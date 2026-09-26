@@ -86,7 +86,7 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
             step_name: step.name.clone(),
             status: RunStatus::Success,
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -98,7 +98,11 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -123,7 +127,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_name: step.name.clone(),
             status: RunStatus::Failed,
             output: msg.into(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result: None,
@@ -135,7 +139,11 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }
@@ -188,6 +196,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -208,6 +217,8 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 

@@ -33,7 +33,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::api::workflows::build_manual_trigger_obj;
 use crate::core::run_eta::{next_check_initial, next_check_polling, NextCheck};
 use crate::models::*;
 use crate::AppState;
@@ -108,57 +107,17 @@ pub struct McpTriggerWorkflowResponse {
 /// POST /api/mcp/workflow-trigger
 ///
 /// JSON wrapper around the existing `POST /api/workflows/:id/trigger`
-/// SSE handler. Creates the run + spawns the runner exactly like the
-/// UI route, but returns the run_id + smart-polling hint synchronously
-/// instead of streaming events.
+/// SSE handler. Creates the run through the same launcher as the UI route
+/// (variable preflight + encrypted snapshot + insert), but returns the
+/// run_id + smart-polling hint synchronously instead of streaming events.
 pub async fn workflow_trigger(
     State(state): State<AppState>,
     Json(req): Json<McpTriggerWorkflowRequest>,
 ) -> Json<ApiResponse<McpTriggerWorkflowResponse>> {
-    let wf_id = req.workflow_id.clone();
-    let wf = match state
-        .db
-        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
-        .await
-    {
-        Ok(Some(wf)) => wf,
-        Ok(None) => return Json(ApiResponse::err("Workflow not found")),
-        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
-    };
-
-    if !wf.enabled {
-        return Json(ApiResponse::err(
-            "Workflow is disabled — enable it in the UI before triggering",
-        ));
-    }
-
-    // Required-variable validation mirrors the existing trigger route.
-    for declared in &wf.variables {
-        if declared.required {
-            let val = req
-                .variables
-                .get(&declared.name)
-                .map(|s| s.trim())
-                .unwrap_or("");
-            if val.is_empty() {
-                let label = if declared.label.is_empty() {
-                    &declared.name
-                } else {
-                    &declared.label
-                };
-                return Json(ApiResponse::err(format!(
-                    "Variable « {} » est obligatoire pour lancer ce workflow.",
-                    label
-                )));
-            }
-        }
-    }
-    let trigger_obj = build_manual_trigger_obj(&req.variables, Utc::now());
-
     // Compute the smart-polling hint BEFORE we insert the new run, so
     // the sample count reflects only history (the new pending run
     // doesn't influence its own ETA).
-    let wf_id_for_avg = wf.id.clone();
+    let wf_id_for_avg = req.workflow_id.clone();
     let history = state
         .db
         .with_conn(move |conn| {
@@ -174,60 +133,18 @@ pub async fn workflow_trigger(
     let (expected_duration_ms, samples) = avg_workflow_duration_ms(&history);
     let next_check = next_check_initial(expected_duration_ms, samples);
 
-    let now = Utc::now();
-    let run = WorkflowRun {
-        id: Uuid::new_v4().to_string(),
-        workflow_id: wf.id.clone(),
-        status: RunStatus::Pending,
-        trigger_context: Some(serde_json::Value::Object(trigger_obj)),
-        step_results: vec![],
-        tokens_used: 0,
-        workspace_path: None,
-        started_at: now,
-        finished_at: None,
-        run_type: "linear".into(),
-        batch_total: 0,
-        batch_completed: 0,
-        batch_failed: 0,
-        batch_no_response: 0,
-        batch_name: None,
-        parent_run_id: None,
-        state: ::std::collections::HashMap::new(),
-        produced_branches: vec![],
-        parent_workflow_id: None,
-        parent_workflow_name: None,
-        parent_run_started_at: None,
-    };
-
-    let r = run.clone();
-    let limit = wf.concurrency_limit;
-    let wf_id_check = wf.id.clone();
-    match state
-        .db
-        .with_conn(move |conn| {
-            if let Some(max) = limit {
-                let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
-                if active >= max {
-                    anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
-                }
-            }
-            crate::db::workflows::insert_run(conn, &r)?;
-            Ok(())
-        })
-        .await
+    let (wf, run) = match crate::api::workflows::create_manual_run(
+        &state,
+        &req.workflow_id,
+        req.variables,
+        Default::default(),
+        crate::core::launch_context::LaunchContext::default(),
+    )
+    .await
     {
-        Ok(()) => {}
-        Err(e) => {
-            let msg = e.to_string();
-            if let Some(rest) = msg.strip_prefix("CONCURRENCY_LIMIT:") {
-                return Json(ApiResponse::err(format!(
-                    "Concurrency limit reached ({})",
-                    rest
-                )));
-            }
-            return Json(ApiResponse::err(format!("DB error: {}", msg)));
-        }
-    }
+        Ok(created) => created,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
 
     tracing::info!(
         "MCP triggered workflow run {} for workflow {}",
@@ -235,43 +152,18 @@ pub async fn workflow_trigger(
         wf.name
     );
 
-    // Background dispatch — identical to the SSE route, just without
-    // an event sink. The runner persists status / step_results to the
-    // run row, which the GET status route reads back.
-    let state_for_run = state.clone();
-    let config = state.config.clone();
-    let wf_for_run = wf.clone();
-    let mut run_exec = run.clone();
-    tokio::spawn(async move {
-        let cfg = config.read().await;
-        let tokens = cfg.tokens.clone();
-        let agents = cfg.agents.clone();
-        drop(cfg);
-        if let Err(e) = crate::workflows::runner::execute_run(
-            state_for_run.clone(),
-            &wf_for_run,
-            &mut run_exec,
-            &tokens,
-            &agents,
-            None,
-            None, // top-level run → fresh shared budget
-            None, // top-level run → own worktree
-        )
-        .await
-        {
-            tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
-        }
-        // Agent-triggered runs are as unattended as cron runs — same webhook
-        // contract on a non-success terminal state (best-effort, bounded).
-        crate::core::run_notify::notify_if_failed(&state_for_run, &wf_for_run, &run_exec).await;
-    });
+    // Agent-triggered runs are as unattended as cron runs — same webhook
+    // contract on a non-success terminal state (best-effort, bounded).
+    let started_at = run.started_at;
+    let (run_id, workflow_id, workflow_name) = (run.id.clone(), wf.id.clone(), wf.name.clone());
+    crate::api::workflows::spawn_manual_run(&state, wf, run, None, true);
 
     Json(ApiResponse::ok(McpTriggerWorkflowResponse {
-        run_id: run.id,
-        workflow_id: wf.id,
-        workflow_name: wf.name,
+        run_id,
+        workflow_id,
+        workflow_name,
         status: "Pending".into(),
-        started_at: now,
+        started_at,
         expected_duration_ms,
         samples,
         next_check,
@@ -290,7 +182,8 @@ pub struct StepResultSummary {
     /// must inspect `tokens_status` instead of treating an unknown value as 0.
     pub tokens_used: Option<u64>,
     /// Explicit measurement state for steps whose usage may be unavailable.
-    /// BatchQuickPrompt carries this in its structured envelope; legacy and
+    /// BatchQuickPrompt carries this in its structured envelope; an Agent step
+    /// whose runtime reported no usage is `not_measured`; measured and
     /// deterministic steps omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_status: Option<String>,
@@ -310,6 +203,9 @@ pub struct McpRunStatusResponse {
     pub finished_at: Option<chrono::DateTime<Utc>>,
     pub elapsed_ms: u64,
     pub current_step: Option<String>,
+    /// Latest tool call of the step in progress, when its runtime reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_activity: Option<AgentActivity>,
     pub step_count: u32,
     pub tokens_used: u64,
     pub steps: Vec<StepResultSummary>,
@@ -339,7 +235,11 @@ fn step_tokens_measurement(step: &StepResult) -> (Option<u64>, Option<String>) {
         return (None, Some("in_progress".to_string()));
     }
     if step.step_kind.as_deref() != Some("BatchQuickPrompt") {
-        return (Some(step.tokens_used), None);
+        let status = step
+            .tokens_used
+            .is_none()
+            .then(|| "not_measured".to_string());
+        return (step.tokens_used, status);
     }
     let status = crate::workflows::template::extract_step_envelope(&step.output)
         .and_then(|envelope| serde_json::from_str::<serde_json::Value>(&envelope.data_json).ok())
@@ -349,7 +249,7 @@ fn step_tokens_measurement(step: &StepResult) -> (Option<u64>, Option<String>) {
                 .map(str::to_string)
         });
     match status.as_deref() {
-        Some("measured" | "partial") => (Some(step.tokens_used), status),
+        Some("measured" | "partial") => (step.tokens_used, status),
         Some(_) => (None, status),
         None => (None, Some("unavailable_legacy_batch".to_string())),
     }
@@ -412,13 +312,12 @@ pub async fn workflow_run_status(
         ))
     };
 
-    let current_step = run.step_results.last().and_then(|s| {
-        if matches!(s.status, RunStatus::Running | RunStatus::Pending) {
-            Some(s.step_name.clone())
-        } else {
-            None
-        }
-    });
+    let in_flight = run
+        .step_results
+        .last()
+        .filter(|s| matches!(s.status, RunStatus::Running | RunStatus::Pending));
+    let current_step = in_flight.map(|s| s.step_name.clone());
+    let current_activity = in_flight.and_then(|s| s.last_activity.clone());
 
     let steps: Vec<StepResultSummary> = run
         .step_results
@@ -448,6 +347,7 @@ pub async fn workflow_run_status(
         finished_at: run.finished_at,
         elapsed_ms,
         current_step,
+        current_activity,
         step_count,
         tokens_used: run.tokens_used,
         steps,
@@ -1183,6 +1083,8 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -1289,7 +1191,7 @@ mod tests {
             output: format!(
                 "---STEP_OUTPUT---\n{{\"data\":{{\"tokens_status\":\"{tokens_status}\"}},\"status\":\"OK\",\"summary\":\"batch\"}}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]"
             ),
-            tokens_used,
+            tokens_used: Some(tokens_used),
             duration_ms: 10,
             started_at: Some(Utc::now()),
             condition_result: None,
@@ -1301,7 +1203,11 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 
@@ -1318,6 +1224,19 @@ mod tests {
             step_tokens_measurement(&measured),
             (Some(42), Some("measured".to_string()))
         );
+    }
+
+    #[test]
+    fn unmeasured_agent_step_is_reported_as_unknown_not_zero() {
+        let mut agent = batch_step_result(0, "unused");
+        agent.step_kind = Some("Agent".into());
+        agent.tokens_used = None;
+        assert_eq!(
+            step_tokens_measurement(&agent),
+            (None, Some("not_measured".to_string()))
+        );
+        agent.tokens_used = Some(1_234);
+        assert_eq!(step_tokens_measurement(&agent), (Some(1_234), None));
     }
 
     #[test]

@@ -119,7 +119,7 @@ pub enum LivePageActionClaimOutcome {
 /// fixed, so a tag/attribute scan is sufficient and keeps this dependency
 /// footprint at zero. `to_ascii_lowercase` (not `to_lowercase`) preserves
 /// byte offsets even when the surrounding HTML contains non-ASCII text.
-fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
+pub(crate) fn page_action_block_ranges(html: &str) -> Vec<(String, std::ops::Range<usize>)> {
     let lower = html.to_ascii_lowercase();
     let mut blocks = Vec::new();
     let mut cursor = 0usize;
@@ -158,12 +158,16 @@ fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
         if !valid_action_ref(action_ref) {
             continue;
         }
-        blocks.push((
-            action_ref.to_string(),
-            html[body_start..body_end].trim().to_string(),
-        ));
+        blocks.push((action_ref.to_string(), body_start..body_end));
     }
     blocks
+}
+
+pub(crate) fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
+    page_action_block_ranges(html)
+        .into_iter()
+        .map(|(reference, range)| (reference, html[range].trim().to_string()))
+        .collect()
 }
 
 fn find_tag_end(tag: &str, start: usize) -> Option<usize> {
@@ -580,8 +584,12 @@ pub fn get(
 /// this is what arms the buttons, and a button is armed as long as its block
 /// is on the page — no matter how many times it, or its neighbours, have run.
 pub fn list_for_live_page(conn: &Connection, live_page_id: &str) -> Result<Vec<LivePageAction>> {
+    // A block removed from the published HTML keeps its row for the launches
+    // that reference it, but is no longer an offer.
     let mut statement = conn.prepare(&format!(
-        "{SELECT_DECLARATION} WHERE a.live_page_id = ?1 ORDER BY a.created_at, a.action_ref"
+        "{SELECT_DECLARATION} WHERE a.live_page_id = ?1 \
+         AND a.live_page_revision_id = p.current_revision_id \
+         ORDER BY a.created_at, a.action_ref"
     ))?;
     let actions = statement
         .query_map([live_page_id], map_action)?
@@ -827,6 +835,16 @@ fn resolve_dynamic_binding(
     source_ref: &str,
     binding_key: Option<&str>,
 ) -> Result<String> {
+    resolve_page_reference(conn, live_page_id, source_ref, binding_key)
+        .map(|resolved| json_value_as_string(&resolved))
+}
+
+fn resolve_page_reference(
+    conn: &Connection,
+    live_page_id: &str,
+    source_ref: &str,
+    binding_key: Option<&str>,
+) -> Result<serde_json::Value> {
     let reference = source_ref
         .trim()
         .trim_start_matches('<')
@@ -859,8 +877,7 @@ fn resolve_dynamic_binding(
             .map(|raw| serde_json::from_str(&raw))
             .transpose()?
             .unwrap_or(serde_json::Value::Null);
-        let resolved = resolve_json_path(&current, path, binding_key)?;
-        return Ok(json_value_as_string(&resolved));
+        return resolve_json_path(&current, path, binding_key);
     }
     let page: (String, String, String) = conn.query_row(
         "SELECT id, slug, title FROM live_pages WHERE id = ?1",
@@ -868,11 +885,65 @@ fn resolve_dynamic_binding(
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     match field {
-        "id" => Ok(page.0),
-        "slug" => Ok(page.1),
-        "title" => Ok(page.2),
+        "id" => Ok(serde_json::Value::String(page.0)),
+        "slug" => Ok(serde_json::Value::String(page.1)),
+        "title" => Ok(serde_json::Value::String(page.2)),
         other => anyhow::bail!("unknown page context field `{other}`"),
     }
+}
+
+/// A `user_input` the Page pre-fills from its own data: its row selector may
+/// ride in the click, and the value remains the reader's to edit.
+fn is_prefilled_input(value: &DiscussionActionValue) -> bool {
+    value.provenance == DiscussionActionValueProvenance::UserInput
+        && value
+            .source_ref
+            .as_deref()
+            .is_some_and(|reference| reference.trim().starts_with("<page."))
+}
+
+/// The starting values of the `user_input` fields a Page pre-fills, read for
+/// the clicked row. A field whose row or path cannot be read, or holds null,
+/// is left out: the reader types it, as before. The row selector is the one
+/// the click carries under the field's name, or the click's only selector.
+pub fn prefill_values(
+    conn: &Connection,
+    id: &str,
+    bindings: &HashMap<String, String>,
+) -> Result<HashMap<String, String>> {
+    let Some(action) = declaration_by_id(conn, id)? else {
+        return Ok(HashMap::new());
+    };
+    if action.stale_source {
+        return Ok(HashMap::new());
+    }
+    let only_selector = (bindings.len() == 1)
+        .then(|| bindings.values().next())
+        .flatten();
+    let mut values = HashMap::new();
+    for value in action
+        .values
+        .iter()
+        .filter(|value| is_prefilled_input(value))
+    {
+        let selector = bindings.get(&value.name).or(only_selector);
+        let source_ref = value.source_ref.as_deref().unwrap_or_default();
+        match resolve_page_reference(
+            conn,
+            &action.live_page_id,
+            source_ref,
+            selector.map(String::as_str),
+        ) {
+            Ok(serde_json::Value::Null) => {}
+            Ok(resolved) => {
+                values.insert(value.name.clone(), json_value_as_string(&resolved));
+            }
+            Err(error) => {
+                tracing::debug!(action = %id, field = %value.name, %error, "Page prefill skipped");
+            }
+        }
+    }
+    Ok(values)
 }
 
 fn resolve_json_path(
@@ -960,7 +1031,8 @@ pub fn claim_launch(
     for (name, selector) in bindings {
         let declared = action.values.iter().any(|value| {
             value.name == *name
-                && value.provenance == DiscussionActionValueProvenance::DynamicBinding
+                && (value.provenance == DiscussionActionValueProvenance::DynamicBinding
+                    || is_prefilled_input(value))
         });
         if !declared {
             anyhow::bail!("unknown dynamic action binding `{name}`");
@@ -1933,6 +2005,73 @@ mod tests {
         assert_eq!(variables["service"], "Add feature");
     }
 
+    #[test]
+    fn a_launch_whose_run_was_interrupted_at_boot_frees_its_row() {
+        let conn = connection();
+        insert_target(&conn);
+        let html = action_block(
+            "implem",
+            r#"{"kind":"quick_exec","target_id":"qe-1","values":[{"name":"service","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).key>"}]}"#,
+        );
+        insert_page(&conn, "page-autocode", "rev-1", &html);
+        insert_dataset(
+            &conn,
+            "page-autocode",
+            "tickets",
+            "collection",
+            r#"[{"key":"EW-7633"}]"#,
+        );
+        ingest_page_actions(&conn, "page-autocode", "rev-1", &html).unwrap();
+        crate::db::workflows::insert_workflow(
+            &conn,
+            &crate::db::tests::sample_workflow("w-implem"),
+        )
+        .unwrap();
+        let mut run = crate::db::tests::sample_run("run-implem", "w-implem");
+        run.status = crate::models::RunStatus::Running;
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+        let click = || {
+            claim_launch(
+                &conn,
+                "page-action:page-autocode:implem",
+                &HashMap::new(),
+                &HashMap::from([("service".into(), "EW-7633".into())]),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let LivePageActionClaimOutcome::Claimed { action: first, .. } = click() else {
+            panic!("the first click launches");
+        };
+        complete(
+            &conn,
+            &first.id,
+            kronn_action_engine::ActionCompletion {
+                state: DiscussionActionState::Running,
+                shared_run_id: Some("run-implem".into()),
+                result_discussion_id: None,
+                deep_link: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(click(), LivePageActionClaimOutcome::Existing(ref running) if running.id == first.id)
+        );
+
+        // A backend restart interrupts the run.
+        crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
+
+        let LivePageActionClaimOutcome::Claimed { action: second, .. } = click() else {
+            panic!("an interrupted run must not block its row");
+        };
+        assert_ne!(second.id, first.id);
+        let settled = get(kronn_action_engine::Reconcile::Persisted, &conn, &first.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.state, DiscussionActionState::Failed);
+    }
+
     /// The reported shape: one "Framer" block over a list of tickets, one
     /// button per row. Clicking a second ticket after the first succeeded used
     /// to answer with the first ticket's success, and nothing ran.
@@ -2328,6 +2467,86 @@ mod tests {
             panic!("expected a fresh claim");
         };
         assert_eq!(variables["service"], "Test Page");
+    }
+
+    #[test]
+    fn a_block_removed_from_the_published_html_is_no_longer_offered() {
+        let conn = connection();
+        insert_target(&conn);
+        let block = |name: &str| action_block(name, r#"{"kind":"quick_exec","target_id":"qe-1"}"#);
+        let html_v1 = format!("{}{}", block("kept"), block("dropped"));
+        insert_page(&conn, "page-trim", "rev-1", &html_v1);
+        ingest_page_actions(&conn, "page-trim", "rev-1", &html_v1).unwrap();
+        let listed = |conn: &Connection| {
+            list_for_live_page(conn, "page-trim")
+                .unwrap()
+                .into_iter()
+                .map(|action| action.action_ref)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed(&conn), ["dropped", "kept"]);
+
+        let html_v2 = block("kept");
+        republish_revision(&conn, "page-trim", "rev-2", &html_v2);
+        ingest_page_actions(&conn, "page-trim", "rev-2", &html_v2).unwrap();
+        assert_eq!(listed(&conn), ["kept"]);
+
+        // A revision with no block at all offers nothing.
+        republish_revision(&conn, "page-trim", "rev-3", "<p>No buttons.</p>");
+        ingest_page_actions(&conn, "page-trim", "rev-3", "<p>No buttons.</p>").unwrap();
+        assert!(listed(&conn).is_empty());
+    }
+
+    #[test]
+    fn a_user_input_is_prefilled_from_the_clicked_row_and_stays_the_readers_value() {
+        let conn = connection();
+        insert_target(&conn);
+        let html = action_block(
+            "debrief",
+            r#"{"kind":"quick_exec","target_id":"qe-1","values":[{"name":"service","provenance":"user_input","source_ref":"<page.dataset.tickets.find(key).owner>"}]}"#,
+        );
+        insert_page(&conn, "page-prefill", "rev-1", &html);
+        insert_dataset(
+            &conn,
+            "page-prefill",
+            "tickets",
+            "collection",
+            r#"[{"key":"EW-1","owner":"ana"},{"key":"EW-2","owner":null}]"#,
+        );
+        ingest_page_actions(&conn, "page-prefill", "rev-1", &html).unwrap();
+        let id = "page-action:page-prefill:debrief";
+        let prefill = |selector: &str| {
+            prefill_values(
+                &conn,
+                id,
+                &HashMap::from([("service".into(), selector.into())]),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            prefill("EW-1"),
+            HashMap::from([("service".into(), "ana".into())])
+        );
+        // A null field, or a row that does not exist, leaves the field empty.
+        assert!(prefill("EW-2").is_empty());
+        assert!(prefill("EW-404").is_empty());
+        // The click's only selector serves whatever its name.
+        assert_eq!(
+            prefill_values(&conn, id, &HashMap::from([("row".into(), "EW-1".into())])).unwrap(),
+            HashMap::from([("service".into(), "ana".into())])
+        );
+
+        // The launch accepts that selector and runs what the reader typed.
+        let Some(LivePageActionClaimOutcome::Claimed { variables, .. }) = claim_launch(
+            &conn,
+            id,
+            &HashMap::from([("service".into(), "ana, edited".into())]),
+            &HashMap::from([("service".into(), "EW-1".into())]),
+        )
+        .unwrap() else {
+            panic!("a prefilled row must launch");
+        };
+        assert_eq!(variables["service"], "ana, edited");
     }
 
     #[test]

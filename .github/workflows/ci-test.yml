@@ -346,7 +346,7 @@ jobs:
 
       - name: Run document-sidecar build bootstrap tests
         working-directory: backend/sidecars/docs
-        run: python3 -m unittest test_build_bundle.py -v
+        run: python3 -m unittest test_build_bundle.py test_parent_watch.py -v
 
   # A Linux unit test cannot prove that CPython can load MSYS2's DLL graph.
   # Exercise the exact Windows release-sidecar path on every tested PR so a
@@ -454,6 +454,11 @@ jobs:
 
       - name: Lint — i18n key parity (fr/en/es/zh)
         run: pnpm lint:i18n
+
+      # Undefined --kr-* tokens, literal white/black text on a token fill, focus
+      # rings removed, and WCAG AA of every text role in every theme.
+      - name: Lint — theme tokens and WCAG contrast
+        run: pnpm lint:theme
 
       - name: Run tests with coverage threshold floor
         # Uses `vitest run --coverage` so the `coverage.thresholds` block

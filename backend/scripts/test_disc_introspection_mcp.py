@@ -673,7 +673,9 @@ class DiscSourceBindingToolTests(unittest.TestCase):
                 "source_agent": "Codex",
                 "source_session_id": "session-1",
             })
-        self.fake_http.assert_called_once_with("POST", "/api/disc/link", {
+        # A runtime-status read now follows the bind; check the bind call
+        # itself rather than assuming it's the only one.
+        self.fake_http.assert_any_call("POST", "/api/disc/link", {
             "disc_id": "disc-a",
             "source_agent": "Codex",
             "source_session_id": "session-1",
@@ -688,8 +690,47 @@ class DiscSourceBindingToolTests(unittest.TestCase):
                 "source_session_id": "session-2",
                 "force_reassign": True,
             })
-        body = self.fake_http.call_args.args[2]
+        body = self.fake_http.call_args_list[0].args[2]
         self.assertIs(body["force_reassign"], True)
+
+    def test_disc_link_reports_rejoin_required_when_not_an_active_member(self):
+        # The write succeeds (durable resume mapping), but no active
+        # `discussion_sessions` row backs it, so the response must say so and
+        # name the exact remedy instead of a bare success.
+        self.mod._set_current_disc_id("disc-a")
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            result = self.mod.call_disc_link({
+                "disc_id": "disc-a",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            })
+        self.assertFalse(result["runtime_bound"])
+        self.assertTrue(result["rejoin_required"])
+        self.assertIn("disc_join", result["hint"])
+        self.assertIn("disc_invite_peer", result["hint"])
+
+    def test_disc_link_reports_runtime_bound_when_already_an_active_member(self):
+        # A session that already has a live `discussion_sessions` row on this
+        # exact disc is genuinely usable by task_exec_prepare; say so.
+        def respond(method, path, body=None):
+            if path == "/api/disc/link":
+                return {"success": True, "data": True}
+            self.assertTrue(path.startswith("/api/disc/session-status?"))
+            return {"success": True, "data": {
+                "binding_version": 1,
+                "bound_disc_id": "disc-a",
+                "connected_disc_id": "disc-a",
+                "connection_status": "active",
+            }}
+        http = mock.MagicMock(side_effect=respond)
+        with mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_disc_link({
+                "disc_id": "disc-a",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            })
+        self.assertTrue(result["runtime_bound"])
+        self.assertNotIn("rejoin_required", result)
 
     def test_disc_transfer_session_requires_pinned_source_and_confirmation(self):
         tool = next(
@@ -1057,6 +1098,39 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             self.assertIn("forbids worker_scope", str(refused.exception))
             refused_http.assert_not_called()
 
+    def test_a_room_native_agent_is_the_principal_through_its_injected_context(self):
+        context = {
+            "discussion_id": "disc-parent", "agent_type": "ClaudeCode",
+            "dispatch_job_id": "job-1", "source_message_id": "msg-1",
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "agent", "agent_type": "Codex"}
+        identity = mock.MagicMock(side_effect=AssertionError("CLI identity must not be read"))
+        with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps(context)}), \
+                mock.patch.object(self.mod, "_task_exec_identity", identity), \
+                mock.patch.object(self.mod, "_http", http):
+            for call in (self.mod.call_task_exec_prepare, self.mod.call_task_exec_launch):
+                call({"task_reference": "KT-740", "worker": worker, "worker_scope_intent": "generic"})
+        self.assertEqual(len(http.call_args_list), 2)
+        for recorded_call in http.call_args_list:
+            body = recorded_call.args[2]
+            self.assertEqual(body["room_agent"], context)
+            self.assertNotIn("source_agent", body)
+            self.assertNotIn("source_session_id", body)
+
+    def test_an_incomplete_room_agent_context_fails_closed_before_http(self):
+        http = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps({"discussion_id": "disc-parent"})}), \
+                mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_prepare({
+                    "task_reference": "KT-740",
+                    "worker": {"kind": "agent", "agent_type": "Codex"},
+                    "worker_scope_intent": "generic",
+                })
+        self.assertIn("room agent context is incomplete", str(refused.exception))
+        http.assert_not_called()
+
     def test_stale_bridge_refuses_capability_mutations_before_http(self):
         self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
@@ -1151,6 +1225,72 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             }),
         ])
 
+    def test_status_forwards_a_bounded_wait_and_refuses_unknown_statuses(self):
+        """KT-790 — `wait_for` and `timeout_secs` reach the backend, which bounds
+        the wait; a misspelt status fails here rather than waiting for nothing."""
+        http = mock.MagicMock(return_value={"success": True, "data": {
+            "lineage": {"execution": {"status": "AwaitingReview"}},
+            "wait": {"matched": True, "timed_out": False, "waited_ms": 1200},
+        }})
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "session-1"),
+        ), mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_task_exec_status({
+                "task_execution_id": "exec-1",
+                "wait_for": ["AwaitingReview", "Done", "Blocked"],
+                "timeout_secs": 90,
+            })
+            self.assertTrue(result["wait"]["matched"])
+            for bad in (
+                {"wait_for": ["awaiting_review"]},
+                {"wait_for": []},
+                {"wait_for": "Done"},
+                {"timeout_secs": 0},
+                {"timeout_secs": True},
+            ):
+                with self.subTest(args=bad), self.assertRaises(RuntimeError):
+                    self.mod.call_task_exec_status({"task_execution_id": "exec-1", **bad})
+        http.assert_called_once_with(
+            "POST", "/api/orchestration/tool/executions/exec-1/status", {
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+                "wait_for": ["AwaitingReview", "Done", "Blocked"],
+                "timeout_secs": 90,
+            },
+        )
+        schema = next(
+            tool["inputSchema"]["properties"] for tool in self.mod.TOOLS
+            if tool["name"] == "task_exec_status"
+        )
+        self.assertIn("wait_for", schema)
+        self.assertIn("timeout_secs", schema)
+
+    def test_status_forwards_the_compact_view_without_rewriting_its_next_action(self):
+        """KT-791 — the compact projection carries the backend's own `next_action`;
+        the full-view resume heuristic must not run on it."""
+        compact = {
+            "id": "exec-1", "status": "AwaitingReview", "attempt": 1,
+            "next_action": {"tool": "task_exec_review", "reason": "review"},
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": compact})
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "session-1"),
+        ), mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(
+                self.mod.call_task_exec_status({"task_execution_id": "exec-1", "view": "compact"}),
+                compact,
+            )
+            with self.assertRaises(RuntimeError):
+                self.mod.call_task_exec_status({"task_execution_id": "exec-1", "view": "tiny"})
+        http.assert_called_once_with(
+            "POST", "/api/orchestration/tool/executions/exec-1/status", {
+                "source_agent": "Codex", "source_session_id": "session-1", "view": "compact",
+            },
+        )
+        reassign = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_exec_reassign")
+        self.assertIn("awaiting-review", reassign["description"])
+        self.assertIn("AwaitingReview", self.mod.TOOL_MANUALS["task_exec_reassign"])
+
     def test_task_exec_reassign_accepts_every_message_target_kind_from_agent_list(self):
         """KT-492 — `worker` is the flat MessageTarget object copied verbatim
         from `agent_list`, for every transport it can report: an HTTP provider
@@ -1201,7 +1341,7 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.assertIn("agent_list", str(refused.exception))
         http.assert_not_called()
 
-    def test_status_advertises_resume_only_for_public_applying_checkpoint(self):
+    def test_status_advertises_resume_only_for_resumable_integration_holds(self):
         identity = {"source_agent": "Codex", "source_session_id": "session-1"}
         cases = [
             ({
@@ -1226,6 +1366,40 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
                 "lineage": {"execution": {
                     "status": "AwaitingReview", "blocked_from_status": None,
                     "interrupted_from_status": None,
+                }},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": None,
+                    "interrupted_from_status": "Integrating",
+                }},
+                "recovery": {"pending": True, "recovery_action": "rebuild_candidate"},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": None,
+                    "interrupted_from_status": "Integrating",
+                }},
+                "recovery": {"pending": False, "recovery_action": "rebuild_candidate"},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": None,
+                    "interrupted_from_status": "Working",
+                }},
+                "recovery": {"pending": True, "recovery_action": "resume_worker"},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "Approved", "blocked_from_status": None,
+                    "interrupted_from_status": None,
+                    "blocked_reason_code": "integration_refused",
+                }},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Approved", "blocked_from_status": None,
+                    "interrupted_from_status": None, "blocked_reason_code": None,
                 }},
             }, False),
         ]
@@ -1319,6 +1493,142 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
                 self.mod.call_task_exec_status({"task_execution_id": "exec-1"})
         self.assertIn("join or resume", str(error.exception))
         http.assert_not_called()
+
+
+class WorkflowStepRoomTests(unittest.TestCase):
+    """KT-793 — a workflow Agent step with a room joins it through the runner's
+    environment capability before its first tool, then acts as that session."""
+
+    CONTEXT = {
+        "discussion_id": "room-793", "run_id": "run-793",
+        "step_key": "orchestrate", "capability": "kr-step-secret",
+    }
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.env = mock.patch.dict(os.environ, {
+            "KRONN_WORKFLOW_STEP_CONTEXT": json.dumps(self.CONTEXT),
+            "KRONN_DISCUSSION_ID": "room-793",
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        for name, value in (
+            ("_agent_type_for_session", "ClaudeCode"),
+            ("_session_id_for_caller", "adhoc-step-1"),
+            ("_room_peek_for_tool_result", None),
+        ):
+            patcher = mock.patch.object(self.mod, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _call(self, name, arguments, rid=1):
+        response = self.mod._handle({
+            "jsonrpc": "2.0", "id": rid, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        })
+        return response["result"]
+
+    @staticmethod
+    def _backend(method, path, body=None):
+        if path == "/api/discussions/workflow-step-join":
+            return {"success": True, "data": {
+                "disc_id": body["workflow_step"]["discussion_id"], "session_pk": 7,
+                "self_alias": "@claude-cli-2", "repinned_executions": 0,
+            }}
+        if path == "/api/orchestration/tool/prepare":
+            return {"success": True, "data": {"launchable": True}}
+        return {"success": True, "data": {"left": True}}
+
+    def test_prepare_needs_no_disc_join_the_bridge_joins_with_the_step_capability(self):
+        http = mock.MagicMock(side_effect=self._backend)
+        worker = {"kind": "agent", "agent_type": "Codex"}
+        with mock.patch.object(self.mod, "_http", http):
+            first = self._call("task_exec_prepare", {
+                "task_reference": "KT-793", "worker": worker, "worker_scope_intent": "generic",
+            })
+            self._call("task_exec_prepare", {
+                "task_reference": "KT-793", "worker": worker, "worker_scope_intent": "generic",
+            }, rid=2)
+        self.assertNotIn("isError", first)
+        paths = [recorded.args[1] for recorded in http.call_args_list]
+        self.assertEqual(paths, [
+            "/api/discussions/workflow-step-join",
+            "/api/orchestration/tool/prepare",
+            "/api/orchestration/tool/prepare",
+        ], "one join, before the first tool only")
+        join_body = http.call_args_list[0].args[2]
+        self.assertEqual(join_body, {
+            "workflow_step": self.CONTEXT,
+            "agent_type": "ClaudeCode",
+            "session_id": "adhoc-step-1",
+        })
+        prepare_body = http.call_args_list[1].args[2]
+        self.assertEqual(prepare_body["parent_discussion_id"], "room-793")
+        self.assertEqual(prepare_body["source_agent"], "ClaudeCode")
+        self.assertEqual(prepare_body["source_session_id"], "adhoc-step-1")
+        self.assertNotIn("workflow_step", prepare_body)
+        self.assertNotIn("room_agent", prepare_body)
+        result = json.loads(first["content"][0]["text"])
+        self.assertEqual(result["kronn_room_joined"], {
+            "disc_id": "room-793", "self_alias": "@claude-cli-2",
+        })
+        self.assertNotIn("kr-step-secret", first["content"][0]["text"])
+
+    def test_an_incomplete_capability_fails_closed_before_any_request(self):
+        http = mock.MagicMock(side_effect=self._backend)
+        with mock.patch.dict(os.environ, {
+            "KRONN_WORKFLOW_STEP_CONTEXT": json.dumps({"discussion_id": "room-793"}),
+        }), mock.patch.object(self.mod, "_http", http):
+            result = self._call("disc_meta", {})
+        self.assertTrue(result["isError"])
+        self.assertIn("workflow step context is incomplete", result["content"][0]["text"])
+        http.assert_not_called()
+
+    def test_a_join_to_another_room_is_refused(self):
+        def elsewhere(method, path, body=None):
+            return {"success": True, "data": {"disc_id": "room-other", "session_pk": 7}}
+        with mock.patch.object(self.mod, "_http", mock.MagicMock(side_effect=elsewhere)):
+            result = self._call("disc_meta", {})
+        self.assertTrue(result["isError"])
+        self.assertIn("another room", result["content"][0]["text"])
+        self.assertIsNone(self.mod._WORKFLOW_STEP_MEMBERSHIP["state"])
+
+    def test_after_disc_leave_the_step_stays_out_of_the_room(self):
+        http = mock.MagicMock(side_effect=self._backend)
+        with mock.patch.object(self.mod, "_http", http):
+            self._call("disc_leave", {})
+            self._call("disc_leave", {}, rid=2)
+        paths = [recorded.args[1] for recorded in http.call_args_list]
+        self.assertEqual(paths.count("/api/discussions/workflow-step-join"), 1)
+        self.assertEqual(self.mod._WORKFLOW_STEP_MEMBERSHIP["state"], "left")
+
+    def test_a_spawned_worker_never_uses_a_step_capability(self):
+        worker_context = {
+            "execution_id": "exec-a", "discussion_id": "disc-child",
+            "agent_type": "Codex", "dispatch_job_id": "job", "source_message_id": "msg",
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": {"execution": {}}})
+        with mock.patch.dict(os.environ, {
+            self.mod._TASK_WORKER_CONTEXT_ENV: json.dumps(worker_context),
+        }), mock.patch.object(self.mod, "_http", http):
+            self._call("task_exec_status", {})
+        paths = [recorded.args[1] for recorded in http.call_args_list]
+        self.assertNotIn("/api/discussions/workflow-step-join", paths)
+
+    def test_no_tool_input_schema_can_carry_the_capability(self):
+        def property_names(schema):
+            if isinstance(schema, dict):
+                for key, value in schema.items():
+                    if key == "properties" and isinstance(value, dict):
+                        yield from value
+                    yield from property_names(value)
+            elif isinstance(schema, list):
+                for item in schema:
+                    yield from property_names(item)
+        for tool in self.mod.TOOLS:
+            names = set(property_names(tool["inputSchema"]))
+            self.assertNotIn("workflow_step", names, tool["name"])
+            self.assertNotIn("capability", names, tool["name"])
 
 
 class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
@@ -4523,6 +4833,20 @@ class WorkflowTriggerTests(unittest.TestCase):
         _, _, body = self.fake_http.call_args.args
         self.assertNotIn("variables", body)
 
+    def test_undeclared_key_is_named_instead_of_silently_dropped(self):
+        # KT-738 — `vars` (not `variables`) used to be dropped silently, so
+        # the backend answered an unrelated "Variable X is required" instead
+        # of pointing at the caller's actual mistake.
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.call_workflow_trigger({
+                "workflow_id": "wf-1",
+                "vars": {"ticketKey": "KT-738"},
+            })
+        self.fake_http.assert_not_called()
+        message = str(ctx.exception)
+        self.assertIn("vars", message)
+        self.assertIn("variables", message)
+
 
 class WorkflowActiveRunsTests(unittest.TestCase):
     """`workflow_active_runs` — in-flight board over GET /api/workflows.
@@ -6033,7 +6357,8 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
         entry = next(t for t in self.mod.TOOLS if t["name"] == "workflow_create_draft")
         desc = entry["description"]
         for st in ["Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt",
-                   "Exec", "Gate", "Notify", "JsonData", "SubWorkflow"]:
+                   "Exec", "Gate", "Notify", "JsonData", "SubWorkflow",
+                   "TriggerWorkflow"]:
             self.assertIn(st, desc, f"step_type '{st}' must be documented in workflow_create_draft")
 
     # ── initialize `instructions` must ORIENT the agent (what Kronn is + a
@@ -6081,13 +6406,13 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         return {"success": True, "data": data}
 
     # ── workflow_step_schema ─────────────────────────────────────────
-    def test_step_schema_lists_the_closed_twelve_set(self):
+    def test_step_schema_lists_the_closed_thirteen_set(self):
         out = self.mod.call_workflow_step_schema({})
         self.assertEqual(
             set(out["step_types_closed_set"]),
             {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
              "Gate", "Notify", "JsonData", "CollectApiData", "TransformData",
-             "PublishPageData", "SubWorkflow"},
+             "PublishPageData", "SubWorkflow", "TriggerWorkflow"},
         )
         # every type has a field spec
         for st in out["step_types_closed_set"]:
@@ -6462,6 +6787,126 @@ class WorkflowRunHistoryTests(unittest.TestCase):
         self.assertEqual(s["step_name"], "big")
         self.assertLess(len(s["output"]), 2000)
         self.assertIn("truncated", s["output"])
+
+    def test_workflow_run_get_exposes_step_model_and_provenance_fields(self):
+        run = {"id": "r", "step_results": [
+            {
+                "step_name": "step1",
+                "status": "Success",
+                "duration_ms": 10,
+                "tokens_used": 100,
+                "step_kind": "Agent",
+                "step_agent": "ClaudeCode",
+                "output": "hello",
+                "step_model": "qwen3.8:27b-mlx",
+                "step_api_plugin_slug": "mcp-github",
+                "step_api_endpoint_path": "/repos/owner/repo/issues",
+                "envelope_detected": True,
+                "child_run_id": "child-123",
+                "is_rollback": True,
+                "native_tool_calls": [{"name": "tool1", "ok": True}],
+            },
+            {
+                "step_name": "step2",
+                "status": "Success",
+                "duration_ms": 5,
+                "tokens_used": 0,
+                "step_kind": "ApiCall",
+                "step_agent": None,
+                "output": "world",
+                "step_model": None,
+                "step_api_plugin_slug": None,
+                "step_api_endpoint_path": None,
+                "envelope_detected": None,
+                "child_run_id": None,
+                "is_rollback": False,
+                "native_tool_calls": [],
+            }
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)):
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+
+        steps = out["step_results"]
+        self.assertEqual(len(steps), 2)
+
+        # Step 1: all fields present
+        s1 = steps[0]
+        self.assertEqual(s1["step_name"], "step1")
+        self.assertEqual(s1["status"], "Success")
+        self.assertEqual(s1["duration_ms"], 10)
+        self.assertEqual(s1["tokens_used"], 100)
+        self.assertEqual(s1["step_kind"], "Agent")
+        self.assertEqual(s1["step_agent"], "ClaudeCode")
+        self.assertEqual(s1["output"], "hello")
+        self.assertEqual(s1["step_model"], "qwen3.8:27b-mlx")
+        self.assertEqual(s1["step_api_plugin_slug"], "mcp-github")
+        self.assertEqual(s1["step_api_endpoint_path"], "/repos/owner/repo/issues")
+        self.assertEqual(s1["envelope_detected"], True)
+        self.assertEqual(s1["child_run_id"], "child-123")
+        self.assertEqual(s1["is_rollback"], True)
+        self.assertEqual(s1["native_tool_calls"], [{"name": "tool1", "ok": True}])
+
+        # Step 2: optional/null/empty fields omitted, but 7 historical keys present
+        s2 = steps[1]
+        self.assertEqual(s2["step_name"], "step2")
+        self.assertEqual(s2["status"], "Success")
+        self.assertEqual(s2["duration_ms"], 5)
+        self.assertEqual(s2["tokens_used"], 0)
+        self.assertEqual(s2["step_kind"], "ApiCall")
+        self.assertEqual(s2["step_agent"], None)
+        self.assertEqual(s2["output"], "world")
+
+        # Check that optional fields are NOT in s2
+        for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "is_rollback", "native_tool_calls"]:
+            self.assertNotIn(field, s2)
+
+    def test_workflow_run_get_keeps_captured_attempts_without_inventing_legacy_data(self):
+        provenance = {
+            "selected_attempt": None,
+            "attempts": [{
+                "id": 1, "role": "Initial", "retry": 1,
+                "agent": "Ollama", "tier": "Default", "connection_id": None,
+                "requested_model": "local-alias", "resolved_model": "local-alias",
+                "model_applied": True, "observed_models": [], "format_fallback": True,
+                "started_at": "2026-09-23T13:00:00Z", "duration_ms": 25, "succeeded": False,
+            }],
+        }
+        empty = {"selected_attempt": None, "attempts": []}
+        run = {"id": "r", "step_results": [
+            {"step_name": "failed", "status": "Failed", "output": "x" * 5000,
+             "agent_provenance": provenance},
+            {"step_name": "preflight", "agent_provenance": empty},
+            {"step_name": "legacy", "step_model": "historical-model"},
+            {"step_name": "null", "agent_provenance": None},
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)) as http:
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+        steps = out["step_results"]
+        self.assertEqual(steps[0]["agent_provenance"], provenance)
+        self.assertIn("truncated", steps[0]["output"])
+        self.assertEqual(steps[1]["agent_provenance"], empty)
+        self.assertEqual(steps[2]["step_model"], "historical-model")
+        self.assertNotIn("agent_provenance", steps[2])
+        self.assertNotIn("agent_provenance", steps[3])
+        http.assert_called_once_with("GET", "/api/workflows/wf/runs/r")
+        self.assertEqual(run["step_results"][0]["output"], "x" * 5000)
+
+    def test_workflow_run_get_keeps_cache_usage_and_live_activity(self):
+        activity = {"tool": "Read", "target": "src/lib.rs", "at": "2026-09-25T10:00:00Z"}
+        run = {"id": "r", "step_results": [
+            {"step_name": "orchestrateur", "status": "Running", "tokens_used": None,
+             "cached_prompt_tokens": 1554330, "cache_write_prompt_tokens": 80271,
+             "last_activity": activity},
+            {"step_name": "legacy", "status": "Success"},
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)):
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+        live, legacy = out["step_results"]
+        self.assertEqual(live["cached_prompt_tokens"], 1554330)
+        self.assertEqual(live["cache_write_prompt_tokens"], 80271)
+        self.assertEqual(live["last_activity"], activity)
+        for field in ["cached_prompt_tokens", "cache_write_prompt_tokens", "last_activity"]:
+            self.assertNotIn(field, legacy)
 
     def test_workflow_run_get_requires_both_ids(self):
         with self.assertRaises(RuntimeError):
@@ -10804,8 +11249,94 @@ class WaitOutsideLlmLoopTests(unittest.TestCase):
             result = self.mod.call_disc_wait_for_peer({})
 
         self.assertIn("interrupted", result["hint"])
+        self.assertEqual(result["interrupted"], "new_request")
+        self.assertTrue(result["timed_out"], "additive: existing readers are unchanged")
         # The preempting request stays queued for the main loop, unconsumed.
         self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 12)
+        self.assertEqual(self.mod._WAIT_PREEMPTED["notice"]["listening"], False)
+        self.mod._WAIT_PREEMPTED["notice"] = None
+
+    def test_interruption_during_pacing_sleep_keeps_its_captured_reason(self):
+        def fake_wait_once(args):
+            self.now[0] += 60
+            return self._quiet(delay=30)
+
+        def queue_during_sleep(_seconds):
+            self.now[0] += 1
+            if self.mod._REQUEST_QUEUE.empty():
+                self.mod._REQUEST_QUEUE.put({"method": "tools/call", "id": 13,
+                                             "params": {"name": "disc_meta", "arguments": {}}})
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once), \
+             mock.patch.object(self.mod.time, "sleep", queue_during_sleep):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(result["interrupted"], "new_request")
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 13)
+        self.mod._WAIT_PREEMPTED["notice"] = None
+
+    def _call(self, rid, name, fn):
+        with mock.patch.dict(self.mod.DISPATCH, {name: fn}), \
+             mock.patch.object(self.mod, "_room_peek_for_tool_result", return_value=None):
+            return self.mod._handle({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                                     "params": {"name": name, "arguments": {}}})
+
+    def test_preempting_call_result_says_once_that_no_wait_is_armed(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        first = self._call(21, "disc_meta", lambda _args: {"id": "d"})
+        blocks = first["result"]["content"]
+        self.assertEqual(json.loads(blocks[0]["text"]), {"id": "d"}, "payload shape unchanged")
+        self.assertFalse(json.loads(blocks[1]["text"])["wait_preempted"]["listening"])
+
+        second = self._call(22, "disc_meta", lambda _args: {"id": "d"})
+        self.assertEqual(len(second["result"]["content"]), 1, "reported once")
+
+    def test_preemption_notice_rides_on_list_and_error_results_too(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        listed = self._call(23, "disc_list", lambda _args: [{"id": "a"}])
+        self.assertEqual(json.loads(listed["result"]["content"][0]["text"]), [{"id": "a"}])
+        self.assertIn("wait_preempted", listed["result"]["content"][1]["text"])
+
+        def boom(_args):
+            raise RuntimeError("backend down")
+
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        failed = self._call(24, "disc_meta", boom)
+        self.assertTrue(failed["result"]["isError"])
+        self.assertIn("wait_preempted", failed["result"]["content"][1]["text"])
+
+    def test_preemption_notice_survives_a_stale_bridge_after_dispatch(self):
+        def stale(_args):
+            raise self.mod.BridgeStaleError("catalogue changed")
+
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        with mock.patch.object(self.mod, "_schedule_bridge_reload",
+                               return_value={"status": "failed", "error": "simulated"}):
+            response = self._call(26, "disc_meta", stale)
+        blocks = response["result"]["content"]
+        self.assertEqual(json.loads(blocks[0]["text"])["error_code"], "bridge_stale")
+        self.assertIn("wait_preempted", blocks[1]["text"])
+        self.assertIsNone(self.mod._WAIT_PREEMPTED["notice"])
+
+    def test_stale_guard_before_dispatch_keeps_the_notice_for_the_next_call(self):
+        guarded = next(iter(self.mod._GUARDED_ORCHESTRATION_TOOLS))
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        with mock.patch.object(self.mod, "_require_fresh_bridge",
+                               side_effect=self.mod.BridgeStaleError("stale")), \
+             mock.patch.object(self.mod, "_schedule_bridge_reload",
+                               return_value={"status": "failed", "error": "simulated"}):
+            refused = self._call(27, guarded, lambda _args: {})
+        self.assertEqual(len(refused["result"]["content"]), 1)
+        self.assertIsNotNone(self.mod._WAIT_PREEMPTED["notice"], "not consumed, not lost")
+        later = self._call(28, "disc_meta", lambda _args: {"id": "d"})
+        self.assertIn("wait_preempted", later["result"]["content"][1]["text"])
+
+    def test_re_arming_the_wait_clears_the_preemption_notice(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        rearmed = self._call(25, "disc_wait_for_peer",
+                             lambda _args: {"timed_out": True, "messages": []})
+        self.assertEqual(len(rearmed["result"]["content"]), 1)
+        self.assertIsNone(self.mod._WAIT_PREEMPTED["notice"])
 
     def test_ping_and_tools_list_are_serviced_without_waking_the_model(self):
         # Codex review P0: control traffic must be answered inline; only a

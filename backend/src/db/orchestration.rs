@@ -1127,7 +1127,8 @@ pub fn principal_attention(conn: &Connection, run_id: &str) -> Result<PrincipalA
     let awaiting_human: i64 = conn.query_row(
         "SELECT COUNT(*) FROM task_executions WHERE orchestration_run_id = ?1 \
          AND (status = 'Escalated' OR (status = 'Blocked' AND \
-              COALESCE(blocked_reason_code, '') <> 'awaiting_worker_acceptance'))",
+              COALESCE(blocked_reason_code, '') <> 'awaiting_worker_acceptance') \
+              OR (status = 'Approved' AND blocked_reason_code IS NOT NULL))",
         [run_id],
         |row| row.get(0),
     )?;
@@ -1717,6 +1718,34 @@ pub fn get_execution_for_dispatch(
         .map(Option::flatten)
 }
 
+/// Record the model the worker's runtime reported serving. Only the
+/// execution's current dispatch may write it, so a stale run cannot relabel a
+/// reassigned worker. Returns whether it landed.
+pub fn record_worker_served_model(
+    conn: &Connection,
+    execution_id: &str,
+    dispatch_job_id: &str,
+    model: &str,
+) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE task_executions SET worker_served_model = ?3 \
+         WHERE id = ?1 AND dispatch_job_id = ?2",
+        params![execution_id, dispatch_job_id, model],
+    )?;
+    Ok(affected > 0)
+}
+
+pub fn get_worker_served_model(conn: &Connection, execution_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT worker_served_model FROM task_executions WHERE id = ?1",
+            [execution_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// Persist one bounded, payload-free HTTP provider trace for a native worker
 /// dispatch. Re-finalizing the same dispatch replaces its trace; a later
 /// rework has a different dispatch id and therefore remains a separate journal
@@ -2013,6 +2042,217 @@ pub fn block_execution(
         }
         Ok(moved)
     })
+}
+
+/// Park a refused integration, record why and tell the principal room.
+///
+/// Where the row parks depends on how far the saga got: `Approved` stays
+/// approved (a retry re-anchors it), `Applying` moves to `Blocked` (its resume
+/// re-checks the real target), and a row caught between anchor and apply moves
+/// to `Interrupted` for a recovery decision. Returns the parked status, or `None`
+/// when the row is in none of those states. A repeated refusal of an `Approved`
+/// row posts nothing new.
+pub fn hold_refused_integration(
+    conn: &Connection,
+    exec_id: &str,
+    code: BlockedReasonCode,
+    reason: &str,
+    fix: &str,
+    actor: &OrchestrationActor,
+) -> Result<Option<TaskExecutionStatus>> {
+    use TaskExecutionStatus::*;
+    in_savepoint(conn, |conn| {
+        let Some(execution) = get_task_execution(conn, exec_id)? else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        let stamp = |status: TaskExecutionStatus| -> Result<usize> {
+            Ok(conn.execute(
+                "UPDATE task_executions \
+                 SET blocked_reason = ?2, blocked_reason_code = ?3, updated_at = ?4 \
+                 WHERE id = ?1 AND status = ?5",
+                params![
+                    exec_id,
+                    reason,
+                    code.as_str(),
+                    now.to_rfc3339(),
+                    status.as_str()
+                ],
+            )?)
+        };
+        let parked = match execution.status {
+            Approved => {
+                if execution.blocked_reason_code == Some(code)
+                    && execution.blocked_reason.as_deref() == Some(reason)
+                {
+                    return Ok(Some(Approved));
+                }
+                if stamp(Approved)? == 0 {
+                    return Ok(None);
+                }
+                Approved
+            }
+            Applying => {
+                let changes = serde_json::json!({
+                    "reason": reason,
+                    "code": code.as_str(),
+                    "phase": "integration",
+                });
+                if !transition_execution(conn, exec_id, Blocked, actor, changes)? {
+                    return Ok(None);
+                }
+                stamp(Blocked)?;
+                Blocked
+            }
+            Integrating | Validating => {
+                let changes = serde_json::json!({
+                    "reason": reason,
+                    "code": code.as_str(),
+                    "recovery": "integration_refused",
+                });
+                if !transition_execution(conn, exec_id, Interrupted, actor, changes)? {
+                    return Ok(None);
+                }
+                Interrupted
+            }
+            _ => return Ok(None),
+        };
+        record_execution_event(
+            conn,
+            exec_id,
+            "integration_refused",
+            None,
+            None,
+            actor,
+            serde_json::json!({
+                "reason": reason,
+                "code": code.as_str(),
+                "fix": fix,
+                "parked": parked.as_str(),
+            }),
+        )?;
+        announce_integration_refusal(conn, &execution, parked, reason, fix, now)?;
+        Ok(Some(parked))
+    })
+}
+
+/// Post the refusal in the principal room, message and steering card together.
+fn announce_integration_refusal(
+    conn: &Connection,
+    execution: &TaskExecution,
+    parked: TaskExecutionStatus,
+    reason: &str,
+    fix: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let exec_id = execution.id.as_str();
+    let occurrence: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND action = 'integration_refused'",
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    let task: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT task_number, title FROM planning_tasks WHERE id = ?1",
+            [&execution.task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((task_number, title)) = task else {
+        return Ok(());
+    };
+    let parent = execution.parent_discussion_id.as_str();
+    let Some(principal) = crate::db::discussions::get_discussion(conn, parent)? else {
+        return Ok(());
+    };
+    let reference = format!("KT-{task_number}");
+    let (headline, body, next, highlight) = match parked {
+        TaskExecutionStatus::Blocked => (
+            "Intégration suspendue",
+            format!(
+                "L'exécution `{exec_id}` (**{title}**) est validée, mais n'a pas pu être \
+                 appliquée sur la branche cible : {reason}\n\n\
+                 Elle est mise en attente (`Blocked`) ; la branche cible n'a pas bougé."
+            ),
+            "Puis relance avec `task_exec_resume` : Kronn revérifie la branche cible et \
+             reconstruit le candidat si elle a avancé.",
+            format!("{reference} est validée mais n'est pas appliquée."),
+        ),
+        TaskExecutionStatus::Interrupted => (
+            "Intégration interrompue",
+            format!(
+                "L'exécution `{exec_id}` (**{title}**) n'a pas pu construire son candidat \
+                 d'intégration : {reason}\n\n\
+                 Elle est `Interrupted` ; la branche cible n'a pas bougé."
+            ),
+            "Puis relance avec `task_exec_resume` : le candidat est reconstruit sur la \
+             pointe réelle de la branche cible.",
+            format!("{reference} est approuvée mais son intégration est interrompue."),
+        ),
+        _ => (
+            "Intégration bloquée",
+            format!(
+                "L'exécution `{exec_id}` (**{title}**) est approuvée, mais son intégration \
+                 n'a pas pu démarrer : {reason}"
+            ),
+            "Puis relance l'intégration (`task_exec_resume` ou nouvelle approbation) : \
+             l'approbation reste acquise.",
+            format!("{reference} est approuvée mais n'est pas intégrée."),
+        ),
+    };
+    let message = DiscussionMessage {
+        id: format!("orch-integration-refused:{exec_id}:{occurrence}"),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: format!("**{headline} — {reference}**\n\n{body}\n\n**Correctif :** {fix} {next}"),
+        agent_type: None,
+        timestamp: now,
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+    };
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        parent,
+        &message,
+        &targets,
+        &[],
+        None,
+    )?;
+    crate::db::discussion_important::publish_steering_card(
+        conn,
+        parent,
+        &message.id,
+        crate::db::discussion_important::SteeringCard {
+            category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            dedup_key: &format!("orch.integration.refused.{exec_id}.{occurrence}"),
+            title: &format!("{reference} — intégration bloquée"),
+            highlight: &highlight,
+            impact: "La branche cible n'avance pas tant que la cause n'est pas corrigée.",
+            action_required: crate::db::discussion_important::ImportantAction::owed(fix, "Humain"),
+            references: crate::db::discussion_important::ImportantReferences {
+                task_ref: Some(reference.clone()),
+                execution_id: Some(exec_id.to_string()),
+                ..Default::default()
+            },
+        },
+        &message.timestamp.to_rfc3339(),
+    )?;
+    Ok(())
 }
 
 /// Inputs to [`commit_provisioning_checkpoint`] — the single atomic commit that
@@ -3325,7 +3565,8 @@ pub fn transition_execution(
         // effective resume/advance clears the reason together with the checkpoint
         // in this savepoint. This also makes an unrelated active/terminal
         // transition self-heal a stale pre-KT-426 blocker instead of exposing two
-        // contradictory states through task_exec_status.
+        // contradictory states through task_exec_status. An `Approved` row may
+        // also carry a refused-integration hold; leaving Approved clears it here.
         let preserves_blocked_hold = to == Blocked || (from == Blocked && to == Interrupted);
         if !preserves_blocked_hold {
             conn.execute(
@@ -3588,7 +3829,7 @@ fn publish_campaign_gate_card(
         reply_to_message_id: None,
         author_cli_ordinal: None,
     };
-    let targets = [MessageTarget::discussion_agent(principal.agent)];
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         conn,
         &parent,
@@ -3617,6 +3858,50 @@ fn publish_campaign_gate_card(
         &message.timestamp.to_rfc3339(),
     )?;
     Ok(())
+}
+
+/// Record `session_pk` as the CLI steering `exec_id` (KT-790). Only a session of
+/// the execution's own parent room can take that role.
+pub fn pin_principal_cli_session(
+    conn: &Connection,
+    exec_id: &str,
+    session_pk: i64,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE task_executions SET principal_cli_session_id = ?2 \
+         WHERE id = ?1 AND principal_cli_session_id IS NOT ?2 \
+           AND EXISTS (SELECT 1 FROM discussion_sessions s \
+                       WHERE s.id = ?2 AND s.disc_id = task_executions.parent_discussion_id \
+                         AND s.status <> 'left')",
+        params![exec_id, session_pk],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Who a parent-room notice about `exec_id` addresses. A joined CLI is woken only
+/// by turns aimed at its exact session, so the pinned principal wins while it is
+/// still in that room; otherwise the room's configured agent, as before.
+pub fn principal_notice_target(
+    conn: &Connection,
+    exec_id: &str,
+    room_agent: AgentType,
+) -> Result<MessageTarget> {
+    let pinned: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT s.id, s.agent_type FROM task_executions e \
+             JOIN discussion_sessions s ON s.id = e.principal_cli_session_id \
+             WHERE e.id = ?1 AND s.disc_id = e.parent_discussion_id AND s.status <> 'left'",
+            [exec_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match pinned {
+        Some((session_pk, agent)) => MessageTarget::cli(
+            crate::db::discussions::parse_agent_type(&agent)?,
+            session_pk,
+        ),
+        None => MessageTarget::discussion_agent(room_agent),
+    })
 }
 
 /// Every terminal child event leaves a bounded, deterministic obligation in the
@@ -3678,7 +3963,7 @@ fn notify_principal_of_terminal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
     };
-    let targets = [MessageTarget::discussion_agent(principal.agent)];
+    let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         conn,
         &parent,
@@ -4019,6 +4304,63 @@ pub fn list_execution_events(conn: &Connection, exec_id: &str) -> Result<Vec<Tas
         .query_map(params![exec_id], row_to_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(events)
+}
+
+const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
+
+/// The prelocalized scope the execution was launched with. Re-anchoring
+/// rewrites `worker_scope_json`, so its first journal entry keeps the original.
+pub fn launch_worker_scope(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::models::TaskWorkerScope>> {
+    let first: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at ASC, rowid ASC LIMIT 1",
+            params![exec_id, WORKER_SCOPE_REANCHORED],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(changes) = first {
+        let changes: serde_json::Value = serde_json::from_str(&changes)?;
+        return Ok(Some(serde_json::from_value(changes["original"].clone())?));
+    }
+    Ok(get_task_execution(conn, exec_id)?.and_then(|execution| execution.worker_scope))
+}
+
+/// Persist a re-anchored prelocalized scope and journal it atomically.
+pub fn reanchor_execution_worker_scope(
+    conn: &Connection,
+    exec_id: &str,
+    scope: &crate::models::TaskWorkerScope,
+    actor: &OrchestrationActor,
+    changes: serde_json::Value,
+) -> Result<()> {
+    in_savepoint(conn, |conn| {
+        let updated = conn.execute(
+            "UPDATE task_executions SET worker_scope_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                exec_id,
+                serde_json::to_string(scope)?,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "execution vanished before its scope was re-anchored"
+        );
+        record_execution_event(
+            conn,
+            exec_id,
+            WORKER_SCOPE_REANCHORED,
+            None,
+            None,
+            actor,
+            changes,
+        )
+    })
 }
 
 // ─── Validation runs ─────────────────────────────────────────────────────────
@@ -4637,13 +4979,15 @@ pub fn clear_execution_recovery(conn: &Connection, exec_id: &str, applied: &str)
     Ok(())
 }
 
-/// Resume an interrupted integration by rebuilding its candidate against an
-/// observed real target tip. The interrupted origin guard is honoured, and all
-/// stale candidate/apply checkpoints are cleared atomically before Git runs.
+/// Rebuild an integration candidate against an observed real target tip, from an
+/// interrupted row or from an `Applying` one whose target advanced. The origin
+/// guard is honoured, and all stale candidate/apply checkpoints are cleared
+/// atomically before Git runs.
 pub fn resume_rebuild_candidate(
     conn: &Connection,
     exec_id: &str,
     target_sha: &str,
+    cause: &str,
     actor: &OrchestrationActor,
 ) -> Result<bool> {
     in_savepoint(conn, |conn| {
@@ -4652,7 +4996,7 @@ pub fn resume_rebuild_candidate(
             exec_id,
             TaskExecutionStatus::Integrating,
             actor,
-            serde_json::json!({ "recovery": "rebuild_candidate", "target_sha": target_sha }),
+            serde_json::json!({ "recovery": cause, "target_sha": target_sha }),
         )? {
             return Ok(false);
         }
@@ -4734,6 +5078,26 @@ pub fn reassign_execution_worker(
                      infrastructure/integration checkpoint before reassigning a worker"
                 );
             }
+        }
+        // KT-791 — reassigning rejects the pending delivery: its manifest stays in
+        // the attempt history and the replacement works on the next attempt.
+        if execution.status == TaskExecutionStatus::AwaitingReview {
+            if !transition_execution(
+                conn,
+                exec_id,
+                TaskExecutionStatus::ChangesRequested,
+                actor,
+                serde_json::json!({
+                    "phase": "reassignment",
+                    "delivery": "rejected",
+                    "attempt": execution.attempt_no,
+                    "reason": reason,
+                }),
+            )? {
+                bail!("execution {exec_id} raced out of AwaitingReview");
+            }
+            execution = get_task_execution(conn, exec_id)?
+                .ok_or_else(|| anyhow::anyhow!("execution vanished rejecting its delivery"))?;
         }
         let resumable_worker_state = matches!(
             execution.status,
@@ -4904,7 +5268,7 @@ pub fn reassign_execution_worker(
             "UPDATE task_executions SET worker_target_kind = ?2, worker_cli_session_id = ?3, \
                     worker_agent_type = ?4, worker_model = ?5, worker_model_tier = ?6, \
                     worker_profile_id = ?7, dispatch_job_id = NULL, updated_at = ?8, \
-                    worker_connection_id = ?9 \
+                    worker_connection_id = ?9, worker_served_model = NULL \
              WHERE id = ?1",
             params![
                 exec_id,

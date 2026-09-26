@@ -44,7 +44,25 @@ Kronn had no counter for a CLI it did not spawn. That single reading is why:
 - `TelemetryCoveragePanel` renders coverage and deliberately no total;
 - an agent-context total in the audit is `None` when any one file is unreadable,
   because a partial sum presented as a total is wrong by an unknown amount;
-- `compactTokens` renders a small real cost as `<1k` rather than rounding to `0`.
+- `compactTokens` renders a small real cost as `<1k` rather than rounding to `0`;
+- an HTTP task execution keeps a turn's `cached_prompt_tokens` absent when its
+  provider did not report one. Totals sum only over `cache_reported_turns`, so a
+  cache rate or an invoice is never derived from them: the unreported turns may
+  have been cached or not. `cache_write_prompt_tokens` (Anthropic's
+  `cache_creation_input_tokens`, billed above the input rate) follows the same
+  rule and sums over its own `cache_write_reported_turns`.
+- a workflow Agent step's `tokens_used` stays uncached input plus output. Claude
+  Code reports cache reads and writes beside them (`cache_read_input_tokens`,
+  `cache_creation_input_tokens`), so the step result and each attempt carry
+  `cached_prompt_tokens` and `cache_write_prompt_tokens`, absent when unreported.
+
+Anthropic caches only what a request marks, so Claude through LiteLLM reports
+zero cached tokens unless the request marks them. Kronn adds LiteLLM's
+`cache_control_injection_points` (system and last message) to requests whose model
+contains `claude`, by default: on the same Sonnet task replayed 8 times with the
+marks against 3 without, the input cost fell to 22–26 % of the uncached price
+(reads ×0.1, writes ×1.25), with 7 of 8 deliveries passing against 3 of 3.
+`KRONN_LITELLM_PROMPT_CACHE=0` on the backend turns it off.
 
 ## 3. What shipped
 

@@ -146,6 +146,18 @@ reassignment. After a successful edit, Kronn exposes only `git_commit` (one
 response plus one correction), then only `task_exec_deliver`: status/diff and
 all read/edit tools stay withdrawn.
 
+Before any write, the edit is refused and nothing reaches disk when it breaks
+the file's structure. Rust is parsed. PHP, Twig, SCSS/CSS/LESS, TS/JS and JSON
+get a language-aware delimiter check (strings and comments ignored; Twig tags
+and `if`/`for`/`block`… with their `end…`), applied only to a file whose
+delimiters were balanced before the edit. An `edit_lines` replacement must
+also keep the indentation of the first and last non-blank lines it replaces;
+inner lines may move. The diagnostic starts with `Structure validation refused`
+and, like a Rust parser error, puts the worker into its one strict correction
+of the same frozen range. The prelocalized brief carries no human-arbitration
+or parent-milestone section: a bounded edit has neither.
+`[src: file: backend/src/api/agent_workspace_structure.rs]`
+
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
 
@@ -176,6 +188,18 @@ ordinary `prelocalized_edit`, choose the narrowest verified range possible —
 never use replacement semantics for an insertion when this structural mode is
 available.
 A pure `insert_after_line` never asks the worker to retype the anchor: the executor preserves the anchor bytes mechanically, so the worker authors only the new text.
+
+The scope is written against the pinned base, but a delivery can change the
+file's line count. Before `request_changes` hands the work back, and before a
+resumed or reassigned worker runs, Kronn re-anchors it: every line before the
+range (and after it, for `prelocalized_edit`) must still match the base byte for
+byte, and the new range is what lies between them. The persisted scope is
+updated, journaled as `worker_scope_reanchored`, and the hand-off names the new
+range. When anything outside the range changed, the range was deleted
+entirely, or it grew past 200 lines, the rework is refused with
+`stale range: …; relaunch with a new worker_scope`, naming the launch range
+and the observed change.
+`[src: file: backend/src/api/orchestration.rs]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -453,11 +477,28 @@ bounded. The saved value is per model and survives restart.
 
 For an Agent step with `output_format: TypedSchema`, `steps.rs::ollama_envelope_format`
 wraps the author's `data` schema in the canonical envelope shape
-`{data, status, summary}` and passes it as Ollama's `format` param — decoding is
-grammar-constrained, so the output is a structurally-valid bare envelope object
-that `extract_step_envelope` strategy-2 recovers. `stream:false` is used in this
-case (one validated blob, not chunks). Post-extract schema validation + the
-repair / `on_invalid` flow are unchanged.
+`{data, status, summary}` and requests constrained decoding through Ollama's
+`format` parameter. OpenAI-compatible HTTP agents send the corresponding
+`response_format: json_schema`. Both use `stream:false`; CLI agents receive the
+schema through the prompt. Provider acceptance alone does not prove schema
+enforcement: Kronn still extracts and validates the returned envelope.
+
+If the initial HTTP response explicitly rejects structured output support
+(400, 422 or 501), Kronn retries once without that format field. The model,
+prompt, tools and other settings stay unchanged. This occurs before any tool
+execution, and a notice is retained in the run output and diagnostics. A
+generic 501, invalid schema, authentication or quota error does not authorize
+this fallback; 501 is never treated as a transient capacity failure. There is
+no permanent MLX/model blacklist: a future provider that accepts the format
+uses it normally.
+
+Post-extract schema validation and repair still run. The step's `on_invalid`
+policy is unchanged: `Fail` rejects output that remains invalid, while
+`Continue` may keep invalid raw output. Prompt-based output is not a guarantee
+of schema compliance. Repeated launches, including a repair launch, negotiate
+the capability independently; no persistent capability cache is written.
+`[src: file: backend/src/agents/runner.rs]`
+`[src: file: backend/src/workflows/steps.rs]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
 TypedSchema step still fails validation after the repair attempt, it retries

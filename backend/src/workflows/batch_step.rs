@@ -621,7 +621,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 step_name: step.name.clone(),
                 status: RunStatus::Success,
                 output,
-                tokens_used: 0,
+                tokens_used: None,
                 duration_ms: start.elapsed().as_millis() as u64,
                 started_at: None,
                 condition_result: None,
@@ -636,7 +636,11 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             },
             condition_action: None,
         };
@@ -776,6 +780,8 @@ async fn execute_batch_quick_prompt_step_with_budget(
         }
     };
 
+    let tokens_used = (collected.tokens_status != "unavailable_children_not_measured")
+        .then_some(collected.measured_tokens);
     let output = build_structured_output(BatchStructuredOutput {
         run_id: &outcome.run_id,
         total: final_total,
@@ -784,8 +790,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
         discussion_ids: &outcome.discussion_ids,
         completed: true,
         results: &collected.results,
-        tokens_used: (collected.tokens_status != "unavailable_children_not_measured")
-            .then_some(collected.measured_tokens),
+        tokens_used,
         tokens_status: collected.tokens_status,
         dispatch_attempts: collected.dispatch_attempts,
         redispatches: collected.redispatches,
@@ -810,7 +815,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
             step_name: step.name.clone(),
             status: step_status,
             output,
-            tokens_used: collected.measured_tokens,
+            tokens_used,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -822,7 +827,11 @@ async fn execute_batch_quick_prompt_step_with_budget(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -849,7 +858,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_name: step.name.clone(),
             status: RunStatus::Failed,
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -861,7 +870,11 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -1845,6 +1858,7 @@ mod tests {
             },
             workspace_config: None,
             concurrency_limit: None,
+            concurrency_key: None,
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1874,6 +1888,8 @@ mod tests {
             parent_run_id: None,
             state: std::collections::HashMap::new(),
             produced_branches: vec![],
+            concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -1976,6 +1992,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -1996,6 +2013,8 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 

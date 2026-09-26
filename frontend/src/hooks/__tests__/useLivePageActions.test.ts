@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LivePageAction } from '../../types/generated';
 
-vi.mock('../../lib/api', () => ({ pages: { actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])) } }));
+vi.mock('../../lib/api', () => ({ pages: { actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), actionPrefill: vi.fn() } }));
 
 import { pages as pagesApi } from '../../lib/api';
 import { useLivePageActions } from '../useLivePageActions';
@@ -24,6 +24,7 @@ const anchor = { left: 10, top: 20, width: 100, height: 30 };
 beforeEach(() => {
   vi.mocked(pagesApi.actions).mockReset();
   vi.mocked(pagesApi.actionLaunches).mockReset().mockResolvedValue([]);
+  vi.mocked(pagesApi.actionPrefill).mockReset().mockResolvedValue({});
 });
 
 describe('useLivePageActions', () => {
@@ -55,6 +56,59 @@ describe('useLivePageActions', () => {
     expect(result.current.selectedAction).toBeNull();
   });
 
+  it('asks the server for the clicked row\'s prefill only when the offer draws on the Page', async () => {
+    const prefilled = action({ values: [{
+      name: 'debrief', label: 'Debrief', placeholder: '', description: null, required: false,
+      allow_manual_override: false, provenance: 'user_input', source_ref: '<page.dataset.framing.find(key).debrief>',
+    }] });
+    vi.mocked(pagesApi.actions).mockResolvedValue([prefilled]);
+    vi.mocked(pagesApi.actionPrefill).mockResolvedValue({ debrief: 'Déjà saisi' });
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { key: 'EW-1' }, anchor }));
+    // The card opens at once, before the row's values are back.
+    expect(result.current.activeAction?.prefill).toBeUndefined();
+    await waitFor(() => expect(result.current.activeAction?.prefill).toEqual({ debrief: 'Déjà saisi' }));
+    expect(pagesApi.actionPrefill).toHaveBeenCalledWith(prefilled.id, { key: 'EW-1' });
+
+    // An offer with nothing to draw from the Page costs no request.
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    await act(() => result.current.reload('page-2'));
+    vi.mocked(pagesApi.actionPrefill).mockClear();
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    expect(pagesApi.actionPrefill).not.toHaveBeenCalled();
+  });
+
+  it('a refresh of the same Page keeps the open card, another Page closes it', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    const opened = result.current.activeAction;
+
+    await act(() => result.current.reload('page-1'));
+    expect(result.current.activeAction).toBe(opened);
+
+    await act(() => result.current.reload('page-2'));
+    expect(result.current.activeAction).toBeNull();
+  });
+
+  it('drops the answer of a Page the reader has already left', async () => {
+    let answerFirst: (value: LivePageAction[]) => void = () => {};
+    vi.mocked(pagesApi.actions)
+      .mockImplementationOnce(() => new Promise(resolve => { answerFirst = resolve; }))
+      .mockResolvedValueOnce([action({ id: 'page-action:page-2:refresh', live_page_id: 'page-2' })]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+
+    let first: Promise<void> = Promise.resolve();
+    act(() => { first = result.current.reload('page-1'); });
+    await act(() => result.current.reload('page-2'));
+    await act(async () => { answerFirst([action()]); await first; });
+
+    expect(result.current.actions.map(entry => entry.live_page_id)).toEqual(['page-2']);
+  });
+
   it('a second click on the same button closes its card, the next one opens a fresh one', async () => {
     vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
     const { result } = renderHook(() => useLivePageActions(vi.fn()));
@@ -80,7 +134,7 @@ describe('useLivePageActions', () => {
     expect(result.current.activeAction?.bindings).toEqual({ ticket: 'EW-2' });
   });
 
-  it('a row that has run reopens on its latest run, running or finished', async () => {
+  it('a running row reopens on its run, a finished one on a fresh offer that keeps its last run', async () => {
     const running = action({ id: 'page-launch:1', state: 'running', shared_run_id: 'run-1', binding_key: 'ticket=EW-1' });
     const done = action({ id: 'page-launch:2', state: 'succeeded', binding_key: 'ticket=EW-2' });
     vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
@@ -94,7 +148,8 @@ describe('useLivePageActions', () => {
     expect(result.current.selectedOffer).toEqual(action());
 
     act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-2' }, anchor }));
-    expect(result.current.selectedAction).toEqual(done);
+    expect(result.current.selectedAction).toEqual(action());
+    expect(result.current.activeAction?.previous).toEqual(done);
 
     // A row that never ran opens on the offer.
     act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-3' }, anchor }));

@@ -445,6 +445,18 @@ pub enum BlockedReasonCode {
     /// The target CLI session already holds a live offer for another execution.
     /// Needs a human decision: re-offer to another session or pick a native worker.
     WorkerSessionCommittedElsewhere,
+    /// The integration target branch is checked out in no worktree, or in several.
+    /// Before the anchor the row stays `Approved`; while applying it parks in
+    /// `Blocked`. A human checks the branch out once, then resumes.
+    IntegrationTargetNotCheckedOut,
+    /// An integration was refused by another precondition (dirty target, unpinned
+    /// branch, missing worktree...): `Approved` before the anchor, `Blocked` while
+    /// applying, until resumed.
+    IntegrationRefused,
+    /// The target branch kept advancing while the candidate was being validated,
+    /// beyond the rebuild budget of one attempt. Parked in `Blocked`; a resume
+    /// rebuilds on the tip it then finds.
+    IntegrationTargetDrifted,
 }
 
 impl BlockedReasonCode {
@@ -452,6 +464,9 @@ impl BlockedReasonCode {
         match self {
             Self::AwaitingWorkerAcceptance => "awaiting_worker_acceptance",
             Self::WorkerSessionCommittedElsewhere => "worker_session_committed_elsewhere",
+            Self::IntegrationTargetNotCheckedOut => "integration_target_not_checked_out",
+            Self::IntegrationRefused => "integration_refused",
+            Self::IntegrationTargetDrifted => "integration_target_drifted",
         }
     }
 }
@@ -462,6 +477,9 @@ impl std::str::FromStr for BlockedReasonCode {
         match value {
             "awaiting_worker_acceptance" => Ok(Self::AwaitingWorkerAcceptance),
             "worker_session_committed_elsewhere" => Ok(Self::WorkerSessionCommittedElsewhere),
+            "integration_target_not_checked_out" => Ok(Self::IntegrationTargetNotCheckedOut),
+            "integration_refused" => Ok(Self::IntegrationRefused),
+            "integration_target_drifted" => Ok(Self::IntegrationTargetDrifted),
             _ => anyhow::bail!("Unknown blocked reason code: {value}"),
         }
     }
@@ -526,6 +544,37 @@ impl ExecutionRecoveryAction {
             Self::BlockMissingWorkspace => "block_missing_workspace",
             Self::BlockMissingDiscussion => "block_missing_discussion",
             Self::BlockAgentUnavailable => "block_agent_unavailable",
+        }
+    }
+
+    /// The status `/resume` first moves an `Interrupted` row into for this
+    /// action. `None` for the worker/provisioning resumes, which own an
+    /// origin-specific claim instead of one fixed transition.
+    pub fn resume_target(self) -> Option<TaskExecutionStatus> {
+        use TaskExecutionStatus::*;
+        match self {
+            Self::ResumeProvisioning | Self::ResumeWorker => None,
+            Self::AwaitReview => Some(AwaitingReview),
+            Self::RebuildCandidate => Some(Integrating),
+            Self::RunValidations => Some(Validating),
+            Self::ApplyFastForward | Self::IdempotentClose => Some(Applying),
+            Self::BlockDirtyTarget => Some(Blocked),
+            Self::AwaitHuman
+            | Self::BlockMissingWorkspace
+            | Self::BlockMissingDiscussion
+            | Self::BlockAgentUnavailable => Some(Escalated),
+        }
+    }
+
+    /// Whether `/resume` can apply this action to a row interrupted from
+    /// `origin`. Read from the transition table `transition_execution` enforces,
+    /// so a recommendation can never name a resume the state machine refuses.
+    pub fn resumable_from(self, origin: TaskExecutionStatus) -> bool {
+        match self.resume_target() {
+            None => true,
+            // Escalation is a generalized escape that skips the origin guard.
+            Some(TaskExecutionStatus::Escalated) => true,
+            Some(to) => TaskExecutionStatus::interrupted_resume_allowed(origin, to),
         }
     }
 }
@@ -1262,6 +1311,15 @@ pub struct TaskExecutionHttpTurnUsage {
     pub provider: String,
     pub phase: TaskExecutionHttpPhase,
     pub prompt_tokens: u64,
+    /// Share of `prompt_tokens` served from the provider's prompt cache. `None`
+    /// when the provider does not report it, including every journal entry
+    /// written before this field existed: unknown, not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt tokens the provider reports writing to its prompt cache. `None`
+    /// when not reported, as for `cached_prompt_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
     pub eval_tokens: u64,
     pub duration_ms: u64,
     pub provider_ok: bool,
@@ -1275,6 +1333,16 @@ pub struct TaskExecutionHttpPhaseUsage {
     pub phase: TaskExecutionHttpPhase,
     pub turns: u32,
     pub prompt_tokens: u64,
+    /// Sum over the `cache_reported_turns` that reported a cached share only.
+    #[serde(default)]
+    pub cached_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_reported_turns: u32,
+    /// Sum over the `cache_write_reported_turns` that reported a cache write only.
+    #[serde(default)]
+    pub cache_write_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_write_reported_turns: u32,
     pub eval_tokens: u64,
     pub duration_ms: u64,
 }
@@ -1287,6 +1355,17 @@ pub struct TaskExecutionHttpPhaseUsage {
 pub struct TaskExecutionHttpUsage {
     pub turns: u32,
     pub prompt_tokens: u64,
+    /// Sum over the `cache_reported_turns` that reported a cached share only;
+    /// never a cache rate for turns that did not report one.
+    #[serde(default)]
+    pub cached_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_reported_turns: u32,
+    /// Sum over the `cache_write_reported_turns` that reported a cache write only.
+    #[serde(default)]
+    pub cache_write_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_write_reported_turns: u32,
     pub eval_tokens: u64,
     pub traffic_tokens: u64,
     pub peak_context_tokens: u64,

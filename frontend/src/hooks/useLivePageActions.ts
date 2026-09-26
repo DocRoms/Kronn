@@ -3,6 +3,7 @@ import { pages as pagesApi } from '../lib/api';
 import type { LivePageAction, LivePageDetail } from '../types/generated';
 import {
   hostTheme,
+  hostThemeTokens,
   liveActionBindingKey,
   postLivePageActionSlot,
   postLivePageActionStates,
@@ -19,6 +20,10 @@ export interface LivePageActiveActionState {
   /** What this click turned into once launched or declined — its own launch,
    * never written back over the offer the other buttons still draw from. */
   card?: LivePageAction;
+  /** The row's finished launch, reachable from a fresh offer. */
+  previous?: LivePageAction;
+  /** Starting values the Page draws from its data for this row's fields. */
+  prefill?: Record<string, string>;
 }
 
 export interface UseLivePageActionsResult {
@@ -41,6 +46,12 @@ const IN_FLIGHT = new Set<LivePageAction['state']>(['launching', 'running']);
 // A decline is not a run: it never marks a button nor stands for its row.
 const NOT_A_RUN = new Set<LivePageAction['state']>(['proposed', 'cancelled']);
 const LAUNCH_REFRESH_MS = 3_000;
+
+/** An editable field the Page fills from its own data for the clicked row. */
+function prefillsFromPage(action: LivePageAction): boolean {
+  return action.values.some(value =>
+    value.provenance === 'user_input' && (value.source_ref ?? '').trim().startsWith('<page.'));
+}
 
 function launchKey(actionRef: string, bindingKey: string): string {
   return `${actionRef}\n${bindingKey}`;
@@ -89,6 +100,7 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
   }, []);
 
   const reload = useCallback(async (pageId: string | null) => {
+    const samePage = pageIdRef.current === pageId;
     pageIdRef.current = pageId;
     const [nextActions, nextLaunches] = pageId
       ? await Promise.all([
@@ -98,10 +110,17 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
         Promise.resolve().then(() => pagesApi.actionLaunches(pageId)).catch(() => [] as LivePageAction[]),
       ])
       : [[], []];
+    // The answer for a Page the reader has since left must not replace this one.
+    if (pageIdRef.current !== pageId) return;
     setActions(nextActions);
     actionsRef.current = nextActions;
     setLaunches(nextLaunches);
-    setActiveAction(null);
+    // A periodic refresh keeps the open card, and what was typed in it, while
+    // the Page still offers its action.
+    const current = activeActionRef.current;
+    if (!samePage || !current || !nextActions.some(action => action.action_ref === current.actionRef)) {
+      setActiveAction(null);
+    }
   }, [setActiveAction, setLaunches]);
 
   const moveAnchor = useCallback((anchor: LivePageActiveActionState['anchor']) => {
@@ -128,13 +147,28 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
       setActiveAction(null);
       return;
     }
-    // A row that has run reopens on its latest run — what happened, or where
-    // it stands — rather than on a blank offer; the card offers to launch it
-    // again from there.
+    // A row still running reopens on that run. A finished one opens a fresh
+    // offer, with its last run one click away: relaunching is the usual intent.
     const latest = launchesRef.current.find(launch =>
       launch.action_ref === intent.actionRef && launch.binding_key === bindingKey);
+    const running = latest && IN_FLIGHT.has(latest.state) ? latest : undefined;
     activationRef.current += 1;
-    setActiveAction({ ...intent, activation: activationRef.current, card: latest });
+    const activation = activationRef.current;
+    setActiveAction({
+      ...intent,
+      activation,
+      card: running,
+      previous: running ? undefined : latest,
+    });
+    const offer = actionsRef.current.find(action => action.action_ref === intent.actionRef);
+    if (running || !offer || !prefillsFromPage(offer)) return;
+    // The card opens at once; its fields fill when the row's values arrive.
+    void pagesApi.actionPrefill(offer.id, intent.bindings)
+      .then(prefill => {
+        const current = activeActionRef.current;
+        if (current?.activation === activation) setActiveAction({ ...current, prefill });
+      })
+      .catch(() => { /* the reader types the value, as without a prefill */ });
   }, [setActiveAction]);
 
   // Keyed on the activation, not the block: a launch that answers after the
@@ -197,7 +231,7 @@ export function useLivePageTheme(
     const push = () => {
       const target = iframeRef.current?.contentWindow ?? null;
       const theme = hostTheme();
-      if (target && theme) postLivePageTheme(target, channelId, theme);
+      if (target && theme) postLivePageTheme(target, channelId, theme, hostThemeTokens());
     };
     push();
     const observer = new MutationObserver(push);

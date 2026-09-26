@@ -3,7 +3,7 @@
 
    Two things make that work, and both come from the Page, not from here. The
    iframe bridge anchors on the CTA's `tr`/`li` rather than on the button, so
-   `--kr-action-anchor-width` IS the row's width. And because the Page scrolls
+   `--action-anchor-width` IS the row's width. And because the Page scrolls
    INSIDE its iframe while this card lives in the host layer that does not, the
    bridge re-sends that rectangle on every scroll frame; without it the card
    would stay behind while its row moved away.
@@ -13,19 +13,19 @@
    than the viewport, and falls back to the full-width layout on narrow
    screens — the lower bound wins when the upper one drops below it. */
 .live-page-action-overlay {
-  --kr-action-card-width: clamp(
+  --action-card-width: clamp(
     280px,
-    var(--kr-action-anchor-width, min(720px, calc(100% - 16px))),
+    var(--action-anchor-width, min(720px, calc(100% - 16px))),
     calc(100% - 16px)
   );
 
   position: absolute;
   z-index: 4;
-  width: var(--kr-action-card-width);
+  width: var(--action-card-width);
   left: clamp(
     8px,
-    var(--kr-action-anchor-left, 8px),
-    max(8px, calc(100% - var(--kr-action-card-width) - 8px))
+    var(--action-anchor-left, 8px),
+    max(8px, calc(100% - var(--action-card-width) - 8px))
   );
   max-height: calc(100% - 16px);
   overflow: auto;
@@ -37,6 +37,12 @@
 .live-page-action-overlay .discussion-action-card {
   width: 100%;
   margin-top: 0;
+  /* Here the card is a collapse under a row of the Page, not a floating card in a
+     thread: flat surface, hairline border, no drop shadow — the Page's own language.
+     The launch button keeps the accent: it is the one decision the card asks for. */
+  border-color: var(--kr-border);
+  background: var(--kr-bg-surface);
+  box-shadow: none;
 }
 
 /* Always reachable, whatever state the card is in: a launched card has no
@@ -67,3 +73,22 @@
 
 /* Keep the header's state chip clear of the close button. */
 .live-page-action-overlay .discussion-action-card__header { padding-right: 38px; }
+
+/* The row's finished launch stays one click away from the fresh offer. */
+.live-page-action-overlay__previous {
+  display: block;
+  margin: 0 38px 6px 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kr-text-muted);
+  font-size: 12px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.live-page-action-overlay__previous:hover,
+.live-page-action-overlay__previous:focus-visible {
+  color: var(--kr-text-primary);
+  text-decoration: underline;
+}

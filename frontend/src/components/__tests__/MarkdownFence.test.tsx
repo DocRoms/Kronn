@@ -4,16 +4,18 @@
  *  the contract between the agent (which writes the fence) and the
  *  UI (which renders the preview + export button). */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MarkdownContent } from '../MessageBubble';
 
 const mocks = vi.hoisted(() => ({
   proposal: vi.fn(),
+  createPage: vi.fn(),
 }));
 
 // DocPreview + DocDataExport both talk to /api/docs — stub the module
 // to avoid hitting the network in these pure-rendering tests.
 vi.mock('../../lib/api', () => ({
+  pages: { create: mocks.createPage },
   docs: {
     generatePdf: vi.fn(),
     generateDocx: vi.fn(),
@@ -28,6 +30,18 @@ vi.mock('../../lib/api', () => ({
 }));
 
 describe('MarkdownContent — kronn-doc-preview fence', () => {
+  it('creates an Artifact from the rendered fence with its source message', async () => {
+    const html = '<style>p{color:red}</style><p>Été</p><script>window.value=3</script>';
+    mocks.createPage.mockResolvedValue({ id: 'artifact-1', title: 'Document' });
+    render(<MarkdownContent content={`\`\`\`kronn-doc-preview\n${html}\n\`\`\``} discussionId="disc-1" sourceMessageId="message-1" />);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.docArtifactCreate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.docArtifactConfirm' }));
+    await waitFor(() => expect(mocks.createPage).toHaveBeenCalledWith(expect.objectContaining({
+      html, discussion_id: 'disc-1', source_message_id: 'message-1',
+    })));
+    expect(await screen.findByRole('link', { name: 'disc.docArtifactOpen' })).toBeInTheDocument();
+  });
+
   it('renders DocPreview when a kronn-doc-preview fence is present', () => {
     const md = [
       'Here is the PDF preview:',
@@ -45,6 +59,7 @@ describe('MarkdownContent — kronn-doc-preview fence', () => {
     // the iframe. Any of these three is a reliable tell that we
     // successfully intercepted the fence.
     expect(screen.getByRole('button', { name: /pdf/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'disc.docArtifactCreate' })).not.toBeInTheDocument();
     const iframe = document.querySelector('iframe.doc-preview-iframe') as HTMLIFrameElement;
     expect(iframe).not.toBeNull();
     // The iframe srcdoc carries the fence payload verbatim — this is

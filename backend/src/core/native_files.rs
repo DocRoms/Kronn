@@ -5,9 +5,117 @@
 //! triggered at startup + config change. Agents then discover them natively
 //! (progressive disclosure) instead of receiving full content via prompt.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::models::{AgentProfile, AgentType, Skill};
+
+// ─── Ownership ledger ────────────────────────────────────────────────────────
+
+/// What Kronn wrote into a project, by relative path, with the digest of the
+/// bytes it wrote. Only a listed, unmodified, untracked file is ever removed:
+/// a repository's own skills and agents are never Kronn's to delete.
+const LEDGER_PATH: &str = ".kronn/native-files.json";
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Ledger {
+    files: BTreeMap<String, String>,
+}
+
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn load_ledger(root: &Path) -> Ledger {
+    std::fs::read(root.join(LEDGER_PATH))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_ledger(root: &Path, ledger: &Ledger) {
+    let path = root.join(LEDGER_PATH);
+    let Ok(content) = serde_json::to_string_pretty(ledger) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = crate::core::mcp_scanner::atomic_write(&path, &content) {
+        tracing::warn!("Cannot write {}: {}", path.display(), e);
+    }
+}
+
+/// Whether git tracks `rel` in the repository at `root`. Outside a repository,
+/// or without git, nothing is tracked.
+fn is_tracked(root: &Path, rel: &str) -> bool {
+    crate::core::cmd::sync_cmd("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// A file Kronn may write: absent, or already its own. A tracked or foreign
+/// file with the same name is left as the repository has it.
+fn may_write(root: &Path, rel: &str, ledger: &Ledger) -> bool {
+    let path = root.join(rel);
+    match std::fs::symlink_metadata(&path) {
+        Err(_) => true,
+        Ok(meta) if meta.file_type().is_symlink() => false,
+        Ok(_) => ledger.files.contains_key(rel) && !is_tracked(root, rel),
+    }
+}
+
+fn write_owned(root: &Path, rel: &str, content: &str, ledger: &mut Ledger) -> bool {
+    if !may_write(root, rel, ledger) {
+        tracing::info!("Kept {}: not written by Kronn", root.join(rel).display());
+        return false;
+    }
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("Cannot create {}: {}", parent.display(), e);
+            return false;
+        }
+    }
+    if let Err(e) = crate::core::mcp_scanner::atomic_write(&path, content) {
+        tracing::warn!("Cannot write {}: {}", path.display(), e);
+        return false;
+    }
+    ledger
+        .files
+        .insert(rel.to_string(), digest(content.as_bytes()));
+    true
+}
+
+/// Remove `rel` only when Kronn wrote it, it still holds those bytes, it is
+/// not a symlink and git does not track it. It leaves the ledger either way.
+fn remove_owned(root: &Path, rel: &str, ledger: &mut Ledger) {
+    let Some(written) = ledger.files.remove(rel) else {
+        return;
+    };
+    let path = root.join(rel);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return;
+    };
+    let unchanged =
+        meta.is_file() && std::fs::read(&path).is_ok_and(|bytes| digest(&bytes) == written);
+    if unchanged && !is_tracked(root, rel) {
+        let _ = std::fs::remove_file(&path);
+        tracing::info!("Removed stale native file: {}", path.display());
+    } else {
+        tracing::info!("Kept {}: edited, linked or tracked", path.display());
+    }
+}
 
 // ─── Directory mappings ──────────────────────────────────────────────────────
 
@@ -278,6 +386,7 @@ fn sync_impl(
 
     let skill_slugs: Vec<String> = skills.iter().map(|s| slug(&s.id)).collect();
     let profile_slugs: Vec<String> = profiles.iter().map(|p| slug(&p.id)).collect();
+    let mut ledger = load_ledger(root);
 
     // ── Skills: only for agents that discover SKILL.md natively ──
     for agent in SKILL_SYNC_AGENTS {
@@ -287,37 +396,23 @@ fn sync_impl(
 
         for skill in &skills {
             let skill_slug = slug(&skill.id);
-            let skill_dir_path = root.join(dir).join(&skill_slug);
-            let skill_file = skill_dir_path.join("SKILL.md");
-
-            if let Err(e) = std::fs::create_dir_all(&skill_dir_path) {
-                tracing::warn!(
-                    "Cannot create skill dir {}: {}",
-                    skill_dir_path.display(),
-                    e
-                );
-                continue;
-            }
-
+            let skill_rel = format!("{dir}/{skill_slug}");
             let content = render_skill(agent, skill);
-            if let Err(e) = crate::core::mcp_scanner::atomic_write(&skill_file, &content) {
-                tracing::warn!("Cannot write {}: {}", skill_file.display(), e);
+            if write_owned(
+                root,
+                &format!("{skill_rel}/SKILL.md"),
+                &content,
+                &mut ledger,
+            ) {
+                // Ignored from inside the folder Kronn owns, so the repository's
+                // own `.gitignore` never gains a rule over its tracked skills.
+                write_owned(root, &format!("{skill_rel}/.gitignore"), "*\n", &mut ledger);
             }
         }
 
         // Only cleanup stale files during full sync (startup / project config change)
         if cleanup {
-            cleanup_stale_dirs(&root.join(dir), &skill_slugs);
-        }
-
-        // Ensure gitignore entry for this agent's skill directory
-        if !skills.is_empty() {
-            // Use the top-level agent dir (e.g. ".agents/" not ".agents/skills/")
-            let gitignore_pattern = dir.split('/').next().unwrap_or(dir);
-            crate::core::mcp_scanner::ensure_gitignore_public(
-                project_path,
-                &format!("{}/", gitignore_pattern),
-            );
+            cleanup_stale_dirs(root, dir, &skill_slugs, &mut ledger);
         }
     }
 
@@ -330,35 +425,29 @@ fn sync_impl(
 
         for profile in &profiles {
             if let Some(content) = render_profile(agent, profile) {
-                let file_path = root.join(dir).join(format!("{}{}", slug(&profile.id), ext));
-
-                if let Some(parent) = file_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        tracing::warn!("Cannot create agent dir {}: {}", parent.display(), e);
-                        continue;
-                    }
-                }
-
-                if let Err(e) = crate::core::mcp_scanner::atomic_write(&file_path, &content) {
-                    tracing::warn!("Cannot write {}: {}", file_path.display(), e);
+                let rel = format!("{dir}/{}{ext}", slug(&profile.id));
+                if write_owned(root, &rel, &content, &mut ledger)
+                    && !gitignore_negates_under(root, dir)
+                {
+                    // Only the file Kronn wrote, never the agent's whole folder.
+                    crate::core::mcp_scanner::ensure_gitignore_public(
+                        project_path,
+                        &format!("/{rel}"),
+                    );
                 }
             }
         }
 
         // Only cleanup stale files during full sync
         if cleanup {
-            cleanup_stale_files(&root.join(dir), ext, &profile_slugs);
-        }
-
-        // Ensure gitignore entry for this agent's profile directory
-        if !profiles.is_empty() {
-            let gitignore_pattern = dir.split('/').next().unwrap_or(dir);
-            crate::core::mcp_scanner::ensure_gitignore_public(
-                project_path,
-                &format!("{}/", gitignore_pattern),
-            );
+            cleanup_stale_files(root, dir, ext, &profile_slugs, &mut ledger);
         }
     }
+
+    if cleanup {
+        repair_folder_ignores(root);
+    }
+    save_ledger(root, &ledger);
 
     if !skills.is_empty() || !profiles.is_empty() {
         tracing::info!(
@@ -425,42 +514,123 @@ pub fn build_skills_reference_prompt(skill_ids: &[String]) -> String {
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
-/// Remove subdirectories that are not in `active_slugs`.
-fn cleanup_stale_dirs(parent: &Path, active_slugs: &[String]) {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-            continue;
+/// Remove the skill folders Kronn wrote whose skill is no longer selected.
+/// Only ledger entries are considered: a folder Kronn never wrote is not even
+/// looked at, and one holding other files keeps them.
+fn cleanup_stale_dirs(root: &Path, dir: &str, active_slugs: &[String], ledger: &mut Ledger) {
+    let prefix = format!("{dir}/");
+    let stale: Vec<String> = ledger
+        .files
+        .keys()
+        .filter(|rel| {
+            rel.strip_prefix(&prefix)
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(slug, _)| !active_slugs.iter().any(|active| active == slug))
+        })
+        .cloned()
+        .collect();
+    let mut folders = std::collections::BTreeSet::new();
+    for rel in stale {
+        remove_owned(root, &rel, ledger);
+        if let Some((folder, _)) = rel.rsplit_once('/') {
+            folders.insert(folder.to_string());
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !active_slugs.contains(&name) {
-            let _ = std::fs::remove_dir_all(entry.path());
-            tracing::info!("Removed stale skill dir: {}", entry.path().display());
-        }
+    }
+    for folder in folders {
+        // Only succeeds once the folder is empty.
+        let _ = std::fs::remove_dir(root.join(folder));
     }
 }
 
-/// Remove files matching `*{ext}` that are not in `active_slugs`.
-fn cleanup_stale_files(parent: &Path, ext: &str, active_slugs: &[String]) {
-    let Ok(entries) = std::fs::read_dir(parent) else {
+/// Remove the agent files Kronn wrote whose profile is no longer selected.
+fn cleanup_stale_files(
+    root: &Path,
+    dir: &str,
+    ext: &str,
+    active_slugs: &[String],
+    ledger: &mut Ledger,
+) {
+    let prefix = format!("{dir}/");
+    let stale: Vec<String> = ledger
+        .files
+        .keys()
+        .filter(|rel| {
+            rel.strip_prefix(&prefix)
+                .and_then(|name| name.strip_suffix(ext))
+                .is_some_and(|stem| {
+                    !stem.contains('/') && !active_slugs.iter().any(|active| active == stem)
+                })
+        })
+        .cloned()
+        .collect();
+    for rel in stale {
+        remove_owned(root, &rel, ledger);
+    }
+}
+
+/// Folders whose whole-folder ignore rule earlier syncs appended. `.gemini/`
+/// and `.kiro/` are not listed: MCP settings holding credentials live there.
+const LEGACY_FOLDER_IGNORES: &[&str] = &[".agents", ".claude", ".codex", ".copilot", ".vibe"];
+
+fn gitignore_lines(root: &Path) -> Option<Vec<String>> {
+    let path = root.join(".gitignore");
+    if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return None;
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|content| content.lines().map(str::to_string).collect())
+}
+
+/// Whether the repository re-includes something under `dir`, e.g.
+/// `!.agents/skills/`: an ignore rule added after it would cancel that.
+fn gitignore_negates_under(root: &Path, dir: &str) -> bool {
+    let top = dir.split('/').next().unwrap_or(dir);
+    gitignore_lines(root).is_some_and(|lines| {
+        lines.iter().any(|line| {
+            let rule = line.trim().trim_start_matches('!').trim_start_matches('/');
+            line.trim().starts_with('!') && (rule == top || rule.starts_with(&format!("{top}/")))
+        })
+    })
+}
+
+/// Drop a whole-folder rule (`.agents/`) that an earlier sync appended when the
+/// repository re-includes something under that folder: the rule made its
+/// tracked skills invisible to git.
+fn repair_folder_ignores(root: &Path) {
+    let Some(lines) = gitignore_lines(root) else {
         return;
     };
-    for entry in entries.filter_map(|e| e.ok()) {
-        if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(ext) {
-            continue;
-        }
-
-        let stem = name.strip_suffix(ext).unwrap_or(&name);
-        if !active_slugs.contains(&stem.to_string()) {
-            let _ = std::fs::remove_file(entry.path());
-            tracing::info!("Removed stale profile file: {}", entry.path().display());
-        }
+    let conflicting: Vec<&str> = LEGACY_FOLDER_IGNORES
+        .iter()
+        .copied()
+        .filter(|top| {
+            lines.iter().any(|line| line.trim() == format!("{top}/"))
+                && gitignore_negates_under(root, top)
+        })
+        .collect();
+    if conflicting.is_empty() {
+        return;
+    }
+    let kept: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| {
+            !conflicting
+                .iter()
+                .any(|top| line.trim() == format!("{top}/"))
+        })
+        .collect();
+    let mut content = kept.join("\n");
+    content.push('\n');
+    if let Err(e) = crate::core::mcp_scanner::atomic_write(&root.join(".gitignore"), &content) {
+        tracing::warn!("Cannot repair {}/.gitignore: {}", root.display(), e);
+    } else {
+        tracing::info!(
+            "Removed {:?} from {}/.gitignore: it hid re-included files",
+            conflicting,
+            root.display()
+        );
     }
 }
 
@@ -741,34 +911,167 @@ mod tests {
 
     // ── Cleanup tests ──
 
-    #[test]
-    fn cleanup_stale_dirs_removes_old() {
-        let tmp = tmp_dir("cleanup-dirs");
-        std::fs::create_dir_all(tmp.join("rust")).unwrap();
-        std::fs::create_dir_all(tmp.join("python")).unwrap();
-        std::fs::create_dir_all(tmp.join("go")).unwrap();
+    fn git(repo: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
 
-        // Only rust and python are active
-        cleanup_stale_dirs(&tmp, &["rust".into(), "python".into()]);
+    /// A repository that versions a skill and an agent file of its own, and
+    /// re-includes `.agents/skills/` under an `.agents/*` rule.
+    fn repo_with_own_skill(name: &str) -> PathBuf {
+        let repo = tmp_dir(name);
+        assert!(git(&repo, &["init", "-q"]));
+        std::fs::write(
+            repo.join(".gitignore"),
+            ".agents/*\n!.agents/skills/\n.gemini/\n",
+        )
+        .unwrap();
+        for rel in [
+            ".agents/skills/mine/SKILL.md",
+            ".claude/skills/mine/SKILL.md",
+            ".claude/agents/mine.md",
+        ] {
+            let path = repo.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "# The repository's own\n").unwrap();
+        }
+        assert!(git(&repo, &["add", "-A"]));
+        assert!(git(&repo, &["commit", "-q", "-m", "own skills"]));
+        repo
+    }
 
-        assert!(tmp.join("rust").exists());
-        assert!(tmp.join("python").exists());
-        assert!(!tmp.join("go").exists(), "go should have been removed");
+    fn sync(repo: &Path, skills: &[&str], profiles: &[&str], full: bool) {
+        let skills: Vec<String> = skills.iter().map(|id| id.to_string()).collect();
+        let profiles: Vec<String> = profiles.iter().map(|id| id.to_string()).collect();
+        let path = repo.to_string_lossy();
+        if full {
+            sync_project_native_files_full(&path, &skills, &profiles).unwrap();
+        } else {
+            sync_project_native_files(&path, &skills, &profiles).unwrap();
+        }
     }
 
     #[test]
-    fn cleanup_stale_files_removes_old() {
-        let tmp = tmp_dir("cleanup-files");
-        std::fs::write(tmp.join("architect.md"), "test").unwrap();
-        std::fs::write(tmp.join("tech-lead.md"), "test").unwrap();
-        std::fs::write(tmp.join("qa-engineer.md"), "test").unwrap();
+    fn a_repository_keeps_its_versioned_skills_and_agents_through_every_sync() {
+        let repo = repo_with_own_skill("own-skills");
+        // A restart with no default skill, a change of the defaults, then back.
+        sync(&repo, &[], &[], true);
+        sync(&repo, &["accessibility"], &["architect"], true);
+        sync(&repo, &["api-design"], &["tech-lead"], true);
+        sync(&repo, &[], &[], true);
 
-        // Only architect is active
-        cleanup_stale_files(&tmp, ".md", &["architect".into()]);
+        for rel in [
+            ".agents/skills/mine/SKILL.md",
+            ".claude/skills/mine/SKILL.md",
+            ".claude/agents/mine.md",
+        ] {
+            assert!(repo.join(rel).exists(), "{rel} must survive the sync");
+        }
+        // Only `.gitignore` may change: it gains the exact paths Kronn wrote.
+        assert!(
+            git(
+                &repo,
+                &["diff", "--quiet", "HEAD", "--", ".agents", ".claude"]
+            ),
+            "no tracked skill or agent file was touched"
+        );
+    }
 
-        assert!(tmp.join("architect.md").exists());
-        assert!(!tmp.join("tech-lead.md").exists());
-        assert!(!tmp.join("qa-engineer.md").exists());
+    #[test]
+    fn a_deselected_kronn_skill_is_removed_and_a_foreign_folder_never_is() {
+        let repo = repo_with_own_skill("deselect");
+        let foreign = repo.join(".claude/skills/untracked-mine/SKILL.md");
+        std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+        std::fs::write(&foreign, "# Mine, not committed yet\n").unwrap();
+
+        sync(
+            &repo,
+            &["accessibility", "api-design"],
+            &["architect"],
+            false,
+        );
+        assert!(repo.join(".claude/skills/accessibility/SKILL.md").exists());
+        assert!(repo.join(".claude/agents/architect.md").exists());
+        // The reader edits one of Kronn's files: it is no longer Kronn's to delete.
+        std::fs::write(
+            repo.join(".agents/skills/api-design/SKILL.md"),
+            "# edited\n",
+        )
+        .unwrap();
+
+        sync(&repo, &[], &[], true);
+        assert!(
+            !repo.join(".claude/skills/accessibility").exists(),
+            "Kronn's folder is gone"
+        );
+        assert!(
+            !repo.join(".claude/agents/architect.md").exists(),
+            "Kronn's agent file is gone"
+        );
+        assert!(
+            repo.join(".agents/skills/api-design/SKILL.md").exists(),
+            "an edited file stays"
+        );
+        assert!(foreign.exists(), "a folder Kronn never wrote stays");
+    }
+
+    #[test]
+    fn the_sync_never_ignores_what_the_repository_re_includes() {
+        let repo = repo_with_own_skill("ignore");
+        // An earlier sync appended a whole-folder rule after the re-inclusion.
+        let mut gitignore = std::fs::read_to_string(repo.join(".gitignore")).unwrap();
+        gitignore.push_str(".agents/\n");
+        std::fs::write(repo.join(".gitignore"), gitignore).unwrap();
+
+        sync(&repo, &["accessibility"], &["architect"], true);
+
+        let gitignore = std::fs::read_to_string(repo.join(".gitignore")).unwrap();
+        assert!(
+            !gitignore.lines().any(|line| line.trim() == ".agents/"),
+            "{gitignore}"
+        );
+        assert!(
+            !gitignore.lines().any(|line| line.trim() == ".claude/"),
+            "{gitignore}"
+        );
+        assert!(
+            gitignore.lines().any(|line| line.trim() == ".gemini/"),
+            "credentials stay ignored"
+        );
+        let ignored = |rel: &str| git(&repo, &["check-ignore", "-q", rel]);
+        std::fs::create_dir_all(repo.join(".agents/skills/new")).unwrap();
+        std::fs::write(repo.join(".agents/skills/new/SKILL.md"), "# new\n").unwrap();
+        assert!(
+            !ignored(".agents/skills/new/SKILL.md"),
+            "a new repository skill is not ignored"
+        );
+        assert!(!ignored(".claude/agents/mine.md"));
+        // What Kronn wrote is ignored from its own folder or by its exact path.
+        assert!(ignored(".agents/skills/accessibility/SKILL.md"));
+        assert!(ignored(".claude/agents/architect.md"));
+    }
+
+    #[test]
+    fn a_tracked_file_named_like_a_kronn_skill_is_never_overwritten() {
+        let repo = repo_with_own_skill("collision");
+        let own = repo.join(".claude/skills/accessibility/SKILL.md");
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        std::fs::write(&own, "# The repository's accessibility skill\n").unwrap();
+        assert!(git(&repo, &["add", "-A"]));
+        assert!(git(&repo, &["commit", "-q", "-m", "collision"]));
+
+        sync(&repo, &["accessibility"], &[], true);
+        sync(&repo, &[], &[], true);
+        assert_eq!(
+            std::fs::read_to_string(&own).unwrap(),
+            "# The repository's accessibility skill\n"
+        );
     }
 
     // ── has_native_skills / has_skill_md_files tests ──

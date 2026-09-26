@@ -54,7 +54,7 @@
 }
 
 .aidoc-retry:hover {
-  background: rgba(220, 38, 38, 0.1);
+  background: rgba(var(--kr-error-rgb), 0.1);
 }
 
 /* ── File tree panel ─────────────────────────────────── */

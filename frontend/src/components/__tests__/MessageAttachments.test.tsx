@@ -41,8 +41,32 @@ describe('MessageAttachments', () => {
     // jsdom has no object-URL impl.
     globalThis.URL.createObjectURL = vi.fn(() => 'blob:fake-url');
     globalThis.URL.revokeObjectURL = vi.fn();
+    // Without an IntersectionObserver, thumbnails load at once (documented fallback).
+    vi.stubGlobal('IntersectionObserver', undefined);
   });
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('downloads an image thumbnail only once it nears the viewport', async () => {
+    const observers: Array<{ callback: IntersectionObserverCallback; nodes: Element[] }> = [];
+    vi.stubGlobal('IntersectionObserver', class {
+      nodes: Element[] = [];
+      constructor(callback: IntersectionObserverCallback) { observers.push({ callback, nodes: this.nodes }); }
+      observe(node: Element) { this.nodes.push(node); }
+      disconnect() { this.nodes.length = 0; }
+      unobserve() {}
+      takeRecords() { return []; }
+    });
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['x'], { type: 'image/png' }));
+    render(<MessageAttachments files={[mkFile({ id: 'lazy-1', filename: 'far.png' })]} discussionId="d1" t={t} />);
+    expect(discussionsApi.contextFileBlob).not.toHaveBeenCalled();
+    const watching = observers.find(o => o.nodes.length > 0);
+    expect(watching).toBeTruthy();
+    watching!.callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver);
+    await waitFor(() => expect(discussionsApi.contextFileBlob).toHaveBeenCalledWith('d1', 'lazy-1'));
+  });
 
   it('renders nothing when there are no files', () => {
     const { container } = render(<MessageAttachments files={[]} discussionId="d1" t={t} />);

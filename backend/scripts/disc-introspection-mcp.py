@@ -932,15 +932,18 @@ TOOLS = [
     {
         "name": "task_exec_status",
         "description": (
-            "Read a party-visible TaskExecution and its durable evidence/recovery state. "
-            "After reconnect, use its id or task_reference, obey returned `next_action`, "
-            "and never infer execution state from chat."
+            "Read a party-visible TaskExecution by id or task_reference (KT-###); obey its "
+            "`next_action`, never infer state from chat. Poll with `view: compact` (<1 KB); "
+            "`wait_for` blocks until one of those statuses: tool_manual({tool: \"task_exec_status\"})."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_execution_id": {"type": "string"},
-                "task_reference": {"type": "string", "description": "KT-### or task UUID fallback."},
+                "task_reference": {"type": "string"},
+                "view": {"type": "string", "enum": ["compact", "full"]},
+                "wait_for": {"type": "array", "items": {"type": "string"}},
+                "timeout_secs": {"type": "integer"},
             },
             "required": [],
         },
@@ -981,8 +984,8 @@ TOOLS = [
     {
         "name": "task_exec_reassign",
         "description": (
-            "Reassign an interrupted/blocked execution without losing its room or evidence. "
-            "See tool_manual({tool: \"task_exec_reassign\"})."
+            "Reassign an interrupted, blocked or awaiting-review execution (a pending delivery is "
+            "rejected), keeping its room and evidence. See tool_manual({tool: \"task_exec_reassign\"})."
         ),
         "inputSchema": {
             "type": "object",
@@ -1267,11 +1270,12 @@ TOOLS = [
         "name": "disc_wait_for_peer",
         "description": (
             "Between real steps use `max_total_secs: 20`; unbounded waits are for idle rooms. "
-            "Omit `since_sort_order`: the bridge keeps a durable cursor. An override reuses `latest_sort_order` "
-            "from a WAIT, never `last_sort_order` returned by an append. Each item has a "
+            "Omit `since_sort_order`: the bridge keeps a durable cursor. Override with a WAIT's "
+            "`latest_sort_order`, never `last_sort_order` returned by an append. Each item has a "
             "`message_id`; reply with its exact `reply_to_message_id`. A wait moved to the background "
-            "stays active: DO NOT start another wait before its terminal result. "
-            "Quiet or interruption is not departure; continue work/listening. Routing: "
+            "lasts to its terminal result or your next Kronn call: DO NOT start another wait; "
+            "re-arm. Quiet or interruption is not departure. To await a worker, use "
+            "`task_exec_status` `wait_for`. Routing: "
             "`tool_manual({tool: \"disc_wait_for_peer\"})`."
         ),
         "inputSchema": {
@@ -1279,15 +1283,15 @@ TOOLS = [
             "properties": {
                 "since_sort_order": {
                     "type": "integer",
-                    "description": "Advanced override: highest sort_order actually read. Normally omit it so the bridge uses its durable read cursor. Never pass an append's last_sort_order.",
+                    "description": "Advanced override; see the tool description.",
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Inner poll window in seconds (default 60, capped at 60 so interruptions stay responsive). The OVERALL wait is governed by max_total_secs, not this.",
+                    "description": "Inner poll window, seconds (default and cap 60); max_total_secs bounds the whole wait.",
                 },
                 "max_total_secs": {
                     "type": "integer",
-                    "description": "Overall wait budget in seconds (env KRONN_WAIT_TOTAL_SECS). Use 20 between real work steps; omit only when idle (unbounded default). A background wait remains active: await its terminal result before another.",
+                    "description": "Overall budget, seconds (env KRONN_WAIT_TOTAL_SECS): 20 between work steps; omit only when idle (unbounded).",
                 },
             },
             "required": [],
@@ -1619,9 +1623,10 @@ TOOLS = [
             "never guessing: plugin/config ids with `mcp_list`, bindings with "
             "their list tools, Quick APIs with `qa_list`, Quick Execs with "
             "`qe_list`, Pages with `page_list`. `step_type` is a tagged object, "
-            "closed set is: **Agent · ApiCall · BatchApiCall · "
-            "BatchQuickPrompt · Exec · Gate · Notify · JsonData · "
-            "CollectApiData · TransformData · PublishPageData · SubWorkflow**. "
+            "closed set is: **Agent, ApiCall, BatchApiCall, "
+            "BatchQuickPrompt, Exec, Gate, Notify, JsonData, "
+            "CollectApiData, TransformData, PublishPageData, SubWorkflow, "
+            "TriggerWorkflow**. "
             "Call `workflow_step_schema` before composing steps. Prefer adapting a real "
             "workflow via `workflow_get`/`workflow_clone`. Full authoring contract: "
             "`tool_manual({tool: \"workflow_create_draft\"})`. Returns the created JSON."
@@ -4262,6 +4267,29 @@ def _unwrap(envelope):
     return envelope.get("data")
 
 
+def _reject_unknown_args(tool_name, args, hint=None):
+    """Fail on an argument the tool's own inputSchema does not declare.
+
+    A silently-dropped typo (e.g. `vars` where the schema says `variables`)
+    otherwise reaches the backend as if the field were simply absent, so the
+    caller sees an unrelated "required" error instead of its own mistake.
+    """
+    if not isinstance(args, dict):
+        return
+    schema = next((t["inputSchema"] for t in TOOLS if t["name"] == tool_name), None)
+    allowed = set((schema or {}).get("properties") or {})
+    unknown = sorted(set(args) - allowed)
+    if not unknown:
+        return
+    message = (
+        f"{tool_name}: unknown argument(s) {', '.join(unknown)}; "
+        f"expected one of: {', '.join(sorted(allowed))}."
+    )
+    if hint:
+        message += f" {hint}"
+    raise RuntimeError(message)
+
+
 def _disc_append_attachment_paths(raw_paths):
     """Validate and resolve local files an agent wants to publish in a room.
 
@@ -5405,12 +5433,57 @@ def call_disc_link(args):
         )
     if not source_agent or source_agent == "Unknown":
         raise RuntimeError("disc_link: could not infer source_agent — pass it explicitly")
-    return _unwrap(_http("POST", "/api/disc/link", {
+    _unwrap(_http("POST", "/api/disc/link", {
         "disc_id": disc_id,
         "source_agent": source_agent,
         "source_session_id": source_session_id,
         "force_reassign": bool(args.get("force_reassign", False)),
     }))
+    return _disc_link_runtime_report(disc_id, source_agent)
+
+
+def _disc_link_runtime_report(disc_id, source_agent):
+    """`disc_link` only writes the durable resume mapping, never the live
+    `discussion_sessions` row `task_exec_prepare` authorizes against — say so
+    now, with a read-only status check, instead of a bare success."""
+    live_session_id = _session_id_for_caller()
+    try:
+        qs = urllib.parse.urlencode({
+            "source_agent": source_agent,
+            "source_session_id": live_session_id,
+        })
+        status = _unwrap(_http("GET", f"/api/disc/session-status?{qs}"))
+    except Exception:
+        status = None
+    live = (
+        isinstance(status, dict)
+        and status.get("connected_disc_id") == disc_id
+        and status.get("connection_status") in ("active", "paused")
+    )
+    if live:
+        return {"session_bound": True, "disc_id": disc_id, "runtime_bound": True}
+    try:
+        already_here = _disc_id() == disc_id
+    except RuntimeError:
+        already_here = False
+    get_token = (
+        "disc_invite_peer({}) mints one for THIS room"
+        if already_here
+        else f"get a kr-join token for {disc_id} (its [+ Inviter] button, or "
+        "disc_invite_peer({}) from a bridge already bound there)"
+    )
+    return {
+        "session_bound": True,
+        "disc_id": disc_id,
+        "runtime_bound": False,
+        "rejoin_required": True,
+        "hint": (
+            f"The durable resume link now points to {disc_id}, but this session "
+            "is not an active member of it, so task_exec_prepare/task_exec_launch "
+            f"will still refuse it. {get_token}, then call "
+            'disc_join({token: "kr-join-..."}) to become one.'
+        ),
+    }
 
 
 def call_disc_transfer_session(args):
@@ -5479,6 +5552,88 @@ def _task_exec_identity(tool_name):
 
 
 _TASK_WORKER_CONTEXT_ENV = "KRONN_TASK_WORKER_CONTEXT"
+_ROOM_AGENT_CONTEXT_ENV = "KRONN_ROOM_AGENT_CONTEXT"
+
+
+def _room_agent_context(tool_name):
+    """The room's native agent identity, injected by Kronn for its own turn.
+
+    Like the worker capability it never appears in an input schema. Absent
+    means this bridge is not a room's native agent; malformed fails closed.
+    """
+    raw = os.environ.get(_ROOM_AGENT_CONTEXT_ENV)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"{tool_name}: room agent context is invalid") from error
+    fields = ("discussion_id", "agent_type", "dispatch_job_id", "source_message_id")
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in fields
+    ):
+        raise RuntimeError(f"{tool_name}: room agent context is incomplete")
+    return {field: value[field].strip() for field in fields}
+
+
+_WORKFLOW_STEP_CONTEXT_ENV = "KRONN_WORKFLOW_STEP_CONTEXT"
+_WORKFLOW_STEP_MEMBERSHIP = {"state": None}
+
+
+def _workflow_step_context():
+    """A workflow Agent step's room capability, injected by the runner (KT-793).
+
+    Never in an input schema. Absent means no step room; malformed fails closed.
+    """
+    raw = os.environ.get(_WORKFLOW_STEP_CONTEXT_ENV)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("workflow step context is invalid") from error
+    fields = ("discussion_id", "run_id", "step_key", "capability")
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in fields
+    ):
+        raise RuntimeError("workflow step context is incomplete")
+    return {field: value[field].strip() for field in fields}
+
+
+def _ensure_workflow_step_membership():
+    """Join the step's room once, before its first Kronn tool runs, so the agent
+    is a member and principal there without an invite token. After an explicit
+    `disc_leave` it stays out."""
+    if _WORKFLOW_STEP_MEMBERSHIP["state"] is not None or _spawned_task_worker_mode():
+        return None
+    context = _workflow_step_context()
+    if context is None:
+        return None
+    agent_type = _agent_type_for_session()
+    session_id = _session_id_for_caller()
+    if not agent_type or agent_type == "Unknown" or not session_id:
+        raise RuntimeError("workflow step room: this bridge has no resolved agent identity")
+    result = _unwrap(_http("POST", "/api/discussions/workflow-step-join", {
+        "workflow_step": context,
+        "agent_type": agent_type,
+        "session_id": session_id,
+    }))
+    disc_id = result.get("disc_id") if isinstance(result, dict) else None
+    if disc_id != context["discussion_id"]:
+        raise RuntimeError("workflow step room: the backend joined another room")
+    _set_current_disc_id(disc_id)
+    _WORKFLOW_STEP_MEMBERSHIP["state"] = "joined"
+    return {"disc_id": disc_id, "self_alias": result.get("self_alias")}
+
+
+def _task_exec_principal(tool_name):
+    """Principal identity fields for prepare/launch: the room's native agent
+    when Kronn launched this bridge for it, otherwise the joined CLI session."""
+    room_agent = _room_agent_context(tool_name)
+    if room_agent is not None:
+        return {"room_agent": room_agent}
+    source_agent, source_session_id = _task_exec_identity(tool_name)
+    return {"source_agent": source_agent, "source_session_id": source_session_id}
 
 
 def _spawned_task_worker_context(required=False, tool_name="spawned task worker"):
@@ -5740,14 +5895,12 @@ def call_task_exec_prepare(args):
             f"{_TASK_EXEC_MANUAL_HINT}"
         )
     scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_prepare")
-    source_agent, source_session_id = _task_exec_identity("task_exec_prepare")
     body = {
         "task_reference": task_reference,
         "parent_discussion_id": _disc_id(),
         "worker": worker,
         "worker_scope_intent": scope_intent,
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
+        **_task_exec_principal("task_exec_prepare"),
     }
     if worker_scope is not None:
         body["worker_scope"] = worker_scope
@@ -5764,14 +5917,12 @@ def call_task_exec_launch(args):
             f"{_TASK_EXEC_MANUAL_HINT}"
         )
     scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_launch")
-    source_agent, source_session_id = _task_exec_identity("task_exec_launch")
     body = {
         "task_reference": task_reference,
         "parent_discussion_id": _disc_id(),
         "worker": worker,
         "worker_scope_intent": scope_intent,
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
+        **_task_exec_principal("task_exec_launch"),
     }
     for optional in ("base_rev", "idempotency_key", "validations"):
         if args.get(optional) is not None:
@@ -5781,7 +5932,44 @@ def call_task_exec_launch(args):
     return _task_exec_request("/api/orchestration/tool/launch", body)
 
 
+_TASK_EXECUTION_STATUSES = frozenset({
+    "Pending", "Provisioning", "Blocked", "Working", "AwaitingReview", "Approved",
+    "ChangesRequested", "Integrating", "Validating", "Applying", "Escalated",
+    "Interrupted", "Done", "Failed", "Cancelled",
+})
+
+
+def _task_exec_status_options(args):
+    """The compact view (KT-791) and the blocking wait (KT-790), which the
+    backend bounds."""
+    options = {}
+    view = args.get("view")
+    if view is not None:
+        if view not in ("compact", "full"):
+            raise RuntimeError('task_exec_status: view must be "compact" or "full"')
+        options["view"] = view
+    wait_for = args.get("wait_for")
+    if wait_for is not None:
+        if (
+            not isinstance(wait_for, list)
+            or not wait_for
+            or any(status not in _TASK_EXECUTION_STATUSES for status in wait_for)
+        ):
+            raise RuntimeError(
+                "task_exec_status: wait_for must list TaskExecution statuses, one of "
+                + ", ".join(sorted(_TASK_EXECUTION_STATUSES))
+            )
+        options["wait_for"] = wait_for
+    timeout_secs = args.get("timeout_secs")
+    if timeout_secs is not None:
+        if isinstance(timeout_secs, bool) or not isinstance(timeout_secs, int) or timeout_secs < 1:
+            raise RuntimeError("task_exec_status: timeout_secs must be a positive integer")
+        options["timeout_secs"] = timeout_secs
+    return options
+
+
 def call_task_exec_status(args):
+    options = _task_exec_status_options(args)
     if _spawned_task_worker_mode():
         context = _spawned_task_worker_context(
             required=True, tool_name="task_exec_status"
@@ -5796,6 +5984,7 @@ def call_task_exec_status(args):
                     "dispatch_job_id": context["dispatch_job_id"],
                     "source_message_id": context["source_message_id"],
                 },
+                **options,
             },
         ))
     execution_id = (args.get("task_execution_id") or args.get("task_reference") or "").strip()
@@ -5805,12 +5994,17 @@ def call_task_exec_status(args):
     result = _unwrap(_http(
         "POST",
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
-        {"source_agent": source_agent, "source_session_id": source_session_id},
+        {"source_agent": source_agent, "source_session_id": source_session_id, **options},
     ))
+    if options.get("view") == "compact":
+        # The backend already derives `next_action` for this projection.
+        return result
     execution = ((result.get("lineage") or {}).get("execution") or {})
     status = execution.get("status")
     blocked_from = execution.get("blocked_from_status")
     interrupted_from = execution.get("interrupted_from_status")
+    recovery = result.get("recovery") or {}
+    reason = None
     if (
         (status == "Blocked" and blocked_from == "Applying")
         or (
@@ -5819,12 +6013,28 @@ def call_task_exec_status(args):
             and blocked_from == "Applying"
         )
     ):
+        reason = "Applying-origin hold can be retried once its cause is fixed"
+    elif (
+        status == "Interrupted"
+        and recovery.get("pending")
+        and recovery.get("recovery_action") in _INTEGRATION_RECOVERY_ACTIONS
+    ):
+        reason = "integration checkpoint has a pending recovery decision"
+    elif status == "Approved" and execution.get("blocked_reason_code"):
+        reason = "held approved integration can be retried once its cause is fixed"
+    if reason:
         result["next_action"] = {
             "tool": "task_exec_resume",
             "task_execution_id": execution_id,
-            "reason": "Applying-origin checkpoint can be retried after cleaning the parent",
+            "reason": reason,
         }
     return result
+
+
+# Recovery decisions `task_exec_resume` applies to an interrupted integration.
+_INTEGRATION_RECOVERY_ACTIONS = frozenset({
+    "rebuild_candidate", "run_validations", "apply_fast_forward", "idempotent_close",
+})
 
 
 def call_task_exec_resume(args):
@@ -6619,6 +6829,7 @@ def call_disc_leave(_args):
     # 0.9.0 — a deliberate leave drops the resume capability: the next
     # session must join explicitly, not silently reclaim this row.
     _clear_binding()
+    _WORKFLOW_STEP_MEMBERSHIP["state"] = "left"
     return result
 
 
@@ -6905,7 +7116,7 @@ def _wait_abort_reason():
 
 
 def _wait_sleep(delay, polls, started):
-    """Sleep `delay` seconds in short slices; True if aborted mid-sleep.
+    """Sleep `delay` seconds in short slices; the abort reason, else None.
 
     Emits a progress heartbeat every ~10 s so a client never sees a
     silent gap approaching its tool-call timeout during long pacing.
@@ -6913,13 +7124,35 @@ def _wait_sleep(delay, polls, started):
     end = time.monotonic() + max(0, delay)
     next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
     while time.monotonic() < end:
-        if _wait_abort_reason():
-            return True
+        reason = _wait_abort_reason()
+        if reason:
+            return reason
         if time.monotonic() >= next_progress:
             _emit_wait_progress(polls, int(time.monotonic() - started))
             next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
         time.sleep(min(1.0, max(0.0, end - time.monotonic())))
-    return _wait_abort_reason() is not None
+    return _wait_abort_reason()
+
+
+# A wait ended by a queued tools/call: the host may have backgrounded it and
+# still believe it listens. Reported once, on the result of the call that ended it.
+_WAIT_PREEMPTED = {"notice": None}
+_WAIT_PREEMPTED_NOTICE = {
+    "listening": False,
+    "reason": "new_request",
+    "action": (
+        "Your disc_wait_for_peer ended when this call reached the bridge; no wait "
+        "is armed now. Re-arm disc_wait_for_peer once this step is done."
+    ),
+}
+
+
+def _mark_wait_interrupted(result, reason):
+    """Record the exact interruption reason on the wait's own result."""
+    result["interrupted"] = reason
+    if reason == "new_request":
+        _WAIT_PREEMPTED["notice"] = dict(_WAIT_PREEMPTED_NOTICE)
+    return result
 
 
 # KT-190 — this bridge reports its OWN token cost.
@@ -7129,6 +7362,7 @@ def call_disc_wait_for_peer(args):
                 quiet["hint"] = _wait_budget_hint(started, polls + 1)
             elif aborted.reason != "cancelled":
                 quiet["hint"] = interrupted_hint
+                _mark_wait_interrupted(quiet, aborted.reason)
             return _carry_withheld_total(quiet, withheld_total)
         except Exception:
             # Terminal return can invalidate the child membership while this
@@ -7170,7 +7404,7 @@ def call_disc_wait_for_peer(args):
             return result
         if reason is not None:
             result["hint"] = interrupted_hint
-            return result
+            return _mark_wait_interrupted(result, reason)
         if deadline is not None and time.monotonic() >= deadline:
             result["hint"] = _wait_budget_hint(started, polls)
             return result
@@ -7185,9 +7419,11 @@ def call_disc_wait_for_peer(args):
             delay = 0
         if deadline is not None:
             delay = min(delay, max(0, int(deadline - time.monotonic())))
-        if delay and _wait_sleep(delay, polls, started):
-            if _wait_abort_reason() != "cancelled":
+        sleep_reason = _wait_sleep(delay, polls, started) if delay else None
+        if sleep_reason:
+            if sleep_reason != "cancelled":
                 result["hint"] = interrupted_hint
+                _mark_wait_interrupted(result, sleep_reason)
             return result
         # Resume from what this poll actually observed so replays stay exact.
         latest = result.get("latest_sort_order")
@@ -7876,7 +8112,7 @@ def call_workflow_run_get(args):
             out = s.get("output")
             if isinstance(out, str) and len(out) > 1500:
                 out = out[:1500] + f"… [truncated, {len(s['output'])} chars total]"
-            steps.append({
+            step_dict = {
                 "step_name": s.get("step_name"),
                 "status": s.get("status"),
                 "duration_ms": s.get("duration_ms"),
@@ -7884,7 +8120,17 @@ def call_workflow_run_get(args):
                 "step_kind": s.get("step_kind"),
                 "step_agent": s.get("step_agent"),
                 "output": out,
-            })
+            }
+            for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "agent_provenance", "cached_prompt_tokens", "cache_write_prompt_tokens", "last_activity"]:
+                val = s.get(field)
+                if val is not None:
+                    step_dict[field] = val
+            if s.get("is_rollback") is True:
+                step_dict["is_rollback"] = True
+            ntc = s.get("native_tool_calls")
+            if ntc:
+                step_dict["native_tool_calls"] = ntc
+            steps.append(step_dict)
         run = dict(run)
         run["step_results"] = steps
     return run
@@ -7924,8 +8170,8 @@ def call_workflow_update(args):
         raise RuntimeError("workflow_update: missing required 'workflow_id'")
     patchable = (
         "name", "project_id", "trigger", "steps", "actions", "safety",
-        "workspace_config", "concurrency_limit", "guards", "artifacts",
-        "on_failure", "exec_allowlist", "variables", "enabled",
+        "workspace_config", "concurrency_limit", "concurrency_key", "guards",
+        "artifacts", "on_failure", "exec_allowlist", "variables", "enabled",
     )
     body = {k: args[k] for k in patchable if k in args}
     if not body:
@@ -8445,6 +8691,12 @@ def call_workflow_trigger(args):
     workflow_id = args.get("workflow_id")
     if not workflow_id:
         raise RuntimeError("workflow_trigger: missing required 'workflow_id'")
+    # An undeclared key (e.g. `vars`) must not be dropped silently: without
+    # this, the backend answers "Variable X is required" instead of naming
+    # the caller's actual mistake.
+    _reject_unknown_args(
+        "workflow_trigger", args, hint="Manual-launch variables go in `variables`."
+    )
     body = {"workflow_id": workflow_id}
     variables = args.get("variables")
     if isinstance(variables, dict):
@@ -9308,9 +9560,9 @@ ROOM_WORK_PROTOCOL = (
     "Read `attention_required` on any tool result immediately; `awareness` and "
     "`kronn_room.context` are context, not your turns. Answer addressed turns using the exact "
     "`reply_to_message_id` and CLI target, never a native fallback for an unreachable CLI. "
-    "A wait moved to the background remains active: DO NOT start another wait or end on "
-    "a summary before its terminal result. A queued request can cause an interruption; "
-    "handle that request then resume this loop. A human gate pauses only its affected lot. "
+    "A wait moved to the background stays active until its terminal result: DO NOT start "
+    "another wait or end on a summary meanwhile. Any other Kronn call is an interruption "
+    "that ends it: handle it, then re-arm. A human gate pauses only its affected lot. "
     "Omit `since_sort_order`: the bridge owns the durable read cursor; an append receipt "
     "is not a read. Keep plan writes event-driven; host compliance is not guaranteed."
 )
@@ -9328,6 +9580,8 @@ _PAGE_ACTION_CONTRACT = (
     "source_ref such as `<page.title>`, `<page.dataset.summary.owner>` or "
     "`<page.dataset.tickets.find(key).id>`. For the last form, "
     "`data-kronn-bindings` carries only a JSON selector map keyed by variable name. "
+    "A `user_input` value with such a source_ref starts from that row's value and "
+    "stays editable; its selector is the one keyed by its name, or the click's only one. "
     "Never put secrets or resolved environment values in HTML. The sandbox emits "
     "an intention; only the native card's explicit human launch can execute it."
     "\n\nOne block serves every row: give each row's button its own "
@@ -9335,9 +9589,11 @@ _PAGE_ACTION_CONTRACT = (
     "running is never launched twice. Kronn marks each button with "
     "`data-kronn-action-state` (launching, running, succeeded, failed, "
     "preflight_failed) and a default indicator: style that attribute instead of "
-    "tracking launches in Page scripts. A click opens the native card on the offer "
-    "for a row that never ran, on its latest run otherwise: the steps, the "
-    "discussions it opened with the agent's answer, and a way to launch it again. "
+    "tracking launches in Page scripts. `data-kronn-action-launch` holds the id of "
+    "that latest launch, so a new attempt of a row is told from the previous one. "
+    "A click on a running row reopens its run: the steps, the discussions it "
+    "opened with the agent's answer. Any other click opens a fresh offer, which "
+    "launches a new attempt, with the row's last run one click away. "
     "A Quick Prompt counts as succeeded once its agent has answered."
 )
 
@@ -9439,6 +9695,23 @@ TOOL_MANUALS = {
         "If a joined runtime lacks these tools after reconnect, reconnect the Kronn MCP and report "
         "the capability gap instead of fabricating a handoff."
     ),
+    "task_exec_status": (
+        "`view: \"compact\"` returns only id, task, status, attempt, review_rounds, head_sha, "
+        "last_error, the latest candidate's validations (command, exit_code, duration_ms) and "
+        "`next_action`, in under 1 000 characters: use it to poll. The default `view: \"full\"` "
+        "keeps lineage, DoD, every attempt's manifest and review, validation output and usage; "
+        "read it to review a delivery or diagnose a hold.\n\n"
+        "`wait_for: [\"AwaitingReview\", \"Done\", \"Blocked\"]` holds the call until the "
+        "execution is in one of these statuses, then returns the status plus "
+        "`wait: {matched, timed_out, waited_ms}`. A status already reached returns at once; a "
+        "terminal execution returns unmatched; `timeout_secs` defaults to 60, capped at 170. "
+        "Use it instead of sleeping or polling while a worker runs. Statuses: Pending, "
+        "Provisioning, Blocked, Working, AwaitingReview, Approved, ChangesRequested, "
+        "Integrating, Validating, Applying, Escalated, Interrupted, Done, Failed, Cancelled. "
+        "Delivery, escalation, integration and terminal notices address the parent-room CLI "
+        "that launched, reviewed, resumed or reassigned the execution, so its "
+        "`disc_wait_for_peer` wakes on them too."
+    ),
     "task_exec_resume": (
         "Call resume only when `task_exec_status` returns the exact "
         "`next_action.tool: task_exec_resume`. The backend rechecks parent "
@@ -9449,7 +9722,9 @@ TOOL_MANUALS = {
     ),
     "task_exec_reassign": (
         "Reassignment is principal-only and preserves the execution room, "
-        "worktree and evidence. Pass the flat typed MessageTarget copied from "
+        "worktree and evidence. From `AwaitingReview` it rejects the pending "
+        "delivery, which stays in the attempt history, and the new worker starts "
+        "the next attempt. Pass the flat typed MessageTarget copied from "
         "`agent_list` (`kind`, `agent_type`, optional exact `cli_session_id` and "
         "tier), never the internal `{target, model, profile_id}` envelope. A "
         "transport change must change `worker.kind`. Native HTTP targets do not "
@@ -9543,6 +9818,11 @@ TOOL_MANUALS = {
         "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
         "and 1-20 steps; optional project, variables, guards, failure chain, allowlist, "
         "artifacts, concurrency, safety, actions and workspace config.\n\n"
+        "`concurrency_key` (e.g. `\"{{ticketKey}}\"`, also accepted by `workflow_update`, "
+        "null clears it) makes `concurrency_limit` count runs per key rendered at launch: "
+        "runs with different keys overlap, a launch whose key is already at the limit is "
+        "refused. It needs `concurrency_limit` and may read only `user_input` variables, "
+        "never a `project_env`/`kronn_context` one, because the key is stored in clear.\n\n"
         "Each PromptVariable is `{name,label?,placeholder?,description?,required?,pattern?,"
         "source?,source_ref?,allow_manual_override?,control?}`. Omitted source means "
         "`user_input`. Use `project_env` with a declarative `<env.NAME>` reference only "
@@ -9554,6 +9834,11 @@ TOOL_MANUALS = {
         "format use tagged objects. `workflow_step_schema` is the canonical on-demand source "
         "for every field, example, output-piping rule and template namespace. In particular, "
         "SubWorkflow foreach uses `current_task.*` while batch fan-out uses `batch.item.*`. "
+        "SubWorkflow waits for its child in the same worktree and forbids cycles; "
+        "TriggerWorkflow launches an independent run (its own worktree, limit and "
+        "lifecycle) and continues at once, so loops between workflows are possible. Both "
+        "pass `sub_workflow_variables: {childVariable: template}`; a child's required "
+        "variables must be mapped. "
         "Every referenced plugin, binding, Quick API, Quick Exec and Page must come from its "
         "current list tool; unresolved bindings require asking the user, never guessing."
     ),
@@ -10916,6 +11201,7 @@ def _handle(req):
         # already ran MUST keep its terminal receipt — silently dropping it
         # would invite a duplicating retry.
         suppress_response_on_cancel = name == "disc_wait_for_peer"
+        preempted = None
         this_call_sequence = None
         was_cancelled = False
         try:
@@ -10932,7 +11218,13 @@ def _handle(req):
             _CURRENT_PROGRESS_TOKEN["token"] = (
                 meta.get("progressToken") if isinstance(meta, dict) else None
             )
+            # Re-arming is listening again: the notice no longer applies.
+            preempted = _WAIT_PREEMPTED["notice"]
+            _WAIT_PREEMPTED["notice"] = None
+            if name == "disc_wait_for_peer":
+                preempted = None
             try:
+                joined_room = _ensure_workflow_step_membership()
                 data = fn(args)
             finally:
                 _CURRENT_RPC_SEQUENCE = previous_rpc_sequence
@@ -10954,20 +11246,20 @@ def _handle(req):
                 room = _room_peek_for_tool_result(name)
                 if room:
                     data["kronn_room"] = room
-            return {
+            if joined_room and isinstance(data, dict):
+                data["kronn_room_joined"] = joined_room
+            return _with_wait_preempted({
                 "jsonrpc": "2.0",
                 "id": rid,
-                "result": {
-                    "content": [{
-                        "type": "text",
-                        "text": json.dumps(data, ensure_ascii=False, indent=2),
-                    }],
-                },
-            }
+                "result": {"content": [{
+                    "type": "text",
+                    "text": json.dumps(data, ensure_ascii=False, indent=2),
+                }]},
+            }, preempted)
         except BridgeStaleError as e:
             if was_cancelled and suppress_response_on_cancel:
                 return None
-            return _bridge_stale_result(rid, name, e)
+            return _with_wait_preempted(_bridge_stale_result(rid, name, e), preempted)
         except Exception as e:
             # The inner finally already consumed the cancellation and purged
             # this call's staged cursors; only the response decision remains.
@@ -10975,14 +11267,14 @@ def _handle(req):
                 return None
             # Surface a structured error so the agent can either retry
             # with different args or fall back to asking the user.
-            return {
+            return _with_wait_preempted({
                 "jsonrpc": "2.0",
                 "id": rid,
                 "result": {
                     "isError": True,
                     "content": [{"type": "text", "text": f"kronn-internal error: {e}"}],
                 },
-            }
+            }, preempted)
     # Unknown method
     if rid is not None:
         return {
@@ -10991,6 +11283,17 @@ def _handle(req):
             "error": {"code": -32601, "message": f"Method not found: {method}"},
         }
     return None
+
+
+def _with_wait_preempted(response, notice):
+    # A separate block leaves the tool's own payload shape untouched, on every
+    # response path that consumed the notice.
+    if notice:
+        response["result"]["content"].append({
+            "type": "text",
+            "text": json.dumps({"wait_preempted": notice}, ensure_ascii=False),
+        })
+    return response
 
 
 def main():

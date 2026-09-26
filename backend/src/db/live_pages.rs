@@ -116,6 +116,20 @@ pub fn create_live_page(
     discussion_id: Option<&str>,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    create_live_page_in_transaction(&tx, page, revision, datasets, discussion_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Add a complete Page to a caller-owned transaction. The caller commits the
+/// whole bundle; this helper must never make part of an import durable alone.
+pub(crate) fn create_live_page_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    page: &LivePage,
+    revision: &LivePageRevision,
+    datasets: &[CreateLivePageDataset],
+    discussion_id: Option<&str>,
+) -> Result<()> {
     tx.execute(
         "INSERT INTO live_pages (
              id, project_id, title, slug, current_revision_id, data_revision,
@@ -230,8 +244,7 @@ pub fn create_live_page(
          VALUES (1, ?1)",
         [page.created_at.to_rfc3339()],
     )?;
-    crate::db::live_page_actions::ingest_page_actions(&tx, &page.id, &revision.id, &revision.html)?;
-    tx.commit()?;
+    crate::db::live_page_actions::ingest_page_actions(tx, &page.id, &revision.id, &revision.html)?;
     Ok(())
 }
 
@@ -302,7 +315,7 @@ pub fn list_live_page_discussions(
         return Ok(None);
     };
     let mut stmt = conn.prepare(
-        "SELECT d.id, d.title, links.relation, d.archived
+        "SELECT d.id, d.title, links.relation, d.archived, links.source_message_id
            FROM live_page_discussion_links links
            JOIN discussions d ON d.id = links.discussion_id
           WHERE links.page_id = ?1
@@ -312,6 +325,7 @@ pub fn list_live_page_discussions(
         .query_map([canonical_id], |row| {
             let relation: String = row.get(2)?;
             Ok(LivePageDiscussionLink {
+                source_message_id: row.get(4)?,
                 discussion_id: row.get(0)?,
                 title: row.get(1)?,
                 relation: match relation.as_str() {
@@ -1082,6 +1096,27 @@ mod tests {
         )
         .unwrap();
         page
+    }
+
+    #[test]
+    fn create_live_page_in_transaction_leaves_commit_or_rollback_to_the_caller() {
+        let source = test_connection();
+        let page = fixture(&source);
+        let revision = get_live_page(&source, &page.id).unwrap().unwrap().revision;
+        let conn = test_connection();
+        for commit in [false, true] {
+            let tx = conn.unchecked_transaction().unwrap();
+            create_live_page_in_transaction(&tx, &page, &revision, &[], None).unwrap();
+            assert!(get_live_page(&tx, &page.id).unwrap().is_some());
+            assert!(pages_capability(&tx).unwrap().activated);
+            if commit {
+                tx.commit().unwrap();
+            } else {
+                tx.rollback().unwrap();
+            }
+            assert_eq!(get_live_page(&conn, &page.id).unwrap().is_some(), commit);
+            assert_eq!(pages_capability(&conn).unwrap().activated, commit);
+        }
     }
 
     #[test]

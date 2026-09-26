@@ -19,6 +19,14 @@ export function readPngSize(buf, what) {
   return { width, height };
 }
 
+// Tauri refuses an application icon that is not 8-bit RGBA (colour type 6), and
+// an encoder drops the alpha channel of a fully opaque image unless told not to.
+export function readPngPixelFormat(buf, what) {
+  readPngSize(buf, what);
+  return { bitDepth: buf.readUInt8(24), colourType: buf.readUInt8(25) };
+}
+export const PNG_RGBA = 6;
+
 export function parseIco(buf) {
   if (buf.length < 6) throw new Error('ico: shorter than its directory header');
   if (buf.readUInt16LE(0) !== 0) throw new Error('ico: reserved field is not zero');

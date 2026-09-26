@@ -44,6 +44,21 @@ pub(crate) mod test_support {
     /// substrings it cares about, exactly like a real shell script would.
     /// The fixture executes on POSIX hosts; its helper must also compile for
     /// Windows, where the portability gate builds the complete test library.
+    /// A Claude Code `stream-json` turn shaped like a real one: the served
+    /// model on the assistant event, one `Read` call, a reply, and a `result`
+    /// whose usage counts cache reads and writes apart from `input_tokens`.
+    pub(crate) const CLAUDE_TURN_WITH_CACHE: &str = r#"
+cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture-session","model":"claude-opus-5-5"}'
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5-5-20260915","content":[]}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"src/lib.rs\"}"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"orchestrated"}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}'
+"#;
+
     pub(crate) fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fixture-cli");
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fixture script");
@@ -346,6 +361,8 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcpSessionEvent {
+    /// Model identifier from a structured runtime response, not configuration.
+    ModelObserved(String),
     /// Runtime-owned conversation identifier discovered after session
     /// creation. This is control metadata consumed by the runner, never text
     /// forwarded to the discussion or an agent-visible event payload.
@@ -354,9 +371,12 @@ pub enum AcpSessionEvent {
     ToolCall {
         name: String,
     },
+    /// The informative input of the latest `ToolCall`, once that input is complete.
+    ToolTarget(String),
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        prompt_cache: crate::agents::runner::PromptCacheUsage,
     },
     Completed,
 }
@@ -922,6 +942,7 @@ fn usage_from_prompt_result(result: &Value) -> Option<AcpSessionEvent> {
     (input_tokens > 0 || output_tokens > 0).then_some(AcpSessionEvent::Usage {
         input_tokens,
         output_tokens,
+        prompt_cache: Default::default(),
     })
 }
 
@@ -959,11 +980,12 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
             // Which kind of chunk this is. A runtime that does not say keeps the
             // old behaviour — its text is the answer.
             let kind = update.get("sessionUpdate").and_then(Value::as_str);
-            // The model's private reasoning, which several runtimes stream
-            // before the answer. It is deliberately never shown: it is a
-            // scratchpad, and concatenating it into the reply would leak it.
-            let is_thought = matches!(kind, Some("agent_thought_chunk"));
-            if let (Some(content), false) = (update.get("content"), is_thought) {
+            // Vibe echoes the injected prompt as user_message_chunk. Only
+            // agent_message_chunk is an answer: user echoes, private thoughts,
+            // tool content and future labelled variants must not become text.
+            // Keep compatibility with older unlabelled runtime frames.
+            let is_answer = matches!(kind, None | Some("agent_message_chunk"));
+            if let (Some(content), true) = (update.get("content"), is_answer) {
                 match content {
                     Value::String(text) => events.push(AcpSessionEvent::TextDelta(text.to_owned())),
                     Value::Array(blocks) => {
@@ -998,6 +1020,7 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                         .get("outputTokens")
                         .and_then(Value::as_u64)
                         .unwrap_or_default(),
+                    prompt_cache: Default::default(),
                 });
             }
             (!events.is_empty()).then_some(events)
@@ -1945,6 +1968,72 @@ mod tests {
         );
     }
 
+    /// A labelled non-answer must not become a successful-looking reply.
+    #[test]
+    fn labelled_non_agent_content_never_becomes_the_reply() {
+        for kind in [
+            "user_message_chunk",
+            "agent_thought_chunk",
+            "tool_call",
+            "tool_call_update",
+            "future_update",
+        ] {
+            for content in [
+                json!("injected prompt or non-answer"),
+                json!({"type": "text", "text": "injected prompt or non-answer"}),
+                json!([{"type": "text", "text": "injected prompt or non-answer"}]),
+            ] {
+                let events = events_from_notifications(
+                    vec![json!({
+                        "jsonrpc": "2.0", "method": "session/update",
+                        "params": {"sessionId": "vibe-session", "update": {
+                            "sessionUpdate": kind, "content": content,
+                        }}
+                    })],
+                    "vibe-session",
+                );
+                assert!(
+                    events.is_empty(),
+                    "{kind} leaked into the answer: {events:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn echoed_user_prompt_keeps_agent_reply_tool_and_usage_events_distinct() {
+        let events = events_from_notifications(
+            vec![
+                json!({"params": {"sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "Kronn instructions + user prompt"}
+                }}}),
+                json!({"params": {"sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "read_file",
+                    "content": [{"type": "text", "text": "tool output, not the answer"}]
+                }}}),
+                json!({"params": {"sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Bonjour 🦀"},
+                    "usage": {"inputTokens": 30, "outputTokens": 4}
+                }}}),
+            ],
+            "vibe-session",
+        );
+        assert_eq!(
+            events,
+            vec![
+                AcpSessionEvent::ToolCall {
+                    name: "read_file".into()
+                },
+                AcpSessionEvent::TextDelta("Bonjour 🦀".into()),
+                AcpSessionEvent::Usage {
+                    input_tokens: 30,
+                    output_tokens: 4,
+                    prompt_cache: Default::default(),
+                },
+            ]
+        );
+    }
+
     /// A runtime that does not label its chunks keeps the behaviour it had.
     #[test]
     fn an_unlabelled_chunk_is_still_treated_as_the_answer() {
@@ -1971,7 +2060,8 @@ mod tests {
             usage_from_prompt_result(&result),
             Some(AcpSessionEvent::Usage {
                 input_tokens: 6126,
-                output_tokens: 28
+                output_tokens: 28,
+                prompt_cache: Default::default(),
             }),
         );
     }
@@ -2066,7 +2156,8 @@ mod tests {
                 AcpSessionEvent::TextDelta("before response".into()),
                 AcpSessionEvent::Usage {
                     input_tokens: 3,
-                    output_tokens: 5
+                    output_tokens: 5,
+                    prompt_cache: Default::default(),
                 },
                 AcpSessionEvent::Completed,
             ]

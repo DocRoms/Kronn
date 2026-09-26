@@ -473,6 +473,8 @@ fn http_turn_telemetry_replaces_same_dispatch_and_preserves_rework() {
         provider: "ollama".into(),
         phase: crate::models::TaskExecutionHttpPhase::Read,
         prompt_tokens,
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
         eval_tokens: 10,
         duration_ms: 1_000,
         provider_ok: true,
@@ -724,7 +726,8 @@ fn reassignment_preserves_git_and_records_provider_separately_from_identity() {
     .unwrap();
     conn.execute(
         "UPDATE task_executions SET candidate_target_sha = 'target-sha', \
-                candidate_merge_sha = 'merge-sha', integrated_sha = NULL WHERE id = ?1",
+                candidate_merge_sha = 'merge-sha', integrated_sha = NULL, \
+                worker_served_model = 'previous-worker-model' WHERE id = ?1",
         [&execution.id],
     )
     .unwrap();
@@ -752,6 +755,11 @@ fn reassignment_preserves_git_and_records_provider_separately_from_identity() {
     );
     assert_eq!(reassigned.worker_agent_type.as_deref(), Some("ClaudeCode"));
     assert_eq!(reassigned.worker_model.as_deref(), Some("claude-reasoning"));
+    assert_eq!(
+        get_worker_served_model(&conn, &execution.id).unwrap(),
+        None,
+        "the new worker has served nothing yet"
+    );
     let (provider, identity, generation): (String, String, i64) = conn
         .query_row(
             "SELECT worker_agent_type, worker_target_kind, generation \
@@ -3939,6 +3947,16 @@ fn parse_blocked_reason_code_is_strict() {
         parse_blocked_reason_code(30, Some("worker_session_committed_elsewhere".into())).unwrap(),
         Some(WorkerSessionCommittedElsewhere)
     );
+    for code in [
+        IntegrationTargetNotCheckedOut,
+        IntegrationRefused,
+        IntegrationTargetDrifted,
+    ] {
+        assert_eq!(
+            parse_blocked_reason_code(30, Some(code.as_str().into())).unwrap(),
+            Some(code)
+        );
+    }
     assert!(
         parse_blocked_reason_code(30, Some("some_future_code".into())).is_err(),
         "a code outside the enum domain must surface as an error, not vanish — the \
@@ -5136,5 +5154,163 @@ fn a_replayed_campaign_gate_publishes_nothing_and_breaks_no_transition() {
             .total,
         0,
         "a skipped gate publishes no card"
+    );
+}
+
+/// KT-793 — a workflow step replayed after a resume takes over the executions its
+/// previous session steered, so their notices wake the replayed agent.
+#[test]
+fn a_replayed_workflow_step_takes_over_the_notices_of_its_earlier_session() {
+    let conn = setup();
+    conn.execute(
+        "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at) \
+         VALUES ('wf-793', 'W', '{}', '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO workflow_runs (id, workflow_id, status, started_at) \
+         VALUES ('run-793', 'wf-793', 'Running', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    let first = crate::db::workflow_step_rooms::join(
+        &conn,
+        "run-793",
+        "orchestrate",
+        DISC,
+        "ClaudeCode",
+        "s1",
+    )
+    .unwrap();
+    seed_session(&conn, 7930, "Codex", "human-cli");
+    let launch = |task: &str, number: i64| {
+        seed_task(&conn, task, number);
+        launch_single_task(
+            &conn,
+            &LaunchSingleTaskInput::new(task, DISC),
+            &backend_actor(),
+        )
+        .unwrap()
+        .execution
+    };
+    let steered = launch("t-793-steered", 17931);
+    let human = launch("t-793-human", 17932);
+    assert!(pin_principal_cli_session(&conn, &steered.id, first.session_pk).unwrap());
+    assert!(pin_principal_cli_session(&conn, &human.id, 7930).unwrap());
+
+    let replay = crate::db::workflow_step_rooms::join(
+        &conn,
+        "run-793",
+        "orchestrate",
+        DISC,
+        "ClaudeCode",
+        "s2",
+    )
+    .unwrap();
+    assert_eq!(replay.repinned, 1);
+    let room_agent = crate::db::discussions::get_discussion(&conn, DISC)
+        .unwrap()
+        .unwrap()
+        .agent;
+    assert_eq!(
+        principal_notice_target(&conn, &steered.id, room_agent.clone()).unwrap(),
+        MessageTarget::cli(AgentType::ClaudeCode, replay.session_pk),
+        "the replayed step is woken by its execution's notices"
+    );
+    assert_eq!(
+        principal_notice_target(&conn, &human.id, room_agent).unwrap(),
+        MessageTarget::cli(AgentType::Codex, 7930),
+        "a human CLI keeps the executions it steers"
+    );
+    let first_status: String = conn
+        .query_row(
+            "SELECT status FROM discussion_sessions WHERE id = ?1",
+            [first.session_pk],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        first_status, "left",
+        "the interrupted step's session left the room"
+    );
+}
+
+/// KT-790 — parent-room notices address the CLI steering the execution, and only
+/// a live session of that very room can take that role.
+#[test]
+fn principal_notices_address_the_pinned_parent_room_cli() {
+    let conn = setup();
+    seed_task(&conn, "t-principal-pin", 1790);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-principal-pin", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    let room_agent = crate::db::discussions::get_discussion(&conn, DISC)
+        .unwrap()
+        .unwrap()
+        .agent;
+    assert_eq!(
+        principal_notice_target(&conn, &execution.id, room_agent.clone()).unwrap(),
+        MessageTarget::discussion_agent(room_agent.clone()),
+        "without a pinned principal the room agent keeps the notice"
+    );
+
+    seed_session(&conn, 790, "Codex", "cli-principal");
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES ('disc-elsewhere', 'E', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO discussion_sessions \
+         (id, disc_id, agent_type, session_id, role, status, joined_at) \
+         VALUES (791, 'disc-elsewhere', 'ClaudeCode', 'cli-elsewhere', 'peer', 'active', \
+                 '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        !pin_principal_cli_session(&conn, &execution.id, 791).unwrap(),
+        "a session of another room never becomes the principal"
+    );
+    assert!(pin_principal_cli_session(&conn, &execution.id, 790).unwrap());
+    assert!(
+        !pin_principal_cli_session(&conn, &execution.id, 790).unwrap(),
+        "re-pinning the same session writes nothing"
+    );
+    assert_eq!(
+        principal_notice_target(&conn, &execution.id, room_agent.clone()).unwrap(),
+        MessageTarget::cli(AgentType::Codex, 790)
+    );
+
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Cancelled,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let notice = format!("orch-principal-terminal:{}:Cancelled", execution.id);
+    assert_eq!(
+        crate::db::discussions::list_message_targets(&conn, &notice).unwrap(),
+        vec![MessageTarget::cli(AgentType::Codex, 790)],
+        "the terminal notice wakes the exact principal session"
+    );
+
+    conn.execute(
+        "UPDATE discussion_sessions SET status = 'left' WHERE id = 790",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        principal_notice_target(&conn, &execution.id, room_agent.clone()).unwrap(),
+        MessageTarget::discussion_agent(room_agent),
+        "a principal that left the room no longer captures notices"
     );
 }

@@ -11,6 +11,419 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-26
+
+### Added
+
+- A Claude Code or Codex workflow Agent step can name its room: `room_id` (a
+  template, for example `{{steps.jeton.data.room_id}}`) makes the step's agent
+  a member and the principal of that discussion without a `kr-join` token. The runner hands the
+  agent's bridge a capability through the environment on every launch and every
+  resume, the bridge joins with it before the first Kronn tool, and the backend
+  accepts it only while that very step of that run is running, for that room.
+  The membership ends with the step, a replayed step takes over the executions
+  its interrupted session steered (their deliveries wake it), and
+  `task_exec_prepare` works again after `/resume` of an interrupted run.
+- An isolated workflow run can start from a chosen commit instead of the
+  project checkout's HEAD: `workspace_config.base_ref` (`origin/main`, a tag, a
+  SHA; "Start from" in the workflow editor). A remote branch is fetched first,
+  within 60 s and one fetch at a time per repository, so parallel foreach items
+  do not refuse each other on the ref lock. A failed fetch or an unknown ref
+  refuses the run with a message naming what to check, rather than starting
+  from a stale copy or the main checkout. The worktree of a run left
+  `Interrupted` and not resumed within `server.interrupted_worktree_ttl_days`
+  (default 7, `0` = never) is reclaimed at boot, except a dirty or detached
+  one; commits no base holds stay on a branch listed on the run.
+- A workflow step can launch another workflow without waiting for it:
+  `TriggerWorkflow` creates the child run through the same path as a manual
+  launch (its variables mapped from templates, its snapshot prepared, its own
+  concurrency limit and key applied), then continues at once. The child run
+  records `triggered_by_run_id` and shows the launching workflow as its origin;
+  the step keeps `child_run_id`. Loops between workflows are allowed (a chain of
+  more than 20 runs launching one another is refused), and a refused launch
+  ends the step with `TRIGGER_REFUSED`, which `on_result` can branch on. A
+  phase no longer needs an Exec calling `POST …/trigger` and hanging up after
+  `run_start`. Migration 194 adds the column to runs.
+- `SubWorkflow` passes values to its child: `sub_workflow_variables` maps the
+  child's launch variables to templates rendered in the parent run (in a
+  foreach, `{{current_task.*}}` too), and the child's variable snapshot is
+  prepared like a manual launch's. A child that declares variables used to fail
+  for want of a snapshot. Mapped names must be declared by the child, and a
+  parent variable resolved from the project environment or the Kronn context
+  is never forwarded.
+- A workflow's `concurrency_limit` can be counted per business object:
+  `concurrency_key` (for example `"{{ticketKey}}"`) is rendered at each launch
+  from the run's launch variables and stored on the run. Runs with different
+  keys run side by side; a launch whose key is already at the limit is refused
+  with `Concurrency limit reached for key …`, as the per-workflow limit already
+  was. The key may read only `user_input` variables: one resolved from the
+  project environment or the Kronn context is refused at save, since the key
+  is stored in clear. Migration 193 adds the column to workflows and runs.
+- A workflow run can carry a plain business label from its launch:
+  `POST /api/workflows/{id}/trigger` accepts `state` beside `variables`, and
+  `GET /api/workflows/{id}/runs?state_key=…&state_value=…` returns the runs
+  holding that entry, newest first. The last run about a ticket now takes one
+  call instead of reading the detail of every recent run.
+- A Page action's `user_input` field can start from the clicked row's data:
+  with a `<page.dataset…>` `source_ref`, Kronn resolves it server-side when the
+  card opens and the reader edits it before launching, instead of retyping a
+  debrief that is already in the dataset.
+- `task_exec_status` can wait for an execution: `wait_for` lists statuses (for
+  example `["AwaitingReview", "Done", "Blocked"]`) and the call returns as soon
+  as the execution is in one of them, with `wait: {matched, timed_out,
+  waited_ms}`, instead of the principal sleeping and re-reading. `timeout_secs`
+  bounds it (60 s by default, 170 s at most).
+- A workflow Agent step records the prompt-cache tokens Claude Code reports
+  beside its input and output: `cached_prompt_tokens` (reads) and
+  `cache_write_prompt_tokens` (writes), on the step result and on each attempt.
+  `tokens_used` keeps counting uncached input plus output; an orchestrator step
+  that declared 21 593 tokens had also read 1 554 330 cached tokens and written
+  80 271. While an Agent step runs, its latest tool call (tool, target, time) is
+  stored on the in-flight step result as `last_activity` and returned by
+  `workflow_run_status` as `current_activity`, so every reader sees what the
+  step is doing, not only the client that started the run.
+- Workflow templates accept one explicit fallback, `{{path ?? "text"}}` (or
+  `'text'`, taken verbatim). It renders the literal when the path is absent or
+  JSON null, so a step reading a step that a `Goto` skipped runs instead of
+  failing the run; a present empty value stays empty, and an absent reference
+  without `??` still fails as before. Saving still refuses an unknown step name
+  behind a fallback and now refuses a malformed one; the wizard no longer warns
+  about a guarded reference to a later step. `{{run.id}}` gives the current
+  run's id. See [the template grammar](docs/architecture/overview.md).
+- `ApiCall` and `BatchApiCall` steps can fetch an image or another file through
+  the API broker with `api_response: {"type": "Binary"}`: the credentials stay
+  on the server and the step returns `{content_type, size, base64, data_uri}`
+  instead of failing on JSON parsing. Only the declared media types are
+  accepted (`image/*` by default, `*/*` refused), and a body over `max_bytes`
+  (256 KiB by default, 2 MiB at most) fails the step rather than being
+  truncated. Published as a `data:` URI, a Jira attachment thumbnail shows in a
+  Page without opening its image policy to another domain. Steps without the
+  option parse JSON as before.
+  See [binary responses](docs/operations/deagent-apicall.md#binary-responses-images-and-other-files).
+- A room's native agent can prepare and launch a task execution itself, as
+  its principal, without a CLI joining the room. Kronn identifies it from the
+  turn it is running, so only that room's agent is accepted.
+- Workflow Agent results retain execution provenance for initial, repair,
+  escalation and debate attempts, including model resolution, structured
+  runtime model observations and format fallback. Compact agent/model badges
+  follow the retained output; historical runs keep their existing metadata.
+  See [workflow agent provenance](docs/operations/workflow-agent-provenance.md).
+- A workflow run's Agent step lists every attempt in its details (role, agent,
+  reported or resolved model, format fallback, duration, outcome) and marks the
+  one whose output was kept. A step with no recorded model shows "unknown
+  model" instead of today's step configuration.
+- Later workflow steps can read an Agent step's provenance as
+  `steps.<name>.provenance` (agent, model, connection, role, whether the output
+  was retained), and `PublishPageData` can publish it as a typed value, so a Page
+  names the agent behind its analysis instead of hard-coding it. A step without
+  recorded provenance exposes none.
+- Task execution usage for HTTP agents records the prompt tokens a provider
+  served from its cache, when it reports them (`prompt_tokens_details.cached_tokens`
+  or `cache_read_input_tokens`). Turns that do not report it stay unknown and are
+  counted separately, so no cache rate is inferred for them.
+- HTTP task execution usage also records the prompt tokens a provider wrote to
+  its cache (`cache_creation_input_tokens`), per turn, per phase and in total.
+  Kronn asks LiteLLM to mark Anthropic cache breakpoints on the system prompt
+  and the last message of Claude requests, which brought the input cost of a
+  replayed Sonnet task to about a quarter of its uncached price.
+  `KRONN_LITELLM_PROMPT_CACHE=0` turns it off.
+- Open 2–12 selected discussions in a separate mosaic tab, with Artifact-style
+  layouts, plan progress, recent messages and saved response checkpoints.
+  Each tile scrolls independently and links to its full discussion. The bounded
+  read-only monitor shares one WebSocket and batches refreshes without marking
+  discussions read or launching agents; a missing room does not block its peers.
+  Selecting a tile opens a collapsible input bound to that discussion, with its
+  mentions and draft; messages use the durable outbox route.
+  [Monitoring limits and behavior](docs/operations/discussion-mosaic.md).
+- The discussion asset carousel has a copy button. Text, JSON and log files are
+  copied whole (up to 2 MiB), images as PNG, and videos only where the browser
+  accepts that type; otherwise the button says why it is unavailable.
+- Artifacts can be exported and imported as versioned JSON bundles containing
+  current HTML, retained data and linked automation definitions. Import previews
+  creation, reuse and conflicts, remaps references into a new Artifact and keeps
+  new workflows disabled. Missing local configuration is shown before import;
+  stale previews and failed imports leave no partial resources.
+- Artifact import shows each new Quick Exec's command and arguments and
+  requires explicit approval before creating it. New Quick APIs show their
+  method and endpoint in the preview.
+- HTML previews in discussion messages can become Artifacts with an editable
+  title, unchanged HTML/CSS/JavaScript, and a link back to the source message.
+  Repeated titles create distinct Artifacts without overwriting existing ones.
+
+### Changed
+
+- The Pages interface is now named Artifacts in all four languages, including
+  workflow publishing and the mosaic. Existing URLs, identifiers, API routes
+  and MCP tool names remain compatible.
+- Workflow, Quick API, Quick Exec and Artifact exports replace literal credentials
+  (authorization headers, secret query or body values, `--token`-style
+  arguments) with a marker and list the masked fields in the file, never their
+  values. `{{…}}` references are kept. A notice follows the download, and the
+  import preview lists the masked fields before confirmation.
+
+### Fixed
+
+- `scripts/check-app-icons.mjs` requires the desktop icons to be 8-bit RGBA,
+  which Tauri needs to build the app, and compares them with a fresh render on
+  exact pixels. A lossless re-encode no longer fails it; a resample or a
+  retouch still does. The shipped icons are unchanged from 0.14.0.
+- The boot purge of finished workflow runs no longer removes a worktree that a
+  finished sub-workflow shares with its parent while that parent is still
+  running, paused at a gate or resumable after an interruption.
+- An arbitration card lets the reader take a checked option back, and offers
+  a Comment action: the text reaches the agent that asked, marked as not a
+  decision, and the question stays pending. Before, a checked radio button
+  could not be unchecked and a written reply always settled the question.
+- A workflow with `require_isolation` and a SubWorkflow foreach accepts a
+  `concurrency_limit` above 1: each run owns its worktree, so two runs overlap
+  while each foreach stays sequential. In such a fresh worktree the foreach no
+  longer skips every item on `No such file or directory`: it creates the
+  untracked `.kronn/` folder before writing `current_task.json`.
+- Kronn no longer deletes a repository's own skills and agent files. At every
+  startup the native sync removed any `.claude/skills`, `.agents/skills` or
+  `.gemini/skills` folder (and any agent file) it had not just written, and
+  appended a whole-folder ignore rule such as `.agents/` that cancelled the
+  repository's `!.agents/skills/`. It now records what it writes in
+  `.kronn/native-files.json` and only removes an unmodified, untracked file
+  of its own; it ignores only what it wrote, and drops a whole-folder rule an
+  earlier sync appended over a re-included folder.
+- A kronn-action block removed from a Page's HTML is no longer listed among
+  its actions after the next publication; its launches stay in the history.
+- The dark themes pass WCAG AA: axe, plus a re-measure of the text it leaves
+  undecided behind gradients, now finds no contrast failure on Projects,
+  Discussions, Planning, Plugins, Workflows, Pages, Settings or an open action
+  card in `dark`, `gotham` or `matrix`, where it found 23, 404 and 395. Gotham
+  and matrix low-emphasis text (`--kr-text-muted` down to `--kr-text-ghost`) and
+  a few status colours were lightened, keeping their hue, to at least 4.5:1;
+  sakura and euronews ghost text reaches 3:1. Settings' debug switches no
+  longer show a light-grey browser button, unavailable models are muted
+  instead of faded, and agent names blend their brand colour with the text
+  colour. Thirteen `:focus-visible` rules no longer hide the focus ring.
+  `pnpm lint:theme` (also in CI) measures every theme and refuses undefined
+  custom properties, white or black text pinned on a token fill (in a
+  stylesheet or an inline `style={{ }}` object) and removed focus rings;
+  `e2e/specs/a11y-dark-themes.spec.ts` scans the rendered screens. The Plugins
+  page's scope tip no longer prints white text on the accent.
+- The "▶ Launch" button of a native action card, the project git switcher's
+  button and the current-branch marker no longer print white text on the
+  accent: they use `--kr-text-on-accent`, which reads at 15.97:1 on the default
+  lime, 13.58:1 on the gotham yellow and 15.38:1 on the matrix green, where
+  white was 1.18, 1.43 and 1.37. The discussion weight panel and the prompt
+  variable editor no longer open white in dark themes. The token guard now
+  refuses any `var(--kr-*)` that `tokens.css` does not define, even behind a
+  fallback, and white text pinned on an accent fill.
+- A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is
+  refused before it reaches disk when it leaves an orphan delimiter or an
+  unclosed Twig block, or when an `edit_lines` replacement shifts the
+  indentation of the first or last line it replaces; the diagnostic sends the
+  worker into its one strict correction, as a Rust parser error already did.
+  Local models got bounded edits with indented edges wrong on every measured
+  case. The prelocalized worker brief no longer carries the human-arbitration
+  and parent-milestone sections.
+- An `Exec` step's `---STATE:k=v---` and `---ARTIFACT:name---` markers are read
+  from the command's raw stdout instead of the JSON-escaped copy in its
+  envelope. A multi-line value or artifact now reaches later steps and the run
+  state with real line breaks rather than literal `\n`, and quotes and
+  backslashes are no longer escaped. Only stdout is read; there a `STATE` value
+  may span lines up to its closing `---`.
+- A Kronn action card opened from a Live Page no longer closes every 30 s
+  when the Page refreshes, and keeps what was typed in it; it now follows its
+  row when new data makes the Page redraw. Each row's state carries its launch
+  id (`data-kronn-action-launch`), so a Page tells a new attempt from the
+  previous one. A field's placeholder reads as an example (`e.g. ollama`)
+  instead of passing for the value an empty field would send.
+- An accepted delivery from a Claude Code worker names the model its runtime
+  reported serving (from the `assistant` event of its stream) instead of
+  "Model unknown". A requested model is shown only when none was reported, and
+  reassigning the worker clears the previous one (migration 192).
+- A restart in the middle of a task execution's integration no longer keeps the
+  backend from answering while the interrupted validations are replayed, which
+  could outlast the 300 health probes `kronn start-dev` waits for. Boot still
+  reclassifies every interrupted execution, but replaying validations,
+  rebuilding a candidate, applying and provisioning now start once the server
+  listens, in the background and one execution at a time, each logged as it
+  completes. A resume requested for an execution already being resumed is
+  refused with `a resume of this execution is already running` instead of
+  running twice.
+- A principal following a task execution no longer reads 10 to 17 thousand
+  characters per `task_exec_status` call. `view: "compact"` returns the status,
+  attempt, review rounds, delivered `head_sha`, last error, the latest
+  candidate's validations (command, exit code, duration) and `next_action` in
+  under 1 000 characters. The full view stays the default, for reviews and
+  diagnosis.
+- `task_exec_reassign` is accepted from `AwaitingReview`. The pending delivery
+  is rejected but kept in the attempt history, and the requested worker starts
+  the next attempt on the same task, room and worktree, instead of the
+  principal cancelling and relaunching the task.
+- A worker's delivery now wakes the CLI principal waiting in the parent room.
+  The review request, escalations, integration refusals, campaign pauses, the
+  undelivered-worker notice and the terminal notice were addressed to the
+  room's native agent, so the principal's `disc_wait_for_peer` withheld them
+  and timed out. They now address the joined CLI that launched, reviewed,
+  resumed or reassigned the execution while it remains in that room, and the
+  room's agent otherwise.
+- A prelocalized rework no longer edits the launch line numbers on moved
+  content. When a delivery changed the file's line count, `request_changes`
+  replayed the same range and a local worker deleted the neighbouring rule.
+  Before a rework, a resume or a reassignment, Kronn now re-anchors the range
+  on the lines around it and tells the worker the new range; if anything
+  outside the range changed, it refuses with `stale range: …; relaunch with a
+  new worker_scope`, naming the launch range and the observed change.
+- A CLI task worker that runs `git commit` itself can no longer deliver a
+  commit carrying an invented identity. At delivery, every `Signed-off-by`,
+  `Co-Authored-By` or similar trailer in the delivered commits must name the
+  repository's git identity, the one `git commit -s` signs with; otherwise the
+  delivery is refused with the offending lines and how to fix them, before any
+  review or integration. Approval checks it again for deliveries accepted
+  earlier, and the CLI worker brief now asks for `git commit -s` and no
+  hand-written trailer.
+- A task execution no longer stays in `Applying` forever when another one lands
+  on the same target branch during its validations: Kronn rebuilds the candidate
+  on the new tip, validates it again and applies it (up to three times). Any
+  other refusal to apply, or a target that keeps moving, parks it in `Blocked`
+  with a reason code and a notice in the principal room; `task_exec_resume`
+  then continues from the real target.
+- A workflow with launch variables triggered from MCP (`workflow_trigger`) now
+  runs. That launcher never prepared the encrypted variable snapshot the UI
+  prepares, so the run died at start and stayed "Running" forever, counting
+  against the workflow's concurrency limit. MCP now goes through the UI's
+  launcher, a variable preflight failure is returned to the caller as with
+  `qp_run`, and a run whose execution errors in the background (MCP, UI,
+  schedule, tracker, resume) is marked Failed with the reason (KT-786).
+- Two workflows of one project that run in its main checkout and start at the
+  same moment (crons sharing a minute, for example) no longer make one of them
+  fail at once with "Refusing to run in the main checkout". The later run now
+  waits its turn, in arrival order, for up to 60 s
+  (`KRONN_MAIN_TREE_WAIT_SECS`) and stops waiting if it is cancelled; past that
+  delay the refusal names the run still holding the checkout. A workflow that
+  never writes the checkout can declare it (`workspace_config.main_tree_read_only`,
+  or "Does not write to the project checkout" in its advanced settings) and
+  then runs without taking this lock (KT-787).
+- A Live Page action whose workflow run was interrupted by a restart no longer
+  stays "running" forever and blocks its row. The interruption now reaches
+  the run's shared status, runs left in that state by earlier versions are
+  repaired at startup, and a row whose last launch finished opens on a fresh
+  launch, with the last result one click away.
+- A Page opened in its own tab now keeps up with new data. It is read again
+  every 30 s and when the tab comes back into view, and the new data is sent
+  to the open page without reloading it, so scroll and open rows are kept.
+- Opening a discussion no longer downloads every image it contains. An image
+  thumbnail, which is the whole file, loads as it nears the screen: on a
+  2,000-message room with 12 images, 9.5 MB instead of 15.6 MB at opening.
+- An open discussion no longer re-downloads its whole transcript when an
+  unrelated workflow or media run reports progress. Every refresh now asks for
+  the detail only if it changed, and a burst of events collapses into one
+  request. On a 2,000-message room with a workflow running: opening it went
+  from 66 MB to 27 MB, and 20 s at rest from up to 27 MB to 1.9 MB.
+- In `kronn start-dev`, a build that writes generated sources under a
+  `target/` directory (another checkout's Cargo build, for example) no longer
+  restarts the backend and cuts the agents it is running. The file watcher now
+  ignores `target/`, and a watched build restarts the backend only when it
+  actually changed the binary.
+- The document exporter (`kronn-docs`) no longer outlives a backend that is
+  killed outright (crash, SIGKILL, a hot-reload restart that times out). It
+  now exits as soon as the backend's end of its stdin pipe closes, instead of
+  piling up orphaned processes across restarts. Development setups that use
+  the desktop bundle need `make docs-bundle` once to pick this up.
+- `kronn start-dev` no longer moves `/opt/homebrew/bin` and `~/.cargo/bin`
+  ahead of your own PATH; it adds them at the end, and only when missing. With a
+  second, older agent CLI installed through Homebrew/npm, Kronn used to run that
+  copy: an old Claude Code served `opus` as Opus 4.8 while the up-to-date CLI
+  serves Opus 5.5. The Agents settings now warn when another copy of a CLI with
+  a different version is on PATH, naming the path and version of each.
+- A long discussion left open no longer freezes the page every few seconds.
+  Unrelated refreshes (room links, the dashboard, background status) re-rendered
+  every message; the transcript is now reused while nothing it shows changed.
+  On a 2,000-message room at rest: from about 0.9 s pauses every 5 s to short
+  ones (production build: 0.9 s of long tasks per 20 s down to 0.35 s).
+- An approved task whose integration cannot start no longer sits silently in
+  `Approved`. When the target branch is checked out in no worktree (or in
+  several), or another precondition fails, the execution records why and the
+  principal room gets a notice naming the fix, for example
+  `git worktree add <path> <branch>`. The approval stays valid: once fixed,
+  resuming the execution or approving again starts the integration.
+- An execution interrupted while its merge was being applied can be resumed
+  again. If the merge had already landed, even with more commits on the target
+  since, resuming now closes it as done instead of staying `Interrupted`; if it
+  had not, resuming replays the apply safely. The recovery action Kronn
+  proposes is always one that resume accepts.
+- The Automations list no longer waits on a scan of every workflow run to find
+  each workflow's latest one. A `(workflow_id, started_at)` index answers it
+  directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.
+- An open discussion no longer re-downloads its whole transcript every five
+  seconds. The refresh sends the revision it holds and the server returns the
+  detail only when it changed; on a 2,000-message room this removes about
+  40 MB per minute of transfer while it sits idle.
+- `disc_link` now reports whether the session it just bound is actually usable
+  by `task_exec_prepare`/`task_exec_launch`, instead of a bare success that
+  left the gap to surface later as an unexplained `rejoin_required`. The
+  response now says so at link time and names the exact next call
+  (`disc_invite_peer` then `disc_join`) when a rejoin is still needed (KT-737).
+- A workflow Agent step run through ACP now records the token usage its agent
+  reports instead of 0. When the agent reports none, the step's
+  `tokens_used` is `null` (with `tokens_status: "not_measured"` in the MCP run
+  status) and the run view shows "tokens unknown" rather than a zero. Run
+  totals still add up only the measured steps (KT-735).
+- When a Claude or Codex agent run through ACP fails, the error now includes
+  the end of what the agent printed on stderr (for example an expired login)
+  instead of only "exited with status 1". A prompt that cannot be delivered
+  because the agent already quit reports the agent's exit status and stderr
+  rather than "Broken pipe". The executed command line is logged at debug
+  level with prompts and secret values left out (KT-666).
+- A local linked repository whose path does not exist on this machine no longer
+  makes the Claude task worker unavailable for the whole project on macOS: it is
+  skipped with a warning. A linked repository or project that exists but cannot
+  be read as a Git checkout still refuses the worker, and the refusal now names
+  it instead of suggesting a reassignment. Saving linked repositories now
+  rejects a local path that does not exist; remote URLs are unchanged (KT-741).
+- Native ACP replies no longer include echoed user prompts, including Vibe's
+  copy of Kronn's injected instructions. Only agent message chunks contribute
+  answer text; tool and usage events remain separate (KT-729).
+- Codex discussions with a project-synced internal MCP bridge no longer fail
+  immediately during bootstrap: the adapter emits the reserved
+  `kronn-internal` entry exactly once (KT-730).
+- A draft typed in a discussion after sending, then left for another
+  discussion, is no longer erased when the earlier message is acknowledged;
+  only the sent text itself is cleared.
+- Native backend hot reload uses the initial startup readiness budget instead
+  of stopping a still-starting backend after roughly 30 seconds. Slow project
+  MCP synchronization can finish before the HTTP listener becomes ready;
+  diagnostics distinguish readiness timeout from an actual backend exit.
+- Workflow HTTP agents recover once from an explicit unsupported structured
+  output response by keeping the schema in the prompt and retaining the model,
+  tools and local validation policy. A persistent notice records the fallback,
+  including when repair or escalation replaces the answer. Generic 501 errors
+  are no longer retried as transient failures, and tool-support advice appears
+  only when the provider explicitly rejects tools. Invalid schemas, credentials
+  and quota errors remain failures.
+- Workflow document audits keep native Unix filename bytes instead of failing
+  on non-UTF-8 names. Escaped diagnostic labels distinguish these files without
+  changing their names, contents or index entries.
+- Workflow document audits preserve preexisting and concurrent working-tree
+  changes, staged content and untracked files. They compare pre-step content
+  fingerprints instead of restoring every dirty document from HEAD or deleting
+  it. Changed content with a credential signal now fails the step with a
+  persistent, secret-free diagnostic; legitimate documents over 8 KiB are not
+  rejected for their size. See the [audit and recovery notes](docs/operations/workflow-docs-audit.md).
+- Commits made through a task worker drop `Signed-off-by`, `Co-authored-by` and
+  similar identity trailers written by the model, keeping only the sign-off Kronn
+  adds from the git configuration. The tool result lists what was removed. A
+  worker could otherwise record an invented identity in the history.
+- A room wait ended by another Kronn tool call is no longer silent. The bridge
+  serves one call at a time, so a host that moved `disc_wait_for_peer` to the
+  background stopped listening at its next call while the protocol said the
+  wait remained active. That call's result now carries `wait_preempted`, the
+  wait's own result says `interrupted`, and the protocol text asks for a re-arm.
+- A failed workflow import rolls back every bundled resource, including Pages
+  and Quick Prompts created before the error. Late validation or database
+  failures no longer leave partial imports or activate an empty Pages library.
+- A Live Page's 30-second auto-refresh, and switching to another Page, each
+  fetch that Page's detail exactly once instead of twice (KT-736).
+- Triggering a workflow from MCP with an argument its tool does not declare
+  (for example `vars` instead of `variables`) now fails with an error naming
+  the expected `variables` argument, instead of silently dropping the value
+  and reporting an unrelated "variable is required" error (KT-738).
+
 ## [0.14.0] - 2026-09-23
 
 ### Added

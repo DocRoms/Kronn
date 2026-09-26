@@ -23,6 +23,10 @@ pub struct Workflow {
     pub safety: WorkflowSafety,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    /// Template rendered at launch from non-secret launch variables
+    /// (`{{ticketKey}}`): `concurrency_limit` then counts runs per rendered key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_key: Option<String>,
     /// Execution limits (timeout, LLM calls cap, loop detection). 0.7.0 —
     /// Phase 1 of the Auto-Dev workflow expansion. `None` = use the soft
     /// backend defaults (120 min wall-clock, 100 LLM calls, 10 revisits
@@ -496,6 +500,11 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_output_var: Option<String>,
 
+    /// How a 2xx body is decoded. Absent = JSON, exactly as before; `Binary`
+    /// returns an allowed media type as base64 instead of parsing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_response: Option<ApiResponseMode>,
+
     // ─── Gate fields (0.7.0 Phase 4 — human-in-the-loop) ─────────────
     // Only meaningful when `step_type == Gate`. The runner stops the
     // run with `RunStatus::WaitingApproval`; a human decides via the
@@ -658,6 +667,13 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_workflow_foreach_file: Option<String>,
 
+    /// For `SubWorkflow` and `TriggerWorkflow`: child launch variable name →
+    /// template rendered in this run. The child's snapshot is prepared from
+    /// these values like a manual launch's.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[ts(type = "Record<string, string>")]
+    pub sub_workflow_variables: std::collections::HashMap<String, String>,
+
     /// 2026-06-13 — "Multi-agent review" advanced option on an Agent step.
     /// When set, the step runs its own agent normally, THEN opens a shared
     /// Kronn discussion and invites a SECOND agent (a different model family,
@@ -668,6 +684,12 @@ pub struct WorkflowStep {
     /// back-and-forth rather than a file relay. `None` = plain Agent step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_review: Option<MultiAgentReviewConfig>,
+
+    /// KT-793 — Agent steps only: a template rendering to a discussion id. The
+    /// step's agent joins that room as its principal without an invite token,
+    /// on every launch and every resume of the step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
 }
 
 /// Config for the "Multi-agent review" option on an Agent step (see
@@ -725,6 +747,26 @@ pub struct ExtractSpec {
 /// serde default for `ExtractSpec::fail_on_empty` (2026-06-10).
 fn default_true() -> bool {
     true
+}
+
+/// Response decoding for `ApiCall` / `BatchApiCall`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum ApiResponseMode {
+    /// Parse the body as JSON (the behaviour when `api_response` is absent).
+    Json,
+    /// Return the body as `{content_type, size, base64, data_uri}`. Only the
+    /// declared media types are accepted, so the broker cannot proxy arbitrary
+    /// files, and a body over the cap is refused rather than truncated.
+    Binary {
+        /// Exact types (`image/png`) or a family (`image/*`). Empty = `image/*`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        accept: Vec<String>,
+        /// Largest accepted body in bytes. Default 256 KiB, at most 2 MiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
+    },
 }
 
 /// Pagination strategy for an `ApiCall` step. `Auto` covers the three most
@@ -905,6 +947,11 @@ pub enum StepType {
     /// step's status (→ the parent's `on_result` can branch on it), and its
     /// run id is recorded on the `StepResult.child_run_id` for drill-down.
     SubWorkflow,
+    /// Launch another workflow (`sub_workflow_id`) as an independent run and
+    /// continue at once. The child is created like a manual launch (variables
+    /// from `sub_workflow_variables`, its own concurrency limit) and records
+    /// this run as `triggered_by_run_id`; cycles between workflows are allowed.
+    TriggerWorkflow,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -1165,6 +1212,16 @@ pub struct WorkspaceConfig {
     /// request a worktree so those hooks do not silently stop running.
     #[serde(default)]
     pub require_isolation: bool,
+    /// Declares that the workflow never writes the project's checkout (it
+    /// reads it, or works through absolute paths / page data), so its
+    /// non-isolated runs skip the per-project exclusivity lock.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub main_tree_read_only: bool,
+    /// Commit a fresh run's worktree starts from (`origin/main`, a tag, a SHA)
+    /// instead of the checkout's HEAD. A `<remote>/<branch>` value is fetched
+    /// first and a failed fetch refuses the run. Setting it requests a worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1265,6 +1322,13 @@ pub struct WorkflowRun {
     /// blocked, no auth, network down, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced_branches: Vec<ProducedBranch>,
+    /// The workflow's `concurrency_key` as rendered for this run at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_key: Option<String>,
+    /// The run whose `TriggerWorkflow` step launched this one. Unlike
+    /// `parent_run_id`, the two runs have independent lifecycles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggered_by_run_id: Option<String>,
     /// Provenance enrichment (DERIVED, not persisted). When this run is a
     /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
     /// workflow id + name + tick time so the UI can render
@@ -1351,13 +1415,95 @@ pub struct NativeToolCallLog {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowAgentProvenance {
+    pub attempts: Vec<WorkflowAgentAttempt>,
+    /// One-based attempt id whose output the step retained. Absent when no
+    /// attempt produced a retained output, including preflight failures.
+    pub selected_attempt: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum WorkflowAgentAttemptRole {
+    Initial,
+    Repair,
+    Escalation,
+    Review,
+    Author,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowAgentAttempt {
+    pub id: u32,
+    pub role: WorkflowAgentAttemptRole,
+    /// One-based outer Agent retry; repair/debate retain their parent's number.
+    pub retry: u32,
+    pub agent: AgentType,
+    pub tier: ModelTier,
+    pub connection_id: Option<String>,
+    /// Explicit model override, before resolving connection/tier defaults.
+    pub requested_model: Option<String>,
+    /// Model resolved at the actual launch boundary. Not provider observation.
+    pub resolved_model: Option<String>,
+    /// Whether the transport applied that selection. None means unknown or no
+    /// selection; native ACP can explicitly retain its default (false).
+    pub model_applied: Option<bool>,
+    /// Distinct model identifiers reported by structured runtime responses.
+    /// Empty means unreported; never inferred from generated prose or config.
+    pub observed_models: Vec<String>,
+    pub format_fallback: bool,
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub succeeded: bool,
+    /// Prompt tokens read from the provider's prompt cache, on top of the
+    /// uncached input counted in `tokens_used`. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt tokens written to the provider's prompt cache. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
+}
+
+impl WorkflowAgentProvenance {
+    /// Cache reads and writes summed over the attempts that reported them.
+    pub fn prompt_cache_totals(&self) -> (Option<u64>, Option<u64>) {
+        fn sum(values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
+            values.flatten().fold(None, |total: Option<u64>, value| {
+                Some(total.unwrap_or(0).saturating_add(value))
+            })
+        }
+        (
+            sum(self.attempts.iter().map(|a| a.cached_prompt_tokens)),
+            sum(self.attempts.iter().map(|a| a.cache_write_prompt_tokens)),
+        )
+    }
+}
+
+/// The latest tool call an agent started, as its runtime reported it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentActivity {
+    pub tool: String,
+    /// The call's most informative input (file, command, pattern or URL),
+    /// truncated. `None` until the input is complete or when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct StepResult {
     pub step_name: String,
     pub status: RunStatus,
     pub output: String,
-    pub tokens_used: u64,
+    /// `None` when an agent ran but its runtime reported no usage: a step
+    /// that called a model was not free, so unknown must not read as zero.
+    #[serde(default)]
+    pub tokens_used: Option<u64>,
     pub duration_ms: u64,
     /// 0.8.2 — Wall-clock timestamp at which the step started executing.
     /// Optional for backward compatibility with runs written before this
@@ -1432,11 +1578,26 @@ pub struct StepResult {
     /// for legacy rows. The inverse of `WorkflowRun.parent_run_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_run_id: Option<String>,
+    /// Captured execution provenance. Older rows have no such information;
+    /// reading them must never manufacture attempts from today's config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_provenance: Option<Box<WorkflowAgentProvenance>>,
     /// Bounded Kronn-native calls made by an HTTP Agent step (Ollama or
     /// LiteLLM). Only tool name + outcome are persisted; arguments/results
     /// stay in the provider round-trip and can never leak into run history.
     #[serde(default, skip_serializing_if = "is_empty_tool_call_log")]
     pub native_tool_calls: Box<[NativeToolCallLog]>,
+    /// Prompt-cache reads of this step's agent attempts. `tokens_used` counts
+    /// only uncached input and output, so this is additional. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt-cache writes of this step's agent attempts. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
+    /// Latest tool call of an Agent step while it runs. The terminal result
+    /// replaces the in-flight row, so it survives only an interrupted step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<AgentActivity>,
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {
@@ -1460,6 +1621,8 @@ pub struct CreateWorkflowRequest {
     pub workspace_config: Option<WorkspaceConfig>,
     #[serde(default)]
     pub concurrency_limit: Option<u32>,
+    #[serde(default)]
+    pub concurrency_key: Option<String>,
     #[serde(default)]
     pub guards: Option<WorkflowGuards>,
     #[serde(default)]
@@ -1495,6 +1658,9 @@ pub struct UpdateWorkflowRequest {
     pub safety: Option<WorkflowSafety>,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    /// `null` clears the key; omitted keeps it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    pub concurrency_key: Option<Option<String>>,
     pub guards: Option<WorkflowGuards>,
     /// Replace the artifact map entirely when present. To clear all
     /// declarations, send `Some({})`. Omit the field to leave existing
@@ -1626,6 +1792,12 @@ pub struct TriggerWorkflowRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: ::std::collections::HashMap<String, String>,
+    /// Non-secret entries seeded into the run's `state` at creation, e.g. the
+    /// ticket a run is about, so the run list can be filtered on them even if
+    /// the run fails before any step writes its state.
+    #[serde(default)]
+    #[ts(type = "Record<string, string>")]
+    pub state: ::std::collections::HashMap<String, String>,
 }
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.
@@ -1666,6 +1838,10 @@ pub struct WorkflowExportEnvelope {
     /// Empty when the workflow has no SubWorkflow steps. Excludes the root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_workflows: Vec<Workflow>,
+    /// Fields whose literal secret was replaced before export (never the
+    /// value). An importer shows them so nothing silently runs without them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1724,6 +1900,27 @@ mod step_deserialization_tests {
         let modern: WorkspaceConfig =
             serde_json::from_str(r#"{"hooks":{},"require_isolation":true}"#).unwrap();
         assert!(modern.require_isolation);
+        assert!(
+            !modern.main_tree_read_only,
+            "writing the tree stays the default"
+        );
+
+        let read_only: WorkspaceConfig =
+            serde_json::from_str(r#"{"hooks":{},"main_tree_read_only":true}"#).unwrap();
+        assert!(read_only.main_tree_read_only);
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"hooks": {}, "require_isolation": false}),
+            "an unset flag is not serialized"
+        );
+        assert_eq!(legacy.base_ref, None, "no starting point by default");
+        let based: WorkspaceConfig =
+            serde_json::from_str(r#"{"hooks":{},"base_ref":"origin/main"}"#).unwrap();
+        assert_eq!(based.base_ref.as_deref(), Some("origin/main"));
+        assert_eq!(
+            serde_json::to_value(&based).unwrap()["base_ref"],
+            "origin/main"
+        );
     }
 
     /// 0.8.5 dogfooding regression test — JIRA helper case.

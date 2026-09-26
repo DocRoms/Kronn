@@ -329,6 +329,15 @@ These features are tagged `0.7.0 Phase X` in the source but ship as part of rele
 
 **5. Loops + run state.** `ConditionAction::Goto { step_name, max_iterations }` enables backward jumps from `on_result` rules. `WorkflowRun.state: HashMap<String,String>` (migration `042_workflow_run_state.sql`) is the durable scratchpad: agents write `---STATE:k=v---` lines, runner persists on the run row. Templates: `{{iter.<step_name>}}` (per-step revisit counter from the loop guard) and `{{state.<key>}}`. The `loop_detection_max_revisits` guard fires `StoppedByGuard` when the per-step iter exceeds the limit. Template plumbing in `backend/src/workflows/template.rs`.
 
+A launcher may seed that state at creation: `POST /api/workflows/{id}/trigger`
+accepts `state` beside `variables` (at most 16 entries, keys of letters, digits,
+`_`, `-`, `.`, one-line values of at most 256 characters). It is shown in every
+run list and never encrypted, so it holds plain labels such as the ticket a run
+is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
+returns the newest run carrying that entry, whether it was seeded or written by
+a step, without reading any step output.
+`[src: file: backend/src/api/workflows.rs]`
+
 **6. Rollback / `on_failure`.** `Workflow.on_failure: Vec<WorkflowStep>` — a separate step list that fires **only** when the run terminates with `RunStatus::Failed`. Skipped on `Cancelled`, `StoppedByGuard`, and Gate `reject`. Templates `{{failed_step.name}}` and `{{failed_step.output}}` are exposed inside on_failure prompts. Migration `041_workflow_on_failure.sql`. The wizard rejects `Gate` inside the rollback list (Notify + Agent + ApiCall accepted).
 
 **7. Per-item Export / Import (Workflow + Quick Prompt).** Self-contained envelope JSON with `kind` (`"kronn-workflow"` or `"kronn-quick-prompt"`), `version`, `exported_at`. Endpoints:

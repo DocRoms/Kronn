@@ -1844,7 +1844,7 @@ fn mcp_config_hash_changes_on_args_override() {
 // Workflows CRUD
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn sample_workflow(id: &str) -> Workflow {
+pub(crate) fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
         pinned: false,
@@ -1893,6 +1893,7 @@ fn sample_workflow(id: &str) -> Workflow {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -1913,6 +1914,8 @@ fn sample_workflow(id: &str) -> Workflow {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -1923,6 +1926,7 @@ fn sample_workflow(id: &str) -> Workflow {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: ::std::collections::HashMap::new(),
         on_failure: vec![],
@@ -2010,7 +2014,7 @@ fn workflows_pinned_roundtrip() {
 
 // ─── Workflow Runs ───────────────────────────────────────────────────────
 
-fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
+pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
     let now = Utc::now();
     WorkflowRun {
         id: id.into(),
@@ -2031,6 +2035,8 @@ fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -2211,6 +2217,82 @@ fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
 }
 
 #[test]
+fn boot_reconcile_settles_the_shared_run_of_an_interrupted_workflow() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut zombie = sample_run("zombie", "w1");
+    zombie.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &zombie).unwrap();
+    let shared = |id: &str| {
+        crate::db::shared_runs::lifecycle(&conn, id)
+            .unwrap()
+            .unwrap()
+    };
+    assert!(matches!(
+        shared("zombie").status,
+        crate::models::SharedRunStatus::Running
+    ));
+
+    crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
+
+    assert!(
+        matches!(
+            shared("zombie").status,
+            crate::models::SharedRunStatus::Failed
+        ),
+        "a Live Page launch reading this run must see it end"
+    );
+}
+
+#[test]
+fn boot_repair_resyncs_shared_runs_left_live_for_finished_runs() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut left_live = sample_run("left-live", "w1");
+    left_live.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &left_live).unwrap();
+    let mut still_running = sample_run("still-running", "w1");
+    still_running.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &still_running).unwrap();
+    // The state older builds left behind: the run was interrupted without
+    // re-projecting its shared row.
+    conn.execute(
+        "UPDATE workflow_runs SET status = 'Interrupted' WHERE id = 'left-live'",
+        [],
+    )
+    .unwrap();
+    let shared = |id: &str| {
+        crate::db::shared_runs::lifecycle(&conn, id)
+            .unwrap()
+            .unwrap()
+    };
+    assert!(matches!(
+        shared("left-live").status,
+        crate::models::SharedRunStatus::Running
+    ));
+
+    assert_eq!(
+        crate::db::shared_runs::repair_stale_workflow_projections(&conn).unwrap(),
+        1
+    );
+    assert!(matches!(
+        shared("left-live").status,
+        crate::models::SharedRunStatus::Failed
+    ));
+    assert!(
+        matches!(
+            shared("still-running").status,
+            crate::models::SharedRunStatus::Running
+        ),
+        "a run still in flight keeps its live projection"
+    );
+    assert_eq!(
+        crate::db::shared_runs::repair_stale_workflow_projections(&conn).unwrap(),
+        0
+    );
+}
+
+#[test]
 fn active_child_dispatch_count_is_a_durable_workspace_refcount() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
@@ -2355,6 +2437,139 @@ fn terminal_workspace_cleanup_candidates_exclude_interrupted_and_owned_paths() {
             .as_deref(),
         Some("/repo/.kronn/worktrees/owned"),
         "an active child retains durable ownership of the checkout"
+    );
+}
+
+#[test]
+fn a_finished_child_never_purges_the_worktree_its_resumable_parent_shares() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-shared");
+    workflow.project_id = Some("p-shared".into());
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-shared', 'Shared', '/repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let shared = "/repo/.kronn/worktrees/parent";
+    for (parent_status, parent_id) in [
+        (RunStatus::Interrupted, "parent-interrupted"),
+        (RunStatus::WaitingApproval, "parent-paused"),
+    ] {
+        let mut parent = sample_run(parent_id, "w-shared");
+        parent.status = parent_status;
+        parent.workspace_path = Some(format!("{shared}-{parent_id}"));
+        crate::db::workflows::insert_run(&conn, &parent).unwrap();
+        let mut child = sample_run(&format!("{parent_id}-child"), "w-shared");
+        child.status = RunStatus::Success;
+        child.parent_run_id = Some(parent_id.into());
+        child.run_type = "subworkflow".into();
+        child.workspace_path = parent.workspace_path.clone();
+        crate::db::workflows::insert_run(&conn, &child).unwrap();
+    }
+    let mut finished = sample_run("parent-done", "w-shared");
+    finished.status = RunStatus::Failed;
+    finished.workspace_path = Some(format!("{shared}-done"));
+    crate::db::workflows::insert_run(&conn, &finished).unwrap();
+    let mut finished_child = sample_run("parent-done-child", "w-shared");
+    finished_child.status = RunStatus::Success;
+    finished_child.parent_run_id = Some("parent-done".into());
+    finished_child.workspace_path = finished.workspace_path.clone();
+    crate::db::workflows::insert_run(&conn, &finished_child).unwrap();
+
+    let mut candidates: Vec<String> =
+        crate::db::workflows::terminal_workspace_cleanup_candidates(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.run_id)
+            .collect();
+    candidates.sort();
+    assert_eq!(
+        candidates,
+        ["parent-done", "parent-done-child"],
+        "only a worktree every sharer has finished with is purged"
+    );
+}
+
+#[test]
+fn stale_interrupted_candidates_follow_the_cutoff_and_name_the_owner() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-stale");
+    workflow.project_id = Some("p-stale".into());
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-stale', 'Stale', '/repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let now = Utc::now();
+    let interrupted = |id: &str, days: i64, path: &str| {
+        let mut run = sample_run(id, "w-stale");
+        run.status = RunStatus::Interrupted;
+        run.finished_at = Some(now - chrono::Duration::days(days));
+        run.workspace_path = Some(path.into());
+        run
+    };
+    let old = interrupted("old-owner", 10, "/repo/.kronn/worktrees/old");
+    crate::db::workflows::insert_run(&conn, &old).unwrap();
+    let mut old_child = interrupted("old-child", 10, "/repo/.kronn/worktrees/old");
+    old_child.parent_run_id = Some("old-owner".into());
+    crate::db::workflows::insert_run(&conn, &old_child).unwrap();
+    crate::db::workflows::insert_run(
+        &conn,
+        &interrupted("recent", 2, "/repo/.kronn/worktrees/recent"),
+    )
+    .unwrap();
+    let mut unknown_age = interrupted("unknown-age", 10, "/repo/.kronn/worktrees/unknown");
+    unknown_age.finished_at = None;
+    crate::db::workflows::insert_run(&conn, &unknown_age).unwrap();
+
+    let candidates = crate::db::workflows::stale_interrupted_workspace_candidates(
+        &conn,
+        now - chrono::Duration::days(7),
+    )
+    .unwrap();
+    assert_eq!(
+        candidates,
+        vec![crate::db::workflows::InterruptedWorkspaceCandidate {
+            run_id: "old-owner".into(),
+            workflow_name: "Test Workflow".into(),
+            project_path: "/repo".into(),
+            workspace_path: "/repo/.kronn/worktrees/old".into(),
+        }],
+        "one candidate per path, attributed to the top-level run"
+    );
+
+    let branch = crate::models::ProducedBranch {
+        branch_name: "kronn/Test-Workflow/old-owne".into(),
+        head_sha: "abc123".into(),
+        ahead: 2,
+        pushed_upstream: false,
+    };
+    for _ in 0..2 {
+        assert!(crate::db::workflows::record_reclaimed_interrupted_branch(
+            &conn,
+            "old-owner",
+            "/repo/.kronn/worktrees/old",
+            &branch,
+        )
+        .unwrap());
+    }
+    let stored = crate::db::workflows::get_run(&conn, "old-owner")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.produced_branches.len(), 1, "recorded once");
+    assert!(
+        !crate::db::workflows::record_reclaimed_interrupted_branch(
+            &conn,
+            "recent",
+            "/repo/.kronn/worktrees/elsewhere",
+            &branch,
+        )
+        .unwrap(),
+        "a run that no longer owns that path is left alone"
     );
 }
 
@@ -2648,6 +2863,56 @@ fn list_runs_enriches_subworkflow_parent_provenance() {
     assert_eq!(one.parent_workflow_name.as_deref(), Some("Cron Parent"));
 }
 
+/// KT-795 — the live activity is written beside the runner's own snapshots,
+/// so it may land only on the result still in flight.
+#[test]
+fn in_flight_step_activity_lands_only_on_the_running_step_it_names() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let step = |name: &str, status: RunStatus| {
+        let mut result: StepResult = serde_json::from_value(serde_json::json!({
+            "step_name": name, "status": "Success", "output": "", "duration_ms": 0
+        }))
+        .unwrap();
+        result.status = status;
+        result
+    };
+    let mut run = sample_run("r1", "w1");
+    run.step_results = vec![
+        step("plan", RunStatus::Success),
+        step("build", RunStatus::Running),
+    ];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    let activity = AgentActivity {
+        tool: "Edit".into(),
+        target: Some("src/é.rs".into()),
+        at: Utc::now(),
+    };
+    let set = |index: usize, name: &str| {
+        crate::db::workflows::set_in_flight_step_activity(&conn, "r1", index, name, &activity)
+            .unwrap()
+    };
+
+    assert!(!set(0, "plan"), "a finished step never gains an activity");
+    assert!(!set(1, "plan"), "the index must still hold the named step");
+    assert!(set(1, "build"));
+    let stored = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(stored.step_results[0].last_activity, None);
+    assert_eq!(
+        stored.step_results[1].last_activity.as_ref(),
+        Some(&activity)
+    );
+
+    // The runner's terminal snapshot replaces the in-flight row; a late write
+    // then matches nothing and cannot put the activity back.
+    run.step_results[1].status = RunStatus::Success;
+    let snapshot = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+    assert!(crate::db::workflows::update_run_progress(&conn, snapshot).unwrap());
+    assert!(!set(1, "build"));
+    let finished = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(finished.step_results[1].last_activity, None);
+}
+
 #[test]
 fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
     let conn = test_db();
@@ -2659,7 +2924,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_name: "build".into(),
             status: RunStatus::Success,
             output: "x".repeat(200_000),
-            tokens_used: 42,
+            tokens_used: Some(42),
             duration_ms: 1234,
             started_at: None,
             condition_result: None,
@@ -2671,13 +2936,17 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         StepResult {
             step_name: "deploy".into(),
             status: RunStatus::Failed,
             output: "y".repeat(200_000),
-            tokens_used: 7,
+            tokens_used: None,
             duration_ms: 99,
             started_at: None,
             condition_result: None,
@@ -2689,7 +2958,11 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
     ];
     crate::db::workflows::insert_run(&conn, &run).unwrap();
@@ -2709,7 +2982,11 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
     assert_eq!(listed.step_results[0].step_name, "build");
     assert_eq!(listed.step_results[1].status, RunStatus::Failed);
     assert_eq!(listed.step_results[0].duration_ms, 1234);
-    assert_eq!(listed.step_results[0].tokens_used, 42);
+    assert_eq!(listed.step_results[0].tokens_used, Some(42));
+    assert_eq!(
+        listed.step_results[1].tokens_used, None,
+        "unknown usage must survive persistence as unknown, not zero"
+    );
     assert_eq!(listed.step_results[0].step_kind.as_deref(), Some("Agent"));
 
     // ...but not their outputs, which are the entire weight of the column.
@@ -2735,6 +3012,36 @@ fn listings_tolerate_a_run_with_no_steps() {
     let listed = crate::db::workflows::list_runs(&conn, "w1").unwrap();
     assert_eq!(listed.len(), 1);
     assert!(listed[0].step_results.is_empty());
+}
+
+#[test]
+fn runs_are_found_by_a_state_entry_newest_first() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let now = Utc::now();
+    for (id, ticket, minutes_ago) in [
+        ("old", "EW-1", 30),
+        ("other", "EW-2", 20),
+        ("new", "EW-1", 10),
+    ] {
+        let mut run = sample_run(id, "w1");
+        run.started_at = now - chrono::Duration::minutes(minutes_ago);
+        run.state.insert("ticketKey".into(), ticket.into());
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    crate::db::workflows::insert_run(&conn, &sample_run("unlabelled", "w1")).unwrap();
+    let ids = |value: Option<&str>, limit: u32| {
+        crate::db::workflows::list_runs_by_state(&conn, "w1", "ticketKey", value, limit, 0)
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(ids(Some("EW-1"), 1), ["new"]);
+    assert_eq!(ids(Some("EW-1"), 10), ["new", "old"]);
+    assert_eq!(ids(None, 10), ["new", "other", "old"]);
+    assert!(ids(Some("EW-404"), 10).is_empty());
 }
 
 #[test]
@@ -2789,7 +3096,7 @@ fn workflow_runs_update() {
         step_name: "step1".into(),
         status: RunStatus::Success,
         output: "Done".into(),
-        tokens_used: 500,
+        tokens_used: Some(500),
         duration_ms: 1234,
         started_at: None,
         condition_result: None,
@@ -2801,7 +3108,11 @@ fn workflow_runs_update() {
         step_api_endpoint_path: None,
         is_rollback: false,
         child_run_id: None,
+        agent_provenance: None,
         native_tool_calls: Box::default(),
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 
@@ -3095,6 +3406,8 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -3374,6 +3687,86 @@ fn workflow_get_last_runs_all_empty() {
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
     let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
     assert!(last_runs.is_empty());
+}
+
+#[test]
+fn workflow_latest_run_aggregation_does_not_read_run_payload_pages() {
+    let conn = test_db();
+    let mut statement = conn
+        .prepare("EXPLAIN QUERY PLAN SELECT workflow_id, MAX(started_at) FROM workflow_runs GROUP BY workflow_id")
+        .unwrap();
+    let plan: Vec<String> = statement
+        .query_map([], |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|detail| detail.contains("USING COVERING INDEX")),
+        "latest-run aggregation must stay on index pages rather than visiting every payload row: {plan:?}"
+    );
+    assert!(!plan.iter().any(|detail| detail.contains("TEMP B-TREE")));
+}
+
+#[test]
+fn workflow_latest_run_index_upgrade_preserves_existing_runs_and_ties() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrations::run_through(&conn, "189_artifact_message_origin").unwrap();
+    let start = Utc.with_ymd_and_hms(2026, 9, 24, 8, 0, 0).unwrap();
+    // Rows written with the 189 schema: today's insert helpers name later columns.
+    for id in ["latest-wf", "without-runs", "qp:latest-batch"] {
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES (?1, ?1, '\"Manual\"', '[]', ?2, ?2)",
+            rusqlite::params![id, start.to_rfc3339()],
+        )
+        .unwrap();
+    }
+    for (id, workflow_id, minute) in [
+        ("earlier", "latest-wf", 0),
+        ("latest-a", "latest-wf", 1),
+        ("latest-b", "latest-wf", 1),
+        ("batch", "qp:latest-batch", 0),
+    ] {
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used, started_at, run_type)
+             VALUES (?1, ?2, 'Success', ?3, 123, ?4, 'linear')",
+            rusqlite::params![
+                id,
+                workflow_id,
+                format!(r#"[{{"step_name":"{id}","status":"Success","output":"kept","tokens_used":1,"duration_ms":1}}]"#),
+                (start + chrono::Duration::minutes(minute)).to_rfc3339(),
+            ],
+        )
+        .unwrap();
+    }
+    let saved = |conn: &Connection| -> Vec<(String, String)> {
+        conn.prepare("SELECT id, step_results_json FROM workflow_runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let before = saved(&conn);
+    migrations::run(&conn).unwrap();
+    migrations::run(&conn).unwrap();
+    assert_eq!(saved(&conn), before);
+    let indexed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'idx_workflow_runs_workflow_started')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed, "the upgrade must create the latest-run index");
+    let latest = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    assert_eq!(latest.len(), 2);
+    assert!(!latest.contains_key("without-runs"));
+    assert_eq!(latest["qp:latest-batch"].id, "batch");
+    let retained = &latest["latest-wf"];
+    assert!(matches!(retained.id.as_str(), "latest-a" | "latest-b"));
+    assert_eq!(retained.started_at, start + chrono::Duration::minutes(1));
+    assert_eq!(retained.tokens_used, 123);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4812,6 +5205,7 @@ fn workflow_multi_step_roundtrip() {
                 api_timeout_ms: None,
                 api_max_retries: None,
                 api_output_var: None,
+                api_response: None,
                 gate_message: None,
                 gate_request_changes_target: None,
                 gate_notify_url: None,
@@ -4832,6 +5226,8 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
                 id: None,
@@ -4877,6 +5273,7 @@ fn workflow_multi_step_roundtrip() {
                 api_timeout_ms: None,
                 api_max_retries: None,
                 api_output_var: None,
+                api_response: None,
                 gate_message: None,
                 gate_request_changes_target: None,
                 gate_notify_url: None,
@@ -4897,6 +5294,8 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
                 id: None,
@@ -4939,6 +5338,7 @@ fn workflow_multi_step_roundtrip() {
                 api_timeout_ms: None,
                 api_max_retries: None,
                 api_output_var: None,
+                api_response: None,
                 gate_message: None,
                 gate_request_changes_target: None,
                 gate_notify_url: None,
@@ -4959,6 +5359,8 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
         ],
         actions: vec![],
@@ -4970,6 +5372,7 @@ fn workflow_multi_step_roundtrip() {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: ::std::collections::HashMap::new(),
         on_failure: vec![],
@@ -5055,6 +5458,7 @@ fn workflow_update_steps_count() {
         api_timeout_ms: None,
         api_max_retries: None,
         api_output_var: None,
+        api_response: None,
         gate_message: None,
         gate_request_changes_target: None,
         gate_notify_url: None,
@@ -5075,6 +5479,8 @@ fn workflow_update_steps_count() {
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 

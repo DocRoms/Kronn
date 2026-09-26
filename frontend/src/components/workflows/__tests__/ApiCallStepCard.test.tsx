@@ -1039,6 +1039,63 @@ describe('ApiCallStepCard', () => {
     expect(onChange).toHaveBeenCalledWith({ api_method: 'POST' });
   });
 
+  it('binary response picker writes api_response and keeps the declared contract', () => {
+    const plugins = [{ server: chartbeatServer, config: mkConfig('cfg-1', 'chartbeat') }];
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <ApiCallStepCard
+        step={mkStep({ api_plugin_slug: 'chartbeat' })}
+        onChange={onChange}
+        availableApiPlugins={plugins}
+        projectId="proj-1"
+        allowBinaryResponse
+        t={t}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /wf\.apicall\.advancedToggle/ }));
+    fireEvent.click(screen.getByTestId('wf-apicall-response-picker'));
+    fireEvent.click(screen.getByTestId('wf-apicall-response-picker-option-binary'));
+    expect(onChange).toHaveBeenCalledWith({ api_response: { type: 'Binary' } });
+
+    rerender(
+      <ApiCallStepCard
+        step={mkStep({ api_plugin_slug: 'chartbeat', api_response: { type: 'Binary' } })}
+        onChange={onChange}
+        availableApiPlugins={plugins}
+        projectId="proj-1"
+        allowBinaryResponse
+        t={t}
+      />,
+    );
+    expect(screen.getByText('wf.apicall.responseBinaryHint')).toBeInTheDocument();
+    const accept = screen.getByPlaceholderText('image/*');
+    fireEvent.change(accept, { target: { value: 'image/png, image/jpeg,' } });
+    expect(accept).toHaveValue('image/png, image/jpeg,');
+    fireEvent.blur(accept);
+    expect(onChange).toHaveBeenLastCalledWith({
+      api_response: { type: 'Binary', accept: ['image/png', 'image/jpeg'], max_bytes: null },
+    });
+    fireEvent.change(screen.getByPlaceholderText('262144'), { target: { value: '65536' } });
+    expect(onChange).toHaveBeenLastCalledWith({
+      api_response: { type: 'Binary', accept: [], max_bytes: 65536 },
+    });
+  });
+
+  it('keeps the binary response option out of Quick API forms, which cannot store it', () => {
+    const plugins = [{ server: chartbeatServer, config: mkConfig('cfg-1', 'chartbeat') }];
+    render(
+      <ApiCallStepCard
+        step={mkStep({ api_plugin_slug: 'chartbeat', api_timeout_ms: 5000 })}
+        onChange={() => {}}
+        availableApiPlugins={plugins}
+        projectId="proj-1"
+        t={t}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /wf\.apicall\.advancedToggle/ })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.queryByTestId('wf-apicall-response-format')).not.toBeInTheDocument();
+  });
+
   it('headers editor adds a row propagating api_headers', () => {
     const plugins = [{ server: chartbeatServer, config: mkConfig('cfg-1', 'chartbeat') }];
     const onChange = vi.fn();

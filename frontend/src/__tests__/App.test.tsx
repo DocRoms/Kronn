@@ -32,6 +32,12 @@ vi.mock('../pages/StandaloneLivePageMosaic', () => ({
   ),
 }));
 
+vi.mock('../pages/StandaloneDiscussionMosaic', () => ({
+  StandaloneDiscussionMosaic: ({ discussionIds, layout }: { discussionIds: string[]; layout: string }) => (
+    <div data-testid="standalone-discussion-mosaic">{layout}:{discussionIds.join(',')}</div>
+  ),
+}));
+
 // Mock the API
 vi.mock('../lib/api', () => ({
   setup: {
@@ -163,6 +169,14 @@ describe('App', () => {
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('standalone-page-mosaic'))
       .toHaveTextContent('two-columns:page-1,page-2'));
+    expect(screen.queryByTestId('dashboard')).toBeNull();
+  });
+
+  it('opens a direct discussion mosaic without mounting the dashboard', async () => {
+    window.location.hash = '#discussions/mosaic?discussion=a&discussion=b&layout=two-rows';
+    vi.mocked(setupApi.getStatus).mockResolvedValue({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, scan_paths_explored: [], repos_detected: [], default_scan_path: '/home' });
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('standalone-discussion-mosaic')).toHaveTextContent('two-rows:a,b'));
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 

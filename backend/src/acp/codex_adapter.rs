@@ -32,7 +32,7 @@
 //! fixed environment variable names, never credential values in argv/prompt.
 //! Task workers instead reuse the direct worker's narrower launch policy.
 
-use super::adapter_process::AdapterProcess;
+use super::adapter_process::{AdapterProcess, StderrTail};
 use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -136,6 +136,13 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
                 file.mcp_servers
                     .into_iter()
                     .filter_map(|(id, entry)| {
+                        // Kronn supplies this reserved entry below, including
+                        // its trusted launch command and env-name allowlist.
+                        // A synced project copy would duplicate the TOML key
+                        // and make Codex reject the entire bootstrap config.
+                        if id == "kronn-internal" {
+                            return None;
+                        }
                         let command = entry.command.clone()?;
                         (!command.trim().is_empty()
                             && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
@@ -407,6 +414,8 @@ impl AcpTransport for CodexAcpAdapter {
             SpawnIo::Adapter,
             self.discussion_id.as_deref(),
             self.launch.worker_context.as_ref(),
+            self.launch.room_agent_context.as_ref(),
+            self.launch.workflow_step_context.as_ref(),
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child
@@ -417,15 +426,20 @@ impl AcpTransport for CodexAcpAdapter {
             .stdout
             .take()
             .ok_or_else(|| AcpError::Transport("codex stdout unavailable".into()))?;
+        let stderr = StderrTail::capture(child.stderr.take());
         self.process.install(child, &cancel).await?;
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|error| AcpError::Transport(format!("write codex prompt: {error}")))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|error| AcpError::Transport(format!("close codex prompt stdin: {error}")))?;
+        if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+            return Err(self
+                .process
+                .prompt_write_failure("codex", "write codex prompt", error, &cancel, stderr)
+                .await);
+        }
+        if let Err(error) = stdin.shutdown().await {
+            return Err(self
+                .process
+                .prompt_write_failure("codex", "close codex prompt stdin", error, &cancel, stderr)
+                .await);
+        }
         drop(stdin);
 
         let mut lines = BufReader::new(stdout).lines();
@@ -452,6 +466,7 @@ impl AcpTransport for CodexAcpAdapter {
                             .send(AcpSessionEvent::Usage {
                                 input_tokens,
                                 output_tokens,
+                                prompt_cache: Default::default(),
                             })
                             .await;
                     }
@@ -460,7 +475,9 @@ impl AcpTransport for CodexAcpAdapter {
                 },
                 Ok(None) => break,
                 Err(error) => {
-                    return Err(AcpError::Transport(format!("read codex stdout: {error}")));
+                    return Err(stderr
+                        .into_error("codex", format!("read codex stdout: {error}"))
+                        .await);
                 }
             }
         }
@@ -471,10 +488,11 @@ impl AcpTransport for CodexAcpAdapter {
             return Err(AcpError::Transport(message));
         }
         if !status.success() {
-            return Err(AcpError::Transport(format!(
-                "codex exited with status {status}"
-            )));
+            return Err(stderr
+                .into_error("codex", format!("codex exited with status {status}"))
+                .await);
         }
+        stderr.discard("codex").await;
         let _ = events.send(AcpSessionEvent::Completed).await;
         Ok(())
     }
@@ -717,6 +735,77 @@ mod tests {
         assert!(matches!(error, AcpError::Transport(_)));
     }
 
+    async fn prompt_fixture(body: &str, prompt: &str) -> Result<Vec<AcpSessionEvent>, AcpError> {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), body);
+        let adapter =
+            CodexAcpAdapter::new_with_program(fixture.to_string_lossy(), None, false, None);
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            host.prompt(&target, prompt, tx),
+        )
+        .await
+        .expect("an adapter turn must never hang on its child's pipes");
+        let events = drain(rx).await;
+        result.map(|()| events)
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_prompt_write_to_a_dead_process_reports_its_exit_and_stderr() {
+        // More than a pipe buffer: the write cannot complete once the child is gone.
+        let prompt = "x".repeat(1 << 20);
+        let error = prompt_fixture(
+            "printf '%s\\n' 'Error: not logged in, run codex login' >&2\nexit 1",
+            &prompt,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("codex exited with status exit status: 1"),
+            "{error}"
+        );
+        assert!(error.contains("before reading its prompt"), "{error}");
+        assert!(error.contains("not logged in, run codex login"), "{error}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_failed_exit_surfaces_the_stderr_tail() {
+        let error = prompt_fixture(
+            "cat >/dev/null\nprintf '%s\\n' 'early noise' >&2\nprintf '%s\\n' 'fatal: model not available' >&2\nexit 3",
+            "hi",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("codex exited with status"), "{error}");
+        assert!(error.contains("fatal: model not available"), "{error}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn stderr_is_drained_and_never_reaches_the_event_stream() {
+        // Far past a pipe buffer before stdin is read: an undrained pipe would stall here.
+        let events = prompt_fixture(
+            "head -c 1048576 /dev/zero | tr '\\0' 'e' >&2\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"done\"}}'",
+            "hi",
+        )
+        .await
+        .unwrap();
+        assert!(events.contains(&AcpSessionEvent::TextDelta("done".into())));
+        assert!(events
+            .iter()
+            .all(|event| !format!("{event:?}").contains("eee")));
+    }
+
     #[tokio::test]
     async fn cancel_kills_the_live_subprocess_and_the_turn_reports_cancelled() {
         let dir = tempfile::tempdir().unwrap();
@@ -799,6 +888,62 @@ exec sleep 30"#,
         );
         for var in crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS {
             assert!(argv.contains(var), "{var} must be listed by name: {argv}");
+        }
+    }
+
+    #[test]
+    fn project_internal_bridge_is_replaced_once_in_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch = crate::agents::runner::disc_introspection_mcp_command().unwrap();
+        for project_bridge in [
+            serde_json::json!({"command": launch.command, "args": launch.args}),
+            serde_json::json!({"command": "project-provided-bridge", "args": ["project-argument"]}),
+        ] {
+            std::fs::write(
+                dir.path().join(".mcp.json"),
+                serde_json::to_vec(&serde_json::json!({"mcpServers": {
+                    "kronn-internal": project_bridge,
+                    "project-safe": {"command": "safe-server", "args": ["serve"]},
+                }}))
+                .unwrap(),
+            )
+            .unwrap();
+            let broker = AcpPermissionBroker::scoped(
+                false,
+                AcpSessionScope::new(
+                    Some(dir.path().to_path_buf()),
+                    "project-with-internal-bridge",
+                ),
+            );
+            let config = codex_project_mcp_override(dir.path(), &broker).unwrap();
+            let parsed: toml::Value = toml::from_str(&config)
+                .expect("the project internal bridge must not duplicate the reserved TOML key");
+            let servers = parsed["mcp_servers"].as_table().unwrap();
+            assert_eq!(servers.len(), 2);
+            assert_eq!(
+                servers["project-safe"]["command"].as_str(),
+                Some("safe-server")
+            );
+            let internal = &servers["kronn-internal"];
+            assert_eq!(internal["command"].as_str(), Some(launch.command.as_str()));
+            let args: Vec<_> = internal["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(args, launch.args);
+            let env_names: Vec<_> = internal["env_vars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(
+                env_names,
+                crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS
+            );
+            assert!(internal.get("env").is_none());
         }
     }
 

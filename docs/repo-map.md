@@ -39,6 +39,8 @@ Kronn/
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs + cancel_run (cascades via parent_run_id) + test_step + test_batch_step (dry-run preview: eligible_items + sample_rendered_prompts + warnings)
 │       │   ├── quick_prompts.rs # Quick Prompts CRUD + render + launch (0.3.4)
 │       │   ├── agent_workflow_tools.rs # Native workflow reads and disabled-draft authoring; shared HTTP validation
+│       │   ├── agent_workspace_structure.rs # Refuses a worker edit that breaks the file's delimiters or indentation (KT-792)
+│       │   ├── artifact_portability.rs # Versioned JSON export/import of workflows, Quick APIs/Execs and Artifacts; credentials replaced by references
 │       │   ├── agent_workflow_tests.rs # Native scope, draft, partial-update and canonical-schema regressions
 │       │   ├── workflow_step_schema.json # Canonical step contracts served to MCP and native HTTP agents
 │       │   ├── ollama.rs      # Ollama local LLM (0.4.0) — health check (contextual hints per env) + model listing via HTTP API. ollama_base_url_pub() reused by runner
@@ -56,10 +58,11 @@ Kronn/
 │       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Cross-platform HOME resolution (KRONN_HOST_HOME → HOME → USERPROFILE). COPILOT_HOME for Copilot CLI auth. MCP contexts injected into prompts
 │       ├── db/                 # SQLite persistence layer
 │       │   ├── mod.rs          # Database struct (Mutex<Connection>), with_conn() async accessor, init
-│       │   ├── migrations.rs   # Versioned migration runner (through 187; schema-aware OpenRouter repair runs before Mutex wrap)
+│       │   ├── migrations.rs   # Versioned migration runner (through 195; schema-aware OpenRouter repair runs before Mutex wrap)
 │       │   ├── projects.rs     # Project CRUD operations
 │       │   ├── discussions.rs  # Discussion + message CRUD (+ archive/rename via update_discussion)
 │       │   ├── discussion_launch_settings.rs # Immutable Quick Prompt generation settings bound to the original runtime target
+│       │   ├── workflow_step_rooms.rs # Room memberships joined by a workflow Agent step through its capability; revoked with the step and at boot (KT-793)
 │       │   ├── discussion_workspaces.rs # Managed/external worktrees declared by joined CLI sessions
 │       │   ├── discussions_test.rs # 21 tests (CRUD, archive, title, messages, AgentType round-trip for all 6 agents + Custom, DB string stability)
 │       │   ├── model_catalog.rs # runtime_target_id persistence, reconciliation and tier projection
@@ -148,6 +151,11 @@ Kronn/
 │           ├── transform_data_step.rs # StepType::TransformData: deterministic JSONPath mapping, aggregation and scalar coercion
 │           ├── template.rs     # Purpose-built {{variable}} renderer: permissive preview, strict runtime, no Liquid filters
 │           ├── workspace.rs    # Git worktree create/cleanup with lifecycle hooks
+│           ├── interrupted_worktrees.rs # Boot reclamation of the clean worktree of an Interrupted run past server.interrupted_worktree_ttl_days (KT-798)
+│           ├── concurrency.rs  # Per-key concurrency limit: concurrency_key rendered from user inputs, checked at run insertion (KT-796)
+│           ├── trigger_workflow_step.rs # StepType::TriggerWorkflow: launches another workflow as an independent run, lineage both ways (KT-796)
+│           ├── step_room.rs    # Workflow Agent step room capability: minted per step, held in memory, exchanged by the bridge for a membership (KT-793)
+│           ├── api_call_binary.rs # ApiCall api_response Binary: bounded file responses as {content_type,size,base64,data_uri} (KT-816)
 │           └── tracker/
 │               ├── mod.rs      # TrackerSource trait (poll, update_status, comment, create_pr)
 │               └── github.rs   # GitHub API v3 implementation (reqwest + rustls)
@@ -181,6 +189,9 @@ Kronn/
 │       │   ├── MarkdownComposerTools.tsx # Shared edit/preview tabs, Markdown help, insertable examples and emoji guidance
 │       │   ├── workflows/WorkflowWizard.tsx # Full workflow editor (~4170L): progressive modes, direct stage/step navigation, reusable prompt editor, save/cancel from each stage
 │       │   ├── workflows/LoadedRunDetail.tsx # Load omitted step outputs when a run panel opens; stale-response guard and explicit read retry
+│       │   ├── workflows/ChildWorkflowVariablesEditor.tsx # Maps a SubWorkflow/TriggerWorkflow target's launch variables to parent templates
+│       │   ├── DiscussionMosaicComposer.tsx # Picks 2–12 discussions to open side by side in a mosaic tab
+│       │   ├── ArtifactImportDialog.tsx # Artifact bundle import preview: each Quick Exec command and every credential reference to rebind
 │       │   ├── PluginPortabilityModal.tsx # Safe bundle export/import, encrypted-value danger zone, explicit post-import Global/project assignment
 │       │   ├── DocPreview.tsx    # HTML doc preview + export (0.5.1) — sandboxed iframe (empty `sandbox=""`) renders the agent-authored HTML, two buttons export PDF / DOCX via /api/docs/{pdf,docx}. Per-format state (idle/loading/ready/error).
 │       │   ├── DocDataExport.tsx # Structured-data export (0.5.1) — JSON payload card for CSV / XLSX / PPTX (no iframe). Header shows format + summary (row/sheet/slide count), single "Export" button per card.

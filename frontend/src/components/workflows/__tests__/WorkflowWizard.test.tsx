@@ -20,7 +20,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
-import type { Project, Workflow, WorkflowStep } from '../../../types/generated';
+import type { Project, Workflow, WorkflowStep, WorkflowSummary } from '../../../types/generated';
 
 const { createMock, updateMock, qpListMock, skillListMock, profileListMock, directiveListMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
@@ -63,6 +63,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 import { WorkflowWizard } from '../WorkflowWizard';
 import { jsonPathToTarget } from '../../../lib/workflowUiUtils';
 import { buildBlankStep } from '../../../lib/workflowUiUtils';
+import { pages as pagesApi, projects as projectsApi, workflows as workflowsApi } from '../../../lib/api';
 
 // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -116,6 +117,30 @@ const baseProps: ComponentProps<typeof WorkflowWizard> = {
 
 const renderWizard = (over: Partial<ComponentProps<typeof WorkflowWizard>> = {}) =>
   render(<WorkflowWizard {...baseProps} {...over} />);
+
+it('imports the first Artifact from the publisher step and preserves its writes', async () => {
+  const imported = { id: 'imported-artifact', title: 'Imported team', slug: 'imported-team' };
+  // Exercise the real import dialog and the wizard callback together.
+  pagesApi.previewImport = vi.fn().mockResolvedValue({ title: 'Imported team', entries: [], issues: [], warnings: [], digest: 'review', can_import: true });
+  pagesApi.importArtifact = vi.fn().mockResolvedValue({ artifact: imported, entries: [] });
+  vi.mocked(projectsApi.list).mockResolvedValue([mkProject()]);
+  renderWizard({ focusedStepOnly: true, initialStepId: 'publish-step', editWorkflow: mkWorkflow({ steps: [mkStep({
+    id: 'publish-step', name: 'publish', step_type: { type: 'PublishPageData' },
+    page_publish: { page_id: '', writes: [{ dataset: 'summary', operation: 'replace', value_from: 'trigger', observed_at: null, dedupe_key: null, key_field: null }] },
+  })] }) });
+  fireEvent.click(await screen.findByRole('button', { name: 'pages.import.title' }));
+  await waitFor(() => expect(screen.getByLabelText('pages.import.project')).toHaveValue('proj-1'));
+  const file = new File([JSON.stringify({ kind: 'kronn.artifact', version: 1 })], 'team.json', { type: 'application/json' });
+  fireEvent.change(screen.getByLabelText('pages.import.file'), { target: { files: [file] } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'pages.import.preview' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'pages.import.confirm' }));
+  await waitFor(() => expect(screen.getByLabelText('wiz.publishPagePicker')).toHaveValue(imported.id));
+  expect(screen.getByLabelText('value_from')).toHaveValue('trigger');
+  expect(screen.getByLabelText('dataset')).toHaveValue('summary');
+  expect(pagesApi.importArtifact).toHaveBeenCalledWith(expect.objectContaining({ project_id: 'proj-1', preview_digest: 'review' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
 
 beforeEach(() => {
   createMock.mockReset();
@@ -438,6 +463,117 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(isolation).toBeChecked();
   });
 
+  it('keeps a workflow declared as not writing the checkout when it is saved', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      workspace_config: { hooks: {}, require_isolation: false, main_tree_read_only: true },
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    const readOnly = screen.getByLabelText('wiz.mainTreeReadOnly') as HTMLInputElement;
+    expect(readOnly).toBeChecked();
+    fireEvent.click(screen.getByLabelText('wiz.requireIsolationAction'));
+    expect(readOnly).toBeDisabled();
+    fireEvent.click(screen.getByLabelText('wiz.requireIsolationAction'));
+
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].workspace_config).toMatchObject({
+      require_isolation: false,
+      main_tree_read_only: true,
+    });
+  });
+
+  it('saves the starting point of an isolated run, trimmed, and drops it without isolation', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      workspace_config: { hooks: {}, require_isolation: true, base_ref: 'origin/develop' },
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    const baseRef = screen.getByLabelText('wiz.baseRef') as HTMLInputElement;
+    expect(baseRef.value).toBe('origin/develop');
+    fireEvent.change(baseRef, { target: { value: '  origin/main ' } });
+
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].workspace_config).toMatchObject({
+      require_isolation: true,
+      base_ref: 'origin/main',
+    });
+  });
+
+  it('hides the starting point while the run is not isolated and never sends it', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      workspace_config: { hooks: {}, require_isolation: true, base_ref: 'origin/main' },
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    fireEvent.click(screen.getByLabelText('wiz.requireIsolationAction'));
+    expect(screen.queryByLabelText('wiz.baseRef')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('wiz.mainTreeReadOnly'));
+
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    const saved = updateMock.mock.calls[0][1].workspace_config;
+    expect(saved).toMatchObject({ require_isolation: false, main_tree_read_only: true });
+    expect(saved).not.toHaveProperty('base_ref');
+  });
+
+  it('saves a concurrency key with the limit, and clears it when emptied (KT-796)', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      concurrency_limit: 1,
+      concurrency_key: '{{ticketKey}}',
+    }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    const key = screen.getByLabelText('wiz.concurrencyKey') as HTMLInputElement;
+    expect(key.value).toBe('{{ticketKey}}');
+    fireEvent.change(key, { target: { value: '  pr-{{ticketKey}} ' } });
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    expect(screen.getByText('pr-{{ticketKey}}')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1]).toMatchObject({
+      concurrency_limit: 1,
+      concurrency_key: 'pr-{{ticketKey}}',
+    });
+  });
+
+  it('sends a null concurrency key when the field is emptied, so the update clears it', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({
+      steps: [mkStep(), mkStep({ name: 'review' })],
+      concurrency_limit: 1,
+      concurrency_key: '{{ticketKey}}',
+    }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.advanced'));
+    fireEvent.change(screen.getByLabelText('wiz.concurrencyKey'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].concurrency_key).toBeNull();
+  });
+
   it('editing a step name propagates to the step', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const stepName = screen.getByDisplayValue('main') as HTMLInputElement;
@@ -516,6 +652,33 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(updateMock.mock.calls[0][1].steps[0].multi_agent_review).toMatchObject({
       reviewer_agent: 'Codex', reviewer_tier: null, debate_prompt: 'Review the result.', max_rounds: 3,
     });
+  });
+
+  it('saves the room an Agent step joins as principal, and clears it when emptied', async () => {
+    toStepsPage([mkStep({ room_id: 'disc-old' }), mkStep({ name: 'beta' })]);
+    // A saved room marks the step's advanced section as customised.
+    fireEvent.click(screen.getByText('wiz.advanced *'));
+    const room = screen.getByLabelText('wiz.roomId');
+    expect(room).toHaveValue('disc-old');
+    expect(screen.getByText('wiz.roomIdHint')).toBeInTheDocument();
+    fireEvent.change(room, { target: { value: '{{steps.jeton.data.room_id}}' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].room_id).toBe('{{steps.jeton.data.room_id}}');
+    expect(updateMock.mock.calls[0][1].steps[1].room_id).toBeUndefined();
+  });
+
+  it('stores an emptied room as null so the step saves without one', async () => {
+    toStepsPage([mkStep({ room_id: 'disc-old' }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getByText('wiz.advanced *'));
+    fireEvent.change(screen.getByLabelText('wiz.roomId'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].room_id).toBeNull();
   });
 
   it('adding a rollback (on_failure) step renders a Notify rollback row', () => {
@@ -742,7 +905,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(option);
   };
 
-  it('keeps the twelve types collapsed and groups them by purpose when opened', () => {
+  it('keeps the thirteen types collapsed and groups them by purpose when opened', () => {
     toSteps();
     expect(document.querySelector('.wf-step-type-catalog')).toBeNull();
 
@@ -752,7 +915,28 @@ describe('WorkflowWizard — step-type swaps', () => {
     expect(screen.getByText('wiz.stepTypeGroupAi')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupData')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupControl')).toBeInTheDocument();
-    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(12);
+    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(13);
+  });
+
+  it('lets a TriggerWorkflow step target any workflow, this one included, and keeps a SubWorkflow target when swapped (KT-796)', async () => {
+    vi.mocked(workflowsApi.list).mockResolvedValueOnce([
+      { id: 'wf-1', name: 'ExistingWorkflow', step_count: 2 },
+      { id: 'wf-2', name: 'Phase 3', step_count: 1 },
+    ] as unknown as WorkflowSummary[]);
+    toSteps([
+      mkStep({ step_type: { type: 'SubWorkflow' }, prompt_template: '', sub_workflow_id: 'wf-2' }),
+      mkStep({ name: 'beta' }),
+    ]);
+    const values = () => Array.from(
+      (screen.getByLabelText('wiz.subWorkflowPicker') as HTMLSelectElement).options,
+    ).map(option => option.value);
+    await waitFor(() => expect(values()).toContain('wf-2'));
+    expect(values()).not.toContain('wf-1');
+
+    chooseStepType('wiz.stepTypeTriggerWorkflow');
+    expect(screen.getByText('wiz.triggerWorkflowTitle')).toBeInTheDocument();
+    expect((screen.getByLabelText('wiz.subWorkflowPicker') as HTMLSelectElement).value).toBe('wf-2');
+    expect(values()).toContain('wf-1');
   });
 
   it('keeps optional agent context compact and reveals each selector on demand', async () => {

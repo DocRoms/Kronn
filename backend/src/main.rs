@@ -419,8 +419,11 @@ async fn main() -> anyhow::Result<()> {
     // visibly Interrupted, then classified against its durable lineage and the
     // real Git refs. Managed workspaces orphaned by FK SET NULL are collected
     // only when their checkout is provably ours and clean.
+    // Resumes that can replay validations or rebuild a candidate are only
+    // collected here; they start once the listener is bound.
     let orchestration_recovery = kronn::api::orchestration::reconcile_at_boot(&state).await;
     if orchestration_recovery.interrupted > 0
+        || !orchestration_recovery.deferred_resumes.is_empty()
         || orchestration_recovery.orphan_workspaces_removed > 0
         || !orchestration_recovery.errors.is_empty()
     {
@@ -428,6 +431,7 @@ async fn main() -> anyhow::Result<()> {
             interrupted = orchestration_recovery.interrupted,
             classified = orchestration_recovery.classified,
             resumed_or_parked = orchestration_recovery.resumed_or_parked,
+            deferred = orchestration_recovery.deferred_resumes.len(),
             orphans_removed = orchestration_recovery.orphan_workspaces_removed,
             orphans_preserved = orchestration_recovery.orphan_workspaces_preserved,
             errors = ?orchestration_recovery.errors,
@@ -496,6 +500,31 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!("failed to clear purged workflow workspace path: {error}");
             }
         }
+    }
+
+    // KT-798 — an Interrupted run nobody resumed within its lifetime gives its
+    // worktree back; dirty checkouts stay and unintegrated commits keep a branch.
+    let interrupted_ttl_days = state
+        .config
+        .read()
+        .await
+        .server
+        .interrupted_worktree_ttl_days;
+    let reclaimed = kronn::workflows::interrupted_worktrees::reclaim_stale_interrupted_worktrees(
+        &state.db,
+        interrupted_ttl_days,
+        chrono::Utc::now(),
+    )
+    .await;
+    if reclaimed != Default::default() {
+        tracing::info!(
+            reclaimed = reclaimed.reclaimed,
+            preserved_branches = reclaimed.preserved_branches,
+            kept_dirty = reclaimed.kept_dirty,
+            kept_other = reclaimed.kept_other,
+            ttl_days = interrupted_ttl_days,
+            "Interrupted workflow worktree reclamation completed"
+        );
     }
 
     // Partial-response recovery — agents whose `full_response` was being
@@ -806,6 +835,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move { kronn::agents::media_runner::run_loop(media_state).await });
 
     // Build router
+    let deferred_resume_state = state.clone();
     let app = build_router(state);
 
     // Start server
@@ -841,6 +871,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    kronn::api::orchestration::spawn_deferred_boot_resumes(
+        deferred_resume_state,
+        orchestration_recovery.deferred_resumes,
+    );
 
     // Graceful shutdown: wait for SIGTERM/SIGINT, then let in-flight requests finish
     axum::serve(

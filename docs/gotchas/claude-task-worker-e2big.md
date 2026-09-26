@@ -12,8 +12,11 @@ repositories, deduplicates their Git common directories, and conservatively
 measures the worktrees registered by Git before provisioning a punctual Claude
 worker. A catalogue over either bound is refused with the stable
 `claude_sandbox_catalogue_unsafe` reason, counts and byte totals only, plus a
-`task_exec_reassign` recovery instruction. An unreadable Git catalogue also
-fails closed. [src: file: backend/src/agents/runner.rs:7062]
+`task_exec_reassign` recovery instruction. A linked local repository whose
+path does not exist is skipped with a warning: it has no worktree catalogue for
+the sandbox to enumerate. Any other unreadable Git root still fails closed with
+`claude_sandbox_catalogue_unreadable`, naming the project or linked repository
+(never its path). [src: file: backend/src/agents/runner.rs:7062]
 [src: file: backend/src/api/orchestration.rs:5454]
 
 The worker remains fail-closed: sandbox availability is mandatory,

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+use super::provenance::{self, AgentProvenanceCapture};
 use crate::core::cmd::{async_cmd, sync_cmd};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
 
@@ -1298,14 +1299,20 @@ fn worker_repair_call_matches_target(
                     .unwrap_or(false))
 }
 
-fn rust_syntax_refusal(outcome: &crate::agents::tools::ToolOutcome) -> bool {
-    outcome
+/// Which pre-write validator refused an edit, if one did: its name leads the
+/// strict repair prompt.
+fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'static str> {
+    let error = outcome
         .content
         .get("error")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|error| {
-            error.starts_with(crate::api::agent_workspace_tools::RUST_SYNTAX_REFUSAL_PREFIX)
-        })
+        .and_then(serde_json::Value::as_str)?;
+    if error.starts_with(crate::api::agent_workspace_tools::RUST_SYNTAX_REFUSAL_PREFIX) {
+        Some("Rust syntax")
+    } else if error.starts_with(crate::api::agent_workspace_structure::STRUCTURE_REFUSAL_PREFIX) {
+        Some("Structure")
+    } else {
+        None
+    }
 }
 
 fn worker_repair_iteration_limit(
@@ -1489,6 +1496,8 @@ pub enum StreamJsonEvent {
         input_tokens: u64,
         output_tokens: u64,
         cost_usd: Option<f64>,
+        /// Anthropic counts cache reads and writes apart from `input_tokens`.
+        prompt_cache: PromptCacheUsage,
     },
     /// A terminal provider/CLI failure carried by Claude Code's final
     /// `result` event. Claude may write nothing to stderr and still exit 1,
@@ -1590,6 +1599,29 @@ pub struct AgentProcess {
 struct AgentUsage {
     input_tokens: u64,
     output_tokens: u64,
+    prompt_cache: PromptCacheUsage,
+}
+
+/// Prompt-cache tokens a runtime reported beside its input and output.
+/// `None` means not reported, never zero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PromptCacheUsage {
+    pub cached_prompt_tokens: Option<u64>,
+    pub cache_write_prompt_tokens: Option<u64>,
+}
+
+impl PromptCacheUsage {
+    /// Read Anthropic's `cache_read_input_tokens` / `cache_creation_input_tokens`.
+    pub fn from_anthropic_usage(usage: &serde_json::Value) -> Self {
+        Self {
+            cached_prompt_tokens: usage
+                .get("cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            cache_write_prompt_tokens: usage
+                .get("cache_creation_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+        }
+    }
 }
 
 impl AgentProcess {
@@ -1639,6 +1671,10 @@ impl AgentProcess {
         let usage = *self.usage.lock().unwrap();
         let total = usage.input_tokens.saturating_add(usage.output_tokens);
         (total > 0).then_some(total)
+    }
+
+    pub fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        self.usage.lock().unwrap().prompt_cache
     }
 
     /// Fix file ownership after agent execution.
@@ -1751,6 +1787,10 @@ pub trait AgentIo: Send {
     fn reported_token_usage(&self) -> Option<u64> {
         None
     }
+    /// Prompt-cache usage reported by a structured transport, if any.
+    fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        PromptCacheUsage::default()
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -1780,6 +1820,9 @@ impl AgentIo for AgentProcess {
     }
     fn reported_token_usage(&self) -> Option<u64> {
         AgentProcess::reported_token_usage(self)
+    }
+    fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        AgentProcess::reported_prompt_cache(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -2011,6 +2054,9 @@ pub struct ScriptedProcess {
     /// `next_line` never resolves — the only way to reach a deadline branch in a
     /// test, since a drained scripted stream ends the loop normally.
     hangs_forever: bool,
+    /// Usage a structured transport (ACP) would report for the run.
+    reported_usage: Option<u64>,
+    reported_prompt_cache: PromptCacheUsage,
 }
 
 #[cfg(test)]
@@ -2027,6 +2073,8 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
+            reported_prompt_cache: PromptCacheUsage::default(),
         }
     }
 
@@ -2042,6 +2090,8 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
+            reported_prompt_cache: PromptCacheUsage::default(),
         }
     }
 
@@ -2054,6 +2104,17 @@ impl ScriptedProcess {
     /// Pre-load stderr lines for the StdoutOnly diagnostic path.
     pub fn with_stderr(mut self, lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.stderr = lines.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Simulate usage reported by a structured transport such as ACP.
+    pub fn with_reported_usage(mut self, tokens: u64) -> Self {
+        self.reported_usage = Some(tokens);
+        self
+    }
+
+    pub fn with_reported_prompt_cache(mut self, prompt_cache: PromptCacheUsage) -> Self {
+        self.reported_prompt_cache = prompt_cache;
         self
     }
 
@@ -2081,6 +2142,12 @@ impl AgentIo for ScriptedProcess {
     }
     fn output_mode(&self) -> OutputMode {
         self.output_mode
+    }
+    fn reported_token_usage(&self) -> Option<u64> {
+        self.reported_usage
+    }
+    fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        self.reported_prompt_cache
     }
     async fn kill(&mut self) {
         self.killed = true;
@@ -2158,6 +2225,38 @@ pub fn fix_file_ownership(work_dir: &Path) {
 /// durable task. The child process forwards this opaque context through the
 /// Kronn MCP bridge; the backend still revalidates every field against the
 /// execution and dispatch rows before accepting a delivery.
+/// Identity of a room's own native agent for the current turn, derived by the
+/// dispatcher from the running dispatch job. Like the worker context it only
+/// travels in the process environment, never in the prompt or tool arguments.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoomAgentBridgeContext {
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
+
+/// Capability of a workflow Agent step whose `room_id` names a room (KT-793).
+/// Like the room agent's identity it only travels in the process environment;
+/// the backend accepts it while that very step runs, and only for that room.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowStepBridgeContext {
+    pub discussion_id: String,
+    pub run_id: String,
+    pub step_key: String,
+    pub capability: String,
+}
+
+impl std::fmt::Debug for WorkflowStepBridgeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowStepBridgeContext")
+            .field("discussion_id", &self.discussion_id)
+            .field("run_id", &self.run_id)
+            .field("step_key", &self.step_key)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TaskWorkerBridgeContext {
     pub execution_id: String,
@@ -2176,6 +2275,8 @@ pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_BACKEND_URL",
     "KRONN_AUTH_TOKEN",
     "KRONN_TASK_WORKER_CONTEXT",
+    "KRONN_ROOM_AGENT_CONTEXT",
+    "KRONN_WORKFLOW_STEP_CONTEXT",
     "KRONN_SESSION_ID",
     "KRONN_CALLER_SESSION_ID",
     "KRONN_AGENT_TYPE",
@@ -2430,6 +2531,11 @@ fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>) -> 
 /// Configuration for starting an agent process.
 pub struct AgentStartConfig<'a> {
     pub agent_type: &'a AgentType,
+    /// Optional caller-owned capture survives spawn/provider failures.
+    pub provenance: Option<AgentProvenanceCapture>,
+    /// Receives each tool call the ACP transport reports. The stream-json
+    /// consumer reports its own calls, since only it parses them.
+    pub activity: Option<super::activity::AgentActivitySink>,
     /// Used to read .mcp.json and resolve MCP context.
     pub project_path: &'a str,
     /// Working directory for the agent. If `None`, defaults to `project_path`.
@@ -2493,6 +2599,11 @@ pub struct AgentStartConfig<'a> {
     /// environment; it is never rendered into the model prompt or accepted as
     /// a tool argument. HTTP workers keep using the in-process native executor.
     pub task_worker_context: Option<&'a TaskWorkerBridgeContext>,
+    /// The room's native agent identity for this turn, so it can act as the
+    /// principal of `task_exec`. Ignored when a worker context is present.
+    pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
+    /// A workflow step's room capability. Ignored when a worker context is present.
+    pub workflow_step_context: Option<&'a WorkflowStepBridgeContext>,
     /// Ollama-only: a JSON Schema (a `TypedSchema` step's schema, already
     /// wrapped in the canonical envelope shape by the caller) forwarded as
     /// the `/api/chat` `format` param — grammar-constrained decoding +
@@ -2564,6 +2675,8 @@ impl<'a> AgentStartConfig<'a> {
     ) -> Self {
         Self {
             agent_type,
+            provenance: None,
+            activity: None,
             project_path,
             prompt,
             tokens,
@@ -2584,6 +2697,8 @@ impl<'a> AgentStartConfig<'a> {
             native_acp_full_prompt: None,
             cli_resume_id: None,
             task_worker_context: None,
+            room_agent_context: None,
+            workflow_step_context: None,
             ollama_format: None,
             model_override: None,
             reasoning_effort_override: None,
@@ -3342,6 +3457,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.tier,
             config.model_tiers,
         );
+        provenance::resolve_model(config.provenance.as_ref(), model_flag.as_deref(), None);
         // LiteLLM has no safe built-in default: model ids come from the
         // operator's `config.yaml`, so guessing one yields an opaque 404.
         let model = match (config.agent_type, model_flag.as_deref()) {
@@ -3427,6 +3543,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.cancel_token.as_ref(),
             config.reasoning_effort_override,
             config.max_tokens_override,
+            config.provenance.clone(),
         )
         .await;
     }
@@ -3438,6 +3555,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.tier,
         config.model_tiers,
     );
+    provenance::resolve_model(config.provenance.as_ref(), model_flag.as_deref(), None);
     // KT-646 — resolve reasoning effort the same way: explicit override wins,
     // else the tier's configured preset, else no flag (CLI default). Gated to
     // agents with a proven contract; every other agent gets `None` here.
@@ -3495,9 +3613,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 resume_id: acp_resume_id,
                 session_store: config.acp_session_store.clone(),
                 fallback_prompt: config.native_acp_full_prompt,
+                provenance: config.provenance.clone(),
+                activity: config.activity.clone(),
             };
             #[cfg(test)]
-            if let Some(transport) = config.test_acp_transport.clone() {
+            if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(request, transport).await;
             }
             return start_native_acp(request, config.full_access).await;
@@ -3521,9 +3641,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 resume_id: acp_resume_id,
                 session_store: config.acp_session_store.clone(),
                 fallback_prompt: config.native_acp_full_prompt,
+                provenance: config.provenance.clone(),
+                activity: config.activity.clone(),
             };
             #[cfg(test)]
-            if let Some(transport) = config.test_acp_transport.clone() {
+            if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(
                     AcpSessionRequest {
                         model_flag: None,
@@ -3558,6 +3680,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             };
             let launch = AdapterLaunchOptions {
                 worker_context: config.task_worker_context.cloned(),
+                room_agent_context: config.room_agent_context.cloned(),
+                workflow_step_context: config.workflow_step_context.cloned(),
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
             };
@@ -3673,6 +3797,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         SpawnIo::Direct(stdin_prompt.as_deref()),
         config.discussion_id,
         config.task_worker_context,
+        config.room_agent_context,
+        config.workflow_step_context,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -3688,6 +3814,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     SpawnIo::Direct(stdin_prompt.as_deref()),
                     config.discussion_id,
                     config.task_worker_context,
+                    config.room_agent_context,
+                    config.workflow_step_context,
                 )?
             } else {
                 return Err(e);
@@ -3702,6 +3830,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Always stream stdout
     if let Some(stdout) = child.stdout.take() {
         let tx_out = tx.clone();
+        let provenance = config.provenance.clone();
+        let observe_claude = *config.agent_type == AgentType::ClaudeCode;
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             // Don't conflate a read error (e.g. non-UTF-8 output) with EOF:
@@ -3710,6 +3840,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
+                        if observe_claude {
+                            if let Some(model) = provenance::claude_observed_model(&line) {
+                                provenance::observe_model(provenance.as_ref(), &model);
+                            }
+                        }
                         if tx_out.send(line).await.is_err() {
                             break;
                         }
@@ -3806,7 +3941,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 /// Common inputs to every ACP session-start path (native and adapted alike).
 /// The adapter owns prompt writes; the direct runner schedules them. Keep
 /// this distinction explicit so sharing spawn policy cannot close ACP stdin
-/// prematurely or leave an unread stderr pipe (adapters historically discard it).
+/// prematurely. Both variants pipe stderr: whoever spawns must drain it.
 #[derive(Clone, Copy)]
 pub(crate) enum SpawnIo<'a> {
     Direct(Option<&'a str>),
@@ -3817,6 +3952,8 @@ pub(crate) enum SpawnIo<'a> {
 #[derive(Default)]
 pub(crate) struct AdapterLaunchOptions {
     pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
+    pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
+    pub(crate) workflow_step_context: Option<WorkflowStepBridgeContext>,
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
 }
@@ -3867,6 +4004,8 @@ struct AcpSessionRequest<'a> {
     resume_id: Option<&'a str>,
     session_store: Option<AcpSessionStore>,
     fallback_prompt: Option<&'a str>,
+    provenance: Option<AgentProvenanceCapture>,
+    activity: Option<super::activity::AgentActivitySink>,
 }
 
 async fn start_native_acp(
@@ -3917,6 +4056,11 @@ async fn start_adapted_acp(
 
     let agent_type = request.agent_type;
     let model = request.model_flag.map(str::to_owned);
+    provenance::resolve_model(
+        request.provenance.as_ref(),
+        request.model_flag,
+        request.model_flag.map(|_| true),
+    );
     let reasoning_effort = request.reasoning_effort.map(str::to_owned);
     if let Some(model) = &model {
         tracing::debug!(agent = ?agent_type, model, "ACP adapter model applied via direct CLI flag");
@@ -3956,6 +4100,50 @@ async fn start_adapted_acp(
     .await
 }
 
+/// Test-only routing of every ACP launch in one working directory to a
+/// fixture transport, so tests can drive callers that build their own
+/// `AgentStartConfig` (workflow steps, discussion turns).
+#[cfg(test)]
+pub(crate) mod test_acp_routes {
+    use super::AgentStartConfig;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    type Transport = Arc<dyn crate::acp::AcpTransport>;
+
+    static ROUTES: LazyLock<Mutex<HashMap<PathBuf, Transport>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Removes the route when dropped.
+    pub(crate) struct RouteGuard(PathBuf);
+
+    impl Drop for RouteGuard {
+        fn drop(&mut self) {
+            ROUTES.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    /// `work_dir` must be the directory the runner resolves for the launch.
+    pub(crate) fn route(work_dir: &Path, transport: Transport) -> RouteGuard {
+        ROUTES
+            .lock()
+            .unwrap()
+            .insert(work_dir.to_path_buf(), transport);
+        RouteGuard(work_dir.to_path_buf())
+    }
+
+    pub(super) fn transport_for(
+        config: &AgentStartConfig<'_>,
+        work_dir: &Path,
+    ) -> Option<Transport> {
+        config
+            .test_acp_transport
+            .clone()
+            .or_else(|| ROUTES.lock().unwrap().get(work_dir).cloned())
+    }
+}
+
 /// Shared session-run core behind `AcpHost`, common to every ACP transport
 /// (native JSON-RPC and the Codex/Claude adapters alike): negotiate, scope
 /// the project MCP registry, create the session, apply a resolved model when
@@ -3983,6 +4171,8 @@ async fn run_acp_session(
         resume_id,
         session_store,
         fallback_prompt,
+        provenance,
+        activity,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4087,12 +4277,18 @@ async fn run_acp_session(
     // its own default instead of receiving a bad flag.
     if let Some(model) = model_flag {
         match host.select_model(&session, model).await {
-            Ok(true) => tracing::debug!(agent = ?agent_type, model, "ACP model selection applied"),
-            Ok(false) => tracing::debug!(
+            Ok(true) => {
+                provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
+                tracing::debug!(agent = ?agent_type, model, "ACP model selection applied");
+            }
+            Ok(false) => {
+                provenance::resolve_model(provenance.as_ref(), Some(model), Some(false));
+                tracing::debug!(
                 agent = ?agent_type,
                 model,
                 "ACP session exposes no matching model option; keeping its default"
-            ),
+                );
+            }
             Err(error) => {
                 return Err(acp_start_failure(
                     &host,
@@ -4165,6 +4361,9 @@ async fn run_acp_session(
                             break;
                         }
                     }
+                    AcpSessionEvent::ModelObserved(model) => {
+                        provenance::observe_model(provenance.as_ref(), &model);
+                    }
                     AcpSessionEvent::ToolCall { name } => {
                         // A tool call is not text. Forwarding it on `tx` — the
                         // channel carrying the reply itself — glued
@@ -4181,14 +4380,20 @@ async fn run_acp_session(
                         if let Ok(mut capture) = forwarder_stderr.lock() {
                             capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
+                        super::activity::tool_started(activity.as_ref(), &name);
+                    }
+                    AcpSessionEvent::ToolTarget(target) => {
+                        super::activity::tool_target(activity.as_ref(), target);
                     }
                     AcpSessionEvent::Usage {
                         input_tokens,
                         output_tokens,
+                        prompt_cache,
                     } => {
                         *task_usage.lock().unwrap() = AgentUsage {
                             input_tokens,
                             output_tokens,
+                            prompt_cache,
                         };
                     }
                     AcpSessionEvent::NativeSessionId(conversation_id) => {
@@ -5744,7 +5949,10 @@ pub(crate) fn build_ollama_chat_body(
 #[derive(Default)]
 pub(crate) struct TokenTally {
     prompt: u64,
+    cached_prompt: Option<u64>,
+    cache_write_prompt: Option<u64>,
     eval: u64,
+    provenance: Option<AgentProvenanceCapture>,
 }
 
 /// Cumulative ceiling telemetry carried in stderr; the last marker wins.
@@ -5917,6 +6125,11 @@ struct HttpTurnTrace {
     provider: String,
     phase: crate::models::TaskExecutionHttpPhase,
     prompt_tokens: u64,
+    // Absent when unreported, and from traces written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cached_prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_write_prompt_tokens: Option<u64>,
     eval_tokens: u64,
     duration_ms: u64,
     provider_ok: bool,
@@ -5986,6 +6199,8 @@ pub(crate) fn parse_http_turn_telemetry(
                     provider: trace.provider,
                     phase: trace.phase,
                     prompt_tokens: trace.prompt_tokens,
+                    cached_prompt_tokens: trace.cached_prompt_tokens,
+                    cache_write_prompt_tokens: trace.cache_write_prompt_tokens,
                     eval_tokens: trace.eval_tokens,
                     duration_ms: trace.duration_ms,
                     provider_ok: trace.provider_ok,
@@ -6179,6 +6394,9 @@ pub(crate) async fn forward_chat_line(
     let Some(chunk) = codec.parse_line(line) else {
         return true;
     };
+    if let Some(model) = &chunk.model {
+        provenance::observe_model(tally.provenance.as_ref(), model);
+    }
     if !chunk.tool_calls.is_empty() {
         pending_tools.push(chunk.tool_calls);
     }
@@ -6216,6 +6434,12 @@ pub(crate) async fn forward_chat_line(
     }
     if chunk.prompt_tokens > 0 {
         tally.prompt = chunk.prompt_tokens;
+    }
+    if chunk.cached_prompt_tokens.is_some() {
+        tally.cached_prompt = chunk.cached_prompt_tokens;
+    }
+    if chunk.cache_write_prompt_tokens.is_some() {
+        tally.cache_write_prompt = chunk.cache_write_prompt_tokens;
     }
     if chunk.eval_tokens > 0 {
         tally.eval = chunk.eval_tokens;
@@ -6281,7 +6505,10 @@ fn is_permanent_provider_failure(detail: &str) -> bool {
 }
 
 fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &str) -> bool {
-    if is_permanent_provider_failure(detail) {
+    // 501 declares an unimplemented capability; repeating the same body cannot
+    // recover it. This differs from capacity/availability failures (503/504).
+    if status == Some(reqwest::StatusCode::NOT_IMPLEMENTED) || is_permanent_provider_failure(detail)
+    {
         return false;
     }
     if status.is_some_and(|status| {
@@ -6329,6 +6556,53 @@ fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
     }
 }
 
+/// Positive evidence that the provider rejects constrained output itself.
+/// Do not infer this from model names/storage formats, a generic 501, or an
+/// invalid schema: those must retain their original failure and request body.
+fn rejects_structured_output(failure: &HttpProviderFailure) -> bool {
+    if !matches!(
+        failure.status,
+        Some(
+            reqwest::StatusCode::BAD_REQUEST
+                | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                | reqwest::StatusCode::NOT_IMPLEMENTED
+        )
+    ) || is_permanent_provider_failure(&failure.detail)
+    {
+        return false;
+    }
+    // Inspect the error message, not a serialized request/schema echoed beside
+    // it: a schema property named response_format is not a capability signal.
+    let Some(message) = provider_error_message(&failure.detail) else {
+        return false;
+    };
+    [
+        "structured output is unavailable",
+        "structured outputs are unavailable",
+        "structured output is not supported",
+        "structured outputs are not supported",
+        "does not support structured output",
+        "response_format is not supported",
+        "does not support response_format",
+        "unsupported response_format",
+        "json_schema is not supported",
+        "does not support json_schema",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn provider_error_message(detail: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(detail) {
+        Ok(value) => value["error"]
+            .as_str()
+            .or_else(|| value["error"]["message"].as_str())
+            .or_else(|| value["message"].as_str())
+            .map(str::to_ascii_lowercase),
+        Err(_) => Some(detail.to_ascii_lowercase()),
+    }
+}
+
 fn push_provider_retry_trace(stderr: &Arc<Mutex<Vec<String>>>, line: String) {
     tracing::info!(target: "kronn::agent::provider_retry", "{line}");
     if let Ok(mut stderr) = stderr.lock() {
@@ -6361,6 +6635,13 @@ async fn send_http_agent_request(
     retry_allowed: bool,
     stderr: &Arc<Mutex<Vec<String>>>,
 ) -> Result<(reqwest::Response, usize), HttpProviderFailure> {
+    // Anthropic caches only the prefixes a request marks. Measured at about a
+    // quarter of the uncached input cost; `KRONN_LITELLM_PROMPT_CACHE=0` opts out.
+    let hinted = (backend == "LiteLLM"
+        && std::env::var("KRONN_LITELLM_PROMPT_CACHE").as_deref() != Ok("0"))
+    .then(|| crate::agents::chat_codec::with_prompt_cache_hints(body))
+    .flatten();
+    let body = hinted.as_ref().unwrap_or(body);
     let mut attempt = first_attempt;
     loop {
         let mut request = client.post(url).json(body);
@@ -6471,6 +6752,7 @@ async fn start_ollama_http(
     parent_cancel: Option<&tokio_util::sync::CancellationToken>,
     reasoning_effort: Option<&str>,
     max_tokens: Option<u64>,
+    provenance: Option<AgentProvenanceCapture>,
 ) -> Result<AgentProcess, String> {
     let identity_context = http_agent_identity_context(agent_type, model);
     let system_context = if system_context.trim().is_empty() {
@@ -6814,7 +7096,8 @@ async fn start_ollama_http(
         .map(tokio_util::sync::CancellationToken::child_token)
         .unwrap_or_default();
     let initial_request_started_at = std::time::Instant::now();
-    let initial = tokio::select! {
+    provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
+    let mut initial = tokio::select! {
         biased;
         _ = http_cancel.cancelled() => {
             return Err(format!("{backend} run cancelled before the provider accepted the initial request"));
@@ -6831,19 +7114,69 @@ async fn start_ollama_http(
             &stderr_capture,
         ) => response,
     };
+    // Workflow prompts already carry the schema and the caller validates the
+    // resulting envelope. Negotiate only an explicitly refused wire feature,
+    // once, before any output/tool execution; keep all other request settings.
+    let mut format_fallback_notice = None;
+    if let Err(failure) = &initial {
+        if format.is_some() && rejects_structured_output(failure) {
+            if let Some(capture) = &provenance {
+                if let Ok(mut capture) = capture.lock() {
+                    capture.format_fallback = true;
+                }
+            }
+            let attempt = failure.attempts + 1;
+            let notice = format!(
+                "[structured-output fallback: {backend} rejected constrained JSON; retrying once using the schema in the prompt. Model and tools are unchanged; workflow validation and on_invalid policy still apply.]\n\n"
+            );
+            tracing::warn!(target: "kronn::agent::structured_output", backend, model, "{notice}");
+            if let Ok(mut capture) = stderr_capture.lock() {
+                capture.push(notice.trim().to_string());
+            }
+            if let Some(object) = body.as_object_mut() {
+                object.remove(if is_openai_wire {
+                    "response_format"
+                } else {
+                    "format"
+                });
+            }
+            format_fallback_notice = Some(notice);
+            initial = tokio::select! {
+                biased;
+                _ = http_cancel.cancelled() => {
+                    return Err(format!("{backend} run cancelled before the provider accepted the format fallback"));
+                }
+                response = send_http_agent_request(
+                    &client, &url, &body, auth_key.as_deref(), backend,
+                    attempt, attempt, false, &stderr_capture,
+                ) => response,
+            };
+        }
+    }
+    let used_format_fallback = format_fallback_notice.is_some();
     let (response, initial_provider_attempt) = initial.map_err(|failure| {
-        let tool_hint = if tools_declared > 0 {
-            " Kronn declared native tools on this request; this provider route/model may not support tool calling. Choose a tool-capable model or move the call to an ApiCall step."
-        } else {
-            ""
-        };
-        format_provider_failure(backend, &base, &failure, tool_hint)
+        let tools_rejected = tools_declared > 0 && provider_error_message(&failure.detail)
+            .is_some_and(|message| ["tools are not supported", "does not support tools", "tool calling is not supported"]
+                .iter().any(|needle| message.contains(needle)));
+        let hint = if tools_rejected {
+            " This provider route/model may not support tool calling. Choose a tool-capable model or move the call to an ApiCall step."
+        } else { "" };
+        let error = format_provider_failure(backend, &base, &failure, hint);
+        match format_fallback_notice.as_deref() {
+            Some(notice) => format!("{notice}{error}"),
+            None => error,
+        }
     })?;
 
     // Stream the response — each line is a JSON object with a `message.content` field.
     // The last chunk has `done: true` and includes token counts.
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
     let stderr_clone = stderr_capture.clone();
+    // Successful workflows do not persist arbitrary stderr, so expose the
+    // notice in the run output too. It precedes (never splits) the JSON envelope.
+    if let Some(notice) = format_fallback_notice {
+        let _ = tx.send(notice).await;
+    }
 
     // AgentProcess requires a child, but Ollama's execution is HTTP-based. The
     // child must mirror the STREAM's lifetime exactly: consumers `child.wait()`
@@ -7012,7 +7345,10 @@ async fn start_ollama_http(
             // Provider usage is per response. Resetting here prevents a clean
             // zero-usage/error frame from inheriting the preceding turn's
             // counts; parse_token_usage later sums the independent markers.
-            let mut tally = TokenTally::default();
+            let mut tally = TokenTally {
+                provenance: provenance.clone(),
+                ..Default::default()
+            };
             // The response below was generated from this exact catalogue. A
             // model can remember a tool that was withdrawn on a previous turn
             // and still emit its name; declaration removal is not an execution
@@ -7126,6 +7462,8 @@ async fn start_ollama_http(
                     provider: backend.to_ascii_lowercase(),
                     phase: current_http_phase,
                     prompt_tokens: tally.prompt,
+                    cached_prompt_tokens: tally.cached_prompt,
+                    cache_write_prompt_tokens: tally.cache_write_prompt,
                     eval_tokens: tally.eval,
                     duration_ms: request_started_at
                         .elapsed()
@@ -7142,7 +7480,7 @@ async fn start_ollama_http(
             // A 2xx only means that the provider accepted the request; NVIDIA
             // may still put ResourceExhausted inside the SSE body. Call an
             // attempt successful only after its terminal frame was decoded.
-            if got_done && !got_error && provider_attempt > 1 {
+            if got_done && !got_error && provider_attempt > 1 && !used_format_fallback {
                 push_provider_retry_trace(
                     &stderr_clone,
                     format!(
@@ -7161,6 +7499,7 @@ async fn start_ollama_http(
                 !got_done && !got_error && calls.is_empty()
             };
             if retryable_stream_failure
+                && !used_format_fallback
                 && !external_effect_observed
                 && !emitted_this_turn
                 && provider_attempt < HTTP_PROVIDER_MAX_ATTEMPTS
@@ -7222,6 +7561,7 @@ async fn start_ollama_http(
                 }
             }
             if retryable_stream_failure
+                && !used_format_fallback
                 && !external_effect_observed
                 && !emitted_this_turn
                 && provider_attempt >= HTTP_PROVIDER_MAX_ATTEMPTS
@@ -7876,6 +8216,7 @@ async fn start_ollama_http(
             let mut delivered_this_turn = false;
             let mut failed_edit_this_turn = false;
             let mut syntax_refused_edit_this_turn = false;
+            let mut syntax_refusal_kind = "Rust syntax";
             let mut successful_edit_this_turn = false;
             let mut refused_finalization_read_this_turn = false;
             let mut repair_read_succeeded = false;
@@ -8265,8 +8606,9 @@ async fn start_ollama_http(
                         }
                     } else {
                         failed_edit_this_turn = true;
-                        if rust_syntax_refusal(&outcome) {
+                        if let Some(kind) = structural_refusal(&outcome) {
                             syntax_refused_edit_this_turn = true;
+                            syntax_refusal_kind = kind;
                             worker_repair_target.get_or_insert_with(|| call.clone());
                         }
                         if let Some(payload) = outcome.content.as_object_mut() {
@@ -8578,15 +8920,24 @@ async fn start_ollama_http(
                     constrain_worker_repair_tool(&mut body, target);
                     (
                         format!(
-                            "Rust syntax validation refused the edit and wrote nothing. The prior \
+                            "{syntax_refusal_kind} validation refused the edit and wrote nothing. The prior \
                              receipt is still authoritative. One strict correction remains: use \
                              only `{tool_name}` on the exact preconstructed path and anchor/range \
                              frozen in its schema; change only the replacement bytes using the \
-                             parser error above. Any prose, exploration, different target or \
+                             {evidence} above. Any prose, exploration, different target or \
                              second invalid proposal ends this local attempt and hands the task \
-                             back for a stronger worker."
+                             back for a stronger worker.",
+                            evidence = if syntax_refusal_kind == "Rust syntax" {
+                                "parser error"
+                            } else {
+                                "diagnostic"
+                            },
                         ),
-                        "worker Rust syntax refusal — entering one strict repair edit",
+                        if syntax_refusal_kind == "Rust syntax" {
+                            "worker Rust syntax refusal — entering one strict repair edit"
+                        } else {
+                            "worker structure refusal — entering one strict repair edit"
+                        },
                     )
                 } else {
                     reset_tool_loop_state(&["read_file"]);
@@ -9296,33 +9647,41 @@ impl ClaudeSandboxCatalogueReceipt {
     }
 }
 
+/// One Git root measured by the catalogue preflight; `label` names it in a
+/// refusal without exposing its path.
+pub(crate) struct ClaudeSandboxCatalogueRoot {
+    pub label: String,
+    pub path: PathBuf,
+}
+
 fn claude_sandbox_catalogue_receipt(
-    repo_roots: &[PathBuf],
+    repo_roots: &[ClaudeSandboxCatalogueRoot],
 ) -> Result<ClaudeSandboxCatalogueReceipt, String> {
     let mut common_dirs = std::collections::BTreeSet::new();
     let mut worktrees = std::collections::BTreeSet::new();
-    for repo_root in repo_roots {
+    for root in repo_roots {
+        let unreadable = || claude_sandbox_catalogue_unreadable(&root.label);
         let common_output = sync_cmd("git")
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(repo_root)
+            .current_dir(&root.path)
             .output()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !common_output.status.success() {
-            return Err(claude_sandbox_catalogue_unreadable());
+            return Err(unreadable());
         }
         let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim())
             .canonicalize()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !common_dirs.insert(common_dir) {
             continue;
         }
         let output = sync_cmd("git")
             .args(["worktree", "list", "--porcelain"])
-            .current_dir(repo_root)
+            .current_dir(&root.path)
             .output()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !output.status.success() {
-            return Err(claude_sandbox_catalogue_unreadable());
+            return Err(unreadable());
         }
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             if let Some(path) = line.strip_prefix("worktree ") {
@@ -9337,11 +9696,44 @@ fn claude_sandbox_catalogue_receipt(
     })
 }
 
-fn claude_sandbox_catalogue_unreadable() -> String {
-    "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
-     the registered Git worktree catalogue could not be measured. No repository or worktree path \
-     was logged. Use `task_exec_reassign` to move this execution to another available worker."
-        .to_string()
+fn claude_sandbox_catalogue_unreadable(label: &str) -> String {
+    format!(
+        "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+         the Git root of {label} is inaccessible, so its registered worktrees could not be measured. \
+         No repository or worktree path was logged. Make that repository readable as a Git \
+         checkout, or fix or remove it from the project's linked repositories."
+    )
+}
+
+/// Roots whose worktree catalogue the Claude sandbox could enumerate. A linked
+/// location that does not exist has no catalogue to enumerate, so it is skipped;
+/// any other access failure stays in the list and fails closed.
+pub(crate) fn claude_sandbox_catalogue_roots(
+    project: &crate::models::Project,
+) -> Vec<ClaudeSandboxCatalogueRoot> {
+    let mut roots = vec![ClaudeSandboxCatalogueRoot {
+        label: format!("project `{}`", project.name),
+        path: crate::core::scanner::resolve_host_path(&project.path),
+    }];
+    for repo in &project.linked_repos {
+        let Some(location) = repo.local_location() else {
+            continue;
+        };
+        let path = crate::core::scanner::resolve_host_path(location);
+        if matches!(path.try_exists(), Ok(false)) {
+            tracing::warn!(
+                "Claude sandbox catalogue: linked repository `{}` of project `{}` does not exist on this host; skipped",
+                repo.name,
+                project.name
+            );
+            continue;
+        }
+        roots.push(ClaudeSandboxCatalogueRoot {
+            label: format!("linked repository `{}`", repo.name),
+            path,
+        });
+    }
+    roots
 }
 
 pub(crate) fn claude_task_worker_catalogue_preflight(
@@ -9350,16 +9742,7 @@ pub(crate) fn claude_task_worker_catalogue_preflight(
     if !super::host_is_macos() {
         return Ok(());
     }
-    let mut repo_roots = vec![crate::core::scanner::resolve_host_path(&project.path)];
-    repo_roots.extend(project.linked_repos.iter().filter_map(|repo| {
-        let location = repo.location.trim();
-        (!location.is_empty()
-            && !location.starts_with("http://")
-            && !location.starts_with("https://")
-            && !location.starts_with("git@"))
-        .then(|| crate::core::scanner::resolve_host_path(location))
-    }));
-    claude_sandbox_catalogue_receipt(&repo_roots)?.validate()
+    claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project))?.validate()
 }
 
 async fn run_claude_task_worker_auth_probe(
@@ -10450,11 +10833,76 @@ pub(crate) fn should_skip_home_override(binary: &str, npx_package: Option<&str>)
     )
 }
 
+/// Longest positional argument logged verbatim; longer ones are prompts or
+/// inline JSON (MCP registries) and only their size is logged.
+const ARGV_LOG_VALUE_MAX_CHARS: usize = 96;
+
+/// Argv as it may appear in a debug log: flags verbatim, `-c key=value`
+/// overrides reduced to the key when the value is long or secret-shaped, and
+/// prompt-like values replaced by their length. Every kept part is redacted.
+pub(crate) fn loggable_argv(args: &[String]) -> String {
+    let elided = |value: &str| format!("<{} chars>", value.chars().count());
+    let short_plain = |value: &str| {
+        value.chars().count() <= ARGV_LOG_VALUE_MAX_CHARS && !value.chars().any(char::is_whitespace)
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut after_config_flag = false;
+    let mut after_secret_flag = false;
+    for arg in args {
+        let shown = if after_secret_flag {
+            elided(arg)
+        } else if after_config_flag {
+            match arg.split_once('=') {
+                Some((key, value)) if short_plain(value) && !looks_secret(value) => {
+                    format!("{key}={value}")
+                }
+                Some((key, value)) => format!("{key}={}", elided(value)),
+                None => elided(arg),
+            }
+        } else if arg.starts_with('-') && short_plain(arg) {
+            match arg.split_once('=') {
+                Some((flag, value)) if secret_flag_name(flag) => {
+                    format!("{flag}={}", elided(value))
+                }
+                _ => arg.clone(),
+            }
+        } else if short_plain(arg) && !looks_secret(arg) {
+            arg.clone()
+        } else {
+            elided(arg)
+        };
+        after_config_flag = matches!(arg.as_str(), "-c" | "--config");
+        after_secret_flag = arg.starts_with('-') && !arg.contains('=') && secret_flag_name(arg);
+        out.push(crate::core::redact::redact_for_audit_artifact(&shown).0);
+    }
+    out.join(" ")
+}
+
+fn secret_flag_name(flag: &str) -> bool {
+    let flag = flag.to_ascii_lowercase();
+    [
+        "token",
+        "key",
+        "secret",
+        "passw",
+        "credential",
+        "bearer",
+        "auth",
+    ]
+    .iter()
+    .any(|needle| flag.contains(needle))
+}
+
+fn looks_secret(value: &str) -> bool {
+    crate::core::redact::redact_for_audit_artifact(value).1 > 0
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
-/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write
-/// and uses null stderr because adapters consume structured stdout events.
+/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write.
+/// stderr is piped in both modes; the caller must drain it concurrently or a
+/// verbose child blocks once the pipe buffer fills.
 ///
 /// 9 args: each is genuinely independent — bundling them into a config
 /// struct would just shuffle the verbosity from the direct and adapter call
@@ -10474,6 +10922,8 @@ pub(crate) fn try_spawn(
     io: SpawnIo<'_>,
     discussion_id: Option<&str>,
     task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -10513,11 +10963,8 @@ pub(crate) fn try_spawn(
             cmd_args.splice(exec_idx + 1..exec_idx + 1, overrides);
         }
     }
-    // Never log argv: prompts may contain user data and, historically, API
-    // credentials. Besides the persistent log, argv is already visible to
-    // the child process; duplicating it at INFO turns a transient exposure
-    // into a durable one. Operational diagnostics only need the executable,
-    // argument count, workdir and auth mode.
+    // INFO never carries argv: prompts may contain user data and, historically,
+    // API credentials. The debug line below logs a redacted, elided form.
     tracing::info!(
         "Spawning agent: {} ({} args) in {} (key: {})",
         cmd_name,
@@ -10537,6 +10984,8 @@ pub(crate) fn try_spawn(
         work_dir,
     );
 
+    tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
+
     let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
@@ -10548,11 +10997,9 @@ pub(crate) fn try_spawn(
             },
         )
         .stdout(Stdio::piped())
-        .stderr(if matches!(io, SpawnIo::Adapter) {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        })
+        // Adapters once used a null stderr so an undrained pipe could never
+        // stall them; they now drain it into a bounded tail for diagnostics.
+        .stderr(Stdio::piped())
         // SIGKILL the agent process if its `Child` is dropped before
         // `wait()` returns. This is what makes workflow-run cancellation
         // actually stop in-flight Agent steps: when the runner drops the
@@ -10633,6 +11080,26 @@ pub(crate) fn try_spawn(
     } else {
         // A normal turn must never inherit a caller's worker capability.
         cmd.env_remove("KRONN_TASK_WORKER_CONTEXT");
+    }
+    match room_agent_context.filter(|_| task_worker_context.is_none()) {
+        Some(context) => {
+            let encoded = serde_json::to_string(context)
+                .map_err(|error| format!("Unable to encode room agent context: {error}"))?;
+            cmd.env("KRONN_ROOM_AGENT_CONTEXT", encoded);
+        }
+        None => {
+            cmd.env_remove("KRONN_ROOM_AGENT_CONTEXT");
+        }
+    }
+    match workflow_step_context.filter(|_| task_worker_context.is_none()) {
+        Some(context) => {
+            let encoded = serde_json::to_string(context)
+                .map_err(|error| format!("Unable to encode workflow step context: {error}"))?;
+            cmd.env("KRONN_WORKFLOW_STEP_CONTEXT", encoded);
+        }
+        None => {
+            cmd.env_remove("KRONN_WORKFLOW_STEP_CONTEXT");
+        }
     }
 
     let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {
@@ -10844,6 +11311,7 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
                             input_tokens: input,
                             output_tokens: output,
                             cost_usd: None,
+                            prompt_cache: PromptCacheUsage::from_anthropic_usage(usage),
                         };
                     }
                 }
@@ -10922,11 +11390,12 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
                     cost_usd: cost,
                 });
             }
-            if json.get("usage").is_some() && (input > 0 || output > 0) {
+            if let Some(usage) = json.get("usage").filter(|_| input > 0 || output > 0) {
                 return StreamJsonEvent::Usage {
                     input_tokens: input,
                     output_tokens: output,
                     cost_usd: cost,
+                    prompt_cache: PromptCacheUsage::from_anthropic_usage(usage),
                 };
             }
             StreamJsonEvent::Skip
@@ -11372,6 +11841,7 @@ mod acp_resume_tests {
                         .send(AcpSessionEvent::Usage {
                             input_tokens: 3,
                             output_tokens: 5,
+                            prompt_cache: Default::default(),
                         })
                         .await
                         .unwrap();
@@ -11439,6 +11909,8 @@ mod acp_resume_tests {
                 resume_id,
                 session_store,
                 fallback_prompt,
+                provenance: None,
+                activity: None,
             },
             transport,
         )
@@ -11781,6 +12253,8 @@ mod acp_resume_tests {
                     resume_id: Some("recorded-session"),
                     session_store: None,
                     fallback_prompt: Some("complete history"),
+                    provenance: None,
+                    activity: None,
                 },
                 transport.clone(),
             )
@@ -11912,5 +12386,69 @@ mod acp_resume_tests {
         let short = acp_failure_diagnostic("prompt", "short 🦀 non-secret error");
         assert_eq!(short, "ACP prompt failed: short 🦀 non-secret error");
         assert!(!short.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod argv_log_tests {
+    use super::loggable_argv;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn keeps_the_command_shape_but_never_prompts_or_secret_values() {
+        let prompt = "Refactor the billing module and keep customer data private";
+        let registry = format!(
+            "mcp_servers={{\"kronn\":{{\"command\":\"bridge\",\"args\":[\"{}\"]}}}}",
+            "x".repeat(200)
+        );
+        let logged = loggable_argv(&argv(&[
+            "exec",
+            "resume",
+            "th-1",
+            "--json",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+            "-c",
+            &registry,
+            "-c",
+            "api_key=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+            "--model",
+            "gpt-5",
+            "--token",
+            "opaque-bearer-value",
+            "--api-key=raw-secret-value",
+            "--sandbox=workspace-write",
+            prompt,
+            "-",
+        ]));
+
+        for kept in [
+            "exec resume th-1 --json",
+            "-c model_reasoning_effort=\"high\"",
+            "--model gpt-5",
+            "--sandbox=workspace-write",
+            " -",
+        ] {
+            assert!(logged.contains(kept), "{kept:?} missing from {logged}");
+        }
+        assert!(logged.contains(&format!("mcp_servers=<{} chars>", registry.len() - 12)));
+        assert!(logged.contains(&format!("<{} chars>", prompt.chars().count())));
+        for leaked in [
+            "billing",
+            "sk-proj",
+            "opaque-bearer-value",
+            "raw-secret-value",
+            "xxxx",
+        ] {
+            assert!(!logged.contains(leaked), "{leaked:?} leaked into {logged}");
+        }
+    }
+
+    #[test]
+    fn counts_unicode_prompts_in_chars() {
+        assert_eq!(loggable_argv(&argv(&["-p", "résumé 🙂"])), "-p <8 chars>");
     }
 }

@@ -181,11 +181,11 @@
   /* 0.82 gave ~3.5:1 on the #0172f0 bar (below WCAG AA for normal text);
      0.92 lifts inactive tabs to ~4.3:1 while keeping them visibly softer
      than the solid-white hover / active-tab states. */
-  color: rgba(255, 255, 255, 0.92);
+  color: color-mix(in srgb, var(--kr-text-on-accent) 92%, transparent);
 }
 :root[data-theme="euronews"] .dash-nav-btn:hover {
   background: rgba(255, 255, 255, 0.14);
-  color: #fff;
+  color: var(--kr-text-on-accent);
 }
 :root[data-theme="euronews"] .dash-nav-btn[data-active="true"] {
   background: #fff;
@@ -196,24 +196,24 @@
    the spinner white so it reads on the blue bar. On the ACTIVE tab the bg
    is white, so the blue spinner stays (excluded via :not). */
 :root[data-theme="euronews"] .dash-nav-btn:not([data-active="true"]) .text-accent {
-  color: #fff;
+  color: var(--kr-text-on-accent);
 }
 :root[data-theme="euronews"] .dash-nav-badge {
   background: var(--kr-error);
-  color: #fff;
+  color: var(--kr-on-error);
 }
 :root[data-theme="euronews"] .dash-nav-activity-btn {
   background: rgba(255, 255, 255, 0.14);
   border-color: rgba(255, 255, 255, 0.35);
-  color: #fff;
+  color: var(--kr-text-on-accent);
 }
 :root[data-theme="euronews"] .dash-scan-btn {
   background: rgba(255, 255, 255, 0.14);
   border-color: rgba(255, 255, 255, 0.35);
-  color: #fff;
+  color: var(--kr-text-on-accent);
 }
 :root[data-theme="euronews"] .dash-nav-brand .text-accent {
-  color: #fff;
+  color: var(--kr-text-on-accent);
 }
 
 /* ── Live indicator (rendered only while a run is active) ──
@@ -3446,7 +3446,7 @@ html[data-density="large"] .dash-main {
   border: 1px solid var(--kr-accent);
   border-radius: var(--kr-r-md);
   background: var(--kr-accent);
-  color: white;
+  color: var(--kr-text-on-accent);
   font-weight: 700;
   cursor: pointer;
 }
@@ -3560,7 +3560,7 @@ html[data-density="large"] .dash-main {
 .project-git-branch-list article[data-current='true'] .project-git-branch-node {
   border-color: var(--kr-accent);
   background: var(--kr-accent);
-  color: white;
+  color: var(--kr-text-on-accent);
 }
 
 .project-git-branch-list article > div:nth-child(2) {

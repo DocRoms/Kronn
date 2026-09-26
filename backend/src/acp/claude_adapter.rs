@@ -23,7 +23,7 @@
 //! by [`AcpPermissionBroker::session_policy`] and applied as static CLI flags
 //! instead of a live negotiation.
 
-use super::adapter_process::AdapterProcess;
+use super::adapter_process::{AdapterProcess, StderrTail};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,7 +83,7 @@ impl ClaudeAcpAdapter {
 
     /// Test-only: drive a fixture script instead of the real `claude` binary.
     #[cfg(test)]
-    fn new_with_program(
+    pub(crate) fn new_with_program(
         program: impl Into<String>,
         model: Option<String>,
         full_access: bool,
@@ -292,6 +292,8 @@ impl AcpTransport for ClaudeAcpAdapter {
             SpawnIo::Adapter,
             self.discussion_id.as_deref(),
             self.launch.worker_context.as_ref(),
+            self.launch.room_agent_context.as_ref(),
+            self.launch.workflow_step_context.as_ref(),
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child
@@ -302,52 +304,85 @@ impl AcpTransport for ClaudeAcpAdapter {
             .stdout
             .take()
             .ok_or_else(|| AcpError::Transport("claude stdout unavailable".into()))?;
+        let stderr = StderrTail::capture(child.stderr.take());
         self.process.install(child, &cancel).await?;
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|error| AcpError::Transport(format!("write claude prompt: {error}")))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|error| AcpError::Transport(format!("close claude prompt stdin: {error}")))?;
+        if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+            return Err(self
+                .process
+                .prompt_write_failure("claude", "write claude prompt", error, &cancel, stderr)
+                .await);
+        }
+        if let Err(error) = stdin.shutdown().await {
+            return Err(self
+                .process
+                .prompt_write_failure(
+                    "claude",
+                    "close claude prompt stdin",
+                    error,
+                    &cancel,
+                    stderr,
+                )
+                .await);
+        }
         drop(stdin);
 
         let mut lines = BufReader::new(stdout).lines();
         let mut failure: Option<String> = None;
+        // Input of the tool call in progress, streamed as partial JSON.
+        let mut tool_input: Option<String> = None;
         loop {
             match lines.next_line().await {
-                Ok(Some(line)) => match parse_claude_stream_line(&line) {
-                    StreamJsonEvent::Text(text) => {
-                        let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
+                Ok(Some(line)) => {
+                    if let Some(model) = crate::agents::provenance::claude_observed_model(&line) {
+                        let _ = events.send(AcpSessionEvent::ModelObserved(model)).await;
                     }
-                    StreamJsonEvent::Usage {
-                        input_tokens,
-                        output_tokens,
-                        ..
-                    } => {
-                        let _ = events
-                            .send(AcpSessionEvent::Usage {
-                                input_tokens,
-                                output_tokens,
-                            })
-                            .await;
+                    match parse_claude_stream_line(&line) {
+                        StreamJsonEvent::Text(text) => {
+                            let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
+                        }
+                        StreamJsonEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            prompt_cache,
+                            ..
+                        } => {
+                            let _ = events
+                                .send(AcpSessionEvent::Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                    prompt_cache,
+                                })
+                                .await;
+                        }
+                        StreamJsonEvent::ToolStart(name) => {
+                            tool_input = Some(String::new());
+                            let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
+                        }
+                        StreamJsonEvent::ToolInputDelta(partial) => {
+                            if let Some(input) = tool_input.as_mut() {
+                                input.push_str(&partial);
+                            }
+                        }
+                        StreamJsonEvent::ToolEnd => {
+                            let target = tool_input.take().and_then(|input| {
+                                crate::agents::activity::tool_input_target(&input)
+                            });
+                            if let Some(target) = target {
+                                let _ = events.send(AcpSessionEvent::ToolTarget(target)).await;
+                            }
+                        }
+                        StreamJsonEvent::TerminalError(terminal_failure) => {
+                            failure = Some(terminal_failure.user_message());
+                        }
+                        // The adapter carries its own ACP session identity.
+                        StreamJsonEvent::SessionId(_) | StreamJsonEvent::Skip => {}
                     }
-                    StreamJsonEvent::ToolStart(name) => {
-                        let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
-                    }
-                    StreamJsonEvent::TerminalError(terminal_failure) => {
-                        failure = Some(terminal_failure.user_message());
-                    }
-                    // The adapter carries its own ACP session identity.
-                    StreamJsonEvent::ToolInputDelta(_)
-                    | StreamJsonEvent::ToolEnd
-                    | StreamJsonEvent::SessionId(_)
-                    | StreamJsonEvent::Skip => {}
-                },
+                }
                 Ok(None) => break,
                 Err(error) => {
-                    return Err(AcpError::Transport(format!("read claude stdout: {error}")));
+                    return Err(stderr
+                        .into_error("claude", format!("read claude stdout: {error}"))
+                        .await);
                 }
             }
         }
@@ -358,10 +393,11 @@ impl AcpTransport for ClaudeAcpAdapter {
             return Err(AcpError::Transport(failure));
         }
         if !status.success() {
-            return Err(AcpError::Transport(format!(
-                "claude exited with status {status}"
-            )));
+            return Err(stderr
+                .into_error("claude", format!("claude exited with status {status}"))
+                .await);
         }
+        stderr.discard("claude").await;
         let _ = events.send(AcpSessionEvent::Completed).await;
         Ok(())
     }
@@ -399,6 +435,7 @@ mod tests {
         # Match the CLI's stdin contract before emitting a completed response.
         # Exiting early races the adapter's write, especially under coverage.
         cat >/dev/null
+        printf '%s\n' '{"type":"assistant","message":{"model":"fixture-claude-model","content":[]}}'
         case "$*" in
           *--resume*)
             printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"resumed"}}}'
@@ -461,6 +498,9 @@ mod tests {
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("created".into())));
         assert!(events.contains(&AcpSessionEvent::Completed));
+        assert!(events.contains(&AcpSessionEvent::ModelObserved(
+            "fixture-claude-model".into()
+        )));
 
         // Second turn: has_run_before is now true, so `--resume` is used.
         let (tx, rx) = mpsc::channel(16);
@@ -469,6 +509,55 @@ mod tests {
             .unwrap_or_else(|error| panic!("second prompt failed: {error}"));
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("resumed".into())));
+    }
+
+    /// KT-795 — cache counts and the completed tool input reach the ACP events.
+    #[tokio::test]
+    async fn prompt_reports_cache_usage_and_the_completed_tool_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+        );
+        let adapter = std::sync::Arc::new(ClaudeAcpAdapter::new_with_program(
+            fixture.to_string_lossy(),
+            None,
+            false,
+        ));
+        let mut host = AcpHost::new(1, adapter);
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        host.prompt(&target, "orchestrate", tx).await.unwrap();
+        let events = drain(rx).await;
+
+        let tool_call = events
+            .iter()
+            .position(|event| {
+                *event
+                    == AcpSessionEvent::ToolCall {
+                        name: "Read".into(),
+                    }
+            })
+            .expect("tool call reported");
+        let tool_target = events
+            .iter()
+            .position(|event| *event == AcpSessionEvent::ToolTarget("src/lib.rs".into()))
+            .expect("tool target reported");
+        assert!(tool_call < tool_target, "{events:?}");
+        assert!(events.contains(&AcpSessionEvent::Usage {
+            input_tokens: 48,
+            output_tokens: 21_545,
+            prompt_cache: crate::agents::runner::PromptCacheUsage {
+                cached_prompt_tokens: Some(1_554_330),
+                cache_write_prompt_tokens: Some(80_271),
+            },
+        }));
+        assert!(events.contains(&AcpSessionEvent::ModelObserved(
+            "claude-opus-5-5-20260915".into()
+        )));
     }
 
     #[tokio::test]

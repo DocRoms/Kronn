@@ -738,6 +738,7 @@ fn workflow_step_api_call_roundtrip() {
         api_timeout_ms: Some(15_000),
         api_max_retries: Some(3),
         api_output_var: Some("issues".into()),
+        api_response: None,
         gate_message: None,
         gate_request_changes_target: None,
         gate_notify_url: None,
@@ -758,6 +759,8 @@ fn workflow_step_api_call_roundtrip() {
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     };
     let json = serde_json::to_string(&step).unwrap();
     let parsed: WorkflowStep = serde_json::from_str(&json).unwrap();

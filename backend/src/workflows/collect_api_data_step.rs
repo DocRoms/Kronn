@@ -586,7 +586,7 @@ fn outcome(
                 RunStatus::Success
             },
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: started.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -598,7 +598,11 @@ fn outcome(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }

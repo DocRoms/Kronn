@@ -41,15 +41,18 @@ const actionRelay = vi.hoisted(() => ({ onAction: null as ((intent: {
 }) => void) | null }));
 
 vi.mock('../../lib/api', () => ({
+  projects: { list: vi.fn().mockResolvedValue([]) },
   discussionActions: { get: vi.fn(), cancel: vi.fn(), launch: vi.fn() },
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
   pages: {
     list: vi.fn(), get: vi.fn(), revisions: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
+    exportArtifact: vi.fn(), previewImport: vi.fn(), importArtifact: vi.fn(),
   },
   workflows: { triggerStream: vi.fn() },
 }));
+vi.mock('../../lib/downloadBlob', () => ({ triggerDownload: vi.fn() }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({
     locale: 'fr',
@@ -69,6 +72,7 @@ import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '.
 import { requestRenderedPageHtml } from '../../lib/live-page-sandbox';
 import { HtmlRevisionDiff } from '../../components/HtmlCodeEditor';
 import { PagesPage } from '../PagesPage';
+import { triggerDownload } from '../../lib/downloadBlob';
 
 function getCanonicalPageRow(title: string): HTMLElement {
   const section = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
@@ -119,6 +123,53 @@ afterEach(() => {
 });
 
 describe('PagesPage', () => {
+  it('downloads the portable JSON bundle exactly once for synchronous clicks', async () => {
+    const bundle = { kind: 'kronn.artifact', version: 1, artifact: { html: '<h1>Équipe</h1>' } };
+    vi.mocked(pagesApi.exportArtifact).mockResolvedValue(bundle as never);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    const button = screen.getByRole('button', { name: 'pages.exportArtifact' });
+    act(() => { button.click(); button.click(); });
+    await waitFor(() => expect(triggerDownload).toHaveBeenCalled());
+    expect(pagesApi.exportArtifact).toHaveBeenCalledTimes(1);
+    expect(pagesApi.exportArtifact).toHaveBeenCalledWith(page.id);
+    const [filename, blob] = vi.mocked(triggerDownload).mock.calls.at(-1)!;
+    expect(filename).toBe('adobe-signals.kronn-artifact.json');
+    expect(JSON.parse(await blob.text())).toEqual(bundle);
+  });
+
+  it('says which secrets the exported bundle masked', async () => {
+    vi.mocked(pagesApi.exportArtifact).mockResolvedValue({ kind: 'kronn.artifact', version: 1, redacted_fields: [
+      { kind: 'quick_api', resource_id: 'qa', name: 'Metrics', field: 'api_headers.Authorization' },
+    ] } as never);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.exportArtifact' }));
+    expect(await screen.findByTestId('artifact-export-redacted')).toHaveTextContent('imp.exportRedacted');
+  });
+
+  it('offers an import even when no Artifact exists', async () => {
+    vi.mocked(pagesApi.list).mockResolvedValue([]);
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.import.title' }));
+    expect(await screen.findByRole('dialog', { name: 'pages.import.title' })).toBeInTheDocument();
+    expect(pagesApi.importArtifact).not.toHaveBeenCalled();
+  });
+
+  it('links an Artifact to its exact source message even in standalone mode', async () => {
+    vi.mocked(pagesApi.discussions).mockResolvedValue([{
+      discussion_id: 'source-disc', title: 'Original discussion', relation: 'created_from',
+      archived: false, source_message_id: 'source-message',
+    }]);
+    render(<PagesPage />);
+    const link = await screen.findByRole('link', { name: 'Original discussion · pages.sourceMessage' });
+    expect(link).toHaveAttribute('href', expect.stringContaining('#discussion-source-disc?message=source-message'));
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
   it('opens the shared native action card from a sandbox intention', async () => {
     const pageAction: LivePageAction = {
       id: 'page-action:page-1:refresh', live_page_id: 'page-1', live_page_revision_id: 'rev-2',
@@ -153,6 +204,47 @@ describe('PagesPage', () => {
     expect(screen.queryByTestId(`live-page-action-${pageAction.id}`)).not.toBeInTheDocument();
     click();
     expect(screen.getByRole('button', { name: /Refresh report/ })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps an open card and what was typed in it across two auto-refreshes', async () => {
+    const pageAction: LivePageAction = {
+      id: 'page-action:page-1:frame', live_page_id: 'page-1', live_page_revision_id: 'rev-2',
+      action_ref: 'frame', kind: 'workflow', target_id: 'wf-1', target_name: 'Frame ticket',
+      project_id: null, project_name: null, state: 'proposed', shared_run_id: null,
+      values: [{
+        name: 'banc', label: 'Banc', placeholder: 'ollama', description: null, required: false,
+        allow_manual_override: false, provenance: 'user_input',
+      }],
+      result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
+      finished_at: null, created_at: page.created_at, updated_at: page.updated_at, stale_source: false, binding_key: null,
+    };
+    vi.mocked(pagesApi.actions).mockResolvedValue([pageAction]);
+    vi.useFakeTimers();
+    try {
+      render(<PagesPage />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      act(() => actionRelay.onAction?.({
+        actionRef: 'frame', bindings: {},
+        anchor: { left: 24, top: 40, width: 120, height: 32 },
+      }));
+      const field = screen.getByPlaceholderText('disc.action.placeholderExample:ollama');
+      fireEvent.change(field, { target: { value: 'litellm' } });
+
+      vi.mocked(pagesApi.actions).mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+      expect(pagesApi.actions).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId(`live-page-action-${pageAction.id}`)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('disc.action.placeholderExample:ollama')).toHaveValue('litellm');
+
+      // A refresh that no longer offers the action closes its card.
+      vi.mocked(pagesApi.actions).mockResolvedValue([]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(screen.queryByTestId(`live-page-action-${pageAction.id}`)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fails closed on an action removed from the current Page revision', async () => {
@@ -219,6 +311,48 @@ describe('PagesPage', () => {
     fireEvent.click(refreshButton);
 
     await waitFor(() => expect(pagesApi.list).toHaveBeenCalledOnce());
+  });
+
+  // KT-736: the mount effect used to depend on `refresh`, whose identity
+  // changes with `selectedId` — so it re-fired (and doubled the GET) on
+  // mount and on every page switch, on top of the 30s auto-refresh timer.
+  it('fetches the Page detail exactly once per 30s auto-refresh cycle', async () => {
+    vi.useFakeTimers();
+    try {
+      // Earlier specs in this file may still have an unresolved fetch chain
+      // recorded on this shared mock; start the count from this render only.
+      vi.mocked(pagesApi.get).mockClear();
+      render(<PagesPage />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+
+      vi.mocked(pagesApi.get).mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+
+      vi.mocked(pagesApi.get).mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetches a newly selected Page detail exactly once, not twice', async () => {
+    const other: LivePage = { ...page, id: 'page-2', title: 'Second' };
+    const otherDetail: LivePageDetail = { ...detail, ...other };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === other.id ? otherDetail : detail);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    vi.mocked(pagesApi.get).mockClear();
+
+    fireEvent.click(getCanonicalPageRow('Second'));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+    // Give a stray re-triggered effect a chance to fire before counting.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    expect(pagesApi.get).toHaveBeenCalledTimes(1);
   });
 
   it('uses checkbox semantics for transient Page bulk selection', async () => {

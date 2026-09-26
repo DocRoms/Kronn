@@ -24,6 +24,7 @@ import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils
 import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import { CopyIdPill } from '../CopyIdPill';
 import { WorkflowWizard } from './WorkflowWizard';
+import { StepTokensBadge } from './StepTokens';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -415,6 +416,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   const isTransformData = step.step_type?.type === 'TransformData';
   const isPublishPage = step.step_type?.type === 'PublishPageData';
   const isSubWorkflow = step.step_type?.type === 'SubWorkflow';
+  const isTriggerWorkflow = step.step_type?.type === 'TriggerWorkflow';
   const publishPageId = step.page_publish?.page_id;
   // Only the Agent step type actually consumes the `agent` field; every
   // other type delegates: Batch → QP, ApiCall / BatchApiCall → HTTP, Notify
@@ -452,12 +454,13 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   // real id yet → we skip the fetch and show a "created on save" note.
   const [childWf, setChildWf] = useState<Workflow | null>(null);
   const subRefIsBundle = !!step.sub_workflow_id?.startsWith('@bundle:');
+  const launchesChild = isSubWorkflow || isTriggerWorkflow;
   useEffect(() => {
-    if (!isSubWorkflow || !step.sub_workflow_id || subRefIsBundle) { setChildWf(null); return; }
+    if (!launchesChild || !step.sub_workflow_id || subRefIsBundle) { setChildWf(null); return; }
     let alive = true;
     workflowsApi.get(step.sub_workflow_id).then(w => { if (alive) setChildWf(w); }).catch(() => {});
     return () => { alive = false; };
-  }, [isSubWorkflow, step.sub_workflow_id, subRefIsBundle]);
+  }, [launchesChild, step.sub_workflow_id, subRefIsBundle]);
 
   const current = getStepTest(cacheKey);
   const testMockInput = current?.mockInput ?? '';
@@ -660,7 +663,9 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
                       ? 'page-data'
                       : isSubWorkflow
                         ? 'subworkflow'
-                        : 'agent';
+                        : isTriggerWorkflow
+                          ? 'triggerworkflow'
+                          : 'agent';
   return (
     <div className="wf-step-card" data-step-type={cardKind}>
       <div className="flex-row gap-4">
@@ -787,6 +792,14 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             </span>
           </span>
         )}
+        {isTriggerWorkflow && (
+          <span className="wf-step-kind-badge" data-kind="triggerworkflow" title={t('wiz.triggerWorkflowHint')}>
+            <Play size={10} /> {t('wiz.stepTypeTriggerWorkflow')}
+            <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+              {childWf?.name ?? '…'}
+            </span>
+          </span>
+        )}
         {isAgentLike && (
           <StepAgentSwitcher
             step={step}
@@ -816,7 +829,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
                 actually exec the binary — UX feedback 2026-04-29),
               - Gate (a human-pause step has nothing to test).
             Hiding it on those types keeps the row clean. */}
-        {!isApi && !isNotify && !isExec && !isGate && !isBatchApi && !isJsonData && !isPublishPage && !isSubWorkflow && !nested && (
+        {!isApi && !isNotify && !isExec && !isGate && !isBatchApi && !isJsonData && !isPublishPage && !isSubWorkflow && !isTriggerWorkflow && !nested && (
           <button
             className="wf-test-btn"
             onClick={() => { if (!testRunning) setTestOpen(!testOpen); }}
@@ -916,6 +929,19 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             <div className="wf-batch-step-row" key={`${write.dataset}-${writeIndex}`}>
               <span className="text-xs text-muted">{write.dataset}</span>
               <code className="text-xs">{write.operation} ← {write.value_from}</code>
+            </div>
+          ))}
+        </div>
+      ) : isTriggerWorkflow ? (
+        <div className="wf-subworkflow-steps" style={{ marginTop: 6 }}>
+          <p className="text-xs text-ghost" style={{ margin: 0 }}>
+            {t('wf.triggerWorkflowLaunches', childWf?.name ?? step.sub_workflow_id ?? '…')}
+          </p>
+          {Object.entries(step.sub_workflow_variables ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, template]) => (
+            <div key={name} className="flex-row gap-2 text-xs" style={{ padding: '2px 0' }}>
+              <code>{name}</code>
+              <span className="text-ghost">←</span>
+              <code>{template}</code>
             </div>
           ))}
         </div>
@@ -1349,6 +1375,7 @@ function compactStepMeta(step: WorkflowStep): {
     case 'TransformData': return { kind: 'transform-data', Icon: Shuffle, usesTokens: false, labelKey: 'wiz.stepTypeTransformData' };
     case 'PublishPageData': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypePublishPage' };
     case 'SubWorkflow': return { kind: 'subworkflow', Icon: GitBranch, usesTokens: false, labelKey: 'wiz.stepTypeSubWorkflow' };
+    case 'TriggerWorkflow': return { kind: 'triggerworkflow', Icon: Play, usesTokens: false, labelKey: 'wiz.stepTypeTriggerWorkflow' };
     case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true, labelKey: 'wiz.stepTypeBatchQP' };
     default: return { kind: 'agent', Icon: Sparkles, usesTokens: true, labelKey: 'wiz.stepTypeAgent' }; // Agent (or legacy undefined)
   }
@@ -1848,6 +1875,13 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
         </div>
       )}
 
+      {workflow.concurrency_key && (
+        <div className="wf-info-row">
+          <span className="wf-info-label">{t('wiz.concurrencyKey')}</span>
+          <code>{workflow.concurrency_key}</code>
+        </div>
+      )}
+
       {/* Steps — compact pipeline plus one focused preview by default. */}
       {(() => {
         const agentCount = workflow.steps.filter(s => compactStepMeta(s).usesTokens).length;
@@ -2247,15 +2281,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                       implement / review are usually the heavies; the
                       "désagentification" pattern moves the cheap mechanical
                       ones to ApiCall / Exec / Notify). */}
-                  {completed && completed.tokens_used > 0 && (
-                    <span
-                      className="text-2xs text-ghost"
-                      title={t('wf.stepTokensHint')}
-                      style={{ color: 'var(--kr-accent-ink)' }}
-                    >
-                      {completed.tokens_used.toLocaleString()} {t('wf.stepTokensSuffix')}
-                    </span>
-                  )}
+                  {completed && <StepTokensBadge sr={completed} t={t} className="text-2xs text-ghost" />}
 
                   {/* Current step indicator + live elapsed */}
                   {isCurrent && (

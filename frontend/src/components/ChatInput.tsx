@@ -27,6 +27,7 @@ import {
   loadDraft,
   saveDraft,
   clearDraft,
+  clearSubmittedDraft,
   type DraftRoutingTiers,
 } from '../lib/chat-drafts';
 import {
@@ -130,6 +131,10 @@ export interface ChatInputProps {
   externalConnections?: ExternalApiConnectionView[];
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
+  /** Voice conversation and read-aloud need this page's playback; hidden where it has none. */
+  showVoiceControls?: boolean;
+  /** Debates are launched from the full discussion only. */
+  showDebate?: boolean;
 }
 
 export function ChatInput({
@@ -151,6 +156,8 @@ export function ChatInput({
   onStop,
   onOrchestrate,
   onTtsToggle,
+  showVoiceControls = true,
+  showDebate = true,
   onWorktreeErrorDismiss,
   onWorktreeRetry,
   isAgentRestricted,
@@ -278,6 +285,8 @@ export function ChatInput({
   // and clears on successful send.
   const [restoredDraftAt, setRestoredDraftAt] = useState<string | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Text restored from a send still awaiting its receipt, until anything is typed. */
+  const restoredSubmittedRef = useRef<string | null>(null);
   const currentDiscIdRef = useRef<string | null>(null);
   const [mentionTierOverrides, setMentionTierOverrides] = useState<DraftRoutingTiers>({});
   const mentionTierOverridesRef = useRef<DraftRoutingTiers>({});
@@ -300,6 +309,7 @@ export function ChatInput({
   const scheduleDraftSave = useCallback((text: string) => {
     const discId = currentDiscIdRef.current;
     if (!discId) return;
+    restoredSubmittedRef.current = null;
     if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
     // 250ms debounce — fast enough to survive a "type-and-tab-away" gesture
     // but sparse enough to never hammer localStorage on long messages.
@@ -330,12 +340,12 @@ export function ChatInput({
     return () => window.removeEventListener('kronn:composer-prefill', handler);
   }, [discussion?.id, updateChatInput, scheduleDraftSave]);
 
-  const flushDraftNow = useCallback((discId: string, text: string) => {
+  const flushDraftNow = useCallback((discId: string, text: string, submitted = false) => {
     if (draftSaveTimerRef.current) {
       clearTimeout(draftSaveTimerRef.current);
       draftSaveTimerRef.current = null;
     }
-    saveDraft(discId, text, mentionTierOverridesRef.current);
+    saveDraft(discId, text, mentionTierOverridesRef.current, { submitted });
   }, []);
 
   // On discussion switch: flush the previous discussion's draft (without
@@ -367,6 +377,7 @@ export function ChatInput({
     setPreferredTiers(rememberedTiers);
 
     const saved = loadDraft(nextDiscId);
+    restoredSubmittedRef.current = saved?.submitted ? saved.text : null;
     if (saved) {
       updateChatInput(saved.text);
       updateMentionTierOverrides(saved.routingTiers);
@@ -405,9 +416,10 @@ export function ChatInput({
       if (detail.discussionId !== currentDiscIdRef.current) {
         // The user switched rooms while the request was in flight. The
         // submitted snapshot belongs to the previous room: remove it only
-        // after durable acceptance; on refusal leave it stored so returning
-        // to that room restores the unsent message.
-        if (detail.settlement === 'accepted') clearDraft(detail.discussionId);
+        // after durable acceptance, and only if it is still that snapshot (a
+        // newer draft typed there before leaving is kept); on refusal leave it
+        // stored so returning to that room restores the unsent message.
+        if (detail.settlement === 'accepted') clearSubmittedDraft(detail.discussionId, detail.message);
         return;
       }
 
@@ -415,9 +427,19 @@ export function ChatInput({
       const submittedTiers = submittedRoutingTiersRef.current[detail.discussionId] ?? {};
       if (detail.settlement === 'accepted') {
         delete submittedRoutingTiersRef.current[detail.discussionId];
-        if (current.trim()) {
+        // An input remounted before the receipt restored the submitted text
+        // itself as a draft, and nothing was typed since: that is the
+        // accepted message, not a new one.
+        const isSubmittedSnapshot = restoredSubmittedRef.current === detail.message
+          && current === detail.message;
+        if (current.trim() && !isSubmittedSnapshot) {
           flushDraftNow(detail.discussionId, current);
         } else {
+          if (isSubmittedSnapshot) {
+            restoredSubmittedRef.current = null;
+            updateChatInput('');
+            setRestoredDraftAt(null);
+          }
           clearDraft(detail.discussionId);
           if (currentDiscIdRef.current === detail.discussionId) {
             updateMentionTierOverrides({});
@@ -887,7 +909,7 @@ export function ChatInput({
       ...submittedRoutingTiersRef.current,
       [discussion.id]: { ...mentionTierOverridesRef.current },
     };
-    flushDraftNow(discussion.id, msg);
+    flushDraftNow(discussion.id, msg, true);
     setRestoredDraftAt(null);
     updateChatInput('');
     updateMentionTierOverrides({});
@@ -1798,6 +1820,7 @@ export function ChatInput({
               {sttState === 'recording' ? <MicOff size={15} /> : <Mic size={15} />}
             </button>
 
+            {showVoiceControls && <>
             {/* Voice conversation mode */}
             <button
               className="disc-tool-btn"
@@ -1831,6 +1854,7 @@ export function ChatInput({
             >
               {ttsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
             </button>
+            </>}
 
             {discussionNotesEnabled && (
               <span className="disc-note-tools" role="group" aria-label={t('disc.note.label')}>
@@ -1864,7 +1888,7 @@ export function ChatInput({
             )}
 
             {/* Debate / multi-agent */}
-            <div className="relative">
+            {showDebate && <div className="relative">
               <button
                 className="disc-tool-btn"
                 data-active={showDebatePopover}
@@ -2020,7 +2044,7 @@ export function ChatInput({
                   </button>
                 </div>
               )}
-            </div>
+            </div>}
 
           </div>
 

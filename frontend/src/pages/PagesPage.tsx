@@ -3,7 +3,7 @@ import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
   History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
-  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Workflow, X,
+  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
 } from 'lucide-react';
 import type {
   LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
@@ -14,11 +14,16 @@ import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
 import {
   buildSandboxDocument,
   hostTheme,
+  hostThemeTokens,
   createLivePageOpenLinkRelay,
   requestRenderedPageHtml,
   runtimeData,
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
+import { triggerDownload } from '../lib/downloadBlob';
+import { exportRedactionNotice } from '../lib/redactedFields';
+import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
@@ -179,8 +184,25 @@ export function PagesPage({
     kind: 'success' | 'error';
     message: string;
   } | null>(null);
-  const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | null>(null);
+  const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | 'json' | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportNotice, setExportNotice] = useState<{ pageId: string; text: string } | null>(null);
+  const closeImport = useCallback(() => setImportOpen(false), []);
+  const artifactExportInFlight = useRef(false);
+  const exportArtifact = async () => {
+    if (!detail || artifactExportInFlight.current) return;
+    artifactExportInFlight.current = true; setExportBusy('json'); setExportNotice(null);
+    try {
+      const bundle = await pagesApi.exportArtifact(detail.id);
+      const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
+      triggerDownload(`${detail.slug}.kronn-artifact.json`, blob);
+      setError(null);
+      const notice = await exportRedactionNotice(blob, t);
+      if (notice) setExportNotice({ pageId: detail.id, text: notice });
+    } catch (cause) { setError(userError(cause)); }
+    finally { artifactExportInFlight.current = false; setExportBusy(null); }
+  };
   const exportMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const mosaicMenuRef = useDismissibleDetails<HTMLDetailsElement>();
@@ -281,15 +303,21 @@ export function PagesPage({
     }
   }, [loadDetail, reloadPageActions, selectedId]);
 
+  // `refresh` is rebuilt whenever `selectedId` changes, including from inside
+  // its own call and from `select`. Depending on it directly would re-run the
+  // mount effect on every such change and double the GET /pages/{id} that
+  // call already made — read the latest closure through a ref instead.
+  const refreshRef = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+
   // Initial remote-library synchronization; the state updates happen after
   // the request resolves, not synchronously in the effect body.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { void refreshRef.current(); }, []);
   useEffect(() => {
     if (editingHtml) return undefined;
-    const timer = window.setInterval(() => { void refresh(); }, REFRESH_MS);
+    const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [editingHtml, refresh]);
+  }, [editingHtml]);
 
   const select = useCallback(async (page: LivePage) => {
     if (selectionMode) {
@@ -611,7 +639,7 @@ export function PagesPage({
     return () => window.removeEventListener('resize', reposition);
   }, [mosaicMenuRef, positionMosaicMenu]);
   const document = useMemo(
-    () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel, hostTheme()) : '',
+    () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel, hostTheme(), hostThemeTokens()) : '',
     [bridgeChannel, revisionHtml],
   );
   const publishToFrame = useCallback(() => {
@@ -626,11 +654,17 @@ export function PagesPage({
       data: runtimeData(detail),
     }, '*');
   }, [bridgeChannel, detail]);
+  // A content-sized Page reports its height; it only applies to the document that sent it,
+  // so a new revision that does not opt in never inherits the previous one's size.
+  const [frameSize, setFrameSize] = useState<{ doc: string; height: number } | null>(null);
+  const frameDocRef = useRef(document);
+  useEffect(() => { frameDocRef.current = document; }, [document]);
+  const frameHeight = frameSize && frameSize.doc === document ? frameSize.height : null;
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
       setError(null);
       handlePageActionIntent(intent);
-    }, movePageActionAnchor);
+    }, movePageActionAnchor, height => setFrameSize({ doc: frameDocRef.current, height }));
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
@@ -724,6 +758,7 @@ export function PagesPage({
               </>
             ) : (
               <>
+                <button type="button" className="disc-icon-btn" onClick={() => setImportOpen(true)} title={t('pages.import.title')} aria-label={t('pages.import.title')}><Upload size={16} /></button>
                 <button type="button" className="disc-icon-btn" onClick={() => setSelectionMode(true)} title={t('pages.bulk.start')} aria-label={t('pages.bulk.start')}><ListChecks size={16} /></button>
                 <button type="button" className="disc-icon-btn collection-shell-primary-action" onClick={() => void refresh()} title={t('pages.refresh')} aria-label={t('pages.refresh')}><RefreshCw size={15} className={loading ? 'spin' : undefined} /></button>
                 <CollectionSidebarCollapseButton label={t('collection.closeCollection')} onCollapse={() => setSidebarOpen(false)} />
@@ -841,6 +876,8 @@ export function PagesPage({
 
       <section className="live-pages-viewer">
         {error && <div className="live-pages-error" role="alert">{error}</div>}
+        {exportNotice && exportNotice.pageId === detail?.id
+          && <div className="live-pages-notice" role="status" data-testid="artifact-export-redacted">{exportNotice.text}</div>}
         {detail ? (
           <>
             <header className="live-pages-viewer-header collection-detail-header">
@@ -913,6 +950,9 @@ export function PagesPage({
                 <details className="live-pages-export-menu" data-testid="live-page-export-menu" ref={exportMenuRef}>
                   <summary><Download size={13} />{t('pages.export')}<ChevronDown size={12} /></summary>
                   <div className="live-pages-export-popover">
+                    <button type="button" onClick={() => void exportArtifact()} disabled={exportBusy !== null}>
+                      {exportBusy === 'json' ? <Loader2 size={13} className="spin" /> : <Braces size={13} />}{t('pages.exportArtifact')}
+                    </button>
                     <button type="button" onClick={() => void exportPage('pdf')} disabled={exportBusy !== null}>
                       {exportBusy === 'pdf' ? <Loader2 size={13} className="spin" /> : <FileDown size={13} />} PDF
                     </button>
@@ -1087,7 +1127,10 @@ export function PagesPage({
                 <div className="live-pages-workflows">
                   <div><MessageSquare size={13} /><strong>{t('pages.linkedDiscussions')}</strong></div>
                   {linkedDiscussions.map(discussion => (
-                    <button key={discussion.discussion_id} type="button" onClick={() => onNavigateDiscussion?.(discussion.discussion_id)} disabled={!onNavigateDiscussion}>
+                    discussion.source_message_id ? <a key={discussion.discussion_id}
+                      href={standaloneDiscussionMessageUrl(discussion.discussion_id, discussion.source_message_id)} target="_blank" rel="noopener noreferrer">
+                      {discussion.title} · {t('pages.sourceMessage')} <ExternalLink size={12} />
+                    </a> : <button key={discussion.discussion_id} type="button" onClick={() => onNavigateDiscussion?.(discussion.discussion_id)} disabled={!onNavigateDiscussion}>
                       {discussion.title}{discussion.relation === 'created_from' ? ` · ${t('pages.createdFrom')}` : ''}
                     </button>
                   ))}
@@ -1186,9 +1229,10 @@ export function PagesPage({
                 )}
               </div>
             ) : (
-              <div className="live-pages-frame-shell">
+              <div className={frameHeight ? "live-pages-frame-shell is-content-sized" : "live-pages-frame-shell"}>
                 <iframe
                   ref={iframeRef}
+                  style={frameHeight ? { height: frameHeight } : undefined}
                   title={detail.title}
                   sandbox="allow-scripts"
                   srcDoc={document}
@@ -1211,6 +1255,11 @@ export function PagesPage({
           <div className="live-pages-empty">{t('pages.empty')}</div>
         )}
       </section>
+      {importOpen && <ArtifactImportDialog onClose={closeImport} onImported={page => {
+        setImportOpen(false);
+        setPages(previous => [...previous, page]);
+        void select(page);
+      }} />}
     </div>
   );
 }

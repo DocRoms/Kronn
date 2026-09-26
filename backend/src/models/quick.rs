@@ -689,6 +689,9 @@ pub struct QuickExecExportEnvelope {
     pub version: u32,
     pub exported_at: DateTime<Utc>,
     pub quick_exec: QuickExec,
+    /// Fields whose literal secret was replaced before export (never the value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
 }
 
 /// Canonicalize the JSON body accepted by Quick API authoring surfaces.
@@ -803,6 +806,9 @@ pub struct QuickApiExportEnvelope {
     /// `id`, `project_id`, `created_at`, `updated_at` are present on the
     /// wire but reset at import — fresh values are minted by the importer.
     pub quick_api: QuickApi,
+    /// Fields whose literal secret was replaced before export (never the value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
 }
 
 /// 0.6.0 — payload for `POST /api/quick-apis/:id/run`. Lets the user

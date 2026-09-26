@@ -99,13 +99,46 @@ export function liveActionBindingKey(bindings: Record<string, string>): string {
  * Mirror the host data-theme into the opaque iframe. Pages style explicit
  * light/dark values and may fall back to their media query for custom themes.
  */
-export function postLivePageTheme(target: Window, channelId: string, theme: string): void {
+export function postLivePageTheme(
+  target: Window,
+  channelId: string,
+  theme: string,
+  tokens: Record<string, string> = {},
+): void {
   target.postMessage({
     type: 'kronn:page-theme',
     version: 1,
     channel_id: channelId,
     theme,
+    tokens,
   }, '*');
+}
+
+/** Kronn's structural colours, mirrored into the Page as `--kr-<name>` so a Page can
+ * paint its surfaces, rules and text in the shell's palette — and match the action
+ * card the host draws over it. Semantic colours are deliberately not shared. */
+export const LIVE_PAGE_THEME_TOKENS = [
+  'bg-base', 'bg-surface', 'bg-elevated', 'text-primary', 'text-secondary', 'text-ghost', 'border-medium',
+] as const;
+
+/** A colour value and nothing else: these land in a Page's stylesheet. */
+const SAFE_TOKEN_VALUE = /^[#(),.%\s\w-]{1,64}$/;
+
+function safeTokens(tokens: Record<string, string> | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of LIVE_PAGE_THEME_TOKENS) {
+    const value = tokens?.[name];
+    if (typeof value === 'string' && SAFE_TOKEN_VALUE.test(value) && !/url\s*\(/i.test(value)) out[name] = value;
+  }
+  return out;
+}
+
+/** The host's current values for {@link LIVE_PAGE_THEME_TOKENS}. */
+export function hostThemeTokens(): Record<string, string> {
+  const style = getComputedStyle(document.documentElement);
+  const read: Record<string, string> = {};
+  for (const name of LIVE_PAGE_THEME_TOKENS) read[name] = style.getPropertyValue('--kr-' + name).trim();
+  return safeTokens(read);
 }
 
 /** The theme the host is currently showing, read from the attribute
@@ -137,12 +170,13 @@ export function postLivePageActionSlot(
 export function postLivePageActionStates(
   target: Window,
   channelId: string,
-  launches: Pick<LivePageAction, 'action_ref' | 'binding_key' | 'state'>[],
+  launches: Pick<LivePageAction, 'id' | 'action_ref' | 'binding_key' | 'state'>[],
 ): void {
   const states = launches.map(launch => ({
     action_ref: launch.action_ref,
     binding_key: launch.binding_key ?? '',
     state: launch.state,
+    launch_id: launch.id,
   }));
   target.postMessage({ type: 'kronn:page-action-states', version: 1, channel_id: channelId, states }, '*');
 }
@@ -184,7 +218,12 @@ const ACTION_STATE_STYLE = `<style>
  * data bridge. The iframe itself must still use `sandbox="allow-scripts"`
  * without `allow-same-origin`; CSP and sandbox are complementary boundaries.
  */
-export function buildSandboxDocument(html: string, channelId: string, initialTheme?: string | null): string {
+export function buildSandboxDocument(
+  html: string,
+  channelId: string,
+  initialTheme?: string | null,
+  initialTokens?: Record<string, string> | null,
+): string {
   const safeChannel = JSON.stringify(channelId).replaceAll('<', '\\u003c');
   // Set before the Page's own markup parses, so it never paints in the wrong
   // theme for a frame. Runtime changes arrive by message instead, because
@@ -192,7 +231,9 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
   const theme = typeof initialTheme === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(initialTheme)
     ? `<script>document.documentElement.setAttribute('data-theme',${JSON.stringify(initialTheme)})</script>`
     : '';
-  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${theme}${ACTION_STATE_STYLE}`;
+  const tokens = Object.entries(safeTokens(initialTokens));
+  const palette = tokens.length ? `<style>:root{${tokens.map(([k, v]) => `--kr-${k}:${v}`).join(';')}}</style>` : '';
+  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${theme}${palette}${ACTION_STATE_STYLE}`;
   const bridge = `<script>(()=>{
     const channel=${safeChannel};
     const userActivation=navigator.userActivation;
@@ -211,16 +252,21 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     // document scrolls: the host draws the card in a layer that does NOT
     // scroll with us, so a one-shot anchor drifts away from its row.
     let anchored=null;
+    let anchoredAt=null;
     let anchorQueued=false;
     // A row, not the button: the card belongs under the whole line it acts on.
+    // A Page may name where its collapse opens: the card then sits under the CTA's own
+    // block instead of after the whole table row that happens to contain it.
+    const slotHost=element=>closest.call(element,'[data-kronn-action-slot-host]');
     const anchorRect=element=>{
-      const row=closest.call(element,'tr,li')||element;
+      const row=slotHost(element)||closest.call(element,'tr,li')||element;
       const rect=getBounds.call(row);
       return {left:rect.left,top:rect.top,width:rect.width,height:rect.height};
     };
     // The collapse the host asked us to open, in THIS document, so the rows
     // below are pushed down instead of being covered by a floating panel.
     let slotEl=null;
+    let slotSpec=null;
     const dropSlot=()=>{
       if(slotEl&&slotEl.parentNode)slotEl.parentNode.removeChild(slotEl);
       slotEl=null;
@@ -236,24 +282,29 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     };
     const openSlot=(ref,key,height)=>{
       const cta=findCta(ref,key);
-      const row=cta?closest.call(cta,'tr,li')||cta:null;
+      const host=cta?slotHost(cta):null;
+      const row=host||(cta?closest.call(cta,'tr,li')||cta:null);
       if(!row||!row.parentNode){dropSlot();return;}
-      const inRow=row.tagName==='TR';
+      const inRow=!host&&row.tagName==='TR';
       if(!slotEl||slotEl.__row!==row){
         dropSlot();
-        slotEl=document.createElement(inRow?'tr':'li');
+        slotEl=document.createElement(host?'div':inRow?'tr':'li');
         slotEl.setAttribute('data-kronn-action-slot','');
         if(inRow){
+          // Exactly the row's own span: an oversized colspan adds phantom columns, and a
+          // table-layout:fixed table then shares its free width with them.
+          const span=Array.prototype.reduce.call(row.cells,(n,c)=>n+(c.colSpan||1),0)||1;
           const cell=document.createElement('td');
-          cell.setAttribute('colspan','99');
+          cell.setAttribute('colspan',String(span));
           cell.style.padding='0';
           cell.style.border='0';
           slotEl.appendChild(cell);
-        }else{
+        }else if(!host){
           slotEl.style.listStyle='none';
         }
         slotEl.__row=row;
-        row.parentNode.insertBefore(slotEl,row.nextSibling);
+        if(host)host.appendChild(slotEl);
+        else row.parentNode.insertBefore(slotEl,row.nextSibling);
       }
       const box=inRow?slotEl.firstChild:slotEl;
       box.style.height=height+'px';
@@ -262,7 +313,9 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     const sendAnchor=()=>{
       anchorQueued=false;
       if(!anchored||!linkPort)return;
-      if(!anchored.isConnected){anchored=null;return;}
+      // A Page that redraws its rows replaces the CTA: follow its successor.
+      if(!anchored.isConnected)anchored=anchoredAt&&findCta(anchoredAt.ref,anchoredAt.key);
+      if(!anchored)return;
       // With a slot open the card fills it, so the slot IS the anchor.
       const inSlot=Boolean(slotEl&&slotEl.isConnected);
       const rect=inSlot?getBounds.call(slotEl):anchorRect(anchored);
@@ -293,20 +346,31 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     const markActions=()=>{
       document.querySelectorAll('[data-kronn-action]').forEach(element=>{
         const ref=(getAttribute.call(element,'data-kronn-action')||'').trim();
-        const state=actionStates.get(ref+'\\n'+bindingKey(readBindings(element)));
-        if(state){
+        const entry=actionStates.get(ref+'\\n'+bindingKey(readBindings(element)));
+        if(entry){
+          const state=entry.state;
           if(getAttribute.call(element,'data-kronn-action-state')!==state)element.setAttribute('data-kronn-action-state',state);
+          // Tells one attempt of a row from the next, even when both succeeded.
+          if(entry.launch){
+            if(getAttribute.call(element,'data-kronn-action-launch')!==entry.launch)element.setAttribute('data-kronn-action-launch',entry.launch);
+          }else element.removeAttribute('data-kronn-action-launch');
           if(state==='launching'||state==='running')element.setAttribute('aria-busy','true');
           else element.removeAttribute('aria-busy');
         }else if(element.hasAttribute('data-kronn-action-state')){
           element.removeAttribute('data-kronn-action-state');
+          element.removeAttribute('data-kronn-action-launch');
           element.removeAttribute('aria-busy');
         }
       });
     };
     // Pages render their rows from data, often after this runs: re-mark
     // whenever rows appear or change their binding, never on our own marks.
-    new MutationObserver(()=>{if(actionStates.size)markActions();}).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['data-kronn-action','data-kronn-bindings']});
+    new MutationObserver(()=>{
+      if(actionStates.size)markActions();
+      // Redrawn rows take the open collapse with them: reopen it under the new row.
+      if(slotSpec&&!(slotEl&&slotEl.isConnected))openSlot(slotSpec.ref,slotSpec.key,slotSpec.height);
+      else if(anchored&&!anchored.isConnected)queueAnchor();
+    }).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['data-kronn-action','data-kronn-bindings']});
     Object.defineProperty(window,'KronnPageData',{configurable:false,get:()=>latest});
     const materializedRoot=()=>{
       const root=document.documentElement.cloneNode(true);
@@ -355,6 +419,7 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         if(!/^[A-Za-z0-9._~-]{1,256}$/.test(actionRef))return;
         const bindings=readBindings(action);
         anchored=action;
+        anchoredAt={ref:actionRef,key:bindingKey(bindings)};
         portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:anchorRect(action)});
         return;
       }
@@ -366,6 +431,45 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     try{
       Object.defineProperty(window,'open',{configurable:false,writable:false,value:url=>relayOpenLink(url)});
     }catch(_error){}
+    // A Page that declares <meta name="kronn-page-height" content="auto"> is sized to its
+    // content by the host, which then scrolls it: the host's action card lives in that same
+    // scroll context and follows the Page natively, instead of chasing it frame by frame.
+    // The html box height is the content height, whatever the current frame size — so a
+    // collapse that closes lets the frame shrink back.
+    let heightSent=-1;
+    let heightQueued=false;
+    const autoHeight=()=>{
+      const meta=document.querySelector('meta[name="kronn-page-height"]');
+      return Boolean(meta)&&(getAttribute.call(meta,'content')||'').trim()==='auto';
+    };
+    const sendHeight=()=>{
+      heightQueued=false;
+      if(!linkPort)return;
+      const height=Math.ceil(getBounds.call(document.documentElement).height);
+      if(!isFinite(height)||height<=0||height>200000||height===heightSent)return;
+      heightSent=height;
+      portPost.call(linkPort,{type:'kronn:page-height',version:1,channel_id:channel,height});
+    };
+    const queueHeight=()=>{
+      if(heightQueued)return;
+      heightQueued=true;
+      if(typeof requestAnimationFrame==='function')requestAnimationFrame(sendHeight);else setTimeout(sendHeight,16);
+    };
+    let heightWatched=false;
+    const watchHeight=()=>{
+      if(!autoHeight())return;
+      document.documentElement.style.overflow='hidden';
+      heightSent=-1;
+      queueHeight();
+      if(heightWatched)return;
+      heightWatched=true;
+      if(typeof ResizeObserver==='function'){
+        const observer=new ResizeObserver(queueHeight);
+        observer.observe(document.documentElement);
+        if(document.body)observer.observe(document.body);
+      }
+      addEventListener('load',queueHeight);
+    };
     addEventListener('message',event=>{
       const message=event.data;
       if(!message||message.version!==1||message.channel_id!==channel)return;
@@ -374,6 +478,7 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         stopImmediate.call(event);
         linkPort=event.ports[0];
         portStart.call(linkPort);
+        watchHeight();
         return;
       }
       if(message.type==='kronn:page-data'){
@@ -385,15 +490,23 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         const t=message.theme;
         if(typeof t!=='string'||t.length>64)return;
         document.documentElement.setAttribute('data-theme',t);
+        const tokens=message.tokens&&typeof message.tokens==='object'?message.tokens:{};
+        for(const name of ${JSON.stringify(LIVE_PAGE_THEME_TOKENS)}){
+          const value=tokens[name];
+          if(typeof value==='string'&&/^[#(),.%\\s\\w-]{1,64}$/.test(value)&&!/url\\s*\\(/i.test(value)){
+            document.documentElement.style.setProperty('--kr-'+name,value);
+          }
+        }
         dispatchEvent(new CustomEvent('kronn:page-theme',{detail:t}));
         return;
       }
       if(message.type==='kronn:page-action-slot'){
         const slot=message.slot;
-        if(!slot){dropSlot();queueAnchor();return;}
+        if(!slot){slotSpec=null;dropSlot();queueAnchor();return;}
         if(typeof slot.action_ref!=='string'||typeof slot.binding_key!=='string')return;
         const height=Number(slot.height);
         if(!isFinite(height)||height<0||height>4000)return;
+        slotSpec={ref:slot.action_ref,key:slot.binding_key,height};
         openSlot(slot.action_ref,slot.binding_key,height);
         return;
       }
@@ -401,7 +514,7 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         if(!Array.isArray(message.states))return;
         actionStates=new Map(message.states
           .filter(entry=>entry&&typeof entry.action_ref==='string'&&typeof entry.binding_key==='string'&&typeof entry.state==='string')
-          .map(entry=>[entry.action_ref+'\\n'+entry.binding_key,entry.state]));
+          .map(entry=>[entry.action_ref+'\\n'+entry.binding_key,{state:entry.state,launch:typeof entry.launch_id==='string'?entry.launch_id:null}]));
         markActions();
         return;
       }
@@ -460,6 +573,7 @@ export function createLivePageOpenLinkRelay(
   openExternal: (url: string, target: string, features: string) => unknown = window.open.bind(window),
   onAction?: (intent: LivePageActionIntent) => void,
   onAnchor?: (anchor: LivePageActionIntent['anchor']) => void,
+  onHeight?: (height: number) => void,
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
   const validAnchor = (anchor: LivePageActionAnchor | undefined): anchor is LivePageActionAnchor => (
@@ -476,6 +590,13 @@ export function createLivePageOpenLinkRelay(
     if (message.type === 'kronn:page-action-anchor') {
       if (!validAnchor(message.anchor)) return;
       onAnchor?.({ ...message.anchor, slot: message.anchor.slot === true });
+      return;
+    }
+    // A content-sized Page reporting its height: layout, not a user action.
+    if ((message as { type?: string }).type === 'kronn:page-height') {
+      const height = (message as { height?: unknown }).height;
+      if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0 || height > 200_000) return;
+      onHeight?.(Math.ceil(height));
       return;
     }
     if (navigator.userActivation && !navigator.userActivation.isActive) return;

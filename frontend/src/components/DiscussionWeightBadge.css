@@ -83,8 +83,8 @@
   padding: 8px 10px;
   border: 1px solid var(--kr-border, rgba(128, 128, 128, 0.3));
   border-radius: 8px;
-  background: var(--kr-surface, #fff);
-  color: var(--kr-text, inherit);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   font-size: 11px;
 }

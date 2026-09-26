@@ -120,6 +120,12 @@ pub fn reconcile_stale_runs(
              WHERE status IN ('Running', 'Pending') AND started_at < ?1",
             params![cutoff, now_rfc],
         )?;
+        // Live Page launches read the shared-run projection, not this table.
+        for reconciled in &flipped {
+            if let Some(run) = get_run(conn, &reconciled.run_id)? {
+                crate::db::shared_runs::sync_workflow(conn, &run)?;
+            }
+        }
     }
     Ok(flipped)
 }
@@ -140,7 +146,7 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned
+                pinned, concurrency_key
          FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC",
     )?;
 
@@ -157,7 +163,7 @@ pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned
+                pinned, concurrency_key
          FROM workflows WHERE id = ?1",
     )?;
 
@@ -568,6 +574,8 @@ pub(crate) fn create_batch_run_with_launch_settings(
         parent_run_id: input.parent_run_id.clone(),
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -941,8 +949,8 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             wf.id,
             wf.name,
@@ -966,6 +974,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             // actually need a launch dialog.
             if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
             wf.pinned as i32,
+            wf.concurrency_key,
         ],
     )?;
     Ok(())
@@ -993,7 +1002,8 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
         "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
          concurrency_limit = ?9, enabled = ?10, updated_at = ?11, guards = ?12, artifacts = ?13,
-         on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17
+         on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
+         concurrency_key = ?18
          WHERE id = ?1",
         params![
             wf.id,
@@ -1032,6 +1042,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
                 Some(serde_json::to_string(&wf.variables)?)
             },
             wf.pinned as i32,
+            wf.concurrency_key,
         ],
     )?;
     Ok(n > 0)
@@ -1145,6 +1156,15 @@ pub fn terminal_workspace_cleanup_candidates(
                   JOIN agent_dispatch_jobs dispatch ON dispatch.group_id = child.id
                  WHERE child.parent_run_id = run.id
                    AND dispatch.status IN ('Pending', 'Running')
+            )
+            -- A finished sub-workflow shares its parent's worktree: a parent
+            -- still live, paused or resumable keeps it.
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM workflow_runs sharer
+                 WHERE sharer.workspace_path = run.workspace_path
+                   AND sharer.id <> run.id
+                   AND sharer.status NOT IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')
             )",
     )?;
     let candidates = stmt
@@ -1158,6 +1178,150 @@ pub fn terminal_workspace_cleanup_candidates(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(candidates)
+}
+
+/// The checkout of an `Interrupted` run nobody resumed before `cutoff`,
+/// attributed to the run that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedWorkspaceCandidate {
+    pub run_id: String,
+    pub workflow_name: String,
+    pub project_path: String,
+    pub workspace_path: String,
+}
+
+const TERMINAL_RUN_STATUSES: [&str; 5] = [
+    "Success",
+    "Partial",
+    "Failed",
+    "Cancelled",
+    "StoppedByGuard",
+];
+
+/// A path is returned only when every run pointing at it is terminal or was
+/// interrupted before `cutoff`: a live, paused or recently interrupted sharer
+/// (a sub-workflow inherits its parent's worktree) keeps it resumable.
+pub fn stale_interrupted_workspace_candidates(
+    conn: &Connection,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<InterruptedWorkspaceCandidate>> {
+    struct Row {
+        run_id: String,
+        status: String,
+        finished_at: Option<String>,
+        workflow_name: String,
+        project_path: Option<String>,
+        top_level: bool,
+        read_by_children: bool,
+    }
+    let mut stmt = conn.prepare(
+        "SELECT run.id, run.status, run.finished_at, run.workspace_path, workflow.name,
+                project.path, run.parent_run_id IS NULL,
+                EXISTS (
+                    SELECT 1
+                      FROM workflow_runs child
+                      JOIN agent_dispatch_jobs dispatch ON dispatch.group_id = child.id
+                     WHERE child.parent_run_id = run.id
+                       AND dispatch.status IN ('Pending', 'Running')
+                )
+           FROM workflow_runs run
+           JOIN workflows workflow ON workflow.id = run.workflow_id
+           LEFT JOIN projects project ON project.id = workflow.project_id
+          WHERE run.workspace_path IS NOT NULL
+          ORDER BY run.started_at, run.id",
+    )?;
+    let mut by_path: std::collections::BTreeMap<String, Vec<Row>> = Default::default();
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(3)?,
+            Row {
+                run_id: row.get(0)?,
+                status: row.get(1)?,
+                finished_at: row.get(2)?,
+                workflow_name: row.get(4)?,
+                project_path: row.get(5)?,
+                top_level: row.get(6)?,
+                read_by_children: row.get(7)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (path, row) = row?;
+        by_path.entry(path).or_default().push(row);
+    }
+
+    // An unreadable timestamp parses as "now": never old enough to reclaim.
+    let stale = |row: &Row| {
+        row.status == "Interrupted"
+            && row
+                .finished_at
+                .as_ref()
+                .is_some_and(|at| parse_dt(at.clone()) < cutoff)
+    };
+    let mut candidates = Vec::new();
+    for (workspace_path, rows) in by_path {
+        let kept = rows.iter().any(|row| {
+            row.read_by_children
+                || !(TERMINAL_RUN_STATUSES.contains(&row.status.as_str()) || stale(row))
+        });
+        if kept {
+            continue;
+        }
+        let Some(owner) = rows
+            .iter()
+            .filter(|row| stale(row))
+            .find(|row| row.top_level)
+            .or_else(|| rows.iter().find(|row| stale(row)))
+        else {
+            continue;
+        };
+        let Some(project_path) = owner.project_path.clone() else {
+            continue;
+        };
+        candidates.push(InterruptedWorkspaceCandidate {
+            run_id: owner.run_id.clone(),
+            workflow_name: owner.workflow_name.clone(),
+            project_path,
+            workspace_path,
+        });
+    }
+    Ok(candidates)
+}
+
+/// Append a branch preserved while reclaiming an `Interrupted` run's checkout.
+/// `false` when the run is no longer that Interrupted owner (resumed meanwhile).
+pub fn record_reclaimed_interrupted_branch(
+    conn: &Connection,
+    run_id: &str,
+    workspace_path: &str,
+    branch: &ProducedBranch,
+) -> Result<bool> {
+    let current: Option<Option<String>> = conn
+        .query_row(
+            "SELECT produced_branches FROM workflow_runs
+              WHERE id = ?1 AND status = 'Interrupted' AND workspace_path = ?2",
+            params![run_id, workspace_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
+        return Ok(false);
+    };
+    let mut branches: Vec<ProducedBranch> = match current {
+        Some(raw) => serde_json::from_str(&raw)?,
+        None => Vec::new(),
+    };
+    if !branches
+        .iter()
+        .any(|known| known.branch_name == branch.branch_name && known.head_sha == branch.head_sha)
+    {
+        branches.push(branch.clone());
+    }
+    Ok(conn.execute(
+        "UPDATE workflow_runs SET produced_branches = ?3
+          WHERE id = ?1 AND status = 'Interrupted' AND workspace_path = ?2",
+        params![run_id, workspace_path, serde_json::to_string(&branches)?],
+    )? == 1)
 }
 
 pub fn mark_workspace_cleaned(
@@ -1196,6 +1360,34 @@ pub fn list_runs_paginated(
         .filter_map(|r| r.ok())
         .collect();
 
+    enrich_parent_provenance(conn, &mut runs)?;
+    Ok(runs)
+}
+
+/// The runs whose `state` holds `key` (with `value`, when given), newest
+/// first: finds "the last run about this ticket" without reading any output.
+pub fn list_runs_by_state(
+    conn: &Connection,
+    workflow_id: &str,
+    key: &str,
+    value: Option<&str>,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<WorkflowRun>> {
+    let sql = format!(
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
+           AND EXISTS (SELECT 1 FROM json_each(workflow_runs.state)
+                       WHERE json_each.key = ?2 AND (?3 IS NULL OR json_each.value = ?3))
+         ORDER BY started_at DESC LIMIT ?4 OFFSET ?5",
+        workflow_run_cols_without_outputs()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut runs: Vec<WorkflowRun> = stmt
+        .query_map(params![workflow_id, key, value, limit, offset], |row| {
+            Ok(row_to_run(row))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
     enrich_parent_provenance(conn, &mut runs)?;
     Ok(runs)
 }
@@ -1242,6 +1434,15 @@ pub fn list_runs_page_complete_group(
     Ok(runs)
 }
 
+/// The run a run comes from: the SubWorkflow/batch parent, else the run whose
+/// TriggerWorkflow step launched it.
+fn provenance_run_id(run: &WorkflowRun) -> Option<&str> {
+    run.parent_run_id
+        .as_deref()
+        .or(run.triggered_by_run_id.as_deref())
+        .filter(|id| !id.is_empty())
+}
+
 /// Fill the DERIVED `parent_workflow_id/name` + `parent_run_started_at` fields
 /// on any run that has a `parent_run_id`, via a SINGLE batch query (no N+1).
 /// Resolves each distinct parent run id → its workflow id/name + start time.
@@ -1251,8 +1452,8 @@ pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRu
     // Distinct, non-empty parent ids present in this batch.
     let mut ids: Vec<String> = runs
         .iter()
-        .filter_map(|r| r.parent_run_id.clone())
-        .filter(|s| !s.is_empty())
+        .filter_map(provenance_run_id)
+        .map(str::to_string)
         .collect();
     ids.sort();
     ids.dedup();
@@ -1284,7 +1485,7 @@ pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRu
     }
 
     for run in runs.iter_mut() {
-        if let Some(pid) = run.parent_run_id.as_deref() {
+        if let Some(pid) = provenance_run_id(run) {
             if let Some((wid, wname, started)) = map.get(pid) {
                 run.parent_workflow_id = Some(wid.clone());
                 run.parent_workflow_name = Some(wname.clone());
@@ -1457,8 +1658,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
          run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
-         produced_branches, batch_no_response)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             run.id,
             run.workflow_id,
@@ -1491,6 +1692,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
                 Some(serde_json::to_string(&run.produced_branches)?)
             },
             run.batch_no_response as i64,
+            run.concurrency_key,
+            run.triggered_by_run_id,
         ],
     )?;
     crate::db::shared_runs::sync_workflow(conn, run)?;
@@ -1873,6 +2076,31 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
     Ok(affected > 0)
 }
 
+/// Record the latest activity on the in-flight result at `step_index`.
+///
+/// Written beside the runner's own snapshots, so it lands only while that
+/// result is still the running `step_name`: once the runner stores the
+/// terminal result, a late write matches nothing. Returns whether it landed.
+pub fn set_in_flight_step_activity(
+    conn: &Connection,
+    run_id: &str,
+    step_index: usize,
+    step_name: &str,
+    activity: &AgentActivity,
+) -> Result<bool> {
+    let path = format!("$[{step_index}]");
+    let affected = conn.execute(
+        "UPDATE workflow_runs
+         SET step_results_json = json_set(step_results_json, ?3 || '.last_activity', json(?4))
+         WHERE id = ?1 AND status = 'Running'
+           AND json_valid(step_results_json)
+           AND json_extract(step_results_json, ?3 || '.status') = 'Running'
+           AND json_extract(step_results_json, ?3 || '.step_name') = ?2",
+        params![run_id, step_name, path, serde_json::to_string(activity)?],
+    )?;
+    Ok(affected > 0)
+}
+
 /// Delete a single run.
 pub fn delete_run(conn: &Connection, run_id: &str) -> Result<()> {
     conn.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;
@@ -1940,6 +2168,22 @@ pub fn count_active_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
     let count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1 AND status IN ('Pending', 'Running')",
         params![workflow_id],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// Active runs of a workflow that rendered the same concurrency key. `None`
+/// counts the runs whose key rendered empty, which share one bucket.
+pub fn count_active_runs_for_key(
+    conn: &Connection,
+    workflow_id: &str,
+    key: Option<&str>,
+) -> Result<u32> {
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM workflow_runs
+          WHERE workflow_id = ?1 AND status IN ('Pending', 'Running') AND concurrency_key IS ?2",
+        params![workflow_id, key],
         |row| row.get(0),
     )?;
     Ok(count)
@@ -2017,6 +2261,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         }),
         workspace_config: ws_config_str.and_then(|s| serde_json::from_str(&s).ok()),
         concurrency_limit: concurrency,
+        concurrency_key: row.get(18).unwrap_or(None),
         // Defensive: a corrupt JSON blob in `guards` should NOT silently
         // disable the safety net — fall back to the column being absent
         // (= backend defaults applied) so the runner still kills runaway
@@ -2083,6 +2328,8 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     // Same tolerance as `state` for legacy / corrupt rows.
     let produced_branches_str: Option<String> = row.get(16).unwrap_or(None);
     let batch_no_response: i64 = row.get(17).unwrap_or(0);
+    let concurrency_key: Option<String> = row.get(18).unwrap_or(None);
+    let triggered_by_run_id: Option<String> = row.get(19).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -2114,6 +2361,8 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
             .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<crate::models::ProducedBranch>>(s).ok())
             .unwrap_or_default(),
+        concurrency_key,
+        triggered_by_run_id,
         // Derived, filled by enrich_parent_provenance (never from a column).
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2126,7 +2375,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches, batch_no_response";
+    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id";
 
 /// Blanks every step's `output` inside SQLite, leaving names, statuses and
 /// timings intact. `output` is the entire weight of the column — measured at

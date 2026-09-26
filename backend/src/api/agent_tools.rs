@@ -1055,7 +1055,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "task_exec_reassign",
-            "Reassign a blocked/interrupted execution as its parent-room principal while preserving durable child/worktree/checkpoints.",
+            "Reassign a blocked, interrupted or awaiting-review execution (a pending delivery is rejected) as its parent-room principal while preserving durable child/worktree/checkpoints.",
             json!({
                 "task_execution_id": {"type": "string"},
                 "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier — the same object agent_list hands back and task_exec_prepare/task_exec_launch accept as worker."},
@@ -1563,7 +1563,7 @@ impl ToolExecutor for KronnToolExecutor {
                         launch: Some(crate::core::launch_context::LaunchContext {
                             discussion_id: self.disc_id.clone(),
                             project_id,
-                            context: Default::default(),
+                            ..Default::default()
                         }),
                     };
                     let Json(res) =

@@ -53,13 +53,13 @@
 .disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn {
   background: var(--kr-accent);
   border-color: transparent;
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
 }
 
 .disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn:hover,
 .disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn:focus-visible {
-  background: var(--kr-accent-hover, var(--kr-accent));
-  color: var(--kr-text-on-accent, #fff);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent);
 }
 
 .disc-sidebar-header-menu-wrap {
@@ -458,7 +458,7 @@
   padding: 1px 6px;
   border-radius: 999px;
   background: var(--kr-accent);
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   font-size: 10px;
   font-weight: 700;
   text-align: center;
@@ -607,8 +607,8 @@
 
 .disc-group-count {
   font-weight: 400;
-  /* Same contrast fix as .disc-contacts-meta — 0.5 fell under 4.5:1. */
-  opacity: 0.9;
+  /* No opacity: it compounds with the text token's own alpha and fell under
+     4.5:1 in matrix. */
   margin-left: auto;
 }
 
@@ -687,7 +687,6 @@
 .disc-batch-menu-panel > button:focus-visible {
   background: rgba(var(--kr-accent-rgb), 0.09);
   color: var(--kr-text-primary);
-  outline: none;
 }
 
 .disc-batch-menu-panel > button[data-danger="true"] {
@@ -1323,7 +1322,7 @@
 
 .disc-source-badge--compact[data-diverged="true"] {
   color: var(--kr-danger);
-  background: rgba(220, 53, 69, 0.15);
+  background: rgba(var(--kr-error-rgb), 0.15);
 }
 
 .disc-source-badge--compact img {
@@ -1457,7 +1456,6 @@
 .disc-qp-picker-item:hover,
 .disc-qp-picker-item:focus-visible {
   background: rgba(var(--kr-accent-rgb), 0.14);
-  outline: none;
 }
 .disc-qp-picker-icon {
   flex-shrink: 0;
@@ -3207,7 +3205,7 @@ button.disc-contact-open {
    strip's 2px of padding either side, plus its border. Declared once here
    because the topmost controls must reserve its footprint, not the thread. */
 .disc-messages-git-row[data-rail-floating='true'] {
-  --kr-disc-rail-w: 63px;
+  --disc-rail-w: 63px;
 }
 
 /* When search is closed, the arbitration banner can be the topmost row. Keep
@@ -3215,7 +3213,7 @@ button.disc-contact-open {
    along the full conversation. With search open, the banner is below the rail. */
 .disc-messages-git-row[data-rail-floating='true'][data-search-open='false'] .disc-question-banner,
 .disc-messages-git-row[data-rail-floating='true'] .disc-message-search {
-  padding-right: calc(var(--kr-disc-rail-w) + var(--kr-sp-3));
+  padding-right: calc(var(--disc-rail-w) + var(--kr-sp-3));
 }
 
 .disc-plan-btn {
@@ -3713,7 +3711,6 @@ button.disc-contact-open {
 .disc-msg-orchestrator-toggle:focus-visible {
   border-color: rgba(var(--kr-purple-rgb), 0.55);
   background: rgba(var(--kr-purple-rgb), 0.14);
-  outline: none;
 }
 
 .disc-msg-deleted {
@@ -6972,7 +6969,7 @@ button.disc-contact-open {
   height: 30px;
   border-radius: 50%;
   background: rgba(var(--kr-warning-amber-rgb), 0.15);
-  color: rgb(255, 193, 77);
+  color: var(--kr-warning-amber);
   flex-shrink: 0;
 }
 .test-mode-modal-header h3 {
@@ -7459,7 +7456,6 @@ button.disc-contact-open {
   color: var(--kr-accent);
   background: rgba(var(--kr-accent-rgb), 0.08);
   border-color: var(--kr-accent-border);
-  outline: none;
 }
 
 .doc-preview-iframe {

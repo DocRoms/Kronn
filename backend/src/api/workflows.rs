@@ -427,6 +427,98 @@ pub(crate) fn validate_sub_workflow_graph(
     visit(start_steps, graph, &mut path)
 }
 
+/// Launch variables mapped to a child (SubWorkflow, TriggerWorkflow) never read
+/// a secret of this workflow.
+fn validate_child_variable_mappings(
+    steps: &[WorkflowStep],
+    variables: &[crate::models::PromptVariable],
+) -> Result<(), String> {
+    steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.step_type,
+                StepType::SubWorkflow | StepType::TriggerWorkflow
+            )
+        })
+        .find_map(|step| crate::workflows::sub_workflow_step::secret_mapping_error(step, variables))
+        .map_or(Ok(()), Err)
+}
+
+/// A TriggerWorkflow target must exist, and every mapped variable must be
+/// declared by the child. `start_id` names the workflow being saved, whose
+/// new declarations are `own`: a workflow may trigger itself.
+pub(crate) fn validate_child_targets(
+    start_id: &str,
+    own: &Workflow,
+    steps: &[WorkflowStep],
+    workflows: &std::collections::HashMap<String, Workflow>,
+) -> Result<(), String> {
+    for step in steps {
+        if !matches!(
+            step.step_type,
+            StepType::SubWorkflow | StepType::TriggerWorkflow
+        ) {
+            continue;
+        }
+        let Some(target) = step
+            .sub_workflow_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+        else {
+            continue;
+        };
+        let child = if target == start_id {
+            Some(own)
+        } else {
+            workflows.get(target)
+        };
+        let Some(child) = child else {
+            if step.step_type == StepType::TriggerWorkflow {
+                return Err(format!(
+                    "Step TriggerWorkflow « {} » : le workflow « {target} » est introuvable (supprimé ? id erroné ?).",
+                    step.name
+                ));
+            }
+            // The SubWorkflow graph validator reports a dangling child.
+            continue;
+        };
+        if let Some(error) =
+            crate::workflows::sub_workflow_step::undeclared_mapping_error(step, child)
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn validate_child_targets_db(
+    state: &AppState,
+    start_id: &str,
+    own: &Workflow,
+) -> Result<(), String> {
+    let launches_children = own.steps.iter().chain(own.on_failure.iter()).any(|step| {
+        matches!(
+            step.step_type,
+            StepType::SubWorkflow | StepType::TriggerWorkflow
+        )
+    });
+    if !launches_children {
+        return Ok(());
+    }
+    let workflows = state
+        .db
+        .with_conn(crate::db::workflows::list_workflows)
+        .await
+        .map_err(|e| format!("DB error loading workflows for child validation: {e}"))?
+        .into_iter()
+        .map(|workflow| (workflow.id.clone(), workflow))
+        .collect();
+    validate_child_targets(start_id, own, &own.steps, &workflows)?;
+    validate_child_targets(start_id, own, &own.on_failure, &workflows)
+}
+
 /// Async wrapper: short-circuits when no SubWorkflow step is present (no DB
 /// hit for the common case), else loads every workflow's steps and runs the
 /// pure validator above.
@@ -457,6 +549,26 @@ async fn validate_sub_workflow_graph_db(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    if let Some(room) = s.room_id.as_deref() {
+        if !matches!(s.step_type, StepType::Agent) {
+            return Err(format!(
+                "Step « {} » : `room_id` ne s'applique qu'à une étape Agent.",
+                s.name
+            ));
+        }
+        if room.trim().is_empty() {
+            return Err(format!(
+                "Step Agent « {} » : `room_id` ne peut pas être vide (retire-le ou donne un id de discussion, gabarit accepté).",
+                s.name
+            ));
+        }
+        if !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex) {
+            return Err(format!(
+                "Step Agent « {} » : `room_id` demande Claude Code ou Codex, seuls agents dont le bridge Kronn porte la capacité de room.",
+                s.name
+            ));
+        }
+    }
     match s.step_type {
         StepType::Agent => {
             let has_inline = !s.prompt_template.trim().is_empty();
@@ -552,6 +664,19 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                         "Step SubWorkflow « {} » : `sub_workflow_id` est requis (choisis le workflow enfant à lancer).",
                         s.name
                     ));
+            }
+        }
+        StepType::TriggerWorkflow => {
+            if s.sub_workflow_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err(format!(
+                    "Step TriggerWorkflow « {} » : `sub_workflow_id` est requis (choisis le workflow à lancer).",
+                    s.name
+                ));
             }
         }
         StepType::PublishPageData => {
@@ -742,17 +867,36 @@ pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
         .count() as u32
 }
 
+/// A blank `base_ref` means "unset"; anything else must look like a ref.
+fn validate_workspace_config(config: Option<&WorkspaceConfig>) -> Result<(), String> {
+    match config.and_then(|config| config.base_ref.as_deref()) {
+        Some(base_ref) if !base_ref.trim().is_empty() => {
+            crate::workflows::workspace::validate_base_ref(base_ref).map(|_| ())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// `Workflow.concurrency_limit` limits overlapping *whole runs*. It has never
-/// been a foreach worker count. Refuse the ambiguous combination instead of
-/// accepting a value that looks like per-item parallelism but is ignored by
-/// the shared-worktree SubWorkflow executor.
+/// been a foreach worker count. Without isolation, overlapping runs would share
+/// the main checkout the foreach works in, so a limit above one is refused. An
+/// isolated workflow gives each run its own worktree: runs may overlap while
+/// each foreach stays sequential in its own.
 fn validate_sub_workflow_foreach_concurrency(
     steps: &[WorkflowStep],
     concurrency_limit: Option<u32>,
+    concurrency_key: Option<&str>,
+    workspace_config: Option<&WorkspaceConfig>,
 ) -> Result<(), String> {
-    let Some(limit) = concurrency_limit.filter(|limit| *limit > 1) else {
+    let limit = concurrency_limit.filter(|limit| *limit > 1);
+    // A key lets runs with different keys overlap exactly like a higher limit.
+    let keyed = concurrency_limit.is_some() && concurrency_key.is_some();
+    if limit.is_none() && !keyed {
         return Ok(());
-    };
+    }
+    if workspace_config.is_some_and(|config| config.require_isolation) {
+        return Ok(());
+    }
     let Some(step) = steps.iter().find(|step| {
         step.step_type == StepType::SubWorkflow
             && step
@@ -763,8 +907,14 @@ fn validate_sub_workflow_foreach_concurrency(
         return Ok(());
     };
 
+    let Some(limit) = limit else {
+        return Err(format!(
+            "Step SubWorkflow « {} » : `concurrency_key` lets runs with different keys overlap, while SubWorkflow foreach is sequential in the shared worktree; set `workspace_config.require_isolation: true` so each run gets its own worktree, or remove the key.",
+            step.name
+        ));
+    };
     Err(format!(
-        "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; remove the value (or set it to 1) and use BatchQuickPrompt for safe parallel fan-out.",
+        "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; set `workspace_config.require_isolation: true` so each run gets its own worktree, remove the value (or set it to 1), or use BatchQuickPrompt for parallel fan-out.",
         step.name
     ))
 }
@@ -821,6 +971,8 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
             s.name
         ));
     }
+    crate::workflows::api_call_binary::resolve_binary_policy(s)
+        .map_err(|error| format!("Step {} « {} » : {error}", kind, s.name))?;
     Ok(())
 }
 
@@ -1241,7 +1393,28 @@ pub async fn create(
     if let Err(e) = validate_required_fields_per_type(&req.on_failure) {
         return Json(ApiResponse::err(e));
     }
-    if let Err(e) = validate_sub_workflow_foreach_concurrency(&req.steps, req.concurrency_limit) {
+    let concurrency_key = crate::workflows::concurrency::normalize_key(req.concurrency_key);
+    if let Err(e) = crate::workflows::concurrency::validate_key(
+        concurrency_key.as_deref(),
+        req.concurrency_limit,
+        &req.variables,
+    ) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_sub_workflow_foreach_concurrency(
+        &req.steps,
+        req.concurrency_limit,
+        concurrency_key.as_deref(),
+        req.workspace_config.as_ref(),
+    ) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_workspace_config(req.workspace_config.as_ref()) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_child_variable_mappings(&req.steps, &req.variables)
+        .and_then(|()| validate_child_variable_mappings(&req.on_failure, &req.variables))
+    {
         return Json(ApiResponse::err(e));
     }
     // 2026-06-11 Phase 1 — SubWorkflow graph: cycle/depth/dangling/no-gate.
@@ -1273,6 +1446,7 @@ pub async fn create(
         }),
         workspace_config: req.workspace_config,
         concurrency_limit: req.concurrency_limit,
+        concurrency_key,
         guards: req.guards,
         artifacts: req.artifacts,
         on_failure,
@@ -1286,6 +1460,9 @@ pub async fn create(
         created_at: now,
         updated_at: now,
     };
+    if let Err(e) = validate_child_targets_db(&state, &wf.id, &wf).await {
+        return Json(ApiResponse::err(e));
+    }
 
     let w = wf.clone();
     match state
@@ -1421,6 +1598,10 @@ pub async fn update(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    // Child targets are re-read only when what they depend on changes, so a
+    // rename or a pin never fails on a target deleted since.
+    let child_launches_changed =
+        req.steps.is_some() || req.on_failure.is_some() || req.variables.is_some();
     if let Some(ref steps) = req.steps {
         if steps.len() > 20 {
             return Json(ApiResponse::err(format!(
@@ -1529,6 +1710,10 @@ pub async fn update(
         safety: req.safety.unwrap_or(existing.safety),
         workspace_config: req.workspace_config.or(existing.workspace_config),
         concurrency_limit: req.concurrency_limit.or(existing.concurrency_limit),
+        concurrency_key: match req.concurrency_key {
+            Some(key) => crate::workflows::concurrency::normalize_key(key),
+            None => existing.concurrency_key,
+        },
         guards: req.guards.or(existing.guards),
         artifacts: req.artifacts.unwrap_or(existing.artifacts),
         on_failure,
@@ -1540,9 +1725,32 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
-    if let Err(e) =
-        validate_sub_workflow_foreach_concurrency(&updated.steps, updated.concurrency_limit)
+    if let Err(e) = crate::workflows::concurrency::validate_key(
+        updated.concurrency_key.as_deref(),
+        updated.concurrency_limit,
+        &updated.variables,
+    ) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_child_variable_mappings(&updated.steps, &updated.variables)
+        .and_then(|()| validate_child_variable_mappings(&updated.on_failure, &updated.variables))
     {
+        return Json(ApiResponse::err(e));
+    }
+    if child_launches_changed {
+        if let Err(e) = validate_child_targets_db(&state, &updated.id, &updated).await {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Err(e) = validate_sub_workflow_foreach_concurrency(
+        &updated.steps,
+        updated.concurrency_limit,
+        updated.concurrency_key.as_deref(),
+        updated.workspace_config.as_ref(),
+    ) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_workspace_config(updated.workspace_config.as_ref()) {
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_saved_quick_exec_refs(
@@ -1642,18 +1850,23 @@ const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
 /// transitive sub-workflow. The frontend triggers a file download from this
 /// response (filename suggested via `Content-Disposition`).
 /// #10 — the non-empty `sub_workflow_id`s referenced by a step list's
-/// SubWorkflow steps. Used to bundle (export) and remap (import) the child
-/// workflow graph. Pure + unit-tested.
+/// SubWorkflow and TriggerWorkflow steps. Used to bundle (export) and remap
+/// (import) the child workflow graph. Pure + unit-tested.
 pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
     steps
         .iter()
-        .filter(|s| matches!(s.step_type, StepType::SubWorkflow))
+        .filter(|s| {
+            matches!(
+                s.step_type,
+                StepType::SubWorkflow | StepType::TriggerWorkflow
+            )
+        })
         .filter_map(|s| s.sub_workflow_id.clone())
         .filter(|id| !id.trim().is_empty())
         .collect()
 }
 
-fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
+pub(crate) fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
     sub_workflow_child_ids(&workflow.steps)
         .into_iter()
         .chain(sub_workflow_child_ids(&workflow.on_failure))
@@ -1661,17 +1874,17 @@ fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct WorkflowDependencyIds {
-    quick_prompts: std::collections::BTreeSet<String>,
-    quick_apis: std::collections::BTreeSet<String>,
-    quick_execs: std::collections::BTreeSet<String>,
-    pages: std::collections::BTreeSet<String>,
+pub(crate) struct WorkflowDependencyIds {
+    pub(crate) quick_prompts: std::collections::BTreeSet<String>,
+    pub(crate) quick_apis: std::collections::BTreeSet<String>,
+    pub(crate) quick_execs: std::collections::BTreeSet<String>,
+    pub(crate) pages: std::collections::BTreeSet<String>,
 }
 
 /// Collect every saved resource referenced by the complete workflow graph.
 /// Dynamic Page ids cannot be bundled because their destination only exists at
 /// run time; static ids/slugs are included and remapped during import.
-fn workflow_dependency_ids<'a>(
+pub(crate) fn workflow_dependency_ids<'a>(
     workflows: impl IntoIterator<Item = &'a Workflow>,
 ) -> WorkflowDependencyIds {
     let mut dependencies = WorkflowDependencyIds::default();
@@ -1855,16 +2068,35 @@ pub async fn export_workflow(
         }
     };
 
+    // A literal credential must not travel with a file meant to be shared.
+    let mut redacted_fields = Vec::new();
+    let mut exported = wf.clone();
+    let (mut referenced_workflows, mut referenced_quick_apis, mut referenced_quick_execs) = (
+        referenced_workflows,
+        referenced_quick_apis,
+        referenced_quick_execs,
+    );
+    crate::core::export_secrets::redact_workflow(&mut exported, &mut redacted_fields);
+    for workflow in &mut referenced_workflows {
+        crate::core::export_secrets::redact_workflow(workflow, &mut redacted_fields);
+    }
+    for api in &mut referenced_quick_apis {
+        crate::core::export_secrets::redact_quick_api(api, &mut redacted_fields);
+    }
+    for exec in &mut referenced_quick_execs {
+        crate::core::export_secrets::redact_quick_exec(exec, &mut redacted_fields);
+    }
     let envelope = WorkflowExportEnvelope {
         kind: WORKFLOW_EXPORT_KIND.to_string(),
         version: EXPORT_VERSION,
         exported_at: Utc::now(),
-        workflow: wf.clone(),
+        workflow: exported,
         referenced_quick_prompts,
         referenced_quick_apis,
         referenced_quick_execs,
         referenced_pages,
         referenced_workflows,
+        redacted_fields,
     };
 
     // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
@@ -1909,7 +2141,7 @@ pub async fn export_workflow(
 /// Validate one workflow from an import bundle exactly like a fresh create
 /// (POST /api/workflows). Applied to the root AND every bundled child so a
 /// malformed child can't slip in. Returns a user-facing error string.
-fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
+pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
     if wf.steps.is_empty() {
         return Err("Workflow must have at least one step".into());
     }
@@ -1928,7 +2160,20 @@ fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
     validate_exec_steps(&wf.on_failure, &wf.exec_allowlist)?;
     validate_required_fields_per_type(&wf.steps)?;
     validate_required_fields_per_type(&wf.on_failure)?;
-    validate_sub_workflow_foreach_concurrency(&wf.steps, wf.concurrency_limit)?;
+    crate::workflows::concurrency::validate_key(
+        wf.concurrency_key.as_deref(),
+        wf.concurrency_limit,
+        &wf.variables,
+    )?;
+    validate_child_variable_mappings(&wf.steps, &wf.variables)?;
+    validate_child_variable_mappings(&wf.on_failure, &wf.variables)?;
+    validate_sub_workflow_foreach_concurrency(
+        &wf.steps,
+        wf.concurrency_limit,
+        wf.concurrency_key.as_deref(),
+        wf.workspace_config.as_ref(),
+    )?;
+    validate_workspace_config(wf.workspace_config.as_ref())?;
     Ok(())
 }
 
@@ -1987,7 +2232,7 @@ fn rebind_quick_api_config(
     }
 }
 
-fn remap_workflow_step_dependencies(
+pub(crate) fn remap_workflow_step_dependencies(
     step: &mut WorkflowStep,
     quick_prompts: &std::collections::HashMap<String, String>,
     quick_apis: &std::collections::HashMap<String, String>,
@@ -2273,12 +2518,16 @@ pub async fn import_workflow(
     let root_id_for_return = root_new_id;
     match state
         .db
-        .with_conn(move |conn| {
+        .with_conn(move |connection| {
+            let tx = connection.unchecked_transaction()?;
+            let conn = &tx;
             for (mut page, revision, datasets) in imported_pages {
                 if crate::db::live_pages::get_live_page(conn, &page.slug)?.is_some() {
                     page.slug = format!("{}-{}", page.slug, &page.id[..8]);
                 }
-                crate::db::live_pages::create_live_page(conn, &page, &revision, &datasets, None)?;
+                crate::db::live_pages::create_live_page_in_transaction(
+                    conn, &page, &revision, &datasets, None,
+                )?;
             }
             for qp in &qps {
                 crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
@@ -2300,15 +2549,15 @@ pub async fn import_workflow(
                     root_out = Some(w);
                 }
             }
+            let root_out = root_out.ok_or_else(|| {
+                anyhow::anyhow!("Import interne : workflow racine introuvable après insertion")
+            })?;
+            tx.commit()?;
             Ok(root_out)
         })
         .await
     {
-        Ok(Some(w)) => Json(ApiResponse::ok(w)),
-        Ok(None) => Json(ApiResponse::err_coded(
-            ApiErrorCode::Internal,
-            "Import interne : workflow racine introuvable après insertion",
-        )),
+        Ok(w) => Json(ApiResponse::ok(w)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -2317,17 +2566,35 @@ pub async fn import_workflow(
 /// 0.6.0 UX pass — accepts an optional JSON body with `variables` (manual
 /// launch). When the workflow has declared `variables`, required ones
 /// must be filled (400 if not). Variable values land in the run's
-/// `trigger_context` so they resolve as `{{var_name}}` in step prompts
-/// (the existing `inject_trigger_context` already handles that path).
+/// encrypted execution-variable snapshot, never in `trigger_context`.
 /// Legacy callers that send no body still work — `Option<Json<...>>` ➜
 /// `None` → no variables → exactly the previous behaviour.
 pub(crate) async fn start_manual_run(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
     event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
     launch: crate::core::launch_context::LaunchContext,
 ) -> Result<WorkflowRun, String> {
+    let (wf, run) =
+        create_manual_run(state, workflow_id, provided_vars, initial_state, launch).await?;
+    spawn_manual_run(state, wf, run.clone(), event_sender, false);
+    Ok(run)
+}
+
+/// Every manual launcher (UI, Live Page, discussion action, MCP) goes
+/// through here: workflow lookup, the variable preflight that writes the
+/// encrypted snapshot `execute_run` requires, then the atomic
+/// concurrency-checked insert of the Pending run.
+pub(crate) async fn create_manual_run(
+    state: &AppState,
+    workflow_id: &str,
+    provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
+    launch: crate::core::launch_context::LaunchContext,
+) -> Result<(Workflow, WorkflowRun), String> {
+    validate_initial_run_state(&initial_state)?;
     let lookup_id = workflow_id.to_string();
     let mut wf = state
         .db
@@ -2336,7 +2603,7 @@ pub(crate) async fn start_manual_run(
         .map_err(|error| format!("DB error: {error}"))?
         .ok_or_else(|| "Workflow not found".to_string())?;
     if !wf.enabled {
-        return Err("Workflow is disabled".into());
+        return Err("Workflow is disabled — enable it before triggering".into());
     }
     // A GLOBAL workflow launched from a project-scoped discussion resolves
     // that project's environment/worktree exactly like one declared on the
@@ -2386,6 +2653,14 @@ pub(crate) async fn start_manual_run(
                 serde_json::to_string(&failures).unwrap_or_default()
             )
         })?;
+    let concurrency_key = match wf.concurrency_key.as_deref() {
+        Some(template) => crate::workflows::concurrency::render_key(
+            template,
+            &wf.variables,
+            &prepared.resolved.values,
+        )?,
+        None => None,
+    };
     let trigger_obj =
         build_secure_execution_trigger_obj(prepared.snapshot_id, prepared.resolved.resolved_at);
     let now = Utc::now();
@@ -2406,40 +2681,79 @@ pub(crate) async fn start_manual_run(
         batch_no_response: 0,
         batch_name: None,
         parent_run_id: None,
-        state: ::std::collections::HashMap::new(),
+        state: initial_state,
         produced_branches: vec![],
+        concurrency_key,
+        triggered_by_run_id: launch.triggered_by_run_id.clone(),
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
     };
     let persisted = run.clone();
-    let limit = wf.concurrency_limit;
-    let workflow_id = wf.id.clone();
+    let admission = wf.clone();
     state
         .db
         .with_conn(move |conn| {
-            if let Some(max) = limit {
-                let active = crate::db::workflows::count_active_runs(conn, &workflow_id)?;
-                if active >= max {
-                    anyhow::bail!("Concurrency limit reached ({active}/{max})");
-                }
-            }
-            crate::db::workflows::insert_run(conn, &persisted)
+            crate::workflows::concurrency::insert_run_within_limit(conn, &admission, &persisted)
         })
         .await
-        .map_err(|error| format!("DB error: {error}"))?;
+        .map_err(|error| format!("DB error: {error}"))??;
+    Ok((wf, run))
+}
 
-    let state_for_run = state.clone();
-    let mut run_exec = run.clone();
+const MAX_INITIAL_STATE_ENTRIES: usize = 16;
+const MAX_INITIAL_STATE_VALUE_CHARS: usize = 256;
+
+/// The state a launcher seeds is shown in every run list and never encrypted:
+/// keep it to a few short, plain labels.
+fn validate_initial_run_state(
+    initial_state: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    if initial_state.len() > MAX_INITIAL_STATE_ENTRIES {
+        return Err(format!(
+            "`state` takes at most {MAX_INITIAL_STATE_ENTRIES} entries"
+        ));
+    }
+    for (key, value) in initial_state {
+        let valid_key = (1..=64).contains(&key.len())
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+        if !valid_key {
+            return Err(format!(
+                "`state` key `{key}` must be 1-64 letters, digits, `_`, `-` or `.`"
+            ));
+        }
+        if value.chars().count() > MAX_INITIAL_STATE_VALUE_CHARS
+            || value.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "`state.{key}` must be one line of at most {MAX_INITIAL_STATE_VALUE_CHARS} characters"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Runs a run created by [`create_manual_run`] in the background. An
+/// `execute_run` error leaves it Failed with the reason, never Running.
+pub(crate) fn spawn_manual_run(
+    state: &AppState,
+    wf: Workflow,
+    mut run: WorkflowRun,
+    event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
+    notify_on_failure: bool,
+) {
+    let state = state.clone();
     tokio::spawn(async move {
-        let config = state_for_run.config.read().await;
+        let config = state.config.read().await;
         let tokens = config.tokens.clone();
         let agents = config.agents.clone();
         drop(config);
         if let Err(error) = crate::workflows::runner::execute_run(
-            state_for_run,
+            state.clone(),
             &wf,
-            &mut run_exec,
+            &mut run,
             &tokens,
             &agents,
             event_sender,
@@ -2448,10 +2762,12 @@ pub(crate) async fn start_manual_run(
         )
         .await
         {
-            tracing::error!(run_id = %run_exec.id, error = %error, "workflow action run failed");
+            crate::workflows::runner::settle_errored_run(&state, &wf, &mut run, &error).await;
+        }
+        if notify_on_failure {
+            crate::core::run_notify::notify_if_failed(&state, &wf, &run).await;
         }
     });
-    Ok(run)
 }
 
 pub async fn trigger(
@@ -2459,12 +2775,15 @@ pub async fn trigger(
     Path(id): Path<String>,
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
-    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    let (provided_vars, initial_state) = body
+        .map(|Json(b)| (b.variables, b.state))
+        .unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
     let run = match start_manual_run(
         &state,
         &id,
         provided_vars,
+        initial_state,
         Some(tx),
         crate::core::launch_context::LaunchContext::default(),
     )
@@ -2930,17 +3249,20 @@ pub async fn test_step(
             &ctx,
             &agent_extra_context,
             Some(progress_tx),
+            None,
             Some(&model_tiers),
             Some(&http_endpoints),
             Some(&ollama_context_overrides),
             native_tools,
             Some(&state.db),
+            // A test step has no run, so it never holds a room capability.
+            None,
         )
         .await;
 
         let _ = tx
             .send(crate::workflows::runner::RunEvent::StepDone {
-                step_result: outcome.result.clone(),
+                step_result: Box::new(outcome.result.clone()),
             })
             .await;
 
@@ -3000,6 +3322,10 @@ pub struct ListRunsQuery {
     offset: Option<u32>,
     #[serde(default)]
     complete_group: bool,
+    /// Only the runs whose `state` holds this key, newest first…
+    state_key: Option<String>,
+    /// …with exactly this value, when given.
+    state_value: Option<String>,
 }
 
 pub async fn list_runs(
@@ -3012,6 +3338,20 @@ pub async fn list_runs(
     match state
         .db
         .with_read_conn(move |conn| {
+            if let Some(key) = params.state_key.as_deref() {
+                let limit = params
+                    .limit
+                    .unwrap_or(crate::db::workflows::MAX_RUNS_UNPAGINATED)
+                    .clamp(1, crate::db::workflows::MAX_RUNS_UNPAGINATED);
+                return crate::db::workflows::list_runs_by_state(
+                    conn,
+                    &id,
+                    key,
+                    params.state_value.as_deref(),
+                    limit,
+                    params.offset.unwrap_or(0),
+                );
+            }
             if params.limit.is_some() || params.offset.is_some() {
                 let limit = params
                     .limit
@@ -3271,7 +3611,6 @@ pub async fn decide_run(
     // for reject). The UI already polls run state via SSE/refetch.
     let state_clone = state.clone();
     let run_for_resume = run.clone();
-    let run_id_for_log = run.id.clone();
     tokio::spawn(async move {
         let cfg = state_clone.config.read().await;
         let tokens = cfg.tokens.clone();
@@ -3289,7 +3628,8 @@ pub async fn decide_run(
         )
         .await
         {
-            tracing::error!("Resume run {} failed: {}", run_id_for_log, e);
+            crate::workflows::runner::settle_errored_run(&state_clone, &workflow, &mut run_mut, &e)
+                .await;
         }
         // A gate-resumed run (human approve or the auto-approve timer) that
         // then fails is exactly as unattended as its scheduled first half —
@@ -3393,7 +3733,6 @@ pub async fn resume_interrupted(
     }
 
     let state_clone = state.clone();
-    let run_id_for_log = run.id.clone();
     let response_run_id = run.id.clone();
     tokio::spawn(async move {
         let cfg = state_clone.config.read().await;
@@ -3410,7 +3749,8 @@ pub async fn resume_interrupted(
         )
         .await
         {
-            tracing::error!("Resume of interrupted run {} failed: {}", run_id_for_log, e);
+            crate::workflows::runner::settle_errored_run(&state_clone, &workflow, &mut run, &e)
+                .await;
         }
         // Same unattended-failure contract as the gate resume path.
         crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run).await;
@@ -4222,6 +4562,7 @@ pub async fn suggestions(
                     api_timeout_ms: None,
                     api_max_retries: None,
                     api_output_var: None,
+                    api_response: None,
                     gate_message: None,
                     gate_request_changes_target: None,
                     gate_notify_url: None,
@@ -4242,6 +4583,8 @@ pub async fn suggestions(
                     sub_workflow_id: None,
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
+                    room_id: None,
+                    sub_workflow_variables: std::collections::HashMap::new(),
                 })
                 .collect(),
         });
@@ -4583,14 +4926,70 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(
-            validate_sub_workflow_foreach_concurrency(std::slice::from_ref(&foreach), Some(1))
-                .is_ok()
-        );
-        let error = validate_sub_workflow_foreach_concurrency(&[foreach], Some(8))
-            .expect_err("foreach plus a limit above one must not be silently accepted");
+        assert!(validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(1),
+            None,
+            None
+        )
+        .is_ok());
+        let error = validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(8),
+            None,
+            None,
+        )
+        .expect_err("foreach plus a limit above one must not be silently accepted");
         assert!(error.contains("cannot parallelize foreach items"));
+        assert!(error.contains("require_isolation"));
         assert!(error.contains("BatchQuickPrompt"));
+        // A key lets runs with different keys overlap in the same checkout.
+        let keyed = validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(1),
+            Some("{{ticketKey}}"),
+            None,
+        )
+        .expect_err("a keyed limit overlaps runs like a higher limit");
+        assert!(keyed.contains("`concurrency_key`"), "{keyed}");
+        // Each isolated run owns its worktree, so whole runs may overlap.
+        let isolated = WorkspaceConfig {
+            hooks: Default::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        };
+        assert!(validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(1),
+            Some("{{ticketKey}}"),
+            Some(&isolated)
+        )
+        .is_ok());
+        assert!(validate_sub_workflow_foreach_concurrency(
+            &[foreach],
+            Some(3),
+            None,
+            Some(&isolated)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_base_ref_must_look_like_a_ref_and_a_blank_one_means_unset() {
+        let with = |base_ref: Option<&str>| WorkspaceConfig {
+            hooks: Default::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: base_ref.map(str::to_string),
+        };
+        assert!(validate_workspace_config(None).is_ok());
+        assert!(validate_workspace_config(Some(&with(None))).is_ok());
+        assert!(validate_workspace_config(Some(&with(Some("  ")))).is_ok());
+        assert!(validate_workspace_config(Some(&with(Some("origin/main")))).is_ok());
+        let error = validate_workspace_config(Some(&with(Some("--upload-pack=evil"))))
+            .expect_err("an option is not a ref");
+        assert!(error.contains("workspace_config.base_ref"), "{error}");
     }
 
     #[test]
@@ -5102,6 +5501,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -5122,6 +5522,8 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 
@@ -5510,6 +5912,7 @@ mod tests {
             },
             workspace_config: None,
             concurrency_limit: None,
+            concurrency_key: None,
             guards: None,
             artifacts: ::std::collections::HashMap::new(),
             on_failure: vec![],
@@ -5694,6 +6097,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![child],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -5714,6 +6118,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -5734,6 +6139,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
@@ -5759,6 +6165,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -5795,6 +6202,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -6304,6 +6712,30 @@ mod tests {
     }
 
     #[test]
+    fn room_id_is_an_agent_step_field_and_never_blank() {
+        let mut agent = mk_step("orchestrate", StepType::Agent);
+        agent.prompt_template = "Orchestrate the ticket".into();
+        agent.room_id = Some("{{steps.jeton.data.room_id}}".into());
+        validate_required_fields_per_type(&[agent.clone()]).expect("a templated room is valid");
+        agent.room_id = Some("  ".into());
+        let blank = validate_required_fields_per_type(&[agent]).expect_err("blank room");
+        assert!(
+            blank.contains("room_id") && blank.contains("orchestrate"),
+            "{blank}"
+        );
+        let mut local = mk_step("orchestrate", StepType::Agent);
+        local.prompt_template = "Orchestrate the ticket".into();
+        local.agent = AgentType::Ollama;
+        local.room_id = Some("disc-1".into());
+        let bridgeless = validate_step_required_fields(&local).expect_err("CLI agents only");
+        assert!(bridgeless.contains("Claude Code ou Codex"), "{bridgeless}");
+        let mut exec = mk_step("sortie", StepType::Exec);
+        exec.room_id = Some("disc-1".into());
+        let misplaced = validate_step_required_fields(&exec).expect_err("Agent only");
+        assert!(misplaced.contains("room_id"), "{misplaced}");
+    }
+
+    #[test]
     fn required_fields_apicall_rejects_missing_endpoint_path() {
         let mut s = mk_step("fetch_issue", StepType::ApiCall);
         s.api_plugin_slug = Some("jira".into());
@@ -6368,6 +6800,38 @@ mod tests {
         s.api_plugin_slug = Some("jira".into());
         s.api_endpoint_path = Some("/rest/api/3/issue/{{issue_key}}".into());
         validate_required_fields_per_type(&[s]).expect("complete inline ApiCall should validate");
+    }
+
+    #[test]
+    fn required_fields_binary_response_is_bounded_when_the_workflow_is_saved() {
+        let mut s = mk_step("thumbs", StepType::BatchApiCall);
+        s.api_plugin_slug = Some("mcp-atlassian".into());
+        s.api_endpoint_path = Some("/rest/api/2/attachment/thumbnail/{{batch.item.id}}".into());
+        s.batch_items_from = Some("{{steps.attachments.data}}".into());
+        s.api_response = Some(ApiResponseMode::Binary {
+            accept: vec![],
+            max_bytes: None,
+        });
+        validate_required_fields_per_type(std::slice::from_ref(&s))
+            .expect("default binary contract should validate");
+
+        for (accept, max_bytes, expected) in [
+            (vec!["*/*".to_string()], None, "accept"),
+            (vec![], Some(0), "max_bytes"),
+            (
+                vec![],
+                Some(crate::workflows::api_call_binary::BINARY_MAX_BYTES_CEILING + 1),
+                "max_bytes",
+            ),
+        ] {
+            s.api_response = Some(ApiResponseMode::Binary { accept, max_bytes });
+            let err = validate_required_fields_per_type(std::slice::from_ref(&s))
+                .expect_err("out-of-contract binary response must be refused");
+            assert!(
+                err.contains("thumbs") && err.contains(expected),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -6568,5 +7032,134 @@ mod tests {
         // gate_auto_approve_after_secs defaults to None — no validation
         // applies. Manual-forever is the default, preserved here.
         validate_required_fields_per_type(&[s]).expect("None must validate");
+    }
+
+    fn keyed_workflow(id: &str) -> Workflow {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "project_id": null,
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Gate"}}],
+            "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null,
+            "concurrency_limit": 1,
+            "concurrency_key": "{{ticketKey}}",
+            "variables": [{"name": "ticketKey", "label": "Ticket", "placeholder": ""}],
+            "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        }))
+        .expect("keyed workflow")
+    }
+
+    /// KT-796: runs created here stay Pending (nothing spawns them), so each
+    /// one holds its key's slot for the whole test.
+    #[tokio::test]
+    async fn a_keyed_limit_admits_other_keys_and_refuses_the_same_key() {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
+        let state = AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let workflow = keyed_workflow("keyed");
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &workflow))
+            .await
+            .unwrap();
+        let launch = |key: &str| {
+            let state = state.clone();
+            let variables =
+                std::collections::HashMap::from([("ticketKey".to_string(), key.to_string())]);
+            async move {
+                create_manual_run(
+                    &state,
+                    "keyed",
+                    variables,
+                    std::collections::HashMap::new(),
+                    crate::core::launch_context::LaunchContext::default(),
+                )
+                .await
+                .map(|(_, run)| run)
+            }
+        };
+
+        let first = launch("EW-1").await.expect("first run of EW-1");
+        assert_eq!(first.concurrency_key.as_deref(), Some("EW-1"));
+        let other = launch("EW-2").await.expect("another key runs alongside");
+        let active = state
+            .db
+            .with_conn(|conn| crate::db::workflows::count_active_runs(conn, "keyed"))
+            .await
+            .unwrap();
+        assert_eq!(active, 2, "both keys are active at the same time");
+
+        let refused = launch("EW-1")
+            .await
+            .expect_err("the same key is at its limit");
+        assert!(
+            refused.contains("Concurrency limit reached for key `EW-1` (1/1)"),
+            "{refused}"
+        );
+
+        let first_id = first.id.clone();
+        let stored = state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_runs SET status = 'Success' WHERE id = ?1",
+                    [&first_id],
+                )?;
+                crate::db::workflows::get_run(conn, &other.id)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.concurrency_key.as_deref(), Some("EW-2"));
+        launch("EW-1").await.expect("a finished run frees its key");
+    }
+
+    /// KT-796: a TriggerWorkflow target may be any existing workflow, this one
+    /// included (loops between workflows are the point), but must exist.
+    #[test]
+    fn trigger_targets_must_exist_and_receive_only_declared_variables() {
+        let step = |target: &str, mapping: serde_json::Value| -> WorkflowStep {
+            serde_json::from_value(serde_json::json!({
+                "name": "launch", "step_type": {"type": "TriggerWorkflow"},
+                "sub_workflow_id": target, "sub_workflow_variables": mapping,
+            }))
+            .unwrap()
+        };
+        let own = keyed_workflow("phase-2");
+        let other = keyed_workflow("phase-3");
+        let workflows = std::collections::HashMap::from([("phase-3".to_string(), other)]);
+        let mapping = serde_json::json!({"ticketKey": "{{ticketKey}}"});
+
+        validate_child_targets(
+            "phase-2",
+            &own,
+            &[step("phase-3", mapping.clone())],
+            &workflows,
+        )
+        .expect("an existing target with a declared variable");
+        validate_child_targets(
+            "phase-2",
+            &own,
+            &[step("phase-2", mapping.clone())],
+            &workflows,
+        )
+        .expect("a workflow may trigger itself");
+        let missing = validate_child_targets("phase-2", &own, &[step("gone", mapping)], &workflows)
+            .unwrap_err();
+        assert!(missing.contains("introuvable"), "{missing}");
+        let undeclared = validate_child_targets(
+            "phase-2",
+            &own,
+            &[step("phase-3", serde_json::json!({"ticket": "x"}))],
+            &workflows,
+        )
+        .unwrap_err();
+        assert!(
+            undeclared.contains("declares no launch variable `ticket`"),
+            "{undeclared}"
+        );
+        assert!(validate_required_fields_per_type(&[step(" ", serde_json::json!({}))]).is_err());
     }
 }

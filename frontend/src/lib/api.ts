@@ -1,3 +1,4 @@
+import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
@@ -39,6 +40,8 @@ import type {
   ImportPluginBundleReport,
   Discussion,
   DiscussionDetail,
+  DiscussionPoll,
+  DiscussionMonitorItem,
   DiscussionNativeAgentMode,
   DiscussionAgentHandoffMode,
   DiscussionExecutionVariableRetention,
@@ -227,6 +230,7 @@ import type {
   ImportantCategory,
   ImportantMessageList,
   AnswerDiscussionQuestionRequest,
+  CommentDiscussionQuestionRequest,
   DeclineDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
@@ -590,6 +594,7 @@ async function api<T>(
   method: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: Record<string, string> = { ...authHeaders() };
   // Distinguish "no body" (undefined — e.g. GET, or POST with no payload)
@@ -604,6 +609,7 @@ async function api<T>(
     method,
     headers,
     body: hasBody ? JSON.stringify(body) : undefined,
+    signal,
   });
 
   const contentType = res.headers.get('content-type') ?? '';
@@ -1490,6 +1496,9 @@ function webSessionId(): string {
 }
 
 export const discussions = {
+  monitor: (ids: string[], signal?: AbortSignal) => api<DiscussionMonitorItem[]>(
+    'GET', `/discussions/monitor?ids=${encodeURIComponent(ids.join(','))}`, undefined, signal,
+  ),
   /** KT-595 — `DiscussionListItem` is `Discussion` plus `pending_question_count`,
    *  so a room waiting on a decision says so in the list, before it is opened. */
   list: () => api<DiscussionListItem[]>('GET', '/discussions'),
@@ -1500,6 +1509,11 @@ export const discussions = {
   get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>>(
     'GET',
     `/discussions/${id}`,
+  ),
+  /** The detail only when it changed since `revision`; `detail` is null otherwise. */
+  poll: (id: string, revision?: string | null) => api<DiscussionPoll>(
+    'GET',
+    `/discussions/${id}/poll${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`,
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
@@ -1874,6 +1888,18 @@ export const discussions = {
   ) => api<DiscussionQuestion>(
     'POST',
     `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/decline`,
+    request,
+  ),
+
+  /** Say something about a question without deciding it: the asker receives it
+   *  like an answer and the question stays pending. Same idempotency contract. */
+  commentQuestion: (
+    id: string,
+    questionId: string,
+    request: CommentDiscussionQuestionRequest,
+  ) => api<DiscussionQuestion>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/comment`,
     request,
   ),
 
@@ -2446,6 +2472,9 @@ export const executionVariables = {
 // ─── Pages vivantes (0.10.0) ──────────────────────────────────────────────
 
 export const pages = {
+  exportArtifact: (id: string) => api<ArtifactBundle>('GET', `/pages/${encodeURIComponent(id)}/export`),
+  previewImport: (request: ArtifactImportRequest) => api<ArtifactImportPreview>('POST', '/pages/import/preview', request),
+  importArtifact: (request: ArtifactImportRequest) => api<ArtifactImportResult>('POST', '/pages/import', request),
   capability: () => api<LivePagesCapability>('GET', '/pages/capability'),
   list: () => api<LivePage[]>('GET', '/pages'),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
@@ -2475,6 +2504,8 @@ export const pages = {
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/cancel`, {}),
   launchAction: (actionId: string, request: LaunchLivePageActionRequest) =>
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/launch`, request),
+  actionPrefill: (actionId: string, bindings: Record<string, string>) =>
+    api<Record<string, string>>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/prefill`, { bindings }),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

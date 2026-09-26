@@ -57,6 +57,16 @@ scope: HostScope,
  */
 name: string, };
 
+/**
+ * The latest tool call an agent started, as its runtime reported it.
+ */
+export type AgentActivity = { tool: string,
+/**
+ * The call's most informative input (file, command, pattern or URL),
+ * truncated. `None` until the input is complete or when it has none.
+ */
+target?: string | null, at: string, };
+
 export type AgentApiCallRequest = {
 /**
  * `KRONN_DISCUSSION_ID` of the disc making the call, when the
@@ -271,7 +281,13 @@ rtk_hook_configured: boolean,
  *
  * `None` means "no degradation detected, agent is healthy".
  */
-runtime_warning?: string | null, };
+runtime_warning?: string | null,
+/**
+ * Other copies of this CLI on PATH, shadowed by `path`, whose version
+ * differs from the one Kronn runs. The CLI resolves model aliases itself,
+ * so a stale shadowing copy silently changes the model an alias serves.
+ */
+shadowed_installs?: Array<ShadowedInstall>, };
 
 export type AgentProfile = { id: string, name: string, persona_name: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, is_builtin: boolean,
 /**
@@ -423,6 +439,19 @@ export type ApiKeyDisplay = { id: string, name: string, provider: string, masked
 export type ApiKeysResponse = { keys: Array<ApiKeyDisplay>, disabled_overrides: Array<string>, };
 
 /**
+ * Response decoding for `ApiCall` / `BatchApiCall`.
+ */
+export type ApiResponseMode = { "type": "Json" } | { "type": "Binary",
+/**
+ * Exact types (`image/png`) or a family (`image/*`). Empty = `image/*`.
+ */
+accept?: Array<string>,
+/**
+ * Largest accepted body in bytes. Default 256 KiB, at most 2 MiB.
+ */
+max_bytes?: number | null, };
+
+/**
  * REST API capability for a plugin.
  *
  * Stored on `McpServer` to let a plugin expose an HTTP API alongside (or
@@ -482,11 +511,61 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
  */
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
 
+export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>,
+/**
+ * Literal credentials replaced before export; locations only, never values.
+ */
+redacted_fields?: Array<RedactedField>, };
+
+export type ArtifactBundleDataset = { name: string, kind: LivePageDatasetKind,
+/**
+ * Distinguishes a dataset that has never been populated from a JSON null.
+ */
+has_current: boolean, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, points: Array<ArtifactBundlePoint>, };
+
+export type ArtifactBundlePage = { id: string, title: string, slug: string, html: string, created_by_agent: string | null, datasets: Array<ArtifactBundleDataset>, };
+
+export type ArtifactBundlePoint = { observed_at: string, payload: any, dedupe_key: string | null, };
+
+export type ArtifactImportAction = "create" | "reuse";
+
+export type ArtifactImportApiReview = { method: string | null, endpoint: string, plugin: string, };
+
+export type ArtifactImportChoice = { kind: ArtifactResourceKind, source_id: string, action: ArtifactImportAction, target_id: string | null, };
+
+export type ArtifactImportDisposition = "create" | "reuse" | "conflict";
+
+export type ArtifactImportEntry = { kind: ArtifactResourceKind, source_id: string, name: string, disposition: ArtifactImportDisposition, existing_id: string | null,
+/**
+ * UI translation key suffix: missing, identical, changed, retargeted, chosen.
+ */
+reason: string, quick_exec?: ArtifactImportExecReview, quick_api?: ArtifactImportApiReview, };
+
+export type ArtifactImportExecReview = { command: string, args: Array<string>, approved: boolean, };
+
+export type ArtifactImportPreview = { title: string, entries: Array<ArtifactImportEntry>, issues: Array<string>, warnings: Array<ArtifactImportWarning>, digest: string, can_import: boolean, };
+
+export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
+/**
+ * Source identities of new Quick Execs explicitly reviewed by the user.
+ */
+approved_quick_exec_ids?: Array<string>,
+/**
+ * The preview digest is required at commit; stale decisions are rejected.
+ */
+preview_digest?: string | null, };
+
+export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>, };
+
+export type ArtifactImportWarning = { kind: string, id: string, };
+
 /**
  * Where the full streams were kept. Bytes are the real size on disk; `truncated`
  * says the process produced more than that.
  */
 export type ArtifactRef = { path: string, bytes: number, truncated: boolean, };
+
+export type ArtifactResourceKind = "artifact" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec";
 
 /**
  * Declared artifact in a workflow. Phase-3 minimal model — only
@@ -831,7 +910,7 @@ parent_run_sequence: number | null, };
  * value surfaces instead of being silently coerced. Variant names serialize to the
  * exact DB strings (snake_case) so `as_str` and the enum stay in lockstep.
  */
-export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere";
+export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere" | "integration_target_not_checked_out" | "integration_refused" | "integration_target_drifted";
 
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 
@@ -905,7 +984,7 @@ export type BudgetVerdict = "ok" | "warn" | "rotate" | "unknown";
  * `[TRIAGE]` addendum apply inside the child run — see
  * `docs/design/decomposed-autopilot-presets.md` INV-3).
  */
-export type BundleChildWorkflow = { bundle_id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety | null, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null, guards: WorkflowGuards | null, artifacts: Record<string, ArtifactSpec>, on_failure: Array<WorkflowStep>, exec_allowlist: Array<string>, variables: Array<PromptVariable>,
+export type BundleChildWorkflow = { bundle_id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety | null, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null, concurrency_key: string | null, guards: WorkflowGuards | null, artifacts: Record<string, ArtifactSpec>, on_failure: Array<WorkflowStep>, exec_allowlist: Array<string>, variables: Array<PromptVariable>,
 /**
  * 0.8.5 — optional initial state. Default `true` for back-compat
  * (every UI-driven create stays enabled by default). The MCP
@@ -1238,6 +1317,12 @@ timeout_secs?: number | null,
  */
 output_format: CollectQuickExecOutputFormat, };
 
+/**
+ * A remark on a question that is not a decision: it reaches the asker and
+ * leaves the card waiting.
+ */
+export type CommentDiscussionQuestionRequest = { idempotency_key: string, text: string, };
+
 export type CompareImprovementAvailability = "available" | "different_prompts" | "missing_prompt" | "no_shared_quick_prompt";
 
 export type ComparePromptCompatibility = "identical" | "different" | "missing";
@@ -1422,7 +1507,11 @@ export type CreateLivePageRequest = { title: string, slug?: string | null, proje
  * Optional discussion that originated this Page. Agents set this to the
  * current room so the artifact remains discoverable from both places.
  */
-discussion_id?: string | null, datasets?: Array<CreateLivePageDataset>, };
+discussion_id?: string | null,
+/**
+ * Optional source message, which must belong to discussion_id.
+ */
+source_message_id?: string, datasets?: Array<CreateLivePageDataset>, };
 
 export type CreateMcpConfigRequest = { server_id: string, label: string, env: Record<string, string>, args_override?: Array<string> | null, is_global: boolean, project_ids: Array<string>,
 /**
@@ -1464,7 +1553,7 @@ export type CreateQuickPromptRequest = { name: string, icon?: string | null, pro
 
 export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null, };
 
-export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
+export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, concurrency_key?: string | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
 /**
  * 0.8.5 — optional initial state. Default `true` for back-compat
  * (every UI-driven create stays enabled by default). The MCP
@@ -2490,6 +2579,16 @@ poll_policy: PollBackoffPolicy,
  */
 pacing?: PacingState, project_id: string | null, };
 
+/**
+ * A bounded read-only view for monitoring several rooms without loading their
+ * full transcripts. Missing or unreadable discussions fail independently.
+ */
+export type DiscussionMonitorItem = { id: string, preview: DiscussionMonitorPreview | null, error: string | null, };
+
+export type DiscussionMonitorMessage = { id: string, role: string, channel: string, content: string, truncated: boolean, agent_type: AgentType | null, model: string | null, author_pseudo: string | null, author_cli_ordinal: number | null, timestamp: string, };
+
+export type DiscussionMonitorPreview = { plan: PlanningPlanStats, title: string, shared_id: string | null, agent: AgentType | null, connection_name: string | null, awaiting_agent: boolean, agent_running: boolean, progress_phase: string | null, pending_question_count: number, updated_at: string, messages: Array<DiscussionMonitorMessage>, partial_response: DiscussionMonitorMessage | null, };
+
 export type DiscussionNativeAgentMode = { disabled: boolean, };
 
 export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>,
@@ -2514,6 +2613,12 @@ completed_active: number, total_active: number,
  * KT-30 — bucketed Active counts + the Later count.
  */
 stats: PlanningPlanStats, };
+
+/**
+ * A detail refresh: `detail` is omitted when `revision` still matches the
+ * one the client sent.
+ */
+export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
 
 export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
@@ -3580,7 +3685,7 @@ pinned: boolean,
  */
 archived: boolean, };
 
-export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, };
+export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, source_message_id?: string, };
 
 export type LivePageDiscussionRelation = "created_from" | "attached";
 
@@ -5099,7 +5204,11 @@ export type QuickApiExportEnvelope = { kind: string, version: number, exported_a
  * `id`, `project_id`, `created_at`, `updated_at` are present on the
  * wire but reset at import — fresh values are minted by the importer.
  */
-quick_api: QuickApi, };
+quick_api: QuickApi,
+/**
+ * Fields whose literal secret was replaced before export (never the value).
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type QuickExec = { id: string, name: string, icon: string, description: string, project_id: string | null, command: string, args: Array<string>, timeout_secs: number, output_format: CollectQuickExecOutputFormat, variables: Array<PromptVariable>,
 /**
@@ -5117,7 +5226,11 @@ exit_code: number | null,
  */
 stderr: string | null, };
 
-export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec, };
+export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec,
+/**
+ * Fields whose literal secret was replaced before export (never the value).
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type QuickExecResult = { status: QuickExecStatus,
 /**
@@ -5239,6 +5352,16 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
 preview: string, };
 
 export type RecoveryStatus = { configured: boolean, };
+
+export type RedactedField = {
+/**
+ * `quick_api`, `quick_exec` or `workflow_step`.
+ */
+kind: string, resource_id: string, name: string,
+/**
+ * Dotted location, e.g. `api_headers.Authorization` or `args.3`.
+ */
+field: string, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
@@ -5764,6 +5887,11 @@ run_retention_days: number,
  */
 execution_variable_retention_days: number,
 /**
+ * Days after which boot reclaims the clean worktree of an `Interrupted`
+ * run nobody resumed; its commits stay on a preserved branch. `0` = never.
+ */
+interrupted_worktree_ttl_days: number,
+/**
  * KT-373 — refuse to provision a worktree below this much free disk, in
  * GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
  * holding its own Rust `target/`; provisioning kept going until nothing
@@ -6059,6 +6187,11 @@ scan_paths_explored: Array<string>, };
 
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
+/**
+ * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
+ */
+export type ShadowedInstall = { path: string, version: string, };
+
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
 
 export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, project_id: string | null, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, exec_details?: QuickExecDiagnostics, created_at: string, updated_at: string, };
@@ -6236,7 +6369,12 @@ export type StepOutputFormat = { "type": "FreeText" } | { "type": "Structured" }
  */
 schema: any, on_invalid: OnInvalid, };
 
-export type StepResult = { step_name: string, status: RunStatus, output: string, tokens_used: number, duration_ms: number,
+export type StepResult = { step_name: string, status: RunStatus, output: string,
+/**
+ * `None` when an agent ran but its runtime reported no usage: a step
+ * that called a model was not free, so unknown must not read as zero.
+ */
+tokens_used: number | null, duration_ms: number,
 /**
  * 0.8.2 — Wall-clock timestamp at which the step started executing.
  * Optional for backward compatibility with runs written before this
@@ -6321,13 +6459,32 @@ is_rollback: boolean,
  */
 child_run_id?: string | null,
 /**
+ * Captured execution provenance. Older rows have no such information;
+ * reading them must never manufacture attempts from today's config.
+ */
+agent_provenance?: WorkflowAgentProvenance | null,
+/**
  * Bounded Kronn-native calls made by an HTTP Agent step (Ollama or
  * LiteLLM). Only tool name + outcome are persisted; arguments/results
  * stay in the provider round-trip and can never leak into run history.
  */
-native_tool_calls?: Array<NativeToolCallLog>, };
+native_tool_calls?: Array<NativeToolCallLog>,
+/**
+ * Prompt-cache reads of this step's agent attempts. `tokens_used` counts
+ * only uncached input and output, so this is additional. `None` when not reported.
+ */
+cached_prompt_tokens?: number | null,
+/**
+ * Prompt-cache writes of this step's agent attempts. `None` when not reported.
+ */
+cache_write_prompt_tokens?: number | null,
+/**
+ * Latest tool call of an Agent step while it runs. The terminal result
+ * replaces the in-flight row, so it survives only an interrupted step.
+ */
+last_activity?: AgentActivity | null, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -6455,7 +6612,15 @@ export type TaskExecutionEvent = { id: string, task_execution_id: string, action
  */
 export type TaskExecutionHttpPhase = "read" | "mutation" | "commit" | "delivery" | "finalization" | "exploration" | "answer";
 
-export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns: number, prompt_tokens: number, eval_tokens: number, duration_ms: number, };
+export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns: number, prompt_tokens: number,
+/**
+ * Sum over the `cache_reported_turns` that reported a cached share only.
+ */
+cached_prompt_tokens: number, cache_reported_turns: number,
+/**
+ * Sum over the `cache_write_reported_turns` that reported a cache write only.
+ */
+cache_write_prompt_tokens: number, cache_write_reported_turns: number, eval_tokens: number, duration_ms: number, };
 
 export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
 
@@ -6464,14 +6629,34 @@ export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
  * bounded protocol identifiers; arguments, results, prompts and endpoints are
  * deliberately absent from this durable projection.
  */
-export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | null, provider: string, phase: TaskExecutionHttpPhase, prompt_tokens: number, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
+export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | null, provider: string, phase: TaskExecutionHttpPhase, prompt_tokens: number,
+/**
+ * Share of `prompt_tokens` served from the provider's prompt cache. `None`
+ * when the provider does not report it, including every journal entry
+ * written before this field existed: unknown, not zero.
+ */
+cached_prompt_tokens?: number | null,
+/**
+ * Prompt tokens the provider reports writing to its prompt cache. `None`
+ * when not reported, as for `cached_prompt_tokens`.
+ */
+cache_write_prompt_tokens?: number | null, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
 
 /**
  * Aggregate across every dispatch/rework of one durable task execution. The
  * totals cover the complete journal while `recent_turns` is bounded for UI and
  * MCP payload safety.
  */
-export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
+export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number,
+/**
+ * Sum over the `cache_reported_turns` that reported a cached share only;
+ * never a cache rate for turns that did not report one.
+ */
+cached_prompt_tokens: number, cache_reported_turns: number,
+/**
+ * Sum over the `cache_write_reported_turns` that reported a cache write only.
+ */
+cache_write_prompt_tokens: number, cache_write_reported_turns: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
 
 /**
  * A resolved TaskExecution + its lineage, answerable in one query (DoD-4):
@@ -6819,7 +7004,13 @@ export type TransformDataValueType = "string" | "number" | "boolean";
  * "trigger with no variables" flow working — back-compat for tracker
  * triggers that don't need variables.
  */
-export type TriggerWorkflowRequest = { variables?: Record<string, string>, };
+export type TriggerWorkflowRequest = { variables?: Record<string, string>,
+/**
+ * Non-secret entries seeded into the run's `state` at creation, e.g. the
+ * ticket a run is about, so the run list can be filtered on them even if
+ * the run fails before any step writes its state.
+ */
+state?: Record<string, string>, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
@@ -6934,7 +7125,11 @@ export type UpdatePlanningTaskRequest = { title?: string | null, description?: s
  */
 export type UpdateQuickFavoriteRequest = { pinned: boolean, };
 
-export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null,
+export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null,
+/**
+ * `null` clears the key; omitted keeps it.
+ */
+concurrency_key?: string | null | null, guards?: WorkflowGuards | null,
 /**
  * Replace the artifact map entirely when present. To clear all
  * declarations, send `Some({})`. Omit the field to leave existing
@@ -7221,6 +7416,11 @@ export type WorkerOfferStatus = "pending" | "accepting" | "accepted" | "declined
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
+ * Template rendered at launch from non-secret launch variables
+ * (`{{ticketKey}}`): `concurrency_limit` then counts runs per rendered key.
+ */
+concurrency_key?: string | null,
+/**
  * Execution limits (timeout, LLM calls cap, loop detection). 0.7.0 —
  * Phase 1 of the Auto-Dev workflow expansion. `None` = use the soft
  * backend defaults (120 min wall-clock, 100 LLM calls, 10 revisits
@@ -7281,6 +7481,48 @@ pinned: boolean, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
+export type WorkflowAgentAttempt = { id: number, role: WorkflowAgentAttemptRole,
+/**
+ * One-based outer Agent retry; repair/debate retain their parent's number.
+ */
+retry: number, agent: AgentType, tier: ModelTier, connection_id: string | null,
+/**
+ * Explicit model override, before resolving connection/tier defaults.
+ */
+requested_model: string | null,
+/**
+ * Model resolved at the actual launch boundary. Not provider observation.
+ */
+resolved_model: string | null,
+/**
+ * Whether the transport applied that selection. None means unknown or no
+ * selection; native ACP can explicitly retain its default (false).
+ */
+model_applied: boolean | null,
+/**
+ * Distinct model identifiers reported by structured runtime responses.
+ * Empty means unreported; never inferred from generated prose or config.
+ */
+observed_models: Array<string>, format_fallback: boolean, started_at: string, duration_ms: number, succeeded: boolean,
+/**
+ * Prompt tokens read from the provider's prompt cache, on top of the
+ * uncached input counted in `tokens_used`. `None` when not reported.
+ */
+cached_prompt_tokens?: number | null,
+/**
+ * Prompt tokens written to the provider's prompt cache. `None` when not reported.
+ */
+cache_write_prompt_tokens?: number | null, };
+
+export type WorkflowAgentAttemptRole = "Initial" | "Repair" | "Escalation" | "Review" | "Author";
+
+export type WorkflowAgentProvenance = { attempts: Array<WorkflowAgentAttempt>,
+/**
+ * One-based attempt id whose output the step retained. Absent when no
+ * attempt produced a retained output, including preflight failures.
+ */
+selected_attempt: number | null, };
+
 /**
  * Self-contained envelope produced by `GET /api/workflows/:id/export`.
  * Designed to be saved to disk, mailed, attached to a Github issue, etc.
@@ -7331,7 +7573,12 @@ referenced_pages?: Array<WorkflowExportPage>,
  * atomic operation and remaps `sub_workflow_id` to the fresh child ids.
  * Empty when the workflow has no SubWorkflow steps. Excludes the root.
  */
-referenced_workflows?: Array<Workflow>, };
+referenced_workflows?: Array<Workflow>,
+/**
+ * Fields whose literal secret was replaced before export (never the
+ * value). An importer shows them so nothing silently runs without them.
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type WorkflowExportPage = { id: string, slug: string, title: string, html: string, created_by_agent: string | null, datasets: Array<WorkflowExportPageDataset>, };
 
@@ -7419,6 +7666,15 @@ state?: Record<string, string>,
  * blocked, no auth, network down, …).
  */
 produced_branches?: Array<ProducedBranch>,
+/**
+ * The workflow's `concurrency_key` as rendered for this run at launch.
+ */
+concurrency_key?: string | null,
+/**
+ * The run whose `TriggerWorkflow` step launched this one. Unlike
+ * `parent_run_id`, the two runs have independent lifecycles.
+ */
+triggered_by_run_id?: string | null,
 /**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's
@@ -7619,6 +7875,11 @@ api_max_retries?: number | null,
  */
 api_output_var?: string | null,
 /**
+ * How a 2xx body is decoded. Absent = JSON, exactly as before; `Binary`
+ * returns an allowed media type as base64 instead of parsing it.
+ */
+api_response?: ApiResponseMode | null,
+/**
  * Markdown message shown to the operator on the run-detail page.
  * Templates supported. Empty string falls back to a default
  * "Décision humaine requise" placeholder in the UI.
@@ -7758,6 +8019,12 @@ sub_workflow_id?: string | null,
  */
 sub_workflow_foreach_file?: string | null,
 /**
+ * For `SubWorkflow` and `TriggerWorkflow`: child launch variable name →
+ * template rendered in this run. The child's snapshot is prepared from
+ * these values like a manual launch's.
+ */
+sub_workflow_variables?: Record<string, string>,
+/**
  * 2026-06-13 — "Multi-agent review" advanced option on an Agent step.
  * When set, the step runs its own agent normally, THEN opens a shared
  * Kronn discussion and invites a SECOND agent (a different model family,
@@ -7767,7 +8034,13 @@ sub_workflow_foreach_file?: string | null,
  * reads the artifact once, then only the conversation delta) and a real
  * back-and-forth rather than a file relay. `None` = plain Agent step.
  */
-multi_agent_review?: MultiAgentReviewConfig | null, };
+multi_agent_review?: MultiAgentReviewConfig | null,
+/**
+ * KT-793 — Agent steps only: a template rendering to a discussion id. The
+ * step's agent joins that room as its principal without an invite token,
+ * on every launch and every resume of the step.
+ */
+room_id?: string | null, };
 
 export type WorkflowSuggestion = { id: string, title: string, description: string, reason: string, required_mcps: Array<string>, audience: string, complexity: string, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, };
 
@@ -7796,7 +8069,19 @@ export type WorkspaceConfig = { hooks: WorkspaceHooks,
  * reporting workflows. Legacy configs that declare workspace hooks still
  * request a worktree so those hooks do not silently stop running.
  */
-require_isolation: boolean, };
+require_isolation: boolean,
+/**
+ * Declares that the workflow never writes the project's checkout (it
+ * reads it, or works through absolute paths / page data), so its
+ * non-isolated runs skip the per-project exclusivity lock.
+ */
+main_tree_read_only?: boolean,
+/**
+ * Commit a fresh run's worktree starts from (`origin/main`, a tag, a SHA)
+ * instead of the checkout's HEAD. A `<remote>/<branch>` value is fetched
+ * first and a failed fetch refuses the run. Setting it requests a worktree.
+ */
+base_ref?: string | null, };
 
 export type WorkspaceHistoryLease = { id: string, disc_id: string, session_pk: number, session_agent_type: string, session_id: string | null, canonical_path: string, branch: string, backup_ref: string, head_sha: string, acquired_at: string, expires_at: string, };
 

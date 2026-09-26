@@ -1798,6 +1798,30 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     ));
   });
 
+  it('lists the secrets an export masked before the import is confirmed', async () => {
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+    chooseAutomationAction('Importer');
+    const content = JSON.stringify({
+      kind: 'kronn.quick_api',
+      version: 1,
+      quick_api: { name: 'Masked QA', variables: [] },
+      redacted_fields: [
+        { kind: 'quick_api', resource_id: 'qa-1', name: 'Masked QA', field: 'api_headers.Authorization' },
+      ],
+    });
+    const file = new File([content], 'masked.kronn-qa.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
+    await act(async () => {
+      fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, { target: { files: [file] } });
+    });
+    const note = await screen.findByTestId('import-redacted-fields');
+    expect(note).toHaveTextContent('Secrets retirés de ce fichier');
+    expect(note).toHaveTextContent('Quick API « Masked QA » : api_headers.Authorization');
+    expect(quickApisApi.importQa).not.toHaveBeenCalled();
+  });
+
   it('offers AI-assisted creation and global JSON import from the Quick APIs tab', async () => {
     const onNavigateDiscussion = vi.fn();
     vi.mocked(discussionsApi.create).mockResolvedValueOnce({ id: 'disc-qa-architect' } as never);

@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, act, fireEvent, within } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
-import type { WorkflowRun, WorkflowStep, StepResult } from '../../../types/generated';
+import type { WorkflowRun, WorkflowStep, StepResult, WorkflowAgentAttempt } from '../../../types/generated';
 
 vi.mock('../../../lib/api', () => buildApiMock());
 
@@ -126,6 +126,118 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     });
     render(<RunDetail run={run} onDelete={() => {}} />);
     expect(screen.getByText('sonnet · reasoning')).toBeInTheDocument();
+  });
+
+  it('shows an unknown model for an older run instead of borrowing the current step config', () => {
+    const run = mkRun({
+      step_results: [mkResult({ step_kind: 'Agent', step_agent: 'Ollama' })],
+    });
+    const steps = [mkStep({ name: 'main', agent_settings: { tier: 'reasoning' } as WorkflowStep['agent_settings'] })];
+    render(<RunDetail run={run} workflowSteps={steps} onDelete={() => {}} />);
+    expect(screen.getByText('wf.modelUnknown')).toBeInTheDocument();
+    expect(screen.queryByText('reasoning')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    expect(screen.queryByTestId('wf-agent-provenance')).not.toBeInTheDocument();
+  });
+
+  const attempt = (over: Partial<WorkflowAgentAttempt>): WorkflowAgentAttempt => ({
+    id: 1,
+    role: 'Initial',
+    retry: 1,
+    agent: 'Ollama',
+    tier: 'default',
+    connection_id: null,
+    requested_model: null,
+    resolved_model: 'qwen3.8:27b-mlx',
+    model_applied: null,
+    observed_models: [],
+    format_fallback: false,
+    started_at: '2026-09-23T15:40:21Z',
+    duration_ms: 7_800,
+    succeeded: true,
+    ...over,
+  });
+
+  it('lists every attempt and marks the one whose output was kept', () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'Agent',
+        step_agent: 'ClaudeCode',
+        step_model: 'opus · reasoning',
+        agent_provenance: {
+          selected_attempt: 3,
+          attempts: [
+            attempt({ id: 1, succeeded: true, format_fallback: true }),
+            attempt({ id: 2, role: 'Repair', succeeded: true }),
+            attempt({ id: 3, role: 'Escalation', agent: 'ClaudeCode', resolved_model: 'opus',
+              observed_models: ['claude-opus-5'] }),
+          ],
+        },
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    const list = screen.getByTestId('wf-agent-provenance');
+    const chips = within(list).getAllByText(/·/);
+    expect(chips).toHaveLength(3);
+    expect(chips[0]).toHaveTextContent('wf.attemptRoleInitial · Ollama · qwen3.8:27b-mlx · wf.attemptFormatFallback');
+    expect(chips[2]).toHaveTextContent('★ wf.attemptRoleEscalation · Claude Code · claude-opus-5');
+    expect(chips[2]).toHaveAttribute('data-retained', 'true');
+    expect(chips[0]).toHaveAttribute('data-retained', 'false');
+  });
+
+  it('says when no attempt was kept and never presents a CLI default as the requested model', () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        status: 'Failed',
+        step_kind: 'Agent',
+        step_agent: 'Codex',
+        step_model: null,
+        agent_provenance: {
+          selected_attempt: null,
+          attempts: [attempt({ agent: 'Codex', resolved_model: 'gpt-x', model_applied: false, succeeded: false })],
+        },
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    const list = screen.getByTestId('wf-agent-provenance');
+    expect(list).toHaveTextContent('! wf.attemptRoleInitial · Codex · wf.attemptModelCliDefault');
+    expect(list).not.toHaveTextContent('gpt-x');
+    expect(list).toHaveTextContent('wf.attemptNoneRetained');
+    expect(within(list).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('shows and copies the saved connection for each attempt after workflow settings change', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText);
+    const initialConnection = '12345678-abcd-4def-9012-123456789abc';
+    const retainedConnection = '87654321-abcd-4def-9012-123456789abc';
+    const currentConnection = '99999999-abcd-4def-9012-123456789abc';
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'Agent', step_agent: 'Custom',
+        agent_provenance: {
+          selected_attempt: 2,
+          attempts: [
+            attempt({ connection_id: initialConnection }),
+            attempt({ id: 2, role: 'Escalation', agent: 'Custom', connection_id: retainedConnection }),
+          ],
+        },
+      })],
+    });
+    const steps = [mkStep({ agent_settings: { connection_id: currentConnection } as WorkflowStep['agent_settings'] })];
+    render(<RunDetail run={run} workflowSteps={steps} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    const list = screen.getByTestId('wf-agent-provenance');
+    for (const connection of [initialConnection, retainedConnection]) {
+      const button = within(list).getByRole('button', { name: `wf.attemptConnectionCopy:${connection}` });
+      expect(button).toHaveTextContent(`#${connection.slice(0, 8)}`);
+      await act(async () => { fireEvent.click(button); });
+      expect(writeText).toHaveBeenLastCalledWith(connection);
+    }
+    expect(within(list).queryByRole('button', { name: new RegExp(currentConnection) })).not.toBeInTheDocument();
+    expect(list).not.toHaveTextContent(currentConnection);
   });
 
   it('renders the agent label for a snapshotted Agent step', () => {

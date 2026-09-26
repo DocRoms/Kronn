@@ -4,6 +4,9 @@ import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle } from 'lucide-react';
 import { AGENT_LABELS, agentTextColor } from '../../lib/constants';
+import { AgentProvenanceDetails, StepModelBadge } from './AgentProvenance';
+import { StepTokensBadge } from './StepTokens';
+import { stepTokensUnknown } from './stepTokenStatus';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import { CopyIdPill } from '../CopyIdPill';
 import {
@@ -855,6 +858,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'data'
                       : ws_step.step_type.type === 'PublishPageData' ? 'page'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'subwf'
+                      : ws_step.step_type.type === 'TriggerWorkflow' ? 'subwf'
                       : 'agent'
                   }>
                     {ws_step.step_type.type === 'ApiCall' ? 'API'
@@ -868,6 +872,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'TRANSFORM'
                       : ws_step.step_type.type === 'PublishPageData' ? 'PAGE'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'SUB-WF'
+                      : ws_step.step_type.type === 'TriggerWorkflow' ? 'TRIGGER'
                       : 'AGENT'}
                   </span>
                 )}
@@ -882,16 +887,8 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                     candidates for desagentification (swap Agent → Exec /
                     ApiCall on the hot steps). Zero-token steps (Gate, Exec,
                     Notify, ApiCall, JsonData) stay clean — only steps that
-                    actually consumed LLM tokens show the badge. */}
-                {completed && completed.tokens_used > 0 && (
-                  <span
-                    className="text-ghost text-xs"
-                    title={t('wf.stepTokensHint')}
-                    style={{ color: 'var(--kr-accent-ink)' }}
-                  >
-                    {completed.tokens_used.toLocaleString()} {t('wf.stepTokensSuffix')}
-                  </span>
-                )}
+                    consumed LLM tokens, or whose usage is unknown, show it. */}
+                {completed && <StepTokensBadge sr={completed} t={t} className="text-ghost text-xs" />}
                 {isNext && ws_step.step_type?.type === 'SubWorkflow' && ws_step.sub_workflow_id ? (
                   <FanOutProgress childWorkflowId={ws_step.sub_workflow_id} t={t} />
                 ) : isNext ? (
@@ -1049,17 +1046,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       {AGENT_LABELS[sr.step_agent] ?? sr.step_agent}
                     </span>
                   )}
-                  {/* 2026-06-13 — the model/tier actually resolved for this step
-                      (backend-stamped), shown on EVERY agent step incl. per-item
-                      fan-out routing. Falls back to the step-def tier for runs
-                      recorded before step_model shipped. */}
-                  {sr.step_kind === 'Agent' && (() => {
-                    const fallback = workflowSteps?.find(ws => ws.name === sr.step_name)?.agent_settings;
-                    const label = sr.step_model || fallback?.model || fallback?.tier;
-                    return label ? (
-                      <span className="wf-tier-badge" title={t('wf.modelTierHint')}>{label}</span>
-                    ) : null;
-                  })()}
+                  {/* Backend-stamped at run time; an older run without it stays
+                      unknown rather than borrowing today's workflow config. */}
+                  <StepModelBadge sr={sr} t={t} />
                   <span className="text-ghost">
                     {sr.duration_ms > 0 ? `${(sr.duration_ms / 1000).toFixed(1)}s` : ''}
                   </span>
@@ -1073,7 +1062,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       (the run did NOT "continue", it's compensating). */}
                   {!sr.condition_result && sr.status === 'Success' && i < run.step_results.length - 1
                     && !sr.is_rollback && !run.step_results[i + 1]?.is_rollback && (
-                    <span className="text-2xs" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>&rarr; {t('wf.nextStepArrow')}</span>
+                    <span className="text-2xs" style={{ color: 'var(--kr-success)' }}>&rarr; {t('wf.nextStepArrow')}</span>
                   )}
                   <span className="flex-1" />
                   {!isExpanded && sr.output && (
@@ -1086,6 +1075,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
 
                 {isExpanded && (
                   <div className="wf-step-output-full">
+                    <AgentProvenanceDetails sr={sr} t={t} />
                     {sr.native_tool_calls && sr.native_tool_calls.length > 0 && (
                       <div className="wf-native-tools" data-testid="wf-native-tools">
                         <span className="wf-native-tools-label">{t('wf.nativeTools')}</span>
@@ -1171,7 +1161,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                     <div className="flex-row gap-6 mt-3 text-xs text-faint">
                       <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}>{sr.status}</span></span>
                       {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}
-                      {sr.tokens_used > 0 && <span>Tokens: {sr.tokens_used}</span>}
+                      {stepTokensUnknown(sr)
+                        ? <span>Tokens: {t('wf.stepTokensUnknown')}</span>
+                        : (sr.tokens_used ?? 0) > 0 && <span>Tokens: {sr.tokens_used}</span>}
                       {sr.condition_result && <span>Condition: <span className="text-warning">{conditionLabel(sr.condition_result)}</span></span>}
                     </div>
                   </div>

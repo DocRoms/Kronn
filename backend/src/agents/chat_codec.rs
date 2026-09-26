@@ -21,6 +21,8 @@ use serde_json::Value;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatChunk {
     pub delta: Option<String>,
+    /// Provider-reported identity, independent of the requested model alias.
+    pub model: Option<String>,
     /// Why the provider stopped, when it says so. Surfaced because an empty reply
     /// is otherwise undiagnosable: `length` means the model spent its output budget
     /// (a reasoning model can burn it all thinking), `stop` means it chose to end.
@@ -29,6 +31,12 @@ pub(crate) struct ChatChunk {
     pub done: bool,
     pub error: Option<String>,
     pub prompt_tokens: u64,
+    /// Share of `prompt_tokens` the provider served from its prompt cache.
+    /// `None` when the provider does not report it, which proves nothing.
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt tokens the provider reports writing to its prompt cache (Anthropic
+    /// bills them above the plain input rate). `None` when not reported.
+    pub cache_write_prompt_tokens: Option<u64>,
     pub eval_tokens: u64,
     /// Tool calls the model wants executed before it can answer. Ollama puts
     /// them on the terminal chunk; OpenAI streams them as indexed fragments
@@ -66,7 +74,10 @@ impl ChatCodec for OllamaCodec {
             return None;
         }
         let json: Value = serde_json::from_str(line).ok()?;
-        let mut chunk = ChatChunk::default();
+        let mut chunk = ChatChunk {
+            model: json["model"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
         // In-band error on a 200 stream (model crashed mid-generation).
         if let Some(err) = json["error"].as_str() {
             chunk.error = Some(err.to_string());
@@ -111,7 +122,10 @@ impl ChatCodec for OpenAiCodec {
             return Some(ChatChunk::done());
         }
         let json: Value = serde_json::from_str(payload).ok()?;
-        let mut chunk = ChatChunk::default();
+        let mut chunk = ChatChunk {
+            model: json["model"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
         if let Some(err) = json["error"]["message"].as_str() {
             chunk.error = Some(err.to_string());
         }
@@ -133,6 +147,12 @@ impl ChatCodec for OpenAiCodec {
         }
         if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
             chunk.prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
+            // OpenAI's field; LiteLLM also fills it for Gemini and Anthropic and
+            // may pass Anthropic's own name through instead.
+            chunk.cached_prompt_tokens = usage["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .or_else(|| usage["cache_read_input_tokens"].as_u64());
+            chunk.cache_write_prompt_tokens = usage["cache_creation_input_tokens"].as_u64();
             chunk.eval_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
@@ -182,8 +202,52 @@ pub(crate) fn build_openai_chat_body(
     body
 }
 
+/// Copy of an OpenAI-wire body asking LiteLLM to mark Anthropic cache
+/// breakpoints on the system prompt and the last message. Anthropic caches only
+/// marked prefixes; `None` for other models, which cache implicitly or not at all.
+pub(crate) fn with_prompt_cache_hints(body: &Value) -> Option<Value> {
+    let model = body.get("model")?.as_str()?;
+    if !model.to_ascii_lowercase().contains("claude") {
+        return None;
+    }
+    let mut hinted = body.clone();
+    hinted.as_object_mut()?.insert(
+        "cache_control_injection_points".to_string(),
+        serde_json::json!([
+            { "location": "message", "role": "system" },
+            { "location": "message", "index": -1 },
+        ]),
+    );
+    Some(hinted)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_model_observations_survive_both_wire_formats() {
+        use super::ChatCodec;
+        assert_eq!(
+            super::OllamaCodec
+                .parse_line(r#"{"model":"served-local","done":true}"#)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("served-local")
+        );
+        assert_eq!(
+            super::OpenAiCodec
+                .parse_line(r#"data: {"model":"served-proxy","choices":[]}"#)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("served-proxy")
+        );
+        assert!(super::OpenAiCodec
+            .parse_line("data: [DONE]")
+            .unwrap()
+            .model
+            .is_none());
+    }
     use super::*;
 
     #[test]
@@ -242,7 +306,86 @@ mod tests {
             .parse_line(r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":9}}"#)
             .unwrap();
         assert_eq!((u.prompt_tokens, u.eval_tokens), (7, 9));
+        assert_eq!(u.cached_prompt_tokens, None, "absent means not reported");
         assert_eq!(u.delta, None);
+    }
+
+    #[test]
+    fn openai_reads_cached_prompt_tokens_in_both_spellings() {
+        let openai = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            (openai.prompt_tokens, openai.cached_prompt_tokens),
+            (900, Some(800))
+        );
+        let anthropic = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"cache_read_input_tokens":700}}"#,
+            )
+            .unwrap();
+        assert_eq!(anthropic.cached_prompt_tokens, Some(700));
+        let reported_zero = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0},"cache_read_input_tokens":700}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            reported_zero.cached_prompt_tokens,
+            Some(0),
+            "a reported zero is a measurement and wins over the fallback"
+        );
+    }
+
+    #[test]
+    fn openai_reads_cache_writes_apart_from_cache_reads() {
+        let anthropic = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"cache_creation_input_tokens":600,"cache_read_input_tokens":0}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                anthropic.cached_prompt_tokens,
+                anthropic.cache_write_prompt_tokens
+            ),
+            (Some(0), Some(600))
+        );
+        let gemini = OpenAiCodec
+            .parse_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            gemini.cache_write_prompt_tokens, None,
+            "absent means not reported"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_hints_mark_system_and_last_message_for_claude_only() {
+        let body = build_openai_chat_body("anthropic/Claude-Sonnet-4-6", "sys", "hi", None, true);
+        let hinted = with_prompt_cache_hints(&body).expect("claude model");
+        assert_eq!(
+            hinted["cache_control_injection_points"],
+            serde_json::json!([
+                { "location": "message", "role": "system" },
+                { "location": "message", "index": -1 },
+            ])
+        );
+        assert_eq!(hinted["messages"], body["messages"]);
+        assert!(
+            body.get("cache_control_injection_points").is_none(),
+            "the stored body is left untouched"
+        );
+        let gemini = build_openai_chat_body("gemini-2.5-flash", "sys", "hi", None, true);
+        assert_eq!(with_prompt_cache_hints(&gemini), None);
+        assert_eq!(
+            with_prompt_cache_hints(&serde_json::json!({ "messages": [] })),
+            None
+        );
     }
 
     #[test]

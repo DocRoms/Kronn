@@ -1,4 +1,77 @@
-# Live Pages architecture (v0.10.0)
+# Artifacts architecture (formerly Live Pages)
+
+## Product naming and compatibility
+
+The UI calls this library **Artifacts**. Existing `page_*` MCP tools,
+`/api/pages` endpoints, `#page/…` and `#pages/mosaic?…` URLs, `PublishPageData`
+workflow steps, stored IDs and sandbox event names keep their established
+contracts. An Artifact is the same persisted resource; renaming its product
+label does not migrate or duplicate it. Historical code and documentation use
+“Page” for that domain model.
+[src: file: frontend/src/lib/i18n/locales/en.ts:55]
+[src: file: frontend/src/lib/live-page-navigation.ts:1]
+
+## Portable JSON bundles
+
+The Artifact export action downloads a `kronn.artifact` version-1 JSON bundle.
+It contains the current HTML, named dataset values (including JSON `null`
+distinct from an unpopulated snapshot), schemas, retention settings and every
+retained time-series point with its observation time and deduplication key.
+It follows parsed action targets and workflow dependencies transitively,
+including saved workflows that publish into the root Artifact, their failure
+steps, sub-workflows, Quick Prompts, Quick APIs, Quick Execs and secondary
+Artifacts. Secondary Artifacts do not pull in unrelated incoming publishers.
+Export uses one read transaction. Missing dependencies, unsupported bundles and
+bundles exceeding 16 MiB or 512 resources fail explicitly; nothing is silently
+truncated. Historical HTML revisions, run/publication history and discussion
+links are not included.
+[src: file: backend/src/models/artifact_portability.rs:1]
+[src: file: backend/src/api/artifact_portability.rs:1]
+
+Import is available in the library and in a workflow's publishing step before
+the library is activated. The user selects a project and reviews each planned
+creation, reuse or conflict before committing. Reuse requires a matching source
+identity (or a recorded earlier import) and definition; names alone never match.
+Changed definitions require an explicit local-version or new-copy choice.
+The root Artifact is always new. Publishers and action-bearing dependencies
+that need different destinations are copied, with typed references remapped;
+literal text, CSS and unrelated JavaScript are not rewritten. An explicit reuse
+that cannot target the new destination is rejected. New workflows are disabled;
+existing workflows keep their state and no automation is executed by import.
+For every Quick Exec that will be created, the preview shows the exact saved
+command and argument array. The user must approve each command and refresh the
+preview before import is enabled. The server requires these explicit source
+identities in `approved_quick_exec_ids`; the reviewed digest includes approvals
+and bundle content, so changing either invalidates the previous review.
+Reused local Quick Execs require no new approval. Choosing another file clears
+all approvals. New Quick APIs show their saved method, endpoint and plugin;
+an unspecified method is shown as unknown, not inferred.
+[src: file: backend/src/api/artifact_portability/import.rs:1]
+[src: file: frontend/src/components/ArtifactImportDialog.tsx:1]
+
+Configured connections, their stored credentials, agent-library entries and
+local files are not bundled. Definitions retain those references; preview lists missing known
+plugin/model connections, skills, profiles and directives, and offers an
+explicit import-and-configure-later confirmation. File paths and endpoint
+availability are not checked. Copied webhook approval tokens are cleared.
+A literal credential typed into an embedded Workflow, Quick API or Quick Exec
+(authorization header, secret query/body value, `--token`-style argument) is
+replaced by a marker and listed in `redacted_fields`, never its value; the
+import preview shows that list. `{{…}}` references are kept.
+[src: file: backend/src/core/export_secrets.rs:1]
+The selected project applies to newly created automation definitions and
+Artifact action scopes. A deliberately reused local definition is unchanged.
+[src: file: backend/src/api/artifact_portability/import.rs:1]
+
+`GET /api/pages/{id}/export`, `POST /api/pages/import/preview` and
+`POST /api/pages/import` retain the established Page API naming. Import requires
+the digest from the reviewed preview, recomputes it against current local
+definitions and import identities, and refuses stale decisions. All resources,
+datasets, points, origin mappings and the library activation commit in one
+SQLite transaction; an error rolls everything back. Origin mappings identify
+earlier imported copies without overwriting their source or local definitions.
+[src: file: backend/src/lib.rs:1]
+[src: file: backend/src/db/sql/188_artifact_import_origins.sql:1]
 
 ## Status
 
@@ -59,6 +132,20 @@ A Page may also be linked to one or more Discussions. `created_from` records
 the room where an agent authored the Page; `attached` is an explicit later
 association. These links are independent from Workflow publisher links and are
 deleted automatically if either side is removed.
+
+An HTML preview in a persisted discussion message can be promoted with
+**Make an Artifact**. The title is editable; the preview's HTML, CSS and JavaScript
+are copied unchanged to a new Artifact, with no workflow or command execution.
+The creation request includes `discussion_id` and `source_message_id`; the
+server verifies their relationship, inherits the discussion's project when no
+project was supplied, and resolves title/slug collisions with a fresh suffix.
+The Artifact, initial revision and source link are created in one transaction.
+The library's source link opens the discussion at that exact message. Removing
+the message clears only its source anchor and preserves the Artifact and its
+discussion link. Streamed previews without a persisted message id do not offer
+this action.
+[src: file: backend/src/api/live_pages.rs:365]
+[src: file: frontend/src/components/DocPreviewArtifact.tsx:10]
 
 ## Domain model
 
@@ -147,6 +234,12 @@ The frontend renders a Page in an iframe with `sandbox="allow-scripts"` and no
 credentials. It cannot fetch APIs: the authenticated parent loads datasets from
 Kronn, then posts a versioned, validated snapshot into the frame.
 
+Images load only from `data:` and `blob:` URIs. An image behind authentication,
+such as a Jira attachment thumbnail, is fetched by an `ApiCall` with
+`api_response: Binary` and published as a data URI; see
+[binary responses](../operations/deagent-apicall.md#binary-responses-images-and-other-files).
+[src: file: frontend/src/lib/live-page-sandbox.ts:5]
+
 PDF and DOCX export starts from the materialized iframe DOM, not from the stored
 HTML template. A request/response `postMessage` bridge keeps the opaque-origin
 boundary intact while capturing the current dataset-driven document. The same
@@ -230,14 +323,37 @@ The Page reads back how each row went. `GET /api/pages/{id}/action-launches`
 returns the latest launch per row (declines excluded), polled every few seconds
 while any row runs. The parent posts those states to the iframe as
 `kronn:page-action-states`, and the bridge marks every matching
-`[data-kronn-action]` with `data-kronn-action-state` and `aria-busy`, including
-rows a Page script renders later. A zero-specificity default indicator is
-injected; the author's own CSS wins. Clicking a row that is still running
-reopens its run instead of a blank offer, clicking the button of the open card
-closes it, and the card also closes with its × or Escape. A row that has run
-reopens on its latest launch, finished or not, and the card offers to go back
-to the offer and launch the same row again; a Discussion card never does,
-since a fence carries one intention.
+`[data-kronn-action]` with `data-kronn-action-state`, `aria-busy` and
+`data-kronn-action-launch` (the launch id, so a Page tells a new attempt of a
+row from the previous one even when both succeeded), including rows a Page
+script renders later. A zero-specificity default indicator is injected; the
+author's own CSS wins. Clicking a row that is still running reopens its run
+instead of a blank offer, clicking the button of the open card closes it, and
+the card also closes with its × or Escape. A row whose last launch is finished
+opens a fresh offer, which launches a new attempt of that row, with the
+previous launch one click away; a Discussion card never relaunches, since a
+fence carries one intention.
+[src: file: frontend/src/hooks/useLivePageActions.ts]
+
+A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
+opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
+the clicked row (the selector keyed by the field's name, or the click's only
+selector) and the field starts from that value, still editable; a missing row
+or a null field leaves it empty, and a value the reader already typed is never
+overwritten. The launch runs what the reader sends. `GET /api/pages/{id}/actions`
+lists only the blocks of the current revision: a block removed from the
+published HTML keeps its row for the launches that reference it, but is no
+longer offered, and its old id refuses a launch.
+[src: file: backend/src/db/live_page_actions.rs]
+
+The periodic refresh of a Page (every 30 s, in the Pages view and in its own
+tab) keeps an open card, and what was typed in it, while the Page still offers
+its action; switching Page closes it. When new data makes the Page redraw its
+rows, the bridge reopens the collapse under the row that now carries the same
+binding and the card follows it. A placeholder is shown as an example
+(`e.g. …`), since an empty field sends nothing, unless its author already
+phrased it as an example or an instruction.
+[src: file: frontend/src/lib/live-page-sandbox.ts]
 
 Once launched, a card tells what the run produced, the same way on a Page and
 in a Discussion. A workflow's steps are listed (name, type, status, duration)
@@ -284,6 +400,15 @@ HTML template and dataset contract, then remaps every `PublishPageData.page_id`
 on import. Retained values and publication/run history are excluded to avoid
 silently leaking production observations through a Workflow definition file;
 the imported Page is populated by its next run.
+
+A Workflow import commits its entire bundle in one SQLite transaction: Pages,
+revisions, datasets, capability activation, Quick Prompts and their versions,
+Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
+failure rolls everything back and preserves existing resources. The Page
+creation helper accepts the caller's transaction; starting and committing a
+separate Page transaction inside an import would break this guarantee.
+[src: file: backend/src/api/workflows.rs:2277]
+[src: file: backend/src/db/live_pages.rs:126]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
@@ -387,7 +512,7 @@ coupling the template to every upstream provider response.
 ## Agent and MCP authoring contract
 
 The built-in Workflow Architect and the `kronn-internal` MCP expose the same
-twelve-step taxonomy. For a Page pipeline, an agent must discover dependencies
+thirteen-step taxonomy. For a Page pipeline, an agent must discover dependencies
 before composing the workflow:
 
 1. `qa_list` resolves every saved Quick API used by `CollectApiData`; `qe_list`

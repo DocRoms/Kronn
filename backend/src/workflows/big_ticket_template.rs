@@ -150,6 +150,7 @@ pub fn build_feasibility_workflow(params: FeasibilityWorkflowParams) -> CreateWo
         safety: None,
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: Some(WorkflowGuards {
             // run-14 finding (2026-06-13): a big-ticket fan-out over 26 items
             // (+ debate + human gate wait) ran ~3h and the DEFAULT 2h guard
@@ -207,6 +208,7 @@ pub fn build_feasibility_child(
         safety: None,
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: Some(WorkflowGuards {
             // run-14 finding (2026-06-13): a big-ticket fan-out over 26 items
             // (+ debate + human gate wait) ran ~3h and the DEFAULT 2h guard
@@ -325,6 +327,7 @@ fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
         api_timeout_ms: None,
         api_max_retries: None,
         api_output_var: None,
+        api_response: None,
         gate_message: None,
         gate_request_changes_target: None,
         gate_notify_url: None,
@@ -345,6 +348,8 @@ fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     }
 }
 

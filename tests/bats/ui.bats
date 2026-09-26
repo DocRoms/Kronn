@@ -309,6 +309,56 @@ setup() {
     assert_output "cargo node pnpm watchexec"
 }
 
+# ─── dev_backend_binary_unchanged (hot-reload swap guard) ────────────────────
+
+@test "dev_backend_binary_unchanged: identical fingerprints keep the backend" {
+    run dev_backend_binary_unchanged "123 456" "123 456"
+    assert_success
+}
+
+@test "dev_backend_binary_unchanged: a new binary is a change" {
+    run dev_backend_binary_unchanged "123 456" "789 456"
+    assert_failure
+}
+
+@test "dev_backend_binary_unchanged: an unknown fingerprint is never unchanged" {
+    run dev_backend_binary_unchanged "" ""
+    assert_failure
+    run dev_backend_binary_unchanged "123 456" ""
+    assert_failure
+}
+
+@test "dev-backend-supervisor: watchexec ignores build output directories" {
+    run grep -c -- "--ignore '\*\*/target/\*\*'" "${BATS_TEST_DIRNAME}/../../scripts/dev-backend-supervisor.sh"
+    assert_output "1"
+}
+
+# ─── path_append_missing (kronn start-dev PATH) ───────────────────────────────
+
+@test "path_append_missing: keeps the user's order when the dir is already listed" {
+    run path_append_missing "/Users/u/.local/bin:/opt/homebrew/bin:/usr/bin" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/Users/u/.local/bin:/opt/homebrew/bin:/usr/bin"
+}
+
+@test "path_append_missing: appends a missing dir at the end" {
+    run path_append_missing "/Users/u/.local/bin:/usr/bin" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/Users/u/.local/bin:/usr/bin:/opt/homebrew/bin"
+}
+
+@test "path_append_missing: matches whole entries, not prefixes" {
+    run path_append_missing "/opt/homebrew/bin-old:/usr/bin" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/opt/homebrew/bin-old:/usr/bin:/opt/homebrew/bin"
+}
+
+@test "path_append_missing: an empty PATH becomes the dir alone" {
+    run path_append_missing "" "/opt/homebrew/bin"
+    assert_success
+    assert_output "/opt/homebrew/bin"
+}
+
 @test "dev_missing_tools: a non-1 token (e.g. 'yes') counts as missing" {
     run dev_missing_tools yes 1 1 1
     assert_success
@@ -526,9 +576,11 @@ printf 'start\n' >>"$KRONN_TEST_BACKEND_STARTS"
 trap 'exit 0' TERM INT
 while true; do sleep 1; done
 EOF
+    # The signal follows a build that really replaced the binary.
     cat >"$fake_bin/watchexec" <<'EOF'
 #!/usr/bin/env bash
 sleep 0.2
+printf '# rebuilt\n' >>"$KRONN_DEV_BACKEND_BINARY"
 kill -USR1 "$KRONN_DEV_BACKEND_SUPERVISOR_PID"
 trap 'exit 0' TERM INT
 while true; do sleep 1; done

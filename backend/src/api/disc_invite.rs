@@ -470,6 +470,107 @@ pub async fn peer_join(
     }
 }
 
+/// Body of `POST /api/discussions/workflow-step-join` (KT-793). The bridge
+/// forwards the runner's environment capability; no tool schema carries it.
+#[derive(Debug, Deserialize)]
+pub struct WorkflowStepJoinRequest {
+    pub workflow_step: crate::agents::runner::WorkflowStepBridgeContext,
+    pub agent_type: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowStepJoinResponse {
+    pub disc_id: String,
+    pub session_pk: i64,
+    pub self_alias: Option<String>,
+    pub repinned_executions: usize,
+}
+
+/// `POST /api/discussions/workflow-step-join`
+///
+/// Make a workflow Agent step's bridge a member of the step's room, as a token
+/// join would, but only while that very step runs: the capability is checked
+/// against the live step of its run, and the membership ends with the step.
+pub async fn workflow_step_join(
+    State(state): State<AppState>,
+    Json(req): Json<WorkflowStepJoinRequest>,
+) -> Json<ApiResponse<WorkflowStepJoinResponse>> {
+    use crate::models::ApiErrorCode;
+    let agent_type = req.agent_type.trim().to_string();
+    let session_id = req.session_id.trim().to_string();
+    if agent_type.is_empty() || agent_type == "Unknown" || session_id.is_empty() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "a resolved agent_type and session_id are required",
+        ));
+    }
+    let context = req.workflow_step;
+    let refused = || {
+        Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "workflow step context is not active",
+        ))
+    };
+    if !state.workflow_step_rooms.authorize(&context) {
+        return refused();
+    }
+    let joined = {
+        let (run_id, step_key, disc_id) = (
+            context.run_id.clone(),
+            context.step_key.clone(),
+            context.discussion_id.clone(),
+        );
+        let (agent, session) = (agent_type.clone(), session_id.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                db::workflow_step_rooms::join(conn, &run_id, &step_key, &disc_id, &agent, &session)
+            })
+            .await
+    };
+    let joined = match joined {
+        Ok(joined) => joined,
+        Err(error) => {
+            tracing::info!(run_id = %context.run_id, %error, "workflow step join refused");
+            return refused();
+        }
+    };
+    if !state
+        .workflow_step_rooms
+        .attach(&context, joined.session_pk)
+    {
+        // The step ended between the check and the join.
+        let pk = joined.session_pk;
+        if let Err(error) = state
+            .db
+            .with_conn(move |conn| db::workflow_step_rooms::revoke(conn, &[pk]))
+            .await
+        {
+            tracing::warn!(%error, "could not revoke a late workflow step join");
+        }
+        return refused();
+    }
+    let self_alias = {
+        let pk = joined.session_pk;
+        state
+            .db
+            .with_read_conn(move |conn| db::discussion_sessions::cli_session_ordinal(conn, pk))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|ordinal| {
+                db::discussion_sessions::cli_session_alias(&agent_type, Some(ordinal))
+            })
+    };
+    Json(ApiResponse::ok(WorkflowStepJoinResponse {
+        disc_id: context.discussion_id,
+        session_pk: joined.session_pk,
+        self_alias,
+        repinned_executions: joined.repinned,
+    }))
+}
+
 /// The protocol handed to an agent that just joined a room. Extracted from
 /// the handler so the directives agents keep dropping — read the shared plan,
 /// stay in the room and follow it — are pinned by a test.
@@ -587,12 +688,12 @@ fn join_next_steps(
          launch. When there is no actionable work or execution to follow, \
          use `disc_wait_for_peer()` to listen without spending model turns on \
          quiet polls. A human gate pauses only its affected lot.\n\
-         d. HOST CAVEAT: a wait moved to the background remains active — \
-         do NOT start another wait or end the turn on a summary. Track that \
-         same call until its terminal result; then process it and continue \
-         this loop. Another MCP request may cause an interruption: handle \
-         that activity, then resume the loop. Backgrounding and interruption \
-         are not instructions to leave; zero-turn silence depends on the host.\n\
+         d. HOST CAVEAT: a wait moved to the background stays active until \
+         its terminal result — do NOT start another wait or end the turn on a \
+         summary meanwhile. Any other Kronn call is an interruption that ends \
+         it: the result of that call says so; handle it, then re-arm the wait. \
+         Backgrounding and interruption are not instructions to leave; \
+         zero-turn silence depends on the host.\n\
          e. Omit `since_sort_order`: the bridge owns the durable read cursor. \
          Never use an append receipt as a read cursor. Keep work and plan \
          updates event-driven. Silence from you is indistinguishable from \

@@ -252,11 +252,15 @@ pub async fn export_qa(
         }
     };
 
+    let mut exported = qa.clone();
+    let mut redacted_fields = Vec::new();
+    crate::core::export_secrets::redact_quick_api(&mut exported, &mut redacted_fields);
     let envelope = QuickApiExportEnvelope {
         kind: QA_EXPORT_KIND.to_string(),
         version: QA_EXPORT_VERSION,
         exported_at: Utc::now(),
-        quick_api: qa.clone(),
+        quick_api: exported,
+        redacted_fields,
     };
 
     let safe_name: String = qa
@@ -566,6 +570,7 @@ pub async fn run_qa(
         api_timeout_ms: qa.api_timeout_ms,
         api_max_retries: qa.api_max_retries,
         api_output_var: None,
+        api_response: None,
         gate_message: None,
         gate_request_changes_target: None,
         gate_notify_url: None,
@@ -586,6 +591,8 @@ pub async fn run_qa(
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     };
 
     // Standalone runs are manual tests. A native-tool call made inside an
@@ -998,6 +1005,7 @@ pub async fn batch_run_qa(
         api_timeout_ms: None,
         api_max_retries: None,
         api_output_var: None,
+        api_response: None,
         gate_message: None,
         gate_request_changes_target: None,
         gate_notify_url: None,
@@ -1018,6 +1026,8 @@ pub async fn batch_run_qa(
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     };
 
     let mut ctx = crate::workflows::template::TemplateContext::new();

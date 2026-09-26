@@ -27,6 +27,7 @@ const RUNTIME_NAMESPACES = [
   'failed_step',
   'env',
   'trigger',
+  'run',
 ];
 
 export function isRuntimeToken(name: string): boolean {

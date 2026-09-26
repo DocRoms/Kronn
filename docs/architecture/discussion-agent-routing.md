@@ -77,7 +77,9 @@ bridges without a session id retain the old room-visible projection during
 rolling upgrades. Host runtimes can still impose their own wake semantics:
 Claude Code 2.x backgrounds a tool call at 120 seconds and exposes a
 model-visible task notification. That notification is not permission to stack
-a second wait while the first remains active; true zero-turn silence on such a
+a second wait while the first is active. The bridge serves one request at a
+time, so any other Kronn call ends that wait; the call's result carries
+`wait_preempted` and the agent must re-arm. True zero-turn silence on such a
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs]
 [src: file: backend/scripts/disc-introspection-mcp.py]

@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { ArtifactImportDialog } from '../ArtifactImportDialog';
 import { buildBlankStep, jsonPathToTarget } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
@@ -36,6 +37,7 @@ import {
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
+import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -94,6 +96,7 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
       { type: 'Agent', dataType: 'agent', labelKey: 'wiz.stepTypeAgent', hintKey: 'wiz.stepTypeAgentHint' },
       { type: 'BatchQuickPrompt', dataType: 'batch-qp', labelKey: 'wiz.stepTypeBatchQP', hintKey: 'wiz.stepTypeBatchQPHint' },
       { type: 'SubWorkflow', dataType: 'sub-workflow', labelKey: 'wiz.stepTypeSubWorkflow', hintKey: 'wiz.stepTypeSubWorkflowHint' },
+      { type: 'TriggerWorkflow', dataType: 'trigger-workflow', labelKey: 'wiz.stepTypeTriggerWorkflow', hintKey: 'wiz.stepTypeTriggerWorkflowHint' },
     ],
   },
   {
@@ -127,7 +130,7 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
 const LIVE_PAGE_STARTER_HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <style>body{margin:0;padding:24px;background:#0b1020;color:#e5e7eb;font:14px system-ui}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.card{background:#151c30;border:1px solid #29334d;border-radius:14px;padding:18px}h1{margin:0 0 18px}pre{white-space:pre-wrap;color:#9bd7ff}svg{width:100%;height:180px}.line{fill:none;stroke:#5eead4;stroke-width:3}</style></head>
-<body><h1 id="title">Live Page</h1><div class="grid"><section class="card"><h2>Résumé</h2><pre id="summary">En attente du workflow…</pre></section><section class="card"><h2>Série</h2><svg viewBox="0 0 600 180"><polyline class="line" id="line" points=""/></svg></section></div>
+<body><h1 id="title">Artifact</h1><div class="grid"><section class="card"><h2>Résumé</h2><pre id="summary">En attente du workflow…</pre></section><section class="card"><h2>Série</h2><svg viewBox="0 0 600 180"><polyline class="line" id="line" points=""/></svg></section></div>
 <script>function draw(data){document.getElementById('title').textContent=data.page.title;document.getElementById('summary').textContent=JSON.stringify(data.datasets.summary?.current??{},null,2);const values=(data.datasets.series?.points??[]).map(p=>{const v=p.value;return typeof v==='number'?v:Object.values(v??{}).find(n=>typeof n==='number')??0});const max=Math.max(1,...values);document.getElementById('line').setAttribute('points',values.map((v,i)=>((i/Math.max(1,values.length-1))*600)+','+(170-(v/max)*160)).join(' '))}addEventListener('kronn:page-data',e=>draw(e.detail));if(window.KronnPageData)draw(window.KronnPageData);</script></body></html>`;
 
 function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
@@ -141,6 +144,7 @@ function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
   if (type === 'CollectApiData') return <Database size={size} />;
   if (type === 'TransformData') return <Shuffle size={size} />;
   if (type === 'PublishPageData') return <FileText size={size} />;
+  if (type === 'TriggerWorkflow') return <Play size={size} />;
   return <GitBranch size={size} />;
 }
 
@@ -186,7 +190,9 @@ function isWorkflowStepIncomplete(step: WorkflowStep): boolean {
   if (step.step_type?.type === 'PublishPageData') {
     return !step.page_publish?.page_id?.trim() || !step.page_publish.writes.length;
   }
-  if (step.step_type?.type === 'SubWorkflow') return !step.sub_workflow_id?.trim();
+  if (step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow') {
+    return !step.sub_workflow_id?.trim();
+  }
   if (!step.prompt_template && !step.quick_prompt_id) return true;
   return (step.on_result ?? []).some(rule => !rule.contains);
 }
@@ -360,6 +366,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   // Concurrency
   const [concurrencyLimit, setConcurrencyLimit] = useState<string>(editWorkflow?.concurrency_limit?.toString() ?? '');
+  const [concurrencyKey, setConcurrencyKey] = useState<string>(editWorkflow?.concurrency_key ?? '');
 
   // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
@@ -428,6 +435,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // (no silent main-tree fallback). Carried from the preset; persisted in
   // workspace_config.require_isolation.
   const [requireIsolation, setRequireIsolation] = useState<boolean>(editWorkflow?.workspace_config?.require_isolation ?? false);
+  // Declared "never writes the checkout": its main-tree runs skip the project lock.
+  const [mainTreeReadOnly, setMainTreeReadOnly] = useState<boolean>(editWorkflow?.workspace_config?.main_tree_read_only ?? false);
+  // Where an isolated run's worktree starts (e.g. origin/main); empty = checkout HEAD.
+  const [baseRef, setBaseRef] = useState<string>(editWorkflow?.workspace_config?.base_ref ?? '');
   const hasAgentExecMix =
     steps.some(step => !step.step_type || step.step_type.type === 'Agent') &&
     steps.some(step => step.step_type?.type === 'Exec');
@@ -549,6 +560,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     if (preset.childWorkflows) setPendingChildWorkflows(preset.childWorkflows);
     if (preset.execAllowlist) setExecAllowlist(preset.execAllowlist);
     setRequireIsolation(!!preset.requireIsolation);
+    setMainTreeReadOnly(false);
     if (preset.variables) setWfVariables(preset.variables);
     if (initialProjectId && projects.some(p => p.id === initialProjectId)) {
       setProjectId(initialProjectId);
@@ -596,6 +608,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availablePages, setAvailablePages] = useState<LivePage[]>([]);
   const [pageDraftTitles, setPageDraftTitles] = useState<Record<number, string>>({});
   const [pageCreatingIndex, setPageCreatingIndex] = useState<number | null>(null);
+  const [pageImportIndex, setPageImportIndex] = useState<number | null>(null);
+  const closePageImport = useCallback(() => setPageImportIndex(null), []);
   const [transformPreviewSamples, setTransformPreviewSamples] = useState<Record<number, string>>({});
   const [transformPreviewResults, setTransformPreviewResults] = useState<Record<number, { value: unknown | null; error: string | null }>>({});
   const [transformPreviewingIndex, setTransformPreviewingIndex] = useState<number | null>(null);
@@ -762,6 +776,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         // preset-apply effect above.
         setPendingChildWorkflows(p.childWorkflows ?? []);
         setRequireIsolation(!!p.requireIsolation);
+        setMainTreeReadOnly(false);
         if (p.variables) setWfVariables(p.variables);
         setWizardMode('advanced');
         setWizardStep(2);
@@ -1058,6 +1073,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         mode: s.mode,
         step_type: { type: newType } as WorkflowStep['step_type'],
       };
+      // SubWorkflow ↔ TriggerWorkflow keep their target and variable mapping.
+      const childLaunch = ['SubWorkflow', 'TriggerWorkflow'];
+      if (childLaunch.includes(currentType) && childLaunch.includes(newType)) {
+        universal.sub_workflow_id = s.sub_workflow_id;
+        universal.sub_workflow_variables = s.sub_workflow_variables;
+      }
       // Keep `agent` field present (the type allows AgentType only) — the
       // backend ignores it for non-Agent steps but the model field is
       // non-nullable. Mirror the default the form uses on new steps.
@@ -1161,7 +1182,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     const hasHooks = wsHookAfterCreate || wsHookBeforeRun || wsHookAfterRun || wsHookBeforeRemove;
     // Emit a config when there are hooks OR isolation is required — otherwise a
     // code-pushing preset's require_isolation would be dropped (null config).
-    if (!hasHooks && !requireIsolation) return null;
+    if (!hasHooks && !requireIsolation && !mainTreeReadOnly) return null;
+    // A starting point only means something for an isolated run.
+    const trimmedBaseRef = requireIsolation ? baseRef.trim() : '';
     return {
       hooks: {
         after_create: wsHookAfterCreate || null,
@@ -1170,6 +1193,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         before_remove: wsHookBeforeRemove || null,
       },
       require_isolation: requireIsolation,
+      main_tree_read_only: mainTreeReadOnly,
+      ...(trimmedBaseRef ? { base_ref: trimmedBaseRef } : {}),
     };
   };
 
@@ -1183,6 +1208,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       const wsConfig = buildWorkspaceConfig();
       const safetyVal = (safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) ? safety : undefined;
       const concurrency = concurrencyLimit ? parseInt(concurrencyLimit) : undefined;
+      const trimmedConcurrencyKey = concurrencyKey.trim();
 
       if (isEdit && editWorkflow) {
         await workflowsApi.update(editWorkflow.id, {
@@ -1194,6 +1220,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           safety: safetyVal ?? editWorkflow.safety,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency ?? null,
+          concurrency_key: trimmedConcurrencyKey || null,
           guards,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
@@ -1209,6 +1236,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           safety: safetyVal,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency,
+          concurrency_key: trimmedConcurrencyKey || undefined,
           guards: guards ?? undefined,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
@@ -1285,6 +1313,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   return (
     <div className="wf-wizard-card" data-focused-step={focusedStepOnly}>
+      {pageImportIndex !== null && <ArtifactImportDialog initialProjectId={projectId} onClose={closePageImport} onImported={page => {
+        setAvailablePages(previous => [page, ...previous.filter(item => item.id !== page.id)]);
+        setSteps(previous => previous.map((step, index) => index === pageImportIndex ? {
+          ...step,
+          page_publish: { page_id: page.id, writes: step.page_publish?.writes ?? [] },
+        } : step));
+        closePageImport();
+      }} />}
       {!focusedStepOnly && <header className="wf-wizard-header">
         <div className="wf-wizard-heading">
           <span className="wf-wizard-heading-icon" aria-hidden="true"><Layers size={19} /></span>
@@ -1951,7 +1987,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
-              step.stall_timeout_secs || step.retry || step.delay_after_secs;
+              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
             const activeTypeOption = STEP_TYPE_GROUPS
@@ -2437,6 +2473,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     installedAgents={installedAgentTypes}
                     configLanguage={configLanguage}
                     availableQuickApis={availableQuickApis}
+                    allowBinaryResponse
                     t={t}
                   />
                 ) : step.step_type?.type === 'Notify' ? (
@@ -2817,6 +2854,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       projectId={projectId || null}
                       installedAgents={installedAgentTypes}
                       configLanguage={configLanguage}
+                      allowBinaryResponse
                       t={t}
                     />
                   </div>
@@ -3561,6 +3599,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           {pageCreatingIndex === i ? <Loader2 size={13} className="spin" /> : <Plus size={13} />}
                           {t('wiz.publishPageCreate')}
                         </button>
+                        <button type="button" className="wf-btn-secondary" onClick={() => setPageImportIndex(i)}>
+                          {t('pages.import.title')}
+                        </button>
                       </div>
 
                       {selectedPage && config.writes.map((write, writeIndex) => {
@@ -3587,11 +3628,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       )}
                     </div>
                   );
-                })() : step.step_type?.type === 'SubWorkflow' ? (() => {
+                })() : step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow' ? (() => {
                   // Phase 1c — pick the workflow to run as a nested child run.
                   // Self is excluded (the most obvious cycle); deeper cycles +
                   // "no Gate inside" + depth are enforced server-side at save.
-                  const selectableWfs = availableWorkflows.filter(w => w.id !== editWorkflow?.id);
+                  // A TriggerWorkflow run is independent: it may loop back to itself.
+                  const isTrigger = step.step_type?.type === 'TriggerWorkflow';
+                  const selectableWfs = isTrigger
+                    ? availableWorkflows
+                    : availableWorkflows.filter(w => w.id !== editWorkflow?.id);
                   const selected = availableWorkflows.find(w => w.id === step.sub_workflow_id) ?? null;
                   // Decomposed-preset case: the child doesn't exist yet — the
                   // step carries an `@bundle:<id>` sentinel resolved at save by
@@ -3604,10 +3649,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   return (
                     <div className="wf-sub-workflow-form">
                       <div className="wf-batch-intro">
-                        <GitBranch size={14} />
+                        {isTrigger ? <Play size={14} /> : <GitBranch size={14} />}
                         <div>
-                          <strong>{t('wiz.subWorkflowTitle')}</strong>
-                          <p className="text-xs text-muted">{t('wiz.subWorkflowHint')}</p>
+                          <strong>{t(isTrigger ? 'wiz.triggerWorkflowTitle' : 'wiz.subWorkflowTitle')}</strong>
+                          <p className="text-xs text-muted">{t(isTrigger ? 'wiz.triggerWorkflowHint' : 'wiz.subWorkflowHint')}</p>
                         </div>
                       </div>
                       <label className="text-xs text-muted mb-1">
@@ -3643,7 +3688,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           {t('wiz.subWorkflowSelected', selected.name, String(selected.step_count))}
                         </p>
                       )}
-                      <p className="text-2xs text-ghost mt-2">{t('wiz.subWorkflowConstraints')}</p>
+                      <ChildWorkflowVariablesEditor
+                        targetId={step.sub_workflow_id}
+                        value={step.sub_workflow_variables ?? {}}
+                        onChange={next => updateStep(i, { sub_workflow_variables: next })}
+                      />
+                      <p className="text-2xs text-ghost mt-2">{t(isTrigger ? 'wiz.triggerWorkflowConstraints' : 'wiz.subWorkflowConstraints')}</p>
                     </div>
                   );
                 })() : (() => {
@@ -4285,6 +4335,26 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       </div>
                     )}
 
+                    {/* KT-793 — the room this step's agent joins as principal. */}
+                    {(!step.step_type || step.step_type.type === 'Agent') && (
+                      <div className="mb-5">
+                        <label className="wf-label">{t('wiz.roomId')}</label>
+                        <input
+                          type="text"
+                          className="wf-input"
+                          value={step.room_id ?? ''}
+                          onChange={e => updateStep(i, {
+                            room_id: e.target.value.trim() ? e.target.value : null,
+                          })}
+                          placeholder="{{steps.jeton.data.room_id}}"
+                          aria-label={t('wiz.roomId')}
+                        />
+                        <p className="text-2xs text-muted" style={{ margin: 'var(--kr-sp-1) 0 0' }}>
+                          {t('wiz.roomIdHint')}
+                        </p>
+                      </div>
+                    )}
+
                     {/* Stall timeout */}
                     <div className="flex-row gap-6 mb-5">
                       <div>
@@ -4828,6 +4898,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   placeholder="illimite"
                   aria-label={t('wiz.concurrency')}
                 />
+                <label className="wf-label" style={{ marginTop: 8 }}>{t('wiz.concurrencyKey')}</label>
+                <input
+                  type="text"
+                  className="wf-input"
+                  value={concurrencyKey}
+                  onChange={e => setConcurrencyKey(e.target.value)}
+                  placeholder="{{ticketKey}}"
+                  aria-label={t('wiz.concurrencyKey')}
+                />
+                <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
+                  {t('wiz.concurrencyKeyHint')}
+                </p>
               </div>
 
               {/* Workflow-level workspace isolation. Child batch discussions
@@ -4849,6 +4931,34 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 </label>
                 <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
                   {t(projectId ? 'wiz.workflowIsolationHint' : 'wiz.workflowIsolationNoProject')}
+                </p>
+                {requireIsolation && (
+                  <div style={{ marginTop: 10 }}>
+                    <label className="wf-label text-xs" htmlFor="wf-base-ref">{t('wiz.baseRef')}</label>
+                    <input
+                      id="wf-base-ref"
+                      className="wf-input"
+                      value={baseRef}
+                      onChange={e => setBaseRef(e.target.value)}
+                      placeholder="origin/main"
+                      aria-label={t('wiz.baseRef')}
+                    />
+                    <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
+                      {t('wiz.baseRefHint')}
+                    </p>
+                  </div>
+                )}
+                <label className="wf-checkbox-label" style={{ marginTop: 10 }}>
+                  <input
+                    type="checkbox"
+                    checked={mainTreeReadOnly}
+                    disabled={!projectId || requireIsolation}
+                    onChange={e => setMainTreeReadOnly(e.target.checked)}
+                  />
+                  <span>{t('wiz.mainTreeReadOnly')}</span>
+                </label>
+                <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
+                  {t('wiz.mainTreeReadOnlyHint')}
                 </p>
               </div>
 
@@ -4897,6 +5007,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           {concurrencyLimit && (
             <div className="wf-summary-row"><span className="wf-summary-label">Concurrence</span> max {concurrencyLimit} runs</div>
           )}
+          {concurrencyKey.trim() && (
+            <div className="wf-summary-row"><span className="wf-summary-label">{t('wiz.concurrencyKey')}</span> <code>{concurrencyKey.trim()}</code></div>
+          )}
           {projectId && (
             <div className="wf-summary-row">
               <span className="wf-summary-label">{t('wiz.workflowIsolation')}</span>
@@ -4917,6 +5030,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'JsonData' ? 'JSON'
               : typeKind === 'PublishPageData' ? 'PAGE'
               : typeKind === 'SubWorkflow' ? 'SOUS-WF'
+              : typeKind === 'TriggerWorkflow' ? 'TRIGGER'
               : 'AGENT';
             const typeData = typeKind === 'ApiCall' ? 'api'
               : typeKind === 'BatchQuickPrompt' ? 'batch-qp'
@@ -4929,6 +5043,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'JsonData' ? 'json-data'
               : typeKind === 'PublishPageData' ? 'page-data'
               : typeKind === 'SubWorkflow' ? 'subworkflow'
+              : typeKind === 'TriggerWorkflow' ? 'trigger-workflow'
               : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
             const isApi = typeKind === 'ApiCall';
@@ -5156,7 +5271,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             if (!s.page_publish?.page_id?.trim() || !s.page_publish.writes.length) {
               errors.push(t('wiz.errorPublishPageConfig').replace('{0}', label));
             }
-          } else if (s.step_type?.type === 'SubWorkflow') {
+          } else if (s.step_type?.type === 'SubWorkflow' || s.step_type?.type === 'TriggerWorkflow') {
             // SubWorkflow steps run a child workflow — no prompt. They need a
             // `sub_workflow_id` (a saved-workflow id, or an `@bundle:<id>`
             // sentinel resolved at save when shipped as a decomposed preset).

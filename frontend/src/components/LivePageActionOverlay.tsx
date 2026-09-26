@@ -62,6 +62,7 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
 
   if (!active || !action) return null;
   const inSlot = active.anchor.slot === true;
+  const previous = active.previous;
   return (
     <div
       ref={cardRef}
@@ -72,8 +73,8 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
         top: inSlot ? active.anchor.top : active.anchor.top + active.anchor.height + 4,
         // CSS constrains both offsets at the viewport edge; direct width/left values
         // would conflict with its right-side constraint.
-        ['--kr-action-anchor-left' as string]: `${Math.max(8, active.anchor.left)}px`,
-        ['--kr-action-anchor-width' as string]: `${active.anchor.width}px`,
+        ['--action-anchor-left' as string]: `${Math.max(8, active.anchor.left)}px`,
+        ['--action-anchor-width' as string]: `${active.anchor.width}px`,
       }}
     >
       <button
@@ -86,6 +87,16 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
       >
         <X size={14} aria-hidden />
       </button>
+      {previous && !active.card && (
+        <button
+          type="button"
+          className="live-page-action-overlay__previous"
+          onClick={() => onChanged(previous, activation)}
+          data-testid="page-action-overlay-previous"
+        >
+          {t('pages.action.previousLaunch', t(`disc.action.state.${previous.state}`))}
+        </button>
+      )}
       {/* One card per click. Keyed on the activation alone, so the card
           survives its own id changing from the offer to its launch. */}
       <LivePageActionCard
@@ -93,6 +104,7 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
         action={action}
         offer={offer}
         bindings={active.bindings}
+        prefill={active.prefill}
         onChanged={handleChanged}
         onOpenDiscussion={onOpenDiscussion}
       />

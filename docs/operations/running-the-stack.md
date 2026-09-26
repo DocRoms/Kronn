@@ -15,6 +15,17 @@ stack, not to start a task. Content verbatim.
 - Logs: `./kronn logs` or `make logs`.
 - Dev backend only: `make dev-backend` (watchexec with auto-reload).
 - Dev frontend only: `make dev-frontend` (Vite dev server on :5173).
+- Native hot reload waits for the replacement backend with the same policy as
+  initial startup: `KRONN_DEV_READY_ATTEMPTS` probes (default 300), separated by
+  `KRONN_DEV_READY_INTERVAL` seconds (default 1). Each HTTP probe has a one-second
+  timeout. Startup MCP synchronization runs before the HTTP listener opens, so
+  a live replacement can take longer than 30 seconds to become ready. The
+  supervisor distinguishes a readiness timeout from an actual process exit;
+  even exit 0 before readiness is a failed reload. An intentional stop does not
+  create a backend-failure marker.
+  [src: file: scripts/dev-backend-supervisor.sh:66]
+  [src: file: lib/ui.sh:367]
+  [src: file: backend/src/main.rs:676]
 - The desktop app and native CLI share configuration, but the desktop's free
   listener port is process-local (`ServerConfig.runtime_port`, excluded from
   serialization). The persisted `server.port` remains the CLI preference;

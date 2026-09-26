@@ -29,6 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
+use super::agent_workspace_structure;
+
 use futures::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -567,13 +569,53 @@ pub fn git_commit_payload(root: &Path, files: &[String], message: &str) -> Resul
     git_commit_payload_with_data_dir_lock(root, files, message, None)
 }
 
+/// Trailers that attribute a commit to a person. Kronn adds the sign-off from
+/// the git config itself; a model writing one invents an identity.
+const IDENTITY_TRAILERS: &[&str] = &[
+    "signed-off-by",
+    "co-authored-by",
+    "reviewed-by",
+    "acked-by",
+    "tested-by",
+    "reported-by",
+    "suggested-by",
+    "helped-by",
+];
+
+/// Split a message line into `(key, value)` when it is an identity trailer.
+pub(crate) fn identity_trailer(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.trim_start().split_once(':')?;
+    let key = key.trim();
+    IDENTITY_TRAILERS
+        .contains(&key.to_ascii_lowercase().as_str())
+        .then(|| (key, value.trim()))
+}
+
+/// Drop identity trailer lines from a worker-written message, returning the
+/// cleaned message and the trailer names removed.
+fn strip_identity_trailers(message: &str) -> (String, Vec<String>) {
+    let mut removed = Vec::new();
+    let kept: Vec<&str> = message
+        .lines()
+        .filter(|line| match identity_trailer(line) {
+            Some((key, _)) => {
+                removed.push(key.to_string());
+                false
+            }
+            None => true,
+        })
+        .collect();
+    (kept.join("\n").trim().to_string(), removed)
+}
+
 pub fn git_commit_payload_with_data_dir_lock(
     root: &Path,
     files: &[String],
     message: &str,
     data_dir_lock: Option<&std::fs::File>,
 ) -> Result<Value, String> {
-    let message = message.trim();
+    let (message, removed_trailers) = strip_identity_trailers(message);
+    let message = message.as_str();
     if message.is_empty() {
         return Err("refused: commit message cannot be empty".into());
     }
@@ -615,11 +657,18 @@ pub fn git_commit_payload_with_data_dir_lock(
         false,
         data_dir_lock,
     )?;
-    Ok(json!({
+    let mut payload = json!({
         "hash": committed.hash,
         "message": committed.message,
         "files": normalized,
-    }))
+    });
+    if !removed_trailers.is_empty() {
+        payload["removed_trailers"] = json!(removed_trailers);
+        payload["note"] = json!(
+            "Kronn adds the sign-off from the git configuration; identity trailers you wrote were removed."
+        );
+    }
+    Ok(payload)
 }
 
 /// The tool definitions this module contributes to the native catalogue.
@@ -1176,6 +1225,11 @@ pub fn write_file_payload_with_receipt(
 ) -> Result<Value, String> {
     let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     validate_proposed_source(&path, requested, content)?;
+    if agent_workspace_structure::is_guarded(&path) {
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            agent_workspace_structure::validate_delimiters(&path, requested, &original, content)?;
+        }
+    }
     write_file_payload_inner(root, requested, content, expected_sha256)
 }
 
@@ -1400,6 +1454,7 @@ pub fn edit_file_payload(
     replaced.push_str(&text[cursor..]);
     let total_lines = replaced.lines().count();
     validate_proposed_source(&path, requested, &replaced)?;
+    agent_workspace_structure::validate_delimiters(&path, requested, &text, &replaced)?;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("could not seek `{requested}` for editing: {error}"))?;
     file.write_all(replaced.as_bytes())
@@ -1500,6 +1555,13 @@ pub fn edit_lines_payload(
     if selected_had_newline && !replacement.is_empty() && !replacement.ends_with(line_ending) {
         replacement.push_str(line_ending);
     }
+    agent_workspace_structure::validate_range_indentation(
+        &path,
+        requested,
+        start_line,
+        &lines[start_line - 1..end_line],
+        new_string,
+    )?;
     if text[region_start..region_end] == replacement {
         return Err("the selected lines already equal `new_string` — nothing would change.".into());
     }
@@ -1510,6 +1572,7 @@ pub fn edit_lines_payload(
     replaced.push_str(&replacement);
     replaced.push_str(&text[region_end..]);
     validate_proposed_source(&path, requested, &replaced)?;
+    agent_workspace_structure::validate_delimiters(&path, requested, &text, &replaced)?;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("could not seek `{requested}` for editing: {error}"))?;
     file.write_all(replaced.as_bytes())
@@ -1616,6 +1679,7 @@ pub fn insert_after_line_payload(
     replaced.push_str(&inserted);
     replaced.push_str(&text[insertion_at..]);
     validate_proposed_source(&path, requested, &replaced)?;
+    agent_workspace_structure::validate_delimiters(&path, requested, &text, &replaced)?;
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| format!("could not seek `{requested}` for editing: {error}"))?;
     file.write_all(replaced.as_bytes())
@@ -2227,6 +2291,68 @@ mod tests {
         );
         assert!(result.is_ok());
     }
+    #[test]
+    fn a_shifted_boundary_or_an_orphan_brace_never_reaches_disk_outside_rust() {
+        let root = tempfile::tempdir().unwrap();
+        let twig = "<ul>\n  {% if a %}\n    <li>{{ a }}</li>\n  {% endif %}\n</ul>\n";
+        write_file_payload(root.path(), "list.twig", twig).unwrap();
+        let receipt = revision(root.path(), "list.twig");
+        let shifted = edit_lines_payload(
+            root.path(),
+            "list.twig",
+            3,
+            3,
+            "     <li>{{ b }}</li>",
+            &receipt,
+        )
+        .unwrap_err();
+        assert!(
+            shifted.starts_with(agent_workspace_structure::STRUCTURE_REFUSAL_PREFIX),
+            "{shifted}"
+        );
+        assert!(
+            shifted.contains("line 3 (4 space(s)), not 5 space(s)"),
+            "{shifted}"
+        );
+        let unclosed =
+            edit_lines_payload(root.path(), "list.twig", 4, 4, "", &receipt).unwrap_err();
+        assert!(
+            unclosed.contains("`{% if %}` is never closed"),
+            "{unclosed}"
+        );
+        assert_eq!(revision(root.path(), "list.twig"), receipt);
+
+        let scss = ".a {\n  color: red;\n}\n";
+        write_file_payload(root.path(), "a.scss", scss).unwrap();
+        let receipt = revision(root.path(), "a.scss");
+        let orphan =
+            edit_file_payload(root.path(), "a.scss", "}\n", "}\n}\n", false, &receipt).unwrap_err();
+        assert!(orphan.contains("orphan closing `}`"), "{orphan}");
+        let inserted =
+            insert_after_line_payload(root.path(), "a.scss", 3, "}", &receipt).unwrap_err();
+        assert!(inserted.contains("orphan closing `}`"), "{inserted}");
+        let rewritten =
+            write_file_payload_with_receipt(root.path(), "a.scss", ".a {\n", Some(&receipt))
+                .unwrap_err();
+        assert!(rewritten.contains("is never closed"), "{rewritten}");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a.scss")).unwrap(),
+            scss
+        );
+
+        // A correct bounded edit still goes through.
+        let receipt = revision(root.path(), "list.twig");
+        edit_lines_payload(
+            root.path(),
+            "list.twig",
+            3,
+            3,
+            "    <li>{{ b }}</li>",
+            &receipt,
+        )
+        .expect("an edit that keeps the range's indentation is written");
+    }
+
     #[test]
     fn invalid_rust_line_edits_and_whole_file_writes_never_reach_disk() {
         let root = tempfile::tempdir().unwrap();
@@ -3232,6 +3358,60 @@ mod tests {
             staged.trim().is_empty(),
             "validation must finish before the first path is staged: {staged}"
         );
+    }
+
+    #[test]
+    fn identity_trailers_are_stripped_case_insensitively_and_prose_is_kept() {
+        let (message, removed) = strip_identity_trailers(
+            "fix(mcp): expose fields\n\nWhy: the bridge dropped them.\n\nSigned-off-by: Someone <made-up@example.com>\nco-authored-by: Bot <bot@example.com>\n",
+        );
+        assert_eq!(
+            message,
+            "fix(mcp): expose fields\n\nWhy: the bridge dropped them."
+        );
+        assert_eq!(removed, ["Signed-off-by", "co-authored-by"]);
+        let (only, removed) = strip_identity_trailers("Signed-off-by: A <a@example.com>");
+        assert!(only.is_empty());
+        assert_eq!(removed.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_keeps_only_the_configured_sign_off() {
+        let repo = tiny_repo();
+        git_read(repo.path(), &["config", "user.name", "Configured Person"]).unwrap();
+        git_read(
+            repo.path(),
+            &["config", "user.email", "configured@example.com"],
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("a.txt"), "changed a\n").unwrap();
+
+        let committed = git_commit_payload(
+            repo.path(),
+            &["a.txt".into()],
+            "fix: change a\n\nSigned-off-by: Invented <invented@example.com>\nCo-Authored-By: Model <model@example.com>",
+        )
+        .unwrap();
+
+        let body = git_read(repo.path(), &["log", "-1", "--format=%B"]).unwrap();
+        assert!(!body.contains("invented@example.com"), "{body}");
+        assert!(!body.contains("model@example.com"), "{body}");
+        assert!(
+            body.contains("Signed-off-by: Configured Person <configured@example.com>"),
+            "{body}"
+        );
+        assert_eq!(
+            committed["removed_trailers"],
+            json!(["Signed-off-by", "Co-Authored-By"])
+        );
+        assert!(git_commit_payload(
+            repo.path(),
+            &["a.txt".into()],
+            "Signed-off-by: Invented <invented@example.com>",
+        )
+        .unwrap_err()
+        .contains("empty"));
     }
 
     #[cfg(unix)]

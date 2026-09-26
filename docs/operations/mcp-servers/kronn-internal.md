@@ -74,6 +74,10 @@ API contract: `GET /api/discussions/{id}/questions` returns
 declined. Answering and declining share one resolution path
 (`publish_human_resolution`), so a declined card produces the same receipt,
 routing and idempotency guarantees as an answered one — they cannot drift apart.
+`POST /api/discussions/{id}/questions/{question_id}/comment` accepts
+`{text, idempotency_key}`: the asker receives the text through the same path,
+as a message that says it is not a decision, and the question stays pending.
+In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/db/discussion_questions.rs:1]`
 `[src: file: backend/src/api/discussion_questions.rs:1]`
@@ -144,7 +148,15 @@ thread again: ask before renaming a room you did not open.
    resume credential/cursor; this one-time upgrade case returns
    `runtime_bound: false` and `rejoin_required: true` and needs one fresh join
    instead of silently claiming that append is safe. `disc_link({})` binds the
-   current session to the bound disc for a room reached another way.
+   current session to the bound disc for a room reached another way — but it
+   only ever writes that durable resume mapping, never the live
+   `discussion_sessions` row `task_exec_prepare`/`task_exec_launch` authorize
+   against. Its response says which state the caller ends up in: an active
+   member on that exact disc already gets `runtime_bound: true`; anyone else
+   gets the same `runtime_bound: false` / `rejoin_required: true` shape as
+   `disc_find_by_session`, plus a `hint` naming the exact remedy
+   (`disc_invite_peer` for a fresh token, then `disc_join({token: "kr-join-..."})`)
+   instead of task_exec calls failing later with no explanation.
    Both refuse to act rather than guess when no durable identity exists, and
    neither ever passes `force_reassign`: a session owned by another discussion
    is reported, never stolen.
@@ -354,6 +366,31 @@ idempotency key after an uncertain response. Native HTTP workers receive a
 narrowed surface: no backlog mutation or execution-status lookup, and
 `task_exec_deliver` accepts only the manifest. They never merge, approve or
 close the task.
+Delivery refuses a commit whose `Signed-off-by`, `Co-Authored-By` or similar
+identity trailer names anyone but the repository's git identity; a CLI worker
+commits with `git commit -s` and never writes such a line by hand.
+`[src: file: backend/src/api/orchestration.rs]`
+The principal is either a CLI session joined to the room or the room's own
+native agent during its turn. For the latter Kronn injects
+`KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
+into the bridge environment; the backend accepts it only while that dispatch
+runs in the room, for the same provider, and never for a delegated worker's
+dispatch.
+A Claude Code or Codex workflow Agent step with a `room_id` (a template
+rendering to a discussion id) is principal of that room without a `kr-join`
+token; other providers have no bridge to carry it, so the step is refused. On
+every launch and every resume the runner injects `KRONN_WORKFLOW_STEP_CONTEXT`
+(room, run, step, capability); before the first Kronn tool, the bridge
+exchanges it at
+`POST /api/discussions/workflow-step-join` for an ordinary membership of its own
+CLI session. No tool schema carries it. The backend accepts it only while that
+step of that run is running in this process, for that room: another step, a
+finished run, another run or a restarted backend holds nothing it accepts. The
+membership ends with the step and at backend boot. Being a joined CLI, the step
+is pinned by `task_exec_launch` like any principal, so deliveries wake it, and
+a replayed step takes over the live executions its interrupted session steered.
+`[src: file: backend/src/workflows/step_room.rs]`
+`[src: file: backend/src/db/workflow_step_rooms.rs]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
@@ -369,6 +406,26 @@ retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/src/api/orchestration.rs:7955-7997]
 [src: file: backend/scripts/disc-introspection-mcp.py:921-941]
 [src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
+
+`task_exec_status({view: "compact"})` returns id, task, status, attempt,
+review rounds, delivered `head_sha`, last error, the latest candidate's
+validations (command, exit code, duration) and a backend-derived
+`next_action`, trimmed to stay under 1 000 characters as the bridge prints it.
+The default `view: "full"` is unchanged: worker briefs and reviews read its
+lineage, attempts and manifests.
+
+`task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
+the execution is in one of the `wait_for` statuses and adds
+`wait: {matched, timed_out, waited_ms}` to the usual response. A status already
+reached returns at once, a terminal execution returns unmatched, and
+`timeout_secs` defaults to 60 s, capped at 170 s below the bridge's HTTP
+timeout. The parent-room notices of an execution (review request, escalation,
+integration refusal, campaign pause, undelivered worker, terminal state)
+address the joined CLI that last launched, reviewed, resumed or reassigned it
+while that session remains in the room, so its `disc_wait_for_peer` wakes on
+them; without such a session they address the room's configured agent.
+`[src: file: backend/src/api/orchestration.rs]`
+`[src: file: backend/src/db/orchestration.rs]`
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
@@ -516,7 +573,10 @@ attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `[src: file: backend/scripts/disc-introspection-mcp.py]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
-the replacement worker's handoff message. It is therefore a real recovery
+the replacement worker's handoff message. From `AwaitingReview` it first
+rejects the pending delivery (`AwaitingReview -> ChangesRequested`, journaled
+with `delivery: rejected`); the manifest stays in the attempt history and the
+replacement works on the next attempt. It is therefore a real recovery
 instruction, not an audit-only label. The chosen provider, tier, model and
 profile are synchronised to the durable child discussion in the same database
 transaction: that discussion is what the runtime resolves when it starts the
@@ -664,6 +724,15 @@ These reads reuse the existing list endpoints and do not mutate the library.
 [src: file: backend/scripts/disc-introspection-mcp.py:1044-1088]
 [src: file: backend/scripts/disc-introspection-mcp.py:4223-4234]
 
+## Workflow run detail
+
+`workflow_run_get` preserves the API's stored `agent_provenance` attempt history
+alongside compact step metadata while still truncating long step outputs.
+Missing/null provenance stays absent for historical runs; an explicit empty
+attempt list is preserved. The bridge does not look up today's model settings
+or infer attempts from output text.
+[src: file: backend/scripts/disc-introspection-mcp.py:7863]
+
 ## Joined CLI worktrees
 
 - Call `disc_workspace_get({})` before editing when several peers may be
@@ -780,8 +849,10 @@ When a user gives you a `kr-join-…` invite token :
    Follow existing executions with `task_exec_status`, never duplicate launches.
    Use the unbounded `disc_wait_for_peer()` only when no actionable work or
    execution needs following: its quiet inner polls do not return to the model.
-   A backgrounded wait remains active; track that same call to its terminal
-   result, never start another wait or end on a progress summary. A completed
+   A backgrounded wait stays active until its terminal result or your next
+   Kronn call, which ends it and says so in that call's result
+   (`wait_preempted`); never start another wait or end on a progress summary
+   while it runs, and re-arm after any other Kronn call. A completed
    quiet result or interruption is not departure. Follow each message's routing
    hint and reply only when your exact CLI is addressed (or an untargeted Agent
    turn asks the room); `awareness` is context, not a turn to answer.
@@ -911,9 +982,10 @@ contracts; they are not claimed as entries in this first version.
   row. `tool_manual({tool: "page_create"})` and
   `tool_manual({tool: "page_update_html"})` carry the contract: one inert
   `application/kronn-action` block per action, one `data-kronn-bindings`
-  selector per row, `data-kronn-action-state` on each button for its row's live
-  state, and a native card that opens on the row's latest run and what it
-  produced. Keep a block's reference stable across revisions.
+  selector per row, `data-kronn-action-state` and `data-kronn-action-launch` on
+  each button for its row's live state and latest attempt, and a native card
+  that reopens a running row's run or offers a new attempt with the last run one
+  click away. Keep a block's reference stable across revisions.
 
 ## Related
 

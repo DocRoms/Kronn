@@ -40,6 +40,8 @@ interface ApiCallStepCardProps {
    *  depuis le QA au run-time (per-field override : le step gagne quand set).
    *  Mirror du pattern existant pour BatchApiCall. */
   availableQuickApis?: QuickApi[];
+  /** Workflow steps only: a saved Quick API has no `api_response` to keep it. */
+  allowBinaryResponse?: boolean;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -59,6 +61,7 @@ export function ApiCallStepCard({
   installedAgents,
   configLanguage,
   availableQuickApis,
+  allowBinaryResponse = false,
   t,
 }: ApiCallStepCardProps) {
   const [testing, setTesting] = useState(false);
@@ -82,7 +85,7 @@ export function ApiCallStepCard({
   // `body` or `method` surfaces immediately). Headers were intentionally
   // promoted OUT of advanced — they're too commonly required to hide.
   const hasAnyAdvanced = (s: WorkflowStep): boolean =>
-    !!(s.api_body || s.api_method || s.api_output_var || s.api_timeout_ms || s.api_max_retries);
+    !!(s.api_body || s.api_method || s.api_output_var || s.api_timeout_ms || s.api_max_retries || s.api_response);
   const [showAdvanced, setShowAdvanced] = useState(() => hasAnyAdvanced(step));
   // Track previous "has advanced" snapshot so we only auto-expand on
   // the false → true transition. Without this, a user who manually
@@ -96,7 +99,7 @@ export function ApiCallStepCard({
     }
     prevHadAdvanced.current = now;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step.api_body, step.api_method, step.api_output_var, step.api_timeout_ms, step.api_max_retries]);
+  }, [step.api_body, step.api_method, step.api_output_var, step.api_timeout_ms, step.api_max_retries, step.api_response]);
 
   // The step is identified by `api_config_id` (one row per user
   // credential) rather than by `api_plugin_slug` alone — otherwise the
@@ -211,6 +214,7 @@ export function ApiCallStepCard({
     || !!step.api_timeout_ms
     || !!step.api_max_retries
     || !!step.api_output_var
+    || !!step.api_response
   );
 
   return (
@@ -590,6 +594,7 @@ export function ApiCallStepCard({
               />
             </label>
           </div>
+          {allowBinaryResponse && <ResponseFormatEditor step={step} onChange={onChange} t={t} />}
 
           {/* ── HTTP advanced (method override + headers + body) ── */}
           <div className="wf-apicall-advanced wf-apicall-http-advanced">
@@ -626,6 +631,76 @@ export function ApiCallStepCard({
     </>
     );
   }
+}
+
+// ─── ResponseFormatEditor ─────────────────────────────────────────────────
+//
+// `api_response: Binary` returns an allowed media type as
+// `{content_type, size, base64, data_uri}`; the server enforces the list and
+// the size cap, so the inputs only carry what the step declares.
+const BINARY_DEFAULT_MAX_BYTES = 256 * 1024;
+const BINARY_MAX_BYTES_CEILING = 2 * 1024 * 1024;
+
+function ResponseFormatEditor({
+  step,
+  onChange,
+  t,
+}: {
+  step: WorkflowStep;
+  onChange: (updates: Partial<WorkflowStep>) => void;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const binary = step.api_response?.type === 'Binary' ? step.api_response : null;
+  // Typed freely, committed on blur: parsing each keystroke would eat the comma.
+  const [acceptDraft, setAcceptDraft] = useState(() => (binary?.accept ?? []).join(', '));
+  const setBinary = (patch: { accept?: string[]; max_bytes?: number | null }) => onChange({
+    api_response: { type: 'Binary', accept: binary?.accept ?? [], max_bytes: binary?.max_bytes ?? null, ...patch },
+  });
+  return (
+    <div className="wf-apicall-advanced" data-testid="wf-apicall-response-format">
+      <label className="wf-apicall-field">
+        <span>{t('wf.apicall.responseLabel')}</span>
+        <Dropdown<'json' | 'binary'>
+          value={binary ? 'binary' : 'json'}
+          options={[
+            { value: 'json', label: t('wf.apicall.responseJson') },
+            { value: 'binary', label: t('wf.apicall.responseBinary') },
+          ]}
+          onChange={v => onChange({ api_response: v === 'binary' ? { type: 'Binary' } : null })}
+          ariaLabel={t('wf.apicall.responseLabel')}
+          testId="wf-apicall-response-picker"
+        />
+      </label>
+      {binary && (
+        <>
+          <label className="wf-apicall-field">
+            <span>{t('wf.apicall.responseAcceptLabel')}</span>
+            <input
+              type="text"
+              placeholder="image/*"
+              value={acceptDraft}
+              onChange={e => setAcceptDraft(e.target.value)}
+              onBlur={() => setBinary({
+                accept: acceptDraft.split(',').map(v => v.trim()).filter(Boolean),
+              })}
+            />
+          </label>
+          <label className="wf-apicall-field">
+            <span>{t('wf.apicall.responseMaxBytesLabel')}</span>
+            <input
+              type="number"
+              min={1}
+              max={BINARY_MAX_BYTES_CEILING}
+              placeholder={String(BINARY_DEFAULT_MAX_BYTES)}
+              value={binary.max_bytes ?? ''}
+              onChange={e => setBinary({ max_bytes: e.target.value ? Number(e.target.value) : null })}
+            />
+          </label>
+          <small className="text-xs text-ghost">{t('wf.apicall.responseBinaryHint')}</small>
+        </>
+      )}
+    </div>
+  );
 }
 
 // ─── PathParamsEditor ─────────────────────────────────────────────────────

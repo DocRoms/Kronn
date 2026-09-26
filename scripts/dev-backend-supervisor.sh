@@ -29,6 +29,7 @@ watcher_pid=""
 reload_requested=0
 bootstrap_started=0
 bootstrap_fingerprint=""
+serving_fingerprint=""
 
 record_failure() {
     local status="${1:-1}"
@@ -60,23 +61,23 @@ cleanup() {
     done
 }
 
+binary_fingerprint() {
+    cksum <"$BACKEND_BINARY" 2>/dev/null || true
+}
+
 start_backend() {
+    serving_fingerprint="$(binary_fingerprint)"
     (cd "$BACKEND_DIR" && exec "$BACKEND_BINARY") &
     backend_pid=$!
 }
 
 backend_ready() {
-    local attempt=0
-    while (( attempt < 300 )); do
-        if curl -fsS --connect-timeout 1 --max-time 1 -o /dev/null \
-            "$HEALTH_URL" 2>/dev/null; then
-            return 0
-        fi
-        kill -0 "$backend_pid" 2>/dev/null || return 1
-        attempt=$((attempt + 1))
-        sleep 0.1
-    done
-    return 1
+    # Startup work (including project MCP sync) runs before the HTTP bind on
+    # every launch. A reload needs the same readiness budget as the first boot.
+    wait_for_process_http_ready \
+        "$HEALTH_URL" "$backend_pid" \
+        "${KRONN_DEV_READY_ATTEMPTS:-300}" \
+        "${KRONN_DEV_READY_INTERVAL:-1}"
 }
 
 trap 'reload_requested=1' USR1
@@ -136,6 +137,7 @@ if dev_backend_watch_enabled "${KRONN_DEV_BACKEND_WATCH:-1}"; then
             --postpone \
             --on-busy-update=restart \
             --exts rs,toml,lock \
+            --ignore '**/target/**' \
             --stop-timeout 10s \
             -- ../scripts/dev-backend-watch-command.sh
     ) &
@@ -145,26 +147,39 @@ else
 fi
 
 while true; do
+    if (( reload_requested == 1 )) \
+        && dev_backend_binary_unchanged "$serving_fingerprint" "$(binary_fingerprint)"; then
+        # Any watched file can trigger a build that changes nothing, such as a
+        # generated source under a target directory; restarting would only
+        # cut the agents the running backend serves.
+        reload_requested=0
+        echo "  Backend build left the binary unchanged — keeping the running backend."
+    fi
     if (( reload_requested == 1 )); then
         reload_requested=0
         echo "  Backend build ready — restarting without compile downtime..."
         stop_child "$backend_pid"
         backend_pid=""
         start_backend
-        if ! backend_ready; then
-            status=1
-            if kill -0 "$backend_pid" 2>/dev/null; then
-                stop_child "$backend_pid"
-            else
+        if backend_ready; then
+            echo "  Backend hot reload complete."
+        else
+            readiness_status=$?
+            if [[ "$readiness_status" == "2" ]] || ! kill -0 "$backend_pid" 2>/dev/null; then
                 wait "$backend_pid" 2>/dev/null
                 status=$?
+                echo "  Backend exited before readiness after the hot-reload swap (exit $status)." >&2
+                # Even exit 0 is a failed reload if the server never became ready.
+                [[ "$status" != "0" ]] || status=1
+            else
+                status=1
+                echo "  Backend readiness timed out after the hot-reload swap ($HEALTH_URL); stopping the still-running backend." >&2
+                stop_child "$backend_pid"
             fi
             backend_pid=""
             record_failure "$status"
-            echo "  Backend failed after the hot-reload swap." >&2
             exit "$status"
         fi
-        echo "  Backend hot reload complete."
     fi
 
     if ! kill -0 "$backend_pid" 2>/dev/null; then

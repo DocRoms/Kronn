@@ -4,6 +4,7 @@ import { pages as pagesApi } from '../lib/api';
 import {
   buildSandboxDocument,
   hostTheme,
+  hostThemeTokens,
   createLivePageOpenLinkRelay,
   runtimeData,
 } from '../lib/live-page-sandbox';
@@ -61,7 +62,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
   }, [pageId, reloadPageActions]);
 
   const sandboxDocument = useMemo(
-    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme()) : '',
+    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme(), hostThemeTokens()) : '',
     [bridgeChannel, detail],
   );
   const publishToFrame = useCallback(() => {
@@ -77,11 +78,17 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
     }, '*');
   }, [bridgeChannel, detail]);
 
+  // A content-sized Page reports its height; it only applies to the document that sent it,
+  // so a new revision that does not opt in never inherits the previous one's size.
+  const [frameSize, setFrameSize] = useState<{ doc: string; height: number } | null>(null);
+  const frameDocRef = useRef(sandboxDocument);
+  useEffect(() => { frameDocRef.current = sandboxDocument; }, [sandboxDocument]);
+  const frameHeight = frameSize && frameSize.doc === sandboxDocument ? frameSize.height : null;
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
       setActionUnavailable(false);
       handlePageActionIntent(intent);
-    }, movePageActionAnchor);
+    }, movePageActionAnchor, height => setFrameSize({ doc: frameDocRef.current, height }));
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
@@ -105,7 +112,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
   }
 
   return (
-    <div className="standalone-live-page-mosaic-frame-shell">
+    <div className={frameHeight ? "standalone-live-page-mosaic-frame-shell is-content-sized" : "standalone-live-page-mosaic-frame-shell"}>
       {actionUnavailable && (
         <p className="standalone-live-page-mosaic-action-error" role="alert">
           {t('disc.action.unavailablePageAction')}
@@ -113,6 +120,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
       )}
       <iframe
         ref={iframeRef}
+                  style={frameHeight ? { height: frameHeight } : undefined}
         title={detail.title}
         sandbox="allow-scripts"
         srcDoc={sandboxDocument}

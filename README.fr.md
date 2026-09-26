@@ -23,107 +23,35 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.14.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.14.1 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.14.0
+## Nouveautés de la 0.14.1
 
-- **Davantage d’automatisations pour les agents HTTP :** découvrir, lancer et
-  modifier les Quick Prompts enregistrés, et rédiger des workflows désactivés
-  pour revue humaine. Une demande média peut omettre la connexion lorsqu’une
-  seule prend en charge la modalité.
-- **Des pièces jointes lisibles et des Pages vivantes plus stables :** textes,
-  JSON et logs s’ouvrent à côté des images et vidéos dans le carrousel, avec
-  téléchargement de l’original. Les Pages suivent le thème de Kronn et gardent
-  leur état local quand le rafraîchissement n’apporte aucune donnée modifiée.
-- **Des workflows corrigés :** les entrées facultatives laissées vides restent
-  disponibles dans les templates Gate et Exec (#213). Les Quick Exec conservent
-  leur code de sortie et stderr ; une Quick API utilisée par un workflow ne
-  peut plus être supprimée par inadvertance.
-- **Une installation plus simple :** parcourir les dossiers réellement
-  accessibles au serveur et sélectionner plusieurs racines de dépôts dans
-  l’assistant de configuration.
+- **Des workflows qui s'enchaînent sans se marcher dessus :** une étape
+  `TriggerWorkflow` lance un autre workflow avec ses variables et continue
+  aussitôt ; `concurrency_key` limite les runs par ticket ; un run isolé peut
+  partir de `origin/main` (`base_ref`) ; un run porte un libellé métier qu'on
+  retrouve en un appel.
+- **Des agents de workflow qui pilotent leur room :** une étape Agent avec
+  `room_id` est principal de la room sans jeton d'invitation, y compris après
+  `/resume`, et l'agent natif d'une room lance lui-même des exécutions de tâches.
+- **Les Artifacts, anciennement Pages :** les images d'une API authentifiée
+  (pièces jointes Jira) s'affichent dans un Artifact, un champ d'action peut
+  partir des données de la ligne cliquée, et les Artifacts s'exportent et
+  s'importent en bundles versionnés.
+- **Plus léger, plus stable :** le cache de prompts Anthropic via LiteLLM est
+  actif par défaut, une longue discussion ne gèle plus et ne retélécharge plus
+  son transcript, et les thèmes sombres passent WCAG AA.
+- **Plus sûr pour vos dépôts :** Kronn ne supprime plus au démarrage les skills
+  et agents propres à un dépôt, et le worktree d'un run interrompu que personne
+  n'a repris est récupéré après 7 jours, ses commits gardés sur une branche.
 
-Voir les [notes de la version 0.14.0](CHANGELOG.md), avec le périmètre des
-validations et les résultats conservés des campagnes de modèles.
-
-## Nouveautés de la 0.13.2
-
-- **Images et vidéos depuis n’importe quelle discussion :** la 0.13.0 promettait
-  qu’un agent génère des médias depuis une discussion, et ce n’était vrai que
-  dans les rooms. Dans une discussion ordinaire, `agent_list`, le seul endroit
-  où figure l’identifiant d’une connexion média, refusait l’agent : rien ne
-  pouvait être généré sans qu’un humain colle un identifiant opaque. Il répond
-  désormais dans toutes les discussions, une génération accepte l’alias ou le
-  nom de la connexion, et un refus liste les connexions capables de faire ce
-  qui est demandé.
-- **Des clips lus comme un seul film :** le panneau Assets d’une discussion
-  passe en onglets. Tout garde l’inventaire, Creator le formulaire de
-  génération, et Editor, dès le deuxième clip, range les clips dans l’ordre,
-  met de côté ceux qui n’ont rien à voir avec le film et lit les autres l’un
-  après l’autre en plein écran. L’ordre est enregistré avec la discussion ;
-  aucun fichier unique n’est produit.
-
-Voir les [notes de la version 0.13.2](CHANGELOG.md) et le
-[guide des connexions API externes](docs/operations/external-api-connections.md).
-
-## Nouveautés de la 0.13.1
-
-- **Des boutons de Page vivante qui lancent leur propre ligne :** une Page qui
-  liste des tickets peut placer un bouton sur chaque ligne à partir d’un seul
-  bloc d’action. Chaque clic tourne pour sa ligne, le bouton indique comment
-  s’est passé le run de cette ligne, et un nouveau clic ouvre ce que le run a
-  produit (ses étapes, les discussions qu’il a ouvertes, la réponse de
-  l’agent) avec de quoi le relancer. Avant, le premier clic consommait le bloc
-  pour toutes les lignes, et les clics suivants rejouaient son résultat sans
-  rien lancer.
-- **Des cartes d’action qui disent vrai et lisent leur résultat :** un Quick
-  Prompt est terminé quand son agent a répondu, pas quand sa discussion a été
-  créée. Un Quick API montre sa ligne de résumé et ses premières lignes, un
-  Quick Exec sa sortie, un workflow ses étapes, au lieu de JSON brut.
-  Discussions et Pages partagent la même carte.
-
-Voir les [notes de la version 0.13.1](CHANGELOG.md) et
-[l’architecture des Pages](docs/architecture/live-pages.md).
-
-## Nouveautés de la 0.13.0
-
-- **Génération d’images et de vidéos sur les connexions HTTP :** LiteLLM, NVIDIA
-  et OpenRouter génèrent depuis une discussion ou depuis le carrousel d’assets,
-  avec le coût affiché avant le clic. Les agents lisent ce que chaque modèle
-  annonce réellement — durées, résolutions, ratios — au lieu de découvrir ses
-  limites par un refus, et peuvent enchaîner la dernière image d’un clip dans le
-  clip suivant.
-- **Les agents HTTP atteignent les automatisations :** un agent Ollama ou LiteLLM
-  liste les Quick Execs sauvegardés, en lance un, et écrit des Quick APIs et des
-  Quick Execs comme un agent CLI. Les identifiants restent côté serveur ;
-  l’écriture reste hors des rooms worker.
-- **Messages importants et cartes de décision publiées :** un formulaire en texte
-  brut au-dessus du composer produit un objet structuré et persisté — pas de la
-  mise en forme — et un agent peut poser une décision à un humain puis s’arrêter,
-  la question survivant comme son propre enregistrement.
-- **Des rooms multi-agents qui tiennent :** mentionne trois agents et trois
-  répondent ; un redémarrage du backend n’annule plus en silence ceux qui
-  n’avaient pas encore parlé ; la room enfant d’un worker délégué continue
-  d’accepter des messages une fois sa tâche terminée.
-- **Une base dont on voit le poids :** la configuration montre où sont réellement
-  les octets, une barre par table, mesuré à la demande. Les discussions
-  rapportent leur propre poids, séparé par ce qu’un nettoyage récupérerait.
-- **Un markdown qui se répare :** les marqueurs d’outils n’atterrissent plus au
-  milieu d’un message, les réponses ACP ne sont plus découpées en plein mot, et
-  une longue conversation se met à niveau progressivement au lieu de figer la
-  room à l’ouverture.
-
-Voir les [notes complètes de la version 0.13.0](CHANGELOG.md), le
-[guide des connexions API externes](docs/operations/external-api-connections.md)
-et le [guide de délégation des tâches](docs/guides/task-orchestration.md).
+Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.14.0](#nouveautés-de-la-0140)
-- [Nouveautés de la 0.13.2](#nouveautés-de-la-0132)
-- [Nouveautés de la 0.13.1](#nouveautés-de-la-0131)
-- [Nouveautés de la 0.13.0](#nouveautés-de-la-0130)
+- [Nouveautés de la 0.14.1](#nouveautés-de-la-0141)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -187,7 +115,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.14.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.14.1 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

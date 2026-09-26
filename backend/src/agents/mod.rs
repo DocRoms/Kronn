@@ -1,7 +1,7 @@
 use crate::core::cmd::async_cmd;
 #[cfg(target_os = "windows")]
 use crate::core::cmd::sync_cmd;
-use crate::models::{AgentDetection, AgentType, AppConfig};
+use crate::models::{AgentDetection, AgentType, AppConfig, ShadowedInstall};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -19,6 +19,7 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     }
 }
 
+pub mod activity;
 pub mod chat_codec;
 pub(crate) mod generation_settings;
 pub mod media_asset_url;
@@ -26,6 +27,7 @@ pub mod media_capabilities;
 pub mod media_codec;
 pub mod media_runner;
 pub mod media_worker;
+pub mod provenance;
 pub mod runner;
 pub mod tools;
 
@@ -383,6 +385,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,
+            shadowed_installs: None,
         };
     }
     // Check standard PATH first, then host-mounted bin directories
@@ -411,6 +414,20 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             Ok(Ok(v)) => Some(v),
             _ => None,
         };
+        // Host-mounted and WSL copies live outside this PATH: nothing to compare.
+        let shadowed_installs = match version.as_deref() {
+            Some(resolved_version) if !loc.host_managed && !loc.via_wsl => {
+                shadowed_installs_in(
+                    def.binary,
+                    &loc.path,
+                    resolved_version,
+                    std::env::var_os("PATH"),
+                )
+                .await
+            }
+            _ => Vec::new(),
+        };
+        let shadowed_installs = (!shadowed_installs.is_empty()).then_some(shadowed_installs);
         let host_label = if loc.via_wsl {
             Some("WSL".to_string())
         } else if loc.host_managed {
@@ -439,6 +456,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             rtk_available,
             rtk_hook_configured,
             runtime_warning,
+            shadowed_installs,
         }
     } else {
         // No local binary — probe npx/uvx fallback
@@ -464,6 +482,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             rtk_available,
             rtk_hook_configured,
             runtime_warning,
+            shadowed_installs: None,
         }
     }
 }
@@ -726,6 +745,42 @@ pub fn apply_configured_status(agents: &mut [AgentDetection], config: &AppConfig
         agent.auth_ready = auth.ready;
         agent.auth_setup_command = auth.setup_command.map(str::to_string);
     }
+}
+
+/// Other copies of `binary` on `search_path` that the resolved one shadows, kept
+/// only when their version differs from `resolved_version`.
+async fn shadowed_installs_in(
+    binary: &str,
+    resolved: &str,
+    resolved_version: &str,
+    search_path: Option<std::ffi::OsString>,
+) -> Vec<ShadowedInstall> {
+    let Some(search_path) = search_path else {
+        return Vec::new();
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    let Ok(candidates) = which::which_in_all(binary, Some(search_path), cwd) else {
+        return Vec::new();
+    };
+    let real = |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or(path.to_path_buf());
+    let mut seen = std::collections::HashSet::from([real(std::path::Path::new(resolved))]);
+    let mut shadowed = Vec::new();
+    for candidate in candidates.take(8) {
+        if !seen.insert(real(&candidate)) {
+            continue;
+        }
+        let path = candidate.to_string_lossy().to_string();
+        let probe =
+            tokio::time::timeout(std::time::Duration::from_secs(3), get_version_from(&path)).await;
+        if let Ok(Ok(version)) = probe {
+            if version != resolved_version {
+                shadowed.push(ShadowedInstall { path, version });
+            }
+        }
+    }
+    shadowed
 }
 
 /// Surface a per-agent runtime-degradation warning to the frontend.
@@ -1595,6 +1650,74 @@ mod tests {
         // On other platforms, WSL_DISTRO_NAME is ignored (compile-time gate)
         #[cfg(not(target_os = "linux"))]
         let _ = label;
+    }
+
+    // ─── shadowed_installs_in: stale copies hidden by PATH order ────────────
+
+    #[cfg(unix)]
+    fn fake_cli(dir: &std::path::Path, version: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("kronn-shadow-cli");
+        std::fs::write(&path, format!("#!/bin/sh\necho '{version} (Fake CLI)'\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shadowed_installs_report_a_later_copy_with_another_version() {
+        let root = tempfile::tempdir().unwrap();
+        let (native, alias, stale) = (
+            root.path().join("native"),
+            root.path().join("alias"),
+            root.path().join("stale"),
+        );
+        for dir in [&native, &alias, &stale] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let resolved = fake_cli(&native, "2.1.282");
+        // Another PATH entry pointing at the same file is not a second install.
+        std::os::unix::fs::symlink(&resolved, alias.join("kronn-shadow-cli")).unwrap();
+        let old = fake_cli(&stale, "2.1.207");
+        let search = std::env::join_paths([&native, &alias, &stale]).unwrap();
+
+        let shadowed = shadowed_installs_in(
+            "kronn-shadow-cli",
+            &resolved.to_string_lossy(),
+            "2.1.282",
+            Some(search),
+        )
+        .await;
+
+        assert_eq!(
+            shadowed,
+            vec![ShadowedInstall {
+                path: old.to_string_lossy().to_string(),
+                version: "2.1.207".into(),
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shadowed_installs_ignore_a_copy_with_the_same_version() {
+        let root = tempfile::tempdir().unwrap();
+        let (first, second) = (root.path().join("first"), root.path().join("second"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let resolved = fake_cli(&first, "2.1.282");
+        fake_cli(&second, "2.1.282");
+        let search = std::env::join_paths([&first, &second]).unwrap();
+
+        let shadowed = shadowed_installs_in(
+            "kronn-shadow-cli",
+            &resolved.to_string_lossy(),
+            "2.1.282",
+            Some(search),
+        )
+        .await;
+
+        assert!(shadowed.is_empty(), "{shadowed:?}");
     }
 
     // ─── find_binary: Windows extension matching ────────────────────────────

@@ -1792,7 +1792,7 @@ function MarkdownPre({ children, node }: {
       return <MermaidDiagram source={source.trim()} />;
     }
     if (className.includes('language-kronn-doc-preview')) {
-      return <DocPreview html={source.trim()} discussionId={discussionId} />;
+      return <DocPreview html={source.trim()} discussionId={discussionId} sourceMessageId={sourceMessageId} />;
     }
     if (className.includes('language-kronn-doc-data')) {
       // Parse only data inside try/catch, never JSX. Malformed/unsupported

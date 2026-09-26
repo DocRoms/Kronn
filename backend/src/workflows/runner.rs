@@ -15,6 +15,17 @@ use super::steps::{execute_step, resolve_step_connection, step_model_override, S
 use super::template::TemplateContext;
 use super::workspace::Workspace;
 
+fn fail_document_audit(outcome: &mut StepOutcome, reason: &str) {
+    outcome.result.status = RunStatus::Failed;
+    outcome.result.condition_result = None;
+    outcome.condition_action = None;
+    outcome.result.output = format!(
+        "Document audit failed. Files and index were preserved; inspect these changes before committing or publishing.\n{reason}\n\nAgent result:\n{}",
+        outcome.result.output
+    );
+    tracing::warn!(target: "kronn::docs_write_filter", "Document audit failed; files preserved: {reason}");
+}
+
 /// Events emitted during a workflow run for real-time SSE streaming.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", content = "data")]
@@ -28,7 +39,7 @@ pub enum RunEvent {
     /// Partial output from the agent (streamed in real-time).
     StepProgress { text: String },
     /// A step has finished executing.
-    StepDone { step_result: StepResult },
+    StepDone { step_result: Box<StepResult> },
     /// 0.7.0 — A `WorkflowGuards` limit was hit and the run was halted.
     /// Distinct from `RunDone { Failed }`: the frontend uses this to
     /// render the orange shield "Stoppé par garde-fou" badge instead of
@@ -63,6 +74,47 @@ fn try_emit_run_event(events_tx: Option<&EventSender>, event: RunEvent) {
     if let Some(tx) = events_tx {
         let _ = tx.try_send(event);
     }
+}
+
+/// Store each tool call a running Agent step reports on its in-flight result,
+/// until `stop` fires, the sink closes or the step is no longer in flight.
+fn spawn_step_activity_publisher(
+    db: std::sync::Arc<crate::db::Database>,
+    run_id: String,
+    step_index: usize,
+    step_name: String,
+    mut activity: tokio::sync::watch::Receiver<Option<AgentActivity>>,
+    stop: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                changed = activity.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            let Some(latest) = activity.borrow_and_update().clone() else {
+                continue;
+            };
+            let (run_id, step_name) = (run_id.clone(), step_name.clone());
+            match db
+                .with_conn(move |conn| {
+                    crate::db::workflows::set_in_flight_step_activity(
+                        conn, &run_id, step_index, &step_name, &latest,
+                    )
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => tracing::warn!("step activity not recorded: {error}"),
+            }
+        }
+    })
 }
 
 enum InFlightStepOutcome {
@@ -129,11 +181,21 @@ fn resolved_workspace_hooks(
 fn workflow_requests_workspace(config: Option<&WorkspaceConfig>) -> bool {
     config.is_some_and(|config| {
         config.require_isolation
+            || workflow_base_ref(Some(config)).is_some()
             || config.hooks.after_create.is_some()
             || config.hooks.before_run.is_some()
             || config.hooks.after_run.is_some()
             || config.hooks.before_remove.is_some()
     })
+}
+
+/// The starting point a fresh run asked for. The main checkout can only serve
+/// its own HEAD, so a base implies a worktree.
+fn workflow_base_ref(config: Option<&WorkspaceConfig>) -> Option<&str> {
+    config
+        .and_then(|config| config.base_ref.as_deref())
+        .map(str::trim)
+        .filter(|base_ref| !base_ref.is_empty())
 }
 
 pub const UNCERTAIN_SIDE_EFFECT_STATE_KEY: &str = "__kronn.uncertain_side_effect";
@@ -155,6 +217,7 @@ fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
         StepType::Exec => Some("Exec"),
         StepType::PublishPageData => Some("PublishPageData"),
         StepType::CollectApiData => Some("CollectApiData"),
+        StepType::TriggerWorkflow => Some("TriggerWorkflow"),
         StepType::Agent
         | StepType::BatchQuickPrompt
         | StepType::Gate
@@ -305,6 +368,146 @@ pub(crate) fn inject_and_consume_gate_feedback(
             true
         }
         _ => false,
+    }
+}
+
+/// Last word of a detached launcher whose `execute_run`/`resume_run` returned
+/// `Err`: the run becomes Failed with the reason instead of staying Running,
+/// where it would keep counting against `concurrency_limit`.
+pub async fn settle_errored_run(
+    state: &AppState,
+    workflow: &Workflow,
+    run: &mut WorkflowRun,
+    error: &anyhow::Error,
+) {
+    tracing::error!(run_id = %run.id, "Workflow run failed: {error:#}");
+    // The durable status decides, not the in-memory one: a gate resume
+    // claimed Running in the DB before its copy left WaitingApproval.
+    let reason = format!("Workflow run aborted: {error:#}");
+    run.status = RunStatus::Failed;
+    run.finished_at = Some(Utc::now());
+    run.step_results.push(StepResult {
+        step_name: "__run_error__".to_string(),
+        status: RunStatus::Failed,
+        output: reason,
+        tokens_used: Some(0),
+        duration_ms: 0,
+        started_at: None,
+        condition_result: None,
+        envelope_detected: None,
+        step_kind: None,
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
+        agent_provenance: None,
+        native_tool_calls: Box::default(),
+        step_agent: None,
+        step_model: None,
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
+    });
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+    let run_id = run.id.clone();
+    let settled = state
+        .db
+        .with_conn(move |conn| {
+            let updated = crate::db::workflows::update_run_progress(conn, snap)?;
+            if updated {
+                crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                    conn,
+                    "workflow",
+                    &run_id,
+                    Utc::now(),
+                )?;
+                return Ok(None);
+            }
+            // Blocked by the status guard (already terminal, paused, or a
+            // Cancel won the race): keep the durable status.
+            Ok(crate::db::workflows::get_run(conn, &run_id)?.map(|row| row.status))
+        })
+        .await;
+    match settled {
+        Ok(None) => {
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::WorkflowRunUpdated {
+                    run_id: run.id.clone(),
+                    workflow_id: workflow.id.clone(),
+                    status: format!("{:?}", run.status),
+                    step_index: run.step_results.len() as i32 - 1,
+                    total_steps: workflow.steps.len() as u32,
+                    current_step: None,
+                });
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::SharedRunUpdated {
+                    run_id: run.id.clone(),
+                });
+        }
+        Ok(Some(status)) => {
+            run.step_results.pop();
+            run.status = status;
+        }
+        Err(persist_error) => {
+            tracing::error!(run_id = %run.id, "could not record the run failure: {persist_error:#}");
+        }
+    }
+}
+
+/// Runs above this one in its sub-workflow chain, nearest first.
+async fn ancestor_run_ids(state: &AppState, run: &WorkflowRun) -> Vec<String> {
+    let Some(parent) = run.parent_run_id.clone() else {
+        return Vec::new();
+    };
+    let lookup = state
+        .db
+        .with_conn(move |conn| {
+            use rusqlite::OptionalExtension;
+            let mut chain = Vec::new();
+            let mut next = Some(parent);
+            while let Some(id) = next.take() {
+                if chain.contains(&id) || chain.len() >= 32 {
+                    break;
+                }
+                next = conn
+                    .query_row(
+                        "SELECT parent_run_id FROM workflow_runs WHERE id = ?1",
+                        [&id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                chain.push(id);
+            }
+            Ok(chain)
+        })
+        .await;
+    lookup.unwrap_or_else(|error| {
+        tracing::warn!(run_id = %run.id, "could not read the run's ancestors: {error}");
+        run.parent_run_id.clone().into_iter().collect()
+    })
+}
+
+fn main_tree_refusal_message(refusal: &crate::workflows::workspace::MainTreeRefusal) -> String {
+    use crate::workflows::workspace::MainTreeRefusal;
+    match refusal {
+        MainTreeRefusal::Busy { holder, waited } => format!(
+            "Refusing to run in the main checkout: run {holder} still held it after {}s of waiting \
+             (two non-isolated runs would contaminate each other's files and .kronn/ state). \
+             Enable worktree isolation, declare the workflow as not writing the main tree, \
+             or raise {}.",
+            waited.as_secs(),
+            crate::workflows::workspace::MAIN_TREE_WAIT_ENV
+        ),
+        MainTreeRefusal::HeldByAncestor { holder } => format!(
+            "Refusing to run in the main checkout: parent run {holder} is executing there and \
+             waits for this run. Enable worktree isolation on this workflow."
+        ),
+        MainTreeRefusal::Cancelled => {
+            "Workflow run cancelled while waiting for the main checkout".into()
+        }
     }
 }
 
@@ -557,7 +760,9 @@ async fn execute_run_with_notify_policy(
                 );
                 None
             } else {
-                match Workspace::create(&repo_path, &workflow.name, &run.id, hooks).await {
+                let base_ref = workflow_base_ref(workflow.workspace_config.as_ref());
+                match Workspace::create(&repo_path, &workflow.name, &run.id, hooks, base_ref).await
+                {
                     Ok(ws) => {
                         run.workspace_path = Some(ws.path.to_string_lossy().to_string());
                         Some(ws)
@@ -569,26 +774,32 @@ async fn execute_run_with_notify_policy(
                         // the workflow declares `require_isolation`, abort the
                         // run instead of falling back (mirror the preflight
                         // failure pattern). Read-only workflows keep the legacy
-                        // warn-and-continue behaviour.
+                        // warn-and-continue behaviour. A requested `base_ref`
+                        // never falls back: the main checkout is not at it.
                         let requires_isolation = workflow
                             .workspace_config
                             .as_ref()
                             .map(|c| c.require_isolation)
                             .unwrap_or(false);
-                        if requires_isolation {
-                            let msg = format!(
-                                "Workflow requires an isolated git worktree but it could not be created: {}. \
-                                 Refusing to run in the main checkout — this workflow pushes/mutates code. \
-                                 Check the repo (is it a clean git repo? disk space?), or clear `require_isolation` \
-                                 to allow main-tree runs.",
-                                e
-                            );
+                        if requires_isolation || base_ref.is_some() {
+                            let msg = match base_ref {
+                                Some(base_ref) => format!(
+                                    "{e} Refusing to run in the main checkout: it does not start from `{base_ref}`."
+                                ),
+                                None => format!(
+                                    "Workflow requires an isolated git worktree but it could not be created: {}. \
+                                     Refusing to run in the main checkout — this workflow pushes/mutates code. \
+                                     Check the repo (is it a clean git repo? disk space?), or clear `require_isolation` \
+                                     to allow main-tree runs.",
+                                    e
+                                ),
+                            };
                             run.status = RunStatus::Failed;
                             run.step_results.push(StepResult {
                                 step_name: "__workspace__".to_string(),
                                 status: RunStatus::Failed,
                                 output: msg.clone(),
-                                tokens_used: 0,
+                                tokens_used: Some(0),
                                 duration_ms: 0,
                                 started_at: None,
                                 condition_result: None,
@@ -598,9 +809,13 @@ async fn execute_run_with_notify_policy(
                                 step_api_endpoint_path: None,
                                 is_rollback: false,
                                 child_run_id: None,
+                                agent_provenance: None,
                                 native_tool_calls: Box::default(),
                                 step_agent: None,
                                 step_model: None,
+                                cached_prompt_tokens: None,
+                                cache_write_prompt_tokens: None,
+                                last_activity: None,
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
@@ -626,22 +841,73 @@ async fn execute_run_with_notify_policy(
     // TD-20260709 (A) — a run about to execute in the MAIN checkout takes a
     // per-project exclusivity guard (isolated worktree runs skip it). Held
     // for this execution's lifetime; the checkpoint-reset preflight covers
-    // the deferred gate-pause window.
-    let _main_tree_guard = if workspace.is_none() && !project_path.is_empty() {
-        match crate::workflows::workspace::MainTreeGuard::acquire(&project_path, &run.id) {
+    // the deferred gate-pause window. Crons of the same minute fire in one
+    // tick, so a busy tree is waited for (bounded, FIFO) before refusing.
+    let writes_main_tree = !workflow
+        .workspace_config
+        .as_ref()
+        .is_some_and(|config| config.main_tree_read_only);
+    let _main_tree_guard = if workspace.is_none() && !project_path.is_empty() && writes_main_tree {
+        let ancestors = ancestor_run_ids(&state, run).await;
+        let wait = crate::workflows::workspace::main_tree_wait();
+        match crate::workflows::workspace::MainTreeGuard::acquire(
+            &project_path,
+            &run.id,
+            &ancestors,
+            wait,
+            &cancel_token,
+        )
+        .await
+        {
             Ok(g) => Some(g),
-            Err(holder) => {
-                let msg = format!(
-                    "Refusing to run in the main checkout: run {holder} is already executing there \
-                     (two non-isolated runs would contaminate each other's files and .kronn/ state). \
-                     Wait for it, or enable worktree isolation on one of the workflows."
+            Err(crate::workflows::workspace::MainTreeRefusal::Cancelled) => {
+                tracing::info!(
+                    "Workflow run {} cancelled while waiting for the main checkout",
+                    run.id
                 );
+                run.status = RunStatus::Cancelled;
+                run.step_results.push(StepResult {
+                    step_name: "__cancelled_by_user__".to_string(),
+                    status: RunStatus::Cancelled,
+                    output: "Workflow run cancelled by user while waiting for the main checkout"
+                        .to_string(),
+                    tokens_used: Some(0),
+                    duration_ms: 0,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: None,
+                    step_agent: None,
+                    step_model: None,
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    agent_provenance: None,
+                    native_tool_calls: Box::default(),
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
+                });
+                run.finished_at = Some(Utc::now());
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_g = db.clone();
+                db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
+                emit(RunEvent::RunDone {
+                    status: RunStatus::Cancelled,
+                });
+                broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
+                return Ok(());
+            }
+            Err(refusal) => {
+                let msg = main_tree_refusal_message(&refusal);
                 run.status = RunStatus::Failed;
                 run.step_results.push(StepResult {
                     step_name: "__workspace__".to_string(),
                     status: RunStatus::Failed,
                     output: msg.clone(),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: 0,
                     started_at: None,
                     condition_result: None,
@@ -651,9 +917,13 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -661,6 +931,7 @@ async fn execute_run_with_notify_policy(
                 db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
                     .await?;
                 emit(RunEvent::RunError { error: msg });
+                broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
                 return Ok(());
             }
         }
@@ -744,6 +1015,8 @@ async fn execute_run_with_notify_policy(
             ctx.set(name, value);
         }
     }
+    // After trigger fields and variables, so neither can stand in for the run.
+    ctx.set("run.id", run.id.clone());
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
     // wrote it) renders cleanly rather than leaving the literal
@@ -764,6 +1037,7 @@ async fn execute_run_with_notify_policy(
             prior_agent.as_deref(),
             prior.step_model.as_deref(),
         );
+        ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
     }
     // 0.7.0 Phase 6 — seed durable state from the run row. On a fresh
     // run this is empty (no-op); on resume / restart-recovery it carries
@@ -816,7 +1090,7 @@ async fn execute_run_with_notify_policy(
                     step_name: "__preflight__".to_string(),
                     status: RunStatus::Failed,
                     output: msg.clone(),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: 0,
                     started_at: None,
                     condition_result: None,
@@ -826,9 +1100,13 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -895,7 +1173,7 @@ async fn execute_run_with_notify_policy(
                     step_name: "__preflight__".to_string(),
                     status: RunStatus::Failed,
                     output: msg.clone(),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: 0,
                     started_at: None,
                     condition_result: None,
@@ -905,9 +1183,13 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -974,7 +1256,7 @@ async fn execute_run_with_notify_policy(
                 step_name: "__cancelled_by_user__".to_string(),
                 status: RunStatus::Cancelled,
                 output: "Workflow run cancelled by user".to_string(),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -986,7 +1268,11 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             all_success = false;
             break;
@@ -1002,7 +1288,7 @@ async fn execute_run_with_notify_policy(
                 step_name: "__safeguard_abort__".to_string(),
                 status: RunStatus::Failed,
                 output: format!("Workflow aborted: exceeded {} total step iterations (possible infinite Goto loop)", max_total_iterations),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
             condition_result: None,
@@ -1014,7 +1300,11 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                    agent_provenance: None,
                     native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             break;
         }
@@ -1044,7 +1334,7 @@ async fn execute_run_with_notify_policy(
                     "Stopped by Timeout guard: {}s elapsed (limit {}s)",
                     elapsed_secs, resolved_guards.timeout_seconds
                 ),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -1056,7 +1346,11 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             stopped_by_guard = true;
             break;
@@ -1085,7 +1379,7 @@ async fn execute_run_with_notify_policy(
                     budget.llm_calls(),
                     budget.max_llm_calls()
                 ),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -1097,7 +1391,11 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             stopped_by_guard = true;
             break;
@@ -1141,7 +1439,7 @@ async fn execute_run_with_notify_policy(
                     "Stopped by LoopDetection guard: step '{}' visited {} times (limit {})",
                     step_name, visit_count, resolved_guards.loop_detection_max_revisits
                 ),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -1153,7 +1451,11 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             stopped_by_guard = true;
             break;
@@ -1199,7 +1501,7 @@ async fn execute_run_with_notify_policy(
             step_name: step.name.clone(),
             status: RunStatus::Running,
             output: String::new(),
-            tokens_used: 0,
+            tokens_used: None,
             duration_ms: 0,
             started_at: Some(step_started_at),
             condition_result: None,
@@ -1211,7 +1513,11 @@ async fn execute_run_with_notify_policy(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         };
         apply_step_snapshot(
             step,
@@ -1324,18 +1630,51 @@ async fn execute_run_with_notify_policy(
                     // dans une copie locale du step (per-field override : le
                     // step gagne quand non-vide).
                     let mut hydrated = step.clone();
-                    if let Err(e) = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
+                    let hydration = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
                         &mut hydrated,
                         &state.db,
                     )
-                    .await
-                    {
+                    .await;
+                    // Observe documents before launch, including dirty/indexed
+                    // content. A failed snapshot refuses the launch rather than
+                    // guessing which writes belong to this step afterwards.
+                    let docs_before = if hydration.is_ok() && !work_dir.is_empty() {
+                        crate::core::docs_write_filter::snapshot_docs(std::path::Path::new(
+                            &work_dir,
+                        ))
+                        .await
+                        .map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    // KT-793 — a room that does not resolve refuses the launch.
+                    let step_room = if hydration.is_ok() {
+                        super::step_room::activate(
+                            &state.workflow_step_rooms,
+                            &state.db,
+                            &run.id,
+                            &hydrated,
+                            &ctx,
+                        )
+                        .await
+                    } else {
+                        Ok(None)
+                    };
+                    let preparation_error = hydration
+                        .err()
+                        .or_else(|| {
+                            docs_before.as_ref().err().map(|error| format!(
+                                "Document audit preflight failed; no agent launched, files preserved: {error}"
+                            ))
+                        })
+                        .or_else(|| step_room.as_ref().err().cloned());
+                    if let Some(e) = preparation_error {
                         StepOutcome {
                             result: StepResult {
                                 step_name: step.name.clone(),
                                 status: RunStatus::Failed,
                                 output: e,
-                                tokens_used: 0,
+                                tokens_used: Some(0),
                                 duration_ms: step_start.elapsed().as_millis() as u64,
                                 started_at: None,
                                 condition_result: None,
@@ -1347,7 +1686,11 @@ async fn execute_run_with_notify_policy(
                                 step_api_endpoint_path: None,
                                 is_rollback: false,
                                 child_run_id: None,
+                                agent_provenance: None,
                                 native_tool_calls: Box::default(),
+                                cached_prompt_tokens: None,
+                                cache_write_prompt_tokens: None,
+                                last_activity: None,
                             },
                             condition_action: None,
                         }
@@ -1364,6 +1707,7 @@ async fn execute_run_with_notify_policy(
                             &mut run.state,
                         );
                         let step = &hydrated;
+                        let step_room = step_room.ok().flatten();
                         let full_access = agents_config.full_access_for(&step.agent);
                         let native_tools = Some(KronnToolExecutor::workflow_arc(
                             state.clone(),
@@ -1390,6 +1734,19 @@ async fn execute_run_with_notify_policy(
                                 }
                             }
                         });
+                        // The SSE stream reaches only the client that started the
+                        // run; the in-flight row is what every other reader sees.
+                        let (activity_tx, activity_rx) = tokio::sync::watch::channel(None);
+                        let activity_stop = tokio_util::sync::CancellationToken::new();
+                        let activity_publisher = spawn_step_activity_publisher(
+                            state.db.clone(),
+                            run.id.clone(),
+                            in_flight_result_index,
+                            step.name.clone(),
+                            activity_rx,
+                            activity_stop.clone(),
+                        );
+                        let activity_stop = activity_stop.drop_guard();
                         // 0.8.2 — Stamp the wall-clock step start so the
                         // frontend's live-elapsed counter reads an authoritative
                         // value instead of estimating via `runStart + sum of
@@ -1398,7 +1755,7 @@ async fn execute_run_with_notify_policy(
                         // retries, and any scheduling gap between steps —
                         // and the WorkflowDetail live-mini-dashboard then
                         // disagrees with RunDetail's `LiveStepStatus`.
-                        let outcome = execute_step(
+                        let mut outcome = execute_step(
                             step,
                             &project_path,
                             &work_dir,
@@ -1407,6 +1764,7 @@ async fn execute_run_with_notify_policy(
                             &ctx,
                             &agent_extra_context,
                             Some(progress_tx),
+                            Some(&activity_tx),
                             Some(&agents_config.model_tiers),
                             Some(&crate::models::setup::HttpEndpoints::from_agents(
                                 agents_config,
@@ -1414,8 +1772,12 @@ async fn execute_run_with_notify_policy(
                             Some(&ollama_context_overrides),
                             native_tools,
                             Some(&state.db),
+                            step_room.as_ref().map(|room| room.context()),
                         )
                         .await;
+                        if let Some(room) = step_room {
+                            room.finish().await;
+                        }
                         // execute_step took ownership of progress_tx and dropped
                         // it on return → the forwarder's recv() now yields None
                         // and the loop exits naturally. AWAIT it (don't abort —
@@ -1423,30 +1785,35 @@ async fn execute_run_with_notify_policy(
                         // tail of the channel buffer, losing the last few chunks
                         // of the step's output to the SSE stream).
                         let _ = forwarder.await;
-                        // 0.7.1 — anti-secret audit on docs/ writes the agent
-                        // produced during this step. Soft-reject : we revert
-                        // via `git checkout` and log; the step itself stays
-                        // Success unless the agent's code write itself failed.
-                        // Only fires when there's a real worktree (skips
-                        // ApiCall-only / Notify-only workflows where work_dir
-                        // is empty or unmounted).
-                        if !work_dir.is_empty() {
-                            let rejections = crate::core::docs_write_filter::audit_docs_writes(
+                        drop(activity_tx);
+                        // Awaited so no activity write can land after the terminal result.
+                        drop(activity_stop);
+                        let _ = activity_publisher.await;
+                        // Never restore/delete observed writes: another process
+                        // may have authored them. Reject the step instead, while
+                        // preserving all content and the original agent outcome.
+                        if let Ok(Some(before)) = &docs_before {
+                            let audit = crate::core::docs_write_filter::audit_docs_writes(
                                 std::path::Path::new(&work_dir),
                                 sensitive_substrings.as_ref(),
+                                before,
                             )
                             .await;
-                            if !rejections.is_empty() {
-                                for (path, reason) in &rejections {
-                                    tracing::warn!(
-                                        target: "kronn::docs_write_filter",
-                                        "Step '{}': reverted docs write {} — {}",
-                                        step.name, path, reason.explain()
-                                    );
+                            match audit {
+                                Ok(rejections) if !rejections.is_empty() => {
+                                    let reasons = rejections
+                                        .iter()
+                                        .map(|(path, reason)| {
+                                            format!("{path}: {}", reason.explain())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    fail_document_audit(&mut outcome, &reasons);
+                                    let count_key = format!("docs_write_rejections.{}", step.name);
+                                    run.state.insert(count_key, rejections.len().to_string());
                                 }
-                                // Surface count in run state for UI visibility.
-                                let count_key = format!("docs_write_rejections.{}", step.name);
-                                run.state.insert(count_key, rejections.len().to_string());
+                                Err(error) => fail_document_audit(&mut outcome, &error),
+                                Ok(_) => {}
                             }
                         }
                         outcome
@@ -1619,6 +1986,17 @@ async fn execute_run_with_notify_policy(
                         agents_config,
                         sub_budget.clone(),
                         sub_parent_workspace.clone(),
+                        super::sub_workflow_step::ChildLaunch {
+                            ctx: &ctx,
+                            parent_variables: &workflow.variables,
+                            parent_project_id: workflow.project_id.as_deref(),
+                        },
+                    )
+                    .await
+                }
+                StepType::TriggerWorkflow => {
+                    super::trigger_workflow_step::execute_trigger_workflow_step(
+                        &state, workflow, &run.id, step, &ctx,
                     )
                     .await
                 }
@@ -1659,7 +2037,7 @@ async fn execute_run_with_notify_policy(
                         step_name: step.name.clone(),
                         status: RunStatus::Cancelled,
                         output: format!("Step '{}' cancelled by user mid-flight.", step.name),
-                        tokens_used: 0,
+                        tokens_used: interrupted_step_tokens(&step.step_type),
                         duration_ms: step_start.elapsed().as_millis() as u64,
                         started_at: None,
                         condition_result: None,
@@ -1671,7 +2049,11 @@ async fn execute_run_with_notify_policy(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        agent_provenance: None,
                         native_tool_calls: Box::default(),
+                        cached_prompt_tokens: None,
+                        cache_write_prompt_tokens: None,
+                        last_activity: None,
                     },
                     condition_action: None,
                 }
@@ -1714,7 +2096,7 @@ async fn execute_run_with_notify_policy(
                             "Step '{}' stopped by workflow Timeout guard after {}s (limit {}s).",
                             step.name, actual_secs, resolved_guards.timeout_seconds
                         ),
-                        tokens_used: 0,
+                        tokens_used: interrupted_step_tokens(&step.step_type),
                         duration_ms: step_start.elapsed().as_millis() as u64,
                         started_at: None,
                         condition_result: None,
@@ -1726,7 +2108,11 @@ async fn execute_run_with_notify_policy(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        agent_provenance: None,
                         native_tool_calls: Box::default(),
+                        cached_prompt_tokens: None,
+                        cache_write_prompt_tokens: None,
+                        last_activity: None,
                     },
                     condition_action: None,
                 }
@@ -1755,7 +2141,8 @@ async fn execute_run_with_notify_policy(
         // output are kept in `ctx` (template visibility) but NOT
         // persisted — declaring is the contract that says "this matters
         // enough to write a file for".
-        let extracted = super::template::extract_artifacts(&outcome.result.output);
+        let (extracted, extracted_state) =
+            super::template::extract_step_markers(&outcome.result.output);
         if !extracted.is_empty() {
             persist_declared_artifacts(workflow, &extracted, std::path::Path::new(&work_dir));
         }
@@ -1765,12 +2152,12 @@ async fn execute_run_with_notify_policy(
         // next step; here we mirror those entries onto `run.state`
         // so they're persisted to the DB on the upcoming progress
         // snapshot and survive Gate pauses / daemon restarts.
-        for (k, v) in super::template::extract_state(&outcome.result.output) {
+        for (k, v) in extracted_state {
             run.state.insert(k, v);
         }
 
         // Accumulate tokens
-        run.tokens_used += outcome.result.tokens_used;
+        run.tokens_used += outcome.result.tokens_used.unwrap_or(0);
 
         // 0.7.0 — count this step toward the LLM-calls quota. Only step
         // types that spawn an agent are counted: BatchQuickPrompt counts
@@ -1800,7 +2187,9 @@ async fn execute_run_with_notify_policy(
             | StepType::JsonData
             | StepType::CollectApiData
             | StepType::TransformData
-            | StepType::PublishPageData => {}
+            | StepType::PublishPageData
+            // A triggered run has its own budget.
+            | StepType::TriggerWorkflow => {}
             // SubWorkflow itself spawns no LLM directly; its child run's
             // Agent steps consume LLM calls. Phase 1b aggregates the child's
             // count into the SHARED budget so the parent quota isn't bypassed
@@ -1829,7 +2218,7 @@ async fn execute_run_with_notify_policy(
 
         // Emit step done event
         emit(RunEvent::StepDone {
-            step_result: outcome.result.clone(),
+            step_result: Box::new(outcome.result.clone()),
         });
         // 0.8.2 — cross-tab live update. status reflects the new state
         // (WaitingApproval if the step was a Gate, else still Running).
@@ -2396,31 +2785,55 @@ async fn execute_run_with_notify_policy(
                     .await
                 }
                 StepType::Agent => {
-                    let full_access = agents_config.full_access_for(&rb_step.agent);
-                    let native_tools = Some(KronnToolExecutor::workflow_arc(
-                        state.clone(),
-                        workflow.project_id.clone(),
-                        run.id.clone(),
-                        rb_step.name.clone(),
-                    ));
-                    execute_step(
+                    let room_started = std::time::Instant::now();
+                    match super::step_room::activate(
+                        &state.workflow_step_rooms,
+                        &state.db,
+                        &run.id,
                         rb_step,
-                        &project_path,
-                        &work_dir,
-                        tokens_config,
-                        full_access,
                         &ctx,
-                        &agent_extra_context,
-                        None,
-                        Some(&agents_config.model_tiers),
-                        Some(&crate::models::setup::HttpEndpoints::from_agents(
-                            agents_config,
-                        )),
-                        Some(&ollama_context_overrides),
-                        native_tools,
-                        Some(&state.db),
                     )
                     .await
+                    {
+                        Err(error) => super::step_room::refused_outcome(
+                            rb_step,
+                            error,
+                            room_started.elapsed().as_millis() as u64,
+                        ),
+                        Ok(step_room) => {
+                            let full_access = agents_config.full_access_for(&rb_step.agent);
+                            let native_tools = Some(KronnToolExecutor::workflow_arc(
+                                state.clone(),
+                                workflow.project_id.clone(),
+                                run.id.clone(),
+                                rb_step.name.clone(),
+                            ));
+                            let outcome = execute_step(
+                                rb_step,
+                                &project_path,
+                                &work_dir,
+                                tokens_config,
+                                full_access,
+                                &ctx,
+                                &agent_extra_context,
+                                None,
+                                None,
+                                Some(&agents_config.model_tiers),
+                                Some(&crate::models::setup::HttpEndpoints::from_agents(
+                                    agents_config,
+                                )),
+                                Some(&ollama_context_overrides),
+                                native_tools,
+                                Some(&state.db),
+                                step_room.as_ref().map(|room| room.context()),
+                            )
+                            .await;
+                            if let Some(room) = step_room {
+                                room.finish().await;
+                            }
+                            outcome
+                        }
+                    }
                 }
                 StepType::Gate => {
                     // Gate in rollback would deadlock the run on a Failed
@@ -2495,13 +2908,20 @@ async fn execute_run_with_notify_policy(
                     // a rollback step.
                     super::sub_workflow_step::forbidden_in_rollback(rb_step)
                 }
+                // An independent run, e.g. a cleanup workflow: nothing recurses.
+                StepType::TriggerWorkflow => {
+                    super::trigger_workflow_step::execute_trigger_workflow_step(
+                        &state, workflow, &run.id, rb_step, &ctx,
+                    )
+                    .await
+                }
             };
 
             ctx.set_step_output(&rb_step.name, &rb_outcome.result.output);
-            for (k, v) in super::template::extract_state(&rb_outcome.result.output) {
+            for (k, v) in super::template::extract_step_markers(&rb_outcome.result.output).1 {
                 run.state.insert(k, v);
             }
-            run.tokens_used += rb_outcome.result.tokens_used;
+            run.tokens_used += rb_outcome.result.tokens_used.unwrap_or(0);
             apply_step_snapshot(
                 rb_step,
                 &mut rb_outcome.result,
@@ -2515,7 +2935,7 @@ async fn execute_run_with_notify_policy(
 
             let rb_failed = rb_outcome.result.status == RunStatus::Failed;
             emit(RunEvent::StepDone {
-                step_result: rb_outcome.result.clone(),
+                step_result: Box::new(rb_outcome.result.clone()),
             });
             run.step_results.push(rb_outcome.result);
 
@@ -3071,9 +3491,20 @@ pub async fn claim_interrupted_run(
     }
     if let Some(ws) = run.workspace_path.as_deref() {
         if !std::path::Path::new(ws).exists() {
+            let preserved = run
+                .produced_branches
+                .iter()
+                .map(|branch| format!("`{}`", branch.branch_name))
+                .collect::<Vec<_>>();
+            let kept = if preserved.is_empty() {
+                String::new()
+            } else {
+                format!(" Its commits are kept on {}.", preserved.join(", "))
+            };
             return Err(anyhow!(
-                "Worktree `{}` no longer exists — refusing to resume in the main checkout. Re-trigger the workflow for a fresh run.",
-                ws
+                "Worktree `{}` no longer exists — refusing to resume in the main checkout. Re-trigger the workflow for a fresh run.{}",
+                ws,
+                kept
             ));
         }
     }
@@ -3228,6 +3659,7 @@ pub(crate) fn record_step_completion(
         agent_name.as_deref(),
         result.step_model.as_deref(),
     );
+    ctx.set_step_provenance(&step.name, result.agent_provenance.as_deref());
 }
 
 pub(crate) fn apply_step_snapshot(
@@ -3248,8 +3680,34 @@ pub(crate) fn apply_step_snapshot(
         StepType::TransformData => "TransformData",
         StepType::PublishPageData => "PublishPageData",
         StepType::SubWorkflow => "SubWorkflow",
+        StepType::TriggerWorkflow => "TriggerWorkflow",
     };
     result.step_kind = Some(kind.into());
+    if matches!(step.step_type, StepType::Agent) {
+        if let Some(provenance) = &result.agent_provenance {
+            let selected = provenance
+                .selected_attempt
+                .and_then(|id| provenance.attempts.iter().find(|attempt| attempt.id == id))
+                // Failed launches have no retained output, but their last
+                // attempted provider/model must remain diagnosable in badges.
+                .or_else(|| provenance.attempts.last());
+            result.step_agent = selected.map(|attempt| attempt.agent.clone());
+            result.step_model = selected.and_then(|attempt| {
+                let model = if !attempt.observed_models.is_empty() {
+                    Some(attempt.observed_models.join(" / "))
+                } else if attempt.model_applied == Some(false) {
+                    None
+                } else {
+                    attempt.resolved_model.clone()
+                };
+                model.map(|model| match attempt.tier {
+                    crate::models::ModelTier::Default => model,
+                    tier => format!("{model} · {}", format!("{tier:?}").to_lowercase()),
+                })
+            });
+            return;
+        }
+    }
     result.step_agent = matches!(step.step_type, StepType::Agent).then(|| step.agent.clone());
     // 2026-06-13 — stamp the model/tier actually resolved for this Agent step
     // so the UI shows the real model on EVERY agent step (incl. per-item
@@ -3307,6 +3765,15 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
                 ctx.set(key.clone(), s);
             }
         }
+    }
+}
+
+/// A step dropped mid-flight may already have spent model tokens it never
+/// reported; only step kinds that run no model can claim a measured zero.
+fn interrupted_step_tokens(step_type: &StepType) -> Option<u64> {
+    match step_type {
+        StepType::Agent | StepType::BatchQuickPrompt | StepType::SubWorkflow => None,
+        _ => Some(0),
     }
 }
 
@@ -3382,6 +3849,8 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: crate::models::WorkspaceHooks::default(),
                 require_isolation: true,
+                main_tree_read_only: false,
+                base_ref: None,
             }),
         )
         .expect("hooks");
@@ -3394,6 +3863,8 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: hooks(Some("./scripts/one-off.sh"), None),
                 require_isolation: true,
+                main_tree_read_only: false,
+                base_ref: None,
             }),
         )
         .expect("hooks");
@@ -3418,6 +3889,8 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: crate::models::WorkspaceHooks::default(),
                 require_isolation: true,
+                main_tree_read_only: false,
+                base_ref: None,
             })
         )
         .is_none());
@@ -3427,6 +3900,8 @@ mod tests {
             Some(&WorkspaceConfig {
                 hooks: hooks(Some("./prepare.sh"), None),
                 require_isolation: false,
+                main_tree_read_only: false,
+                base_ref: None,
             }),
         )
         .expect("hooks");
@@ -3441,6 +3916,8 @@ mod tests {
         assert!(!workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: crate::models::WorkspaceHooks::default(),
             require_isolation: false,
+            main_tree_read_only: false,
+            base_ref: None,
         })));
         assert!(resolved_workspace_hooks(Some(&project), None).is_some());
     }
@@ -3473,10 +3950,14 @@ mod tests {
         assert!(!workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: WorkspaceHooks::default(),
             require_isolation: false,
+            main_tree_read_only: false,
+            base_ref: None,
         })));
         assert!(workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: WorkspaceHooks::default(),
             require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
         })));
         assert!(workflow_requests_workspace(Some(&WorkspaceConfig {
             hooks: WorkspaceHooks {
@@ -3484,7 +3965,18 @@ mod tests {
                 ..WorkspaceHooks::default()
             },
             require_isolation: false,
+            main_tree_read_only: false,
+            base_ref: None,
         })));
+        // A starting point only a worktree can honour requests one; a blank one does not.
+        let based = |base_ref: &str| WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: false,
+            main_tree_read_only: true,
+            base_ref: Some(base_ref.into()),
+        };
+        assert!(workflow_requests_workspace(Some(&based("origin/main"))));
+        assert!(!workflow_requests_workspace(Some(&based("   "))));
     }
 
     // ─── next_step_index_for_resume — Goto-loop bug fix (0.7.0) ─────────
@@ -3531,6 +4023,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -3551,6 +4044,8 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
     fn fake_result(name: &str) -> crate::models::StepResult {
@@ -3558,7 +4053,7 @@ mod tests {
             step_name: name.into(),
             status: crate::models::RunStatus::Success,
             output: String::new(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: 0,
             started_at: None,
             condition_result: None,
@@ -3570,7 +4065,11 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 
@@ -3868,6 +4367,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -3888,6 +4388,8 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 
@@ -3896,7 +4398,7 @@ mod tests {
             step_name: "s".into(),
             status: RunStatus::Success,
             output: String::new(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: 0,
             started_at: None,
             condition_result: None,
@@ -3908,7 +4410,11 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 
@@ -4021,7 +4527,7 @@ mod tests {
             step_name: "gate".into(),
             status: RunStatus::WaitingApproval,
             output: output.into(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: 0,
             started_at: None,
             condition_result: None,
@@ -4033,7 +4539,11 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 
@@ -4156,6 +4666,27 @@ mod tests {
             result: empty_result(),
             condition_action: None,
         }
+    }
+
+    #[test]
+    fn document_audit_failure_cannot_continue_via_agent_conditions() {
+        let mut outcome = successful_step_outcome();
+        outcome.result.output = "original agent result".into();
+        outcome.condition_action = Some(ConditionAction::Skip);
+        outcome.result.condition_result = Some("Skip".into());
+        fail_document_audit(&mut outcome, "docs/new report.md: possible credential");
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome.condition_action.is_none());
+        assert!(outcome.result.condition_result.is_none());
+        let persisted = serde_json::to_value(&outcome.result).unwrap();
+        assert!(persisted["output"]
+            .as_str()
+            .unwrap()
+            .contains("docs/new report.md"));
+        assert!(persisted["output"]
+            .as_str()
+            .unwrap()
+            .contains("original agent result"));
     }
 
     #[tokio::test]
@@ -4294,6 +4825,7 @@ mod tests {
             },
             workspace_config: None,
             concurrency_limit: None,
+            concurrency_key: None,
             guards: None,
             artifacts,
             on_failure: vec![],
@@ -4468,6 +5000,8 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            concurrency_key: None,
+            triggered_by_run_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -4688,6 +5222,564 @@ mod tests {
             .unwrap();
         assert_eq!(child_runs, 1, "one durable child batch run is created");
         assert_eq!(discussions, 1, "one fire-and-forget discussion is queued");
+    }
+
+    /// A project on a real directory with one non-isolated workflow whose
+    /// only step sleeps, so two concurrent runs would visibly overlap.
+    async fn main_tree_fixture(
+        state: &crate::AppState,
+        suffix: &str,
+        read_only: bool,
+    ) -> (tempfile::TempDir, Workflow) {
+        let repo = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": format!("proj-main-tree-{suffix}"), "name": "Main tree fixture",
+            "path": repo.path().to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-main-tree-{suffix}");
+        workflow.project_id = Some(project.id.clone());
+        workflow.workspace_config = read_only.then(|| WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: false,
+            main_tree_read_only: true,
+            base_ref: None,
+        });
+        workflow.exec_allowlist = vec!["sleep".into()];
+        let mut pause = fake_step("pause");
+        pause.step_type = StepType::Exec;
+        pause.exec_command = Some("sleep".into());
+        pause.exec_args = vec!["0.4".into()];
+        workflow.steps = vec![pause];
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        (repo, workflow)
+    }
+
+    async fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
+        let out = crate::core::cmd::async_cmd("git")
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A project cloned from an upstream that then gained a commit, and an
+    /// isolated workflow starting from `origin/main` whose only step prints the
+    /// worktree's HEAD. Returns (dirs, clone, upstream tip, workflow).
+    async fn base_ref_fixture(
+        state: &crate::AppState,
+        suffix: &str,
+    ) -> (Vec<tempfile::TempDir>, std::path::PathBuf, String, Workflow) {
+        let upstream_dir = tempfile::TempDir::new().unwrap();
+        let upstream = upstream_dir.path().to_path_buf();
+        git_in(&upstream, &["init", "-q", "-b", "main"]).await;
+        git_in(&upstream, &["config", "user.email", "test@kronn.local"]).await;
+        git_in(&upstream, &["config", "user.name", "test"]).await;
+        std::fs::write(upstream.join("README.md"), "v1\n").unwrap();
+        git_in(&upstream, &["add", "."]).await;
+        git_in(&upstream, &["commit", "-q", "-m", "init"]).await;
+        let clone_dir = tempfile::TempDir::new().unwrap();
+        let clone = clone_dir.path().join("project");
+        git_in(
+            clone_dir.path(),
+            &["clone", "-q", &upstream.to_string_lossy(), "project"],
+        )
+        .await;
+        std::fs::write(upstream.join("README.md"), "v2\n").unwrap();
+        git_in(&upstream, &["commit", "-q", "-am", "upstream moved on"]).await;
+        let remote_tip = git_in(&upstream, &["rev-parse", "HEAD"]).await;
+
+        let now = chrono::Utc::now();
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": format!("proj-base-ref-{suffix}"), "name": "Base ref fixture",
+            "path": clone.to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-base-ref-{suffix}");
+        workflow.name = format!("base-ref-{suffix}");
+        workflow.project_id = Some(project.id.clone());
+        workflow.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: Some("origin/main".into()),
+        });
+        workflow.exec_allowlist = vec!["git".into()];
+        let mut head = fake_step("head");
+        head.step_type = StepType::Exec;
+        head.exec_command = Some("git".into());
+        head.exec_args = vec!["rev-parse".into(), "HEAD".into()];
+        workflow.steps = vec![head];
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        (vec![upstream_dir, clone_dir], clone, remote_tip, workflow)
+    }
+
+    #[tokio::test]
+    async fn an_isolated_run_with_base_ref_starts_from_the_remote_tip() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_dirs, clone, remote_tip, workflow) = base_ref_fixture(&state, "tip").await;
+        let local_head = git_in(&clone, &["rev-parse", "HEAD"]).await;
+        assert_ne!(local_head, remote_tip, "the project is behind its remote");
+
+        let mut run = pending_run("run-base-ref-tip", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let output = &run.step_results[0].output;
+        assert!(
+            output.contains(&remote_tip),
+            "the step ran on the remote tip: {output}"
+        );
+        assert!(!output.contains(&local_head), "{output}");
+        assert!(
+            run.workspace_path
+                .as_deref()
+                .is_some_and(|path| path.contains(".kronn/worktrees")),
+            "it ran in its own worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_base_ref_run_refuses_rather_than_fall_back_when_the_fetch_fails() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (dirs, clone, _tip, mut workflow) = base_ref_fixture(&state, "offline").await;
+        let gone = dirs[0].path().join("unreachable");
+        git_in(
+            &clone,
+            &["remote", "set-url", "origin", &gone.to_string_lossy()],
+        )
+        .await;
+        // Even without require_isolation, the main checkout is not at the base.
+        workflow
+            .workspace_config
+            .as_mut()
+            .unwrap()
+            .require_isolation = false;
+
+        let mut run = pending_run("run-base-ref-offline", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(
+            run.step_results.len(),
+            1,
+            "no step ran: {:?}",
+            run.step_results
+        );
+        let refusal = &run.step_results[0];
+        assert_eq!(refusal.step_name, "__workspace__");
+        assert!(
+            refusal.output.contains("git fetch origin main"),
+            "{}",
+            refusal.output
+        );
+        assert!(
+            refusal.output.contains("does not start from `origin/main`"),
+            "{}",
+            refusal.output
+        );
+        assert_eq!(run.workspace_path, None);
+    }
+
+    fn step_window(run: &WorkflowRun) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+        let step = &run.step_results[0];
+        let start = step.started_at.expect("step start recorded");
+        (
+            start,
+            start + chrono::Duration::milliseconds(step.duration_ms as i64),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_non_isolated_runs_of_one_project_started_together_both_succeed_in_turn() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, workflow) = main_tree_fixture(&state, "turns", false).await;
+        let mut first = pending_run("run-main-tree-first", &workflow.id);
+        let mut second = pending_run("run-main-tree-second", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &first).await;
+        let second_db = second.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &second_db))
+            .await
+            .unwrap();
+
+        let (a, b) = tokio::join!(
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut first,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None
+            ),
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut second,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None
+            ),
+        );
+        a.unwrap();
+        b.unwrap();
+
+        for run in [&first, &second] {
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            assert_eq!(run.step_results.len(), 1, "no __workspace__ refusal");
+        }
+        let (first_start, first_end) = step_window(&first);
+        let (second_start, second_end) = step_window(&second);
+        assert!(
+            first_end <= second_start || second_end <= first_start,
+            "the runs took the checkout one after the other: {first_start}..{first_end} vs {second_start}..{second_end}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_outwaits_the_main_tree_fails_naming_the_holder() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, workflow) = main_tree_fixture(&state, "timeout", false).await;
+        let holder = crate::workflows::workspace::MainTreeGuard::try_acquire(
+            &repo.path().to_string_lossy(),
+            "run-holding-the-tree",
+        )
+        .unwrap();
+        let mut run = pending_run("run-main-tree-late", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let started = std::time::Instant::now();
+        crate::workflows::workspace::MAIN_TREE_WAIT_FOR_TESTS
+            .scope(
+                std::time::Duration::from_millis(200),
+                execute_run(
+                    state.clone(),
+                    &workflow,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        drop(holder);
+
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(200),
+            "it waited first"
+        );
+        assert_eq!(run.status, RunStatus::Failed);
+        let refusal = &run.step_results[0];
+        assert_eq!(refusal.step_name, "__workspace__");
+        assert!(
+            refusal.output.contains("run-holding-the-tree"),
+            "the reason names the holder: {}",
+            refusal.output
+        );
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-main-tree-late"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, RunStatus::Failed);
+        assert!(persisted.step_results[0]
+            .output
+            .contains("run-holding-the-tree"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workflow_declared_read_only_on_the_main_tree_skips_the_lock() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, workflow) = main_tree_fixture(&state, "read-only", true).await;
+        let tree = repo.path().to_string_lossy().to_string();
+        let _holder =
+            crate::workflows::workspace::MainTreeGuard::try_acquire(&tree, "run-writer").unwrap();
+        let mut run = pending_run("run-main-tree-reader", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        crate::workflows::workspace::MAIN_TREE_WAIT_FOR_TESTS
+            .scope(
+                std::time::Duration::ZERO,
+                execute_run(
+                    state.clone(),
+                    &workflow,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert_eq!(
+            crate::workflows::workspace::MainTreeGuard::try_acquire(&tree, "probe").err(),
+            Some("run-writer".to_string()),
+            "the writer kept the lock; the reader never took it"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_run_that_waits_for_the_main_tree_stops_the_wait() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, workflow) = main_tree_fixture(&state, "cancel", false).await;
+        let _holder = crate::workflows::workspace::MainTreeGuard::try_acquire(
+            &repo.path().to_string_lossy(),
+            "run-holding-the-tree",
+        )
+        .unwrap();
+        let mut run = pending_run("run-main-tree-cancelled", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let canceller = {
+            let state = state.clone();
+            async move {
+                // Wait for the runner to register its token, then cancel.
+                for _ in 0..200 {
+                    let registered = state
+                        .cancel_registry
+                        .lock()
+                        .unwrap()
+                        .contains_key("run-main-tree-cancelled");
+                    if registered {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                crate::workflows::cancellation::cancel_run_tree(
+                    &state,
+                    "run-main-tree-cancelled",
+                    crate::workflows::cancellation::CancellationScope::RunTree,
+                    "cancelled_by_operator",
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let started = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            crate::workflows::workspace::MAIN_TREE_WAIT_FOR_TESTS.scope(
+                std::time::Duration::from_secs(30),
+                execute_run(
+                    state.clone(),
+                    &workflow,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+            canceller,
+        );
+        result.unwrap();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "no full wait"
+        );
+        assert_eq!(run.status, RunStatus::Cancelled);
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-main-tree-cancelled"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, RunStatus::Cancelled);
+    }
+
+    async fn wait_until_settled(state: &crate::AppState, run_id: &str) -> WorkflowRun {
+        for _ in 0..500 {
+            let id = run_id.to_string();
+            let run = state
+                .db
+                .with_conn(move |conn| crate::db::workflows::get_run(conn, &id))
+                .await
+                .unwrap()
+                .expect("run row");
+            if !matches!(run.status, RunStatus::Pending | RunStatus::Running) {
+                return run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("run {run_id} never left Running");
+    }
+
+    #[tokio::test]
+    async fn a_background_run_whose_execute_run_fails_ends_failed_with_the_reason() {
+        // The KT-786 shape: variables declared, no snapshot prepared.
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-snapshot-missing".into();
+        workflow.variables = vec![PromptVariable {
+            name: "ticket".into(),
+            label: "Ticket".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: Default::default(),
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }];
+        workflow.steps = vec![json_data_step("first", serde_json::json!({ "n": 1 }))];
+        let run = pending_run("run-snapshot-missing", &workflow.id);
+        let (wf_db, run_db) = (workflow.clone(), run.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+
+        crate::api::workflows::spawn_manual_run(&state, workflow, run, None, false);
+        let settled = wait_until_settled(&state, "run-snapshot-missing").await;
+
+        assert_eq!(settled.status, RunStatus::Failed);
+        assert!(settled.finished_at.is_some());
+        let reason = settled.step_results.last().expect("failure step");
+        assert_eq!(reason.step_name, "__run_error__");
+        assert!(
+            reason.output.contains("snapshot unavailable or expired"),
+            "the reason is kept: {}",
+            reason.output
+        );
+        let shared = state
+            .db
+            .with_conn(|conn| crate::db::shared_runs::get(conn, "run-snapshot-missing"))
+            .await
+            .unwrap()
+            .expect("shared run projected");
+        assert!(matches!(
+            shared.status,
+            crate::models::SharedRunStatus::Failed
+        ));
+    }
+
+    #[tokio::test]
+    async fn settling_an_errored_gate_resume_fails_the_run_claimed_running() {
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-settle-resume".into();
+        let mut run = pending_run("run-settle-resume", &workflow.id);
+        let (wf_db, mut run_db) = (workflow.clone(), run.clone());
+        run_db.status = RunStatus::Running;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+        run.status = RunStatus::WaitingApproval;
+
+        settle_errored_run(
+            &state,
+            &workflow,
+            &mut run,
+            &anyhow::anyhow!("resume broke"),
+        )
+        .await;
+
+        let persisted = wait_until_settled(&state, "run-settle-resume").await;
+        assert_eq!(persisted.status, RunStatus::Failed);
+        assert!(persisted.step_results[0].output.contains("resume broke"));
+    }
+
+    #[tokio::test]
+    async fn settling_an_errored_run_keeps_a_cancel_that_won_the_race() {
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-settle-cancelled".into();
+        let mut run = pending_run("run-settle-cancelled", &workflow.id);
+        let (wf_db, mut run_db) = (workflow.clone(), run.clone());
+        run_db.status = RunStatus::Cancelled;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+        run.status = RunStatus::Running;
+
+        settle_errored_run(&state, &workflow, &mut run, &anyhow::anyhow!("late error")).await;
+
+        assert_eq!(run.status, RunStatus::Cancelled, "no failure is reported");
+        assert!(run.step_results.is_empty());
+        let persisted = wait_until_settled(&state, "run-settle-cancelled").await;
+        assert_eq!(persisted.status, RunStatus::Cancelled);
+        assert!(persisted.step_results.is_empty());
     }
 
     #[tokio::test]
@@ -4924,6 +6016,316 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn document_audit_stops_the_run_and_persists_paths_without_erasing_files() {
+        check_document_audit_in_full_run(false).await;
+    }
+
+    #[tokio::test]
+    async fn document_audit_preserves_preexisting_files_after_agent_launch_failure() {
+        check_document_audit_in_full_run(true).await;
+    }
+
+    async fn check_document_audit_in_full_run(agent_launch_fails: bool) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let (state, tokens, mut agents) = test_state_and_configs();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::create_dir(repo.path().join("docs")).unwrap();
+        let existing_path = repo.path().join("docs/preexisting.md");
+        let existing = "preexisting human documentation\n".repeat(1000);
+        std::fs::write(&existing_path, &existing).unwrap();
+        let rejected_path = repo.path().join("docs/new report.md");
+        let write_path = rejected_path.clone();
+        let fake_secret = "sk-1234567890abcdefghijklmnopqrstuvwxyz";
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                if agent_launch_fails {
+                    return ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                        "error": {"message": "fixture provider refused the request"}
+                    }));
+                }
+                // A concurrent writer is indistinguishable from the agent here.
+                // The audit must stop the run while preserving these bytes.
+                std::fs::write(&write_path, fake_secret).unwrap();
+                ResponseTemplate::new(200).set_body_string(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"GO_PUBLISH\"}}]}\n\ndata: [DONE]\n\n"
+                )
+            }).expect(1).mount(&server).await;
+        agents.lite_llm.base_url = Some(server.uri());
+        agents.model_tiers.lite_llm.default = Some("test-model".into());
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id":"proj-doc-audit", "name":"document audit", "path":repo.path().to_string_lossy(),
+            "repo_url":null, "token_override":null, "ai_config":{"detected":false,"configs":[]},
+            "created_at":chrono::Utc::now().to_rfc3339(), "updated_at":chrono::Utc::now().to_rfc3339()
+        })).unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-doc-audit".into();
+        wf.project_id = Some("proj-doc-audit".into());
+        let mut agent = fake_step("advise");
+        agent.agent = AgentType::LiteLlm;
+        agent.prompt_template = "Return GO_PUBLISH".into();
+        agent.on_result = vec![StepConditionRule {
+            contains: "GO_PUBLISH".into(),
+            action: ConditionAction::Goto {
+                step_name: "publish".into(),
+                max_iterations: None,
+            },
+        }];
+        wf.steps = vec![
+            agent,
+            json_data_step("publish", serde_json::json!({"unexpected":true})),
+        ];
+        let mut run = pending_run("run-doc-audit", &wf.id);
+        insert_wf_and_run(&state, &wf, &run).await;
+        execute_run(
+            state.clone(),
+            &wf,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(
+            run.step_results.len(),
+            1,
+            "publish must never execute, even with a Goto condition"
+        );
+        if agent_launch_fails {
+            assert!(
+                !rejected_path.exists(),
+                "failed launch made no document writes"
+            );
+        } else {
+            assert_eq!(std::fs::read_to_string(rejected_path).unwrap(), fake_secret);
+        }
+        assert_eq!(std::fs::read_to_string(existing_path).unwrap(), existing);
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-doc-audit"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, RunStatus::Failed);
+        assert_eq!(persisted.step_results[0].status, RunStatus::Failed);
+        if agent_launch_fails {
+            assert!(!persisted.step_results[0]
+                .output
+                .contains("Document audit failed"));
+            assert!(!persisted.state.contains_key("docs_write_rejections.advise"));
+            return;
+        }
+        assert!(persisted.step_results[0]
+            .output
+            .contains("docs/new report.md"));
+        assert!(!persisted.step_results[0].output.contains(fake_secret));
+        assert_eq!(
+            persisted
+                .state
+                .get("docs_write_rejections.advise")
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    /// A Claude Code turn that reports one tool call, then waits for the test
+    /// before answering, so the step can be observed while it is running.
+    struct PausedClaudeTurn {
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::acp::AcpTransport for PausedClaudeTurn {
+        async fn initialize(
+            &self,
+            _: crate::acp::AcpInitialize,
+        ) -> Result<crate::acp::AcpNegotiatedCapabilities, crate::acp::AcpError> {
+            Ok(crate::acp::AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: std::collections::BTreeSet::from([
+                    crate::acp::AcpCapability::Sessions,
+                    crate::acp::AcpCapability::Streaming,
+                    crate::acp::AcpCapability::Cancellation,
+                    crate::acp::AcpCapability::McpInjection,
+                ]),
+            })
+        }
+        async fn create_session(
+            &self,
+        ) -> Result<crate::acp::AcpSessionTarget, crate::acp::AcpError> {
+            crate::acp::AcpSessionTarget::new(crate::acp::AcpAgent::ClaudeCode, "paused-turn")
+        }
+        async fn config_options(&self) -> Vec<crate::acp::AcpConfigOption> {
+            Vec::new()
+        }
+        async fn set_config_option(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn resume_session(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn prompt(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            events: tokio::sync::mpsc::Sender<crate::acp::AcpSessionEvent>,
+        ) -> Result<(), crate::acp::AcpError> {
+            use crate::acp::AcpSessionEvent;
+            let _ = events
+                .send(AcpSessionEvent::ToolCall {
+                    name: "Bash".into(),
+                })
+                .await;
+            let _ = events
+                .send(AcpSessionEvent::ToolTarget(
+                    "cargo test --no-fail-fast".into(),
+                ))
+                .await;
+            self.release.notified().await;
+            let _ = events.send(AcpSessionEvent::TextDelta("done".into())).await;
+            let _ = events.send(AcpSessionEvent::Completed).await;
+            Ok(())
+        }
+        async fn cancel(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+    }
+
+    /// KT-795 — a running Agent step's latest tool call is readable through the
+    /// API, not only the starter's SSE stream, and gone once the step ends.
+    #[tokio::test]
+    async fn a_running_agent_step_exposes_its_latest_tool_call_through_the_api() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id":"proj-activity", "name":"activity", "path":repo_path,
+            "repo_url":null, "token_override":null, "ai_config":{"detected":false,"configs":[]},
+            "created_at":chrono::Utc::now().to_rfc3339(), "updated_at":chrono::Utc::now().to_rfc3339()
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let work_dir =
+            crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
+        let _route = crate::agents::runner::test_acp_routes::route(
+            &work_dir,
+            std::sync::Arc::new(PausedClaudeTurn {
+                release: release.clone(),
+            }),
+        );
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-activity".into();
+        wf.project_id = Some("proj-activity".into());
+        let mut agent = fake_step("orchestrateur");
+        agent.prompt_template = "Orchestrate".into();
+        wf.steps = vec![agent];
+        let mut run = pending_run("run-activity", &wf.id);
+        insert_wf_and_run(&state, &wf, &run).await;
+
+        let runner_state = state.clone();
+        let runner = tokio::spawn(async move {
+            execute_run(
+                runner_state,
+                &wf,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map(|_| run)
+        });
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let axum::Json(response) = crate::api::mcp_remote::workflow_run_status(
+                    axum::extract::State(state.clone()),
+                    axum::extract::Path("run-activity".to_string()),
+                )
+                .await;
+                if let Some(status) = response.data.filter(|s| s.current_activity.is_some()) {
+                    return status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the running step's activity must become readable");
+        assert_eq!(status.current_step.as_deref(), Some("orchestrateur"));
+        let activity = status.current_activity.unwrap();
+        assert_eq!(
+            (activity.tool.as_str(), activity.target.as_deref()),
+            ("Bash", Some("cargo test --no-fail-fast"))
+        );
+        let axum::Json(detail) = crate::api::workflows::get_run(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("wf-activity".to_string(), "run-activity".to_string())),
+        )
+        .await;
+        let in_flight = detail.data.unwrap().step_results.pop().unwrap();
+        assert_eq!(in_flight.status, RunStatus::Running);
+        assert_eq!(in_flight.last_activity, Some(activity));
+
+        release.notify_one();
+        let run = runner.await.unwrap().expect("run completes");
+        assert_eq!(run.status, RunStatus::Success);
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-activity"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.step_results[0].status, RunStatus::Success);
+        assert_eq!(
+            persisted.step_results[0].last_activity, None,
+            "the terminal result replaces the in-flight one"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_run_records_failure_when_a_step_fails() {
         // A JsonData step with no payload fails (its executor returns a
         // failing StepResult). The orchestrator must surface that as a failed
@@ -5028,6 +6430,8 @@ mod tests {
             StepType::BatchApiCall,
             StepType::Notify,
             StepType::Exec,
+            // Replaying it after a crash would launch a second run.
+            StepType::TriggerWorkflow,
         ] {
             assert!(
                 uncertain_side_effect_type(&step_type).is_some(),
@@ -5285,6 +6689,20 @@ mod tests {
             err.contains("main checkout"),
             "a gone worktree must refuse, not fall back: {err}"
         );
+        assert!(!err.contains("kept on"), "no branch to name: {err}");
+
+        // A reclaimed worktree names the branch its commits were kept on.
+        gone.produced_branches.push(crate::models::ProducedBranch {
+            branch_name: "kronn/wf-x/run-gone".into(),
+            head_sha: "abc123".into(),
+            ahead: 1,
+            pushed_upstream: false,
+        });
+        let err = claim_interrupted_run(&state, &mut gone, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kept on `kronn/wf-x/run-gone`"), "{err}");
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ vi.mock('../LivePageActionCard', () => ({
   LivePageActionCard: () => <div data-testid="card" />,
 }));
 import { readFileSync } from 'node:fs';
-import { render } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { LivePageActionOverlay } from '../LivePageActionOverlay';
 import type { LivePageAction } from '../../types/generated';
 import type { LivePageActiveActionState } from '../../hooks/useLivePageActions';
@@ -59,7 +59,7 @@ describe('LivePageActionOverlay', () => {
   it('passes the anchor as a variable the stylesheet can clamp, not as a hard left', () => {
     const overlay = overlayAt(950);
 
-    expect(overlay.style.getPropertyValue('--kr-action-anchor-left')).toBe('950px');
+    expect(overlay.style.getPropertyValue('--action-anchor-left')).toBe('950px');
     // The inline `left` is what co-constrained the box against the CSS `right`
     // and crushed it. It must not come back.
     expect(overlay.style.left).toBe('');
@@ -78,7 +78,7 @@ describe('LivePageActionOverlay', () => {
   });
 
   it('takes the row width, so the card is as wide as what it acts on', () => {
-    expect(overlayAt(950).style.getPropertyValue('--kr-action-anchor-width')).toBe('80px');
+    expect(overlayAt(950).style.getPropertyValue('--action-anchor-width')).toBe('80px');
   });
 
   it('reports its height so the Page can size the collapse, and clears it on close', () => {
@@ -101,13 +101,13 @@ describe('LivePageActionOverlay', () => {
   });
 
   it('never lets a near-zero anchor push the card off the left edge', () => {
-    expect(overlayAt(-40).style.getPropertyValue('--kr-action-anchor-left')).toBe('8px');
+    expect(overlayAt(-40).style.getPropertyValue('--action-anchor-left')).toBe('8px');
   });
 
   it('decides the width before it looks at the anchor', () => {
     // The two halves of the original defect, pinned in the stylesheet:
     // a `right` alongside an inline `left` and no `width`.
-    expect(CSS).toMatch(/width:\s*var\(--kr-action-card-width\)/);
+    expect(CSS).toMatch(/width:\s*var\(--action-card-width\)/);
     expect(CSS).not.toMatch(/^\s*right:/m);
     // `max-width` was the failed attempt: a ceiling can never be a floor.
     expect(CSS).not.toMatch(/max-width:\s*720px/);
@@ -123,5 +123,35 @@ describe('LivePageActionOverlay', () => {
       onClose={() => {}} onOpenDiscussion={() => {}} />,
     );
     expect(container.querySelector('.live-page-action-overlay')).toBeNull();
+  });
+
+  it('keeps a finished launch one click away from the fresh offer', () => {
+    const previous = { id: 'launch-1', state: 'succeeded' } as unknown as LivePageAction;
+    const onChanged = vi.fn();
+    render(
+      <LivePageActionOverlay
+        active={{ ...activeAt(8), previous }}
+        action={action}
+        onChanged={onChanged}
+        onClose={() => {}}
+        onOpenDiscussion={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('page-action-overlay-previous'));
+    expect(onChanged).toHaveBeenCalledWith(previous, 1);
+  });
+
+  it('shows no previous-launch link on a running card', () => {
+    const previous = { id: 'launch-1', state: 'succeeded' } as unknown as LivePageAction;
+    render(
+      <LivePageActionOverlay
+        active={{ ...activeAt(8), card: previous, previous: undefined }}
+        action={action}
+        onChanged={() => {}}
+        onClose={() => {}}
+        onOpenDiscussion={() => {}}
+      />,
+    );
+    expect(screen.queryByTestId('page-action-overlay-previous')).toBeNull();
   });
 });

@@ -3327,7 +3327,7 @@ function PorteeCliCoachMark() {
         top: -2,
         right: 0,
         background: 'var(--kr-accent, #3b82f6)',
-        color: '#fff',
+        color: 'var(--kr-text-on-accent)',
         padding: '6px 10px',
         borderRadius: 4,
         fontSize: '0.78em',

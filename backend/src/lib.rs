@@ -216,6 +216,9 @@ pub struct AppState {
     /// not yet returned. Cancellation registration happens earlier, so it must
     /// not be used as process-liveness evidence.
     pub agent_runtime_registry: Arc<Mutex<HashSet<String>>>,
+    /// Task executions with a `/resume` in flight. Boot resumes run once HTTP is
+    /// served, so a concurrent resume of the same execution is refused.
+    pub execution_resumes: Arc<Mutex<HashSet<String>>>,
     /// OAuth2 access-token cache for API plugins. Keyed by `mcp_configs.id`,
     /// value is the bearer token + its absolute expiry. In-memory only —
     /// on restart, tokens are lost and re-exchanged on first use (one HTTP
@@ -246,6 +249,8 @@ pub struct AppState {
     /// Production-only data-directory lock. Spawned Git commits inherit a
     /// duplicate of this handle so a replacement backend waits for Git/hooks.
     pub data_dir_lock: Option<Arc<std::fs::File>>,
+    /// Workflow Agent steps running with a room capability (KT-793).
+    pub workflow_step_rooms: Arc<crate::workflows::step_room::WorkflowStepRooms>,
 }
 
 impl AppState {
@@ -276,6 +281,7 @@ impl AppState {
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
+            execution_resumes: Arc::new(Mutex::new(HashSet::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             git_language_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -283,6 +289,7 @@ impl AppState {
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
             ollama_base_url_override: None,
             data_dir_lock: None,
+            workflow_step_rooms: Arc::default(),
         }
     }
 
@@ -648,6 +655,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Live Pages (v0.10.0) ──
         .route("/api/pages/capability", get(api::live_pages::capability))
         .route(
+            "/api/pages/import",
+            post(api::artifact_portability::import)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/api/pages/import/preview",
+            post(api::artifact_portability::preview)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
             "/api/pages",
             get(api::live_pages::list).post(api::live_pages::create),
         )
@@ -656,6 +673,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::live_pages::get)
                 .patch(api::live_pages::update)
                 .delete(api::live_pages::delete),
+        )
+        .route(
+            "/api/pages/{id}/export",
+            get(api::artifact_portability::export),
         )
         .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
         .route("/api/pages/{id}/workflows", get(api::live_pages::workflows))
@@ -697,6 +718,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/live-page-actions/{id}/launch",
             post(api::live_page_actions::launch),
+        )
+        .route(
+            "/api/live-page-actions/{id}/prefill",
+            post(api::live_page_actions::prefill),
         )
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
@@ -1667,6 +1692,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::discussion_questions::decline),
         )
         .route(
+            "/api/discussions/{id}/questions/{question_id}/comment",
+            post(api::discussion_questions::comment),
+        )
+        .route(
             "/api/discussions/{id}/actions",
             get(api::discussion_actions::list_for_discussion),
         )
@@ -1728,7 +1757,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/discussions/running",
             get(api::discussions::running_discussions),
         )
+        .route(
+            "/api/discussions/monitor",
+            get(api::discussions::monitor::get),
+        )
         .route("/api/discussions/{id}", get(api::discussions::get))
+        .route("/api/discussions/{id}/poll", get(api::discussions::poll))
         .route(
             "/api/discussions/{id}/native-agent",
             get(api::discussions::native_agent_mode),
@@ -1839,6 +1873,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/peer-join",
             post(api::disc_invite::peer_join),
+        )
+        .route(
+            "/api/discussions/workflow-step-join",
+            post(api::disc_invite::workflow_step_join),
         )
         .route(
             "/api/discussions/peer-resume",

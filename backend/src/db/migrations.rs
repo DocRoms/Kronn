@@ -719,6 +719,38 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "187_shared_run_exec_details",
         include_str!("sql/187_shared_run_exec_details.sql"),
     ),
+    (
+        "188_artifact_import_origins",
+        include_str!("sql/188_artifact_import_origins.sql"),
+    ),
+    (
+        "189_artifact_message_origin",
+        include_str!("sql/189_artifact_message_origin.sql"),
+    ),
+    (
+        "190_workflow_runs_latest_index",
+        include_str!("sql/190_workflow_runs_latest_index.sql"),
+    ),
+    (
+        "191_task_execution_principal_session",
+        include_str!("sql/191_task_execution_principal_session.sql"),
+    ),
+    (
+        "192_task_execution_served_model",
+        include_str!("sql/192_task_execution_served_model.sql"),
+    ),
+    (
+        "193_workflow_concurrency_key",
+        include_str!("sql/193_workflow_concurrency_key.sql"),
+    ),
+    (
+        "194_workflow_step_room_sessions",
+        include_str!("sql/194_workflow_step_room_sessions.sql"),
+    ),
+    (
+        "195_workflow_run_triggered_by",
+        include_str!("sql/195_workflow_run_triggered_by.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

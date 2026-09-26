@@ -21,17 +21,69 @@ on the transport result without fabricating fields in the API's data. The normal
 extraction rules still apply if the author explicitly configured `api_extract`.
 A JSON body containing `null` remains an ordinary JSON response; whitespace or
 other nonempty invalid JSON still produces a parsing failure.
-[src: file: backend/src/workflows/api_call_executor.rs:296-383]
-[src: file: backend/src/workflows/api_call_executor.rs:1738-1775]
+[src: file: backend/src/workflows/api_call_executor.rs:304-397]
+[src: file: backend/src/workflows/api_call_executor.rs:1756-1799]
 
 An empty response ends pagination. If it is the first page, the result is null;
 if earlier pages returned data, those values are retained. Links on the empty
 response are not followed. The existing retry policy is unchanged: write verbs
 are not automatically resent. Tests assert the request count for writes,
 nonempty parse failures and pagination ending with an empty response.
-[src: file: backend/src/workflows/api_call_executor.rs:1458-1467]
-[src: file: backend/src/workflows/api_call_executor.rs:1707-1718]
-[src: file: backend/src/workflows/api_call_executor.rs:3740]
+[src: file: backend/src/workflows/api_call_executor.rs:1474-1483]
+[src: file: backend/src/workflows/api_call_executor.rs:1725-1736]
+[src: file: backend/src/workflows/api_call_executor.rs:3765]
+
+## Binary responses (images and other files)
+
+By default every 2xx body is parsed as JSON, so an image fails with
+`Response JSON parse failed`. An `ApiCall` or `BatchApiCall` step can instead
+declare `api_response: {"type": "Binary"}`; the body then comes back as
+`{content_type, size, base64, data_uri}`. Credentials are still injected by the
+server and never appear in the step output, the summary or the audit log.
+Omitting the field (or `{"type": "Json"}`) keeps the JSON behaviour unchanged.
+[src: file: backend/src/models/workflows.rs:739]
+[src: file: backend/src/workflows/api_call_executor.rs:1773]
+
+```json
+"api_response": {"type": "Binary", "accept": ["image/png", "image/jpeg"], "max_bytes": 131072}
+```
+
+- `accept`: exact media types or a `type/*` family. Empty means `image/*`.
+  `*/*` is refused: the broker returns only the files a step declares, not
+  arbitrary downloads. The response's `Content-Type` is checked before the body
+  is read; a missing or undeclared type fails the step.
+- `max_bytes`: default **262 144 bytes (256 KiB)**, at most **2 097 152 bytes
+  (2 MiB)**. A larger `Content-Length`, or a streamed body that crosses the cap,
+  fails the step with `body exceeds max_bytes`: nothing is truncated and no
+  partial payload is returned. Values outside 1..2 MiB are refused when the
+  workflow is saved and again before the request.
+- Multi-page pagination is refused with a binary response (one call, one file).
+  An empty 2xx body still yields `data: null` with its `http_<code>` signal.
+- The summary names the type and size only; it never embeds the payload.
+[src: file: backend/src/workflows/api_call_binary.rs:16-18]
+[src: file: backend/src/workflows/api_call_binary.rs:51-97]
+[src: file: backend/src/workflows/api_call_binary.rs:101-150]
+[src: file: backend/src/api/workflows.rs:824]
+
+`base64` and `data_uri` carry the same bytes. Use `api_extract` to keep the one
+you need, for example `{"path": "$.data_uri"}` for a Page image, so the payload
+is not stored twice. A `BatchApiCall` of N items holds up to N × `max_bytes`.
+
+**Jira attachment thumbnails on a Page.** Pages only load images from `data:`
+or `blob:` URIs (`img-src data: blob:`), so an authenticated Jira URL cannot be
+used directly. Fetch the thumbnails through the broker and publish data URIs:
+
+1. A `BatchApiCall` over the attachments (`[{"id": "10001"}, …]`) on
+   `/rest/api/2/attachment/thumbnail/{{batch.item.id}}`, with
+   `api_response: {"type": "Binary"}` and `api_extract: {"path": "$.data_uri"}`.
+2. A `PublishPageData` `replace` of `steps.<batch>.data.items` into a snapshot
+   dataset. Each item keeps its `input.id` next to its `response` data URI.
+3. The Page indexes them by id (`input.id` → `response`) and sets `<img src>`.
+
+The whole path, with a mock server that requires the credential, is covered by
+`batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment`.
+[src: file: backend/src/workflows/api_call_binary.rs:663]
+[src: file: frontend/src/lib/live-page-sandbox.ts:5]
 
 ## Status (2026-04-26)
 
@@ -65,6 +117,9 @@ nonempty parse failures and pagination ending with an empty response.
   `PaginationSpec`, 12 flat `api_*` fields on `WorkflowStep`
 - `backend/src/workflows/api_call_step.rs` — pure extraction + pagination
   shape detection (no HTTP)
+- `backend/src/workflows/api_call_binary.rs` — `api_response: Binary`
+  contract (media-type allowlist, size cap, `data_uri` envelope) and its
+  broker-level tests
 - `backend/src/workflows/api_call_security.rs` — SSRF host allowlist,
   public-IP check with fast-path, `ResolvedAuth` redact, URL query redact
 - `backend/src/workflows/api_call_executor.rs` — `execute_api_call_step_core`

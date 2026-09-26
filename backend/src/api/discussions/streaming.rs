@@ -233,6 +233,53 @@ async fn cli_task_worker_context(
     }))
 }
 
+/// The room's own native agent for an ordinary CLI turn, so it can be the
+/// principal of `task_exec`. Derived from the running dispatch job only; a
+/// worker launch, an HTTP agent or an unverifiable job gets nothing.
+async fn cli_room_agent_context(
+    state: &AppState,
+    discussion_id: &str,
+    agent_type: &AgentType,
+    dispatch_job_id: Option<&str>,
+) -> Option<runner::RoomAgentBridgeContext> {
+    if runner::is_http_chat_agent(agent_type) {
+        return None;
+    }
+    let dispatch_job_id = dispatch_job_id?.to_string();
+    let lookup = state
+        .db
+        .with_read_conn({
+            let dispatch_job_id = dispatch_job_id.clone();
+            move |conn| {
+                let execution =
+                    crate::db::orchestration::get_execution_for_dispatch(conn, &dispatch_job_id)?;
+                let dispatch = crate::db::agent_dispatch::get(conn, &dispatch_job_id)?;
+                Ok((execution.is_some(), dispatch))
+            }
+        })
+        .await;
+    let (is_worker_dispatch, dispatch) = match lookup {
+        Ok((is_worker, Some(dispatch))) => (is_worker, dispatch),
+        Ok((_, None)) => return None,
+        Err(error) => {
+            tracing::warn!(discussion_id, "room agent context unavailable: {error}");
+            return None;
+        }
+    };
+    if is_worker_dispatch
+        || dispatch.discussion_id != discussion_id
+        || dispatch.trigger_message_id.trim().is_empty()
+    {
+        return None;
+    }
+    Some(runner::RoomAgentBridgeContext {
+        discussion_id: discussion_id.to_string(),
+        agent_type: crate::db::orchestration::agent_type_to_db(agent_type),
+        dispatch_job_id,
+        source_message_id: dispatch.trigger_message_id,
+    })
+}
+
 #[cfg(test)]
 mod native_http_tools_scope_tests {
     use super::{cli_task_worker_context, native_http_tools_for_discussion};
@@ -1908,6 +1955,17 @@ async fn make_agent_stream_inner(
             return Sse::new(prepend_initial_event(stream, initial_event.take()));
         }
     };
+    let cli_room_agent_context = if cli_task_worker_context.is_some() {
+        None
+    } else {
+        cli_room_agent_context(
+            &state,
+            &discussion_id,
+            &agent_type,
+            dispatch_job_id.as_deref(),
+        )
+        .await
+    };
     let mut workspace_path = if tool_free_judge {
         None
     } else {
@@ -2944,7 +3002,18 @@ async fn make_agent_stream_inner(
             }
         }
 
+        // A delivery names the model the worker's runtime served, not the requested one.
+        let served_model = cli_task_worker_context.as_ref().map(|worker| {
+            crate::api::delivery_publication::ServedModelRecorder::start(
+                state.db.clone(),
+                worker.execution_id.clone(),
+                worker.dispatch_job_id.clone(),
+            )
+        });
         match runner::start_agent_with_config(runner::AgentStartConfig {
+            provenance: served_model
+                .as_ref()
+                .map(crate::api::delivery_publication::ServedModelRecorder::capture),
             work_dir: workspace_path.as_deref(),
             full_access,
             skill_ids: &skill_ids,
@@ -2969,6 +3038,7 @@ async fn make_agent_stream_inner(
             native_acp_full_prompt: Some(&full_prompt),
             cli_resume_id: cli_resume_id.as_deref(),
             task_worker_context: cli_task_worker_context.as_ref(),
+            room_agent_context: cli_room_agent_context.as_ref(),
             // Only HTTP agents consume this: CLI agents already reach the same
             // primitives through the stdio bridge, and handing them a second
             // channel would duplicate the surface for no gain.
@@ -3257,6 +3327,7 @@ async fn make_agent_stream_inner(
                                 input_tokens,
                                 output_tokens,
                                 cost_usd,
+                                ..
                             } => {
                                 stream_json_tokens =
                                     stream_json_tokens.max(input_tokens + output_tokens);
@@ -3437,6 +3508,9 @@ async fn make_agent_stream_inner(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
+                if let Some(recorder) = served_model {
+                    recorder.finish().await;
+                }
                 let validation_redaction_error =
                     validation_redaction_scope
                         .as_ref()

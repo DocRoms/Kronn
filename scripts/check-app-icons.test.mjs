@@ -15,7 +15,8 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
-  ICNS_PNG_SIZES, ICO_REQUIRED_SIZES, diffRgba, missingEntries, parseIcns, parseIco,
+  ICNS_PNG_SIZES, ICO_REQUIRED_SIZES, PNG_RGBA, diffRgba, missingEntries, parseIcns, parseIco,
+  readPngPixelFormat,
 } from './icon-containers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -158,5 +159,16 @@ assert.equal(diffRgba(base, oneOff), 1);
 const alphaOnly = base.slice(); alphaOnly[3] = 254;
 assert.equal(diffRgba(base, alphaOnly), 1, 'a difference in alpha alone must count');
 rejects(() => diffRgba(base, base.slice(0, 4)), /8 samples vs 4/, 'comparing different sample counts');
+
+// ── Desktop PNG pixel format (Tauri needs 8-bit RGBA) ──
+for (const size of [32, 128, 256, 512]) {
+  const rel = size === 512 ? 'icon.png' : size === 256 ? '128x128@2x.png' : `${size}x${size}.png`;
+  const shipped = await readFile(`${root}/desktop/src-tauri/icons/${rel}`);
+  assert.deepEqual(readPngPixelFormat(shipped, rel), { bitDepth: 8, colourType: PNG_RGBA },
+    `${rel} must stay 8-bit RGBA or the desktop app no longer compiles`);
+}
+const rgb = Buffer.from(png(32)); rgb.writeUInt8(2, 25);
+assert.equal(readPngPixelFormat(rgb, 'rgb').colourType, 2, 'an RGB header is reported as such');
+rejects(() => readPngPixelFormat(Buffer.from('not a png, just text'), 'text'), /too short|not a PNG/, 'a non-PNG payload');
 
 process.stdout.write('icon container parsers: all structural negative cases rejected\n');

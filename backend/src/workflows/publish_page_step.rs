@@ -159,7 +159,7 @@ fn succeed(
             step_name: step.name.clone(),
             status: RunStatus::Success,
             output,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: started.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -171,7 +171,11 @@ fn succeed(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -183,7 +187,7 @@ fn fail(step: &WorkflowStep, started: Instant, error: impl std::fmt::Display) ->
             step_name: step.name.clone(),
             status: RunStatus::Failed,
             output: error.to_string(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: started.elapsed().as_millis() as u64,
             started_at: None,
             condition_result: None,
@@ -195,7 +199,11 @@ fn fail(step: &WorkflowStep, started: Instant, error: impl std::fmt::Display) ->
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }
@@ -249,6 +257,48 @@ mod tests {
         assert!(request.writes[0].value.is_array());
         assert_eq!(request.writes[0].value[1]["value"], 19);
         assert_eq!(request.writes[0].dedupe_key.as_deref(), Some("run-42:0"));
+    }
+
+    #[test]
+    fn provenance_can_be_published_as_a_typed_value() {
+        use crate::models::{
+            AgentType, ModelTier, WorkflowAgentAttempt, WorkflowAgentAttemptRole,
+            WorkflowAgentProvenance,
+        };
+        let mut context = TemplateContext::new();
+        context.set_step_provenance(
+            "advise",
+            Some(&WorkflowAgentProvenance {
+                attempts: vec![WorkflowAgentAttempt {
+                    id: 1,
+                    role: WorkflowAgentAttemptRole::Initial,
+                    retry: 1,
+                    agent: AgentType::LiteLlm,
+                    tier: ModelTier::Default,
+                    connection_id: None,
+                    requested_model: None,
+                    resolved_model: Some("claude-sonnet-4-6".into()),
+                    model_applied: None,
+                    observed_models: vec![],
+                    format_fallback: false,
+                    started_at: chrono::Utc::now(),
+                    duration_ms: 1,
+                    succeeded: true,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                }],
+                selected_attempt: Some(1),
+            }),
+        );
+        let request = build_request(
+            &step("steps.advise.provenance"),
+            "workflow-1",
+            "run-7",
+            &context,
+        )
+        .expect("typed provenance");
+        assert_eq!(request.writes[0].value["agent"], "LiteLlm");
+        assert_eq!(request.writes[0].value["model"], "claude-sonnet-4-6");
     }
 
     #[test]

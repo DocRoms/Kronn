@@ -16,6 +16,7 @@ pub mod discussion_ceiling_requests;
 pub mod discussion_effort;
 pub mod discussion_important;
 pub(crate) mod discussion_launch_settings;
+pub mod discussion_monitor;
 pub mod discussion_questions;
 pub mod discussion_sessions;
 pub mod discussion_video_sequences;
@@ -50,6 +51,7 @@ pub mod shared_runs;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;
+pub mod workflow_step_rooms;
 pub mod workflows;
 
 #[cfg(test)]
@@ -227,6 +229,19 @@ impl Database {
                 Vec::new()
             }
         };
+        match workflow_step_rooms::revoke_all_after_restart(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Revoked {n} room membership(s) of workflow steps that died with the previous process"),
+            Err(e) => tracing::warn!("Failed to revoke stale workflow step room memberships: {e}"),
+        }
+        match shared_runs::repair_stale_workflow_projections(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                "Re-synced {} shared runs still marked live for finished workflow runs",
+                n
+            ),
+            Err(e) => tracing::warn!("Failed to repair stale shared-run projections: {}", e),
+        }
 
         // 0.8.6 — auto-purge api_call_logs older than 90 days at boot.
         // Generous default : keeps a quarter of audit trail for debug

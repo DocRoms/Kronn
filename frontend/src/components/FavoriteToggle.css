@@ -18,7 +18,6 @@
 .kr-favorite-toggle:focus-visible {
   background: var(--kr-bg-hover);
   color: var(--kr-text-primary);
-  outline: none;
 }
 
 .kr-favorite-toggle[data-active='true'] {

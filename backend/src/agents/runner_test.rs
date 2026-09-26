@@ -83,6 +83,62 @@ mod tests {
         }
     }
 
+    /// KT-795 — on the production Claude route, cache usage, the served model
+    /// and the latest tool call reach the caller; the token total is unchanged.
+    #[tokio::test]
+    async fn claude_adapted_route_reports_cache_served_model_and_activity() {
+        let project = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            project.path(),
+            crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+        );
+        let transport: Arc<dyn AcpTransport> = Arc::new(
+            crate::acp::ClaudeAcpAdapter::new_with_program(fixture.to_string_lossy(), None, false),
+        );
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let capture = crate::agents::provenance::AgentProvenanceCapture::default();
+        let (activity, activity_rx) = tokio::sync::watch::channel(None);
+        let mut process = start_agent_with_config(AgentStartConfig {
+            provenance: Some(capture.clone()),
+            activity: Some(activity),
+            test_acp_transport: Some(transport),
+            ..AgentStartConfig::new(
+                &AgentType::ClaudeCode,
+                project.path().to_str().unwrap(),
+                "orchestrate",
+                &tokens,
+            )
+        })
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+
+        assert_eq!(process.reported_token_usage(), Some(48 + 21_545));
+        assert_eq!(
+            process.reported_prompt_cache(),
+            PromptCacheUsage {
+                cached_prompt_tokens: Some(1_554_330),
+                cache_write_prompt_tokens: Some(80_271),
+            }
+        );
+        assert_eq!(
+            capture.lock().unwrap().observed_models,
+            ["claude-opus-5-5-20260915"]
+        );
+        let latest = activity_rx.borrow().clone().expect("tool call recorded");
+        assert_eq!(
+            (latest.tool.as_str(), latest.target.as_deref()),
+            ("Read", Some("src/lib.rs"))
+        );
+    }
+
     #[tokio::test]
     async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
         let fixture = Arc::new(NativeRouteFixture {
@@ -372,7 +428,18 @@ mod tests {
             }),
             ok: false,
         };
-        assert!(rust_syntax_refusal(&refusal));
+        assert_eq!(structural_refusal(&refusal), Some("Rust syntax"));
+        let structure = crate::agents::tools::ToolOutcome {
+            call: refusal.call.clone(),
+            content: serde_json::json!({
+                "error": format!(
+                    "{} `a.scss`: line 4: orphan closing `}}`",
+                    crate::api::agent_workspace_structure::STRUCTURE_REFUSAL_PREFIX
+                )
+            }),
+            ok: false,
+        };
+        assert_eq!(structural_refusal(&structure), Some("Structure"));
     }
 
     #[test]
@@ -659,7 +726,54 @@ mod tests {
                 input_tokens: 21,
                 output_tokens: 8,
                 cost_usd: Some(cost),
+                ..
             } if (cost - 0.01).abs() < f64::EPSILON
+        ));
+    }
+
+    /// KT-795 — Anthropic counts cache reads and writes beside `input_tokens`.
+    #[test]
+    fn parse_result_reports_cache_reads_and_writes_beside_input() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}"#;
+        match parse_claude_stream_line(line) {
+            StreamJsonEvent::Usage {
+                input_tokens,
+                output_tokens,
+                prompt_cache,
+                ..
+            } => {
+                assert_eq!((input_tokens, output_tokens), (48, 21_545));
+                assert_eq!(
+                    prompt_cache,
+                    PromptCacheUsage {
+                        cached_prompt_tokens: Some(1_554_330),
+                        cache_write_prompt_tokens: Some(80_271),
+                    }
+                );
+            }
+            other => panic!("Expected Usage, got {other:?}"),
+        }
+        let delta = r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":5,"cache_read_input_tokens":0}}}"#;
+        assert!(matches!(
+            parse_claude_stream_line(delta),
+            StreamJsonEvent::Usage {
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: Some(0),
+                    cache_write_prompt_tokens: None,
+                },
+                ..
+            }
+        ));
+        let unreported = r#"{"type":"result","subtype":"success","usage":{"input_tokens":21,"output_tokens":8}}"#;
+        assert!(matches!(
+            parse_claude_stream_line(unreported),
+            StreamJsonEvent::Usage {
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                },
+                ..
+            }
         ));
     }
 
@@ -1965,6 +2079,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("proxy must be reachable");
@@ -3109,6 +3224,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3214,6 +3330,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3269,6 +3386,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -3339,6 +3457,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -3394,6 +3513,7 @@ mod tests {
             None,
             Some(std::time::Duration::from_secs(240 * 60)),
             Some(&parent_cancel),
+            None,
             None,
             None,
         );
@@ -3511,6 +3631,7 @@ mod tests {
                 drop_notify: drop_notify.clone(),
                 second_started: second_started.clone(),
             })),
+            None,
             None,
             None,
             None,
@@ -3644,6 +3765,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -3762,8 +3884,235 @@ mod tests {
             + "data: [DONE]\n\n"
     }
 
+    #[tokio::test]
+    async fn structured_output_refusal_falls_back_without_losing_tools_on_both_wires() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for agent in [AgentType::Ollama, AgentType::LiteLlm] {
+            let ollama = agent == AgentType::Ollama;
+            let endpoint = if ollama {
+                "/api/chat"
+            } else {
+                "/v1/chat/completions"
+            };
+            let format_key = if ollama { "format" } else { "response_format" };
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/show"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    if body.get(format_key).is_some() {
+                        return if ollama {
+                            ResponseTemplate::new(501).set_body_json(serde_json::json!({"error":"structured output is unavailable"}))
+                        } else {
+                            ResponseTemplate::new(400).set_body_json(serde_json::json!({"error":{"message":"This model does not support response_format"}}))
+                        };
+                    }
+                    let after_tool = body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool");
+                    let content = if after_tool { r#"{"data":{"ok":true},"status":"OK"}"# } else { "" };
+                    let mut message = serde_json::json!({"role":"assistant","content":content});
+                    if !after_tool {
+                        message["tool_calls"] = serde_json::json!([{
+                            "id":"probe-1", "type":"function",
+                            "function":{"name":"mcp_list","arguments":if ollama { serde_json::json!({}) } else { serde_json::json!("{}") }}
+                        }]);
+                    }
+                    ResponseTemplate::new(200).set_body_json(if ollama {
+                        serde_json::json!({"message":message,"done":true,"prompt_eval_count":5,"eval_count":2})
+                    } else {
+                        serde_json::json!({"choices":[{"message":message,"finish_reason":if after_tool { "stop" } else { "tool_calls" }}],"usage":{"prompt_tokens":5,"completion_tokens":2}})
+                    })
+                })
+                .expect(3)
+                .mount(&server).await;
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let schema = serde_json::json!({"type":"object","properties":{"data":{"type":"object"},"status":{"type":"string"}}});
+            let mut process = start_ollama_http(
+                &agent,
+                "Call mcp_list, then return data.ok and status as JSON.",
+                "",
+                "test-model",
+                Some(&schema),
+                Some(&server.uri()),
+                None,
+                Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("an explicit unsupported format must recover before any tool runs");
+            let mut output = String::new();
+            while let Some(chunk) = process.next_line().await {
+                output.push_str(&chunk);
+            }
+            assert!(process.child.wait().await.unwrap().success(), "{output}");
+            assert!(
+                output.contains("[structured-output fallback:"),
+                "operator notice missing: {output}"
+            );
+            let envelope = crate::workflows::template::extract_step_envelope(&output)
+                .expect("notice must not hide JSON");
+            crate::workflows::template::validate_envelope_against_schema(
+                &envelope.data_json, &serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}),
+            ).expect("local schema validation remains applicable");
+            assert_eq!(*seen.lock().unwrap(), ["mcp_list"]);
+            let bodies: Vec<serde_json::Value> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == endpoint)
+                .map(|r| serde_json::from_slice(&r.body).unwrap())
+                .collect();
+            assert_eq!(bodies.len(), 3);
+            let mut expected = bodies[0].clone();
+            expected.as_object_mut().unwrap().remove(format_key);
+            assert_eq!(
+                bodies[1], expected,
+                "only the unsupported format may change"
+            );
+            assert!(
+                bodies[2].get(format_key).is_none(),
+                "format must stay removed after tool execution"
+            );
+            assert_eq!(bodies[2]["tools"], bodies[0]["tools"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_output_fallback_is_bounded_and_does_not_mask_other_errors() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for (status, detail, expected_calls) in [
+            (501, "structured output is unavailable", 2),
+            (501, "endpoint not implemented", 1),
+            (
+                400,
+                "Invalid schema for response_format: property maxItems is not supported",
+                1,
+            ),
+            (401, "structured output is unavailable: invalid API key", 1),
+            (429, "insufficient_quota", 1),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error":{"message":detail}})),
+                )
+                .expect(expected_calls)
+                .mount(&server)
+                .await;
+            let schema = serde_json::json!({"type":"object"});
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let error = match start_ollama_http(
+                &AgentType::LiteLlm,
+                "hello",
+                "",
+                "test-model",
+                Some(&schema),
+                Some(&server.uri()),
+                None,
+                Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(_) => panic!("a persistent rejection must stay failed"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(detail),
+                "original diagnostic missing: {error}"
+            );
+            assert!(
+                !error.contains("may not support tool calling"),
+                "false tool attribution: {error}"
+            );
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                expected_calls as usize
+            );
+            assert!(seen.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_output_fallback_can_be_cancelled_before_headers() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let fallback_seen = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mock_seen = fallback_seen.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                if body.get("response_format").is_some() {
+                    ResponseTemplate::new(501).set_body_string("structured output is unavailable")
+                } else {
+                    mock_seen.notify_one();
+                    ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let schema = serde_json::json!({"type":"object"});
+        let base = server.uri();
+        let starting = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            Some(&schema),
+            Some(&base),
+            None,
+            None,
+            None,
+            None,
+            Some(&cancel),
+            None,
+            None,
+            None,
+        );
+        tokio::pin!(starting);
+        tokio::select! {
+            result = &mut starting => panic!("fallback finished before cancellation: {}", result.is_ok()),
+            _ = fallback_seen.notified() => cancel.cancel(),
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), starting)
+            .await
+            .expect("fallback cancellation must remain responsive");
+        match result {
+            Err(error) => assert!(error.contains("cancelled before"), "{error}"),
+            Ok(_) => panic!("cancelled fallback must not start an agent"),
+        }
+    }
+
     #[test]
     fn provider_retry_classifier_separates_capacity_from_permanent_failures() {
+        assert!(!is_transient_provider_failure(
+            Some(reqwest::StatusCode::NOT_IMPLEMENTED),
+            "structured output is unavailable"
+        ));
         assert!(is_transient_provider_failure(
             Some(reqwest::StatusCode::SERVICE_UNAVAILABLE),
             "upstream unavailable"
@@ -3792,6 +4141,44 @@ mod tests {
             None,
             "ResourceExhausted: account quota exhausted"
         ));
+    }
+
+    #[test]
+    fn structured_output_detection_requires_an_explicit_error_message() {
+        for (status, detail, expected) in [
+            (
+                422,
+                r#"{"error":{"message":"structured outputs are not supported"}}"#,
+                true,
+            ),
+            (
+                400,
+                r#"{"error":{"message":"Invalid schema for response_format: additionalProperties must be false"}}"#,
+                false,
+            ),
+            (
+                501,
+                r#"{"request":{"prompt":"structured output is unavailable"}}"#,
+                false,
+            ),
+            (
+                500,
+                r#"{"error":"structured output is unavailable"}"#,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":"Invalid schema","request":{"prompt":"does not support json_schema"}}"#,
+                false,
+            ),
+        ] {
+            let failure = HttpProviderFailure {
+                status: Some(reqwest::StatusCode::from_u16(status).unwrap()),
+                detail: detail.into(),
+                attempts: 1,
+            };
+            assert_eq!(rejects_structured_output(&failure), expected, "{detail}");
+        }
     }
 
     #[tokio::test]
@@ -3842,6 +4229,219 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("JSON body");
         assert_eq!(body["model"], "corp-default");
         assert_eq!(body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn a_later_reported_zero_replaces_the_cached_count_and_absence_keeps_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0}}}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1}}"#,
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("mock proxy reachable");
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.expect("lifeline").success());
+        let captured = process.stderr_capture.lock().unwrap().clone();
+        let turns = parse_http_turn_telemetry(&captured);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].cached_prompt_tokens, Some(0));
+    }
+
+    #[tokio::test]
+    async fn cached_prompt_tokens_reach_the_turn_telemetry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":800}}}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("mock proxy reachable");
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.expect("lifeline").success());
+        let captured = process.stderr_capture.lock().unwrap().clone();
+        let turns = parse_http_turn_telemetry(&captured);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            (turns[0].prompt_tokens, turns[0].cached_prompt_tokens),
+            (1000, Some(800))
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_write_prompt_tokens_reach_the_turn_telemetry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"cache_creation_input_tokens":900,"cache_read_input_tokens":0}}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("mock proxy reachable");
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.expect("lifeline").success());
+        let captured = process.stderr_capture.lock().unwrap().clone();
+        let turns = parse_http_turn_telemetry(&captured);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            (
+                turns[0].cached_prompt_tokens,
+                turns[0].cache_write_prompt_tokens
+            ),
+            (Some(0), Some(900))
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn litellm_prompt_cache_switch_marks_only_claude_requests() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#,
+            ])))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let previous = std::env::var("KRONN_LITELLM_PROMPT_CACHE").ok();
+        for (switch, model) in [
+            (None, "anthropic/claude-sonnet-4-6"),
+            (None, "gemini-2.5-flash"),
+            (Some("0"), "claude-sonnet-4-6"),
+        ] {
+            match switch {
+                Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+                None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+            }
+            let mut process = start_ollama_http(
+                &AgentType::LiteLlm,
+                "hello",
+                "",
+                model,
+                None,
+                Some(&server.uri()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mock proxy reachable");
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.expect("lifeline").success());
+        }
+        match previous {
+            Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+            None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+        }
+
+        let requests = server.received_requests().await.expect("request capture");
+        let bodies: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).expect("JSON body"))
+            .collect();
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(
+            bodies[0]["cache_control_injection_points"],
+            serde_json::json!([
+                { "location": "message", "role": "system" },
+                { "location": "message", "index": -1 },
+            ])
+        );
+        assert!(
+            bodies[1].get("cache_control_injection_points").is_none(),
+            "a non-Anthropic model is never sent the key"
+        );
+        assert!(
+            bodies[2].get("cache_control_injection_points").is_none(),
+            "`KRONN_LITELLM_PROMPT_CACHE=0` turns it off"
+        );
     }
 
     /// The regression this pins (KT-337): the NVIDIA endpoint slot was declared
@@ -4015,6 +4615,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -4066,6 +4667,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -4144,6 +4746,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("transient saturation must be replayed before returning the process");
@@ -4193,6 +4796,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         let error = match started {
@@ -4226,6 +4830,7 @@ mod tests {
             "test-model",
             None,
             Some(&server.uri()),
+            None,
             None,
             None,
             None,
@@ -4321,6 +4926,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("initial request is accepted");
@@ -4398,6 +5004,7 @@ mod tests {
             Some(&base_url),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -4509,6 +5116,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -4567,6 +5175,7 @@ mod tests {
             Some(std::sync::Arc::new(WorkerTools {
                 seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             })),
+            None,
             None,
             None,
             None,
@@ -4708,6 +5317,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -4835,6 +5445,7 @@ mod tests {
             Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -4971,6 +5582,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -5043,6 +5655,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -5275,6 +5888,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -5532,6 +6146,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("start");
@@ -5627,6 +6242,7 @@ mod tests {
                     .into_iter()
                     .collect(),
             })),
+            None,
             None,
             None,
             None,
@@ -5734,6 +6350,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -5791,6 +6408,7 @@ mod tests {
             Some(std::sync::Arc::new(IntermittentReadTools {
                 seen: seen.clone(),
             })),
+            None,
             None,
             None,
             None,
@@ -5863,6 +6481,7 @@ mod tests {
             Some(&server.uri()),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
             None,
             None,
             None,
@@ -6121,6 +6740,7 @@ mod tests {
                 input_tokens,
                 output_tokens,
                 cost_usd,
+                ..
             } => {
                 assert_eq!(input_tokens, 100);
                 assert_eq!(output_tokens, 50);
@@ -6138,6 +6758,7 @@ mod tests {
                 input_tokens,
                 output_tokens,
                 cost_usd,
+                ..
             } => {
                 assert_eq!(input_tokens, 200);
                 assert_eq!(output_tokens, 100);
@@ -6729,13 +7350,132 @@ Suite de la réponse.";
         root
     }
 
+    fn catalogue_root(
+        label: &str,
+        path: std::path::PathBuf,
+    ) -> super::super::ClaudeSandboxCatalogueRoot {
+        super::super::ClaudeSandboxCatalogueRoot {
+            label: label.into(),
+            path,
+        }
+    }
+
+    fn catalogue_project(
+        path: &std::path::Path,
+        linked: &[(&str, String)],
+    ) -> crate::models::Project {
+        let now = chrono::Utc::now();
+        crate::models::Project {
+            id: "p1".into(),
+            name: "proj".into(),
+            path: path.to_string_lossy().into_owned(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: crate::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: linked
+                .iter()
+                .enumerate()
+                .map(|(index, (name, location))| crate::models::LinkedRepo {
+                    id: format!("lr-{index}"),
+                    name: (*name).into(),
+                    kind: "api".into(),
+                    location: location.clone(),
+                    description: String::new(),
+                })
+                .collect(),
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn claude_catalogue_skips_a_linked_repository_missing_on_this_host() {
+        let repo = synthetic_git_worktree_catalogue(1);
+        let missing = repo.path().join("absent-linked-repo");
+        let project = catalogue_project(
+            &repo.path().join("main"),
+            &[
+                ("ghost", missing.to_string_lossy().into_owned()),
+                ("remote", "https://github.com/org/remote".into()),
+                (
+                    "sibling",
+                    repo.path()
+                        .join("worktree-0")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ],
+        );
+        let roots = super::super::claude_sandbox_catalogue_roots(&project);
+        let labels: Vec<&str> = roots.iter().map(|root| root.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["project `proj`", "linked repository `sibling`"],
+            "a missing path and a URL are not measured"
+        );
+        let receipt = super::super::claude_sandbox_catalogue_receipt(&roots).unwrap();
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 2);
+        assert_eq!(receipt.validate(), Ok(()));
+    }
+
+    #[test]
+    fn claude_catalogue_names_an_existing_linked_repository_it_cannot_read() {
+        let repo = synthetic_git_worktree_catalogue(0);
+        let not_git = tempfile::tempdir().unwrap();
+        let secret_path = not_git.path().to_string_lossy().into_owned();
+        let project = catalogue_project(
+            &repo.path().join("main"),
+            &[("plain-folder", secret_path.clone())],
+        );
+        let roots = super::super::claude_sandbox_catalogue_roots(&project);
+        assert_eq!(roots.len(), 2, "an existing path stays fail-closed");
+        let error = super::super::claude_sandbox_catalogue_receipt(&roots).unwrap_err();
+        assert!(error.contains("reason_code=claude_sandbox_catalogue_unreadable"));
+        assert!(
+            error.contains("linked repository `plain-folder`"),
+            "{error}"
+        );
+        assert!(!error.contains("task_exec_reassign"), "{error}");
+        assert!(!error.contains(&secret_path));
+    }
+
+    #[test]
+    fn claude_catalogue_names_the_project_root_when_it_is_not_readable() {
+        let not_git = tempfile::tempdir().unwrap();
+        let project = catalogue_project(not_git.path(), &[]);
+        let error = super::super::claude_sandbox_catalogue_receipt(
+            &super::super::claude_sandbox_catalogue_roots(&project),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("the Git root of project `proj` is inaccessible"),
+            "{error}"
+        );
+        assert!(!error.contains("task_exec_reassign"), "{error}");
+    }
+
     #[test]
     fn claude_task_worker_accepts_catalogue_below_conservative_bounds() {
         let repo = synthetic_git_worktree_catalogue(3);
         let duplicate_checkout = repo.path().join("worktree-0");
         let receipt = super::super::claude_sandbox_catalogue_receipt(&[
-            repo.path().join("main"),
-            duplicate_checkout,
+            catalogue_root("project `main`", repo.path().join("main")),
+            catalogue_root("linked repository `dup`", duplicate_checkout),
         ])
         .unwrap();
         assert_eq!(receipt.common_dir_count, 1);
@@ -6753,8 +7493,11 @@ Suite de la réponse.";
         )
         .unwrap();
         let secret_path = repo.path().to_string_lossy().to_string();
-        let receipt =
-            super::super::claude_sandbox_catalogue_receipt(&[repo.path().join("main")]).unwrap();
+        let receipt = super::super::claude_sandbox_catalogue_receipt(&[catalogue_root(
+            "project `main`",
+            repo.path().join("main"),
+        )])
+        .unwrap();
         let error = receipt.validate().unwrap_err();
         assert_eq!(receipt.common_dir_count, 1);
         assert_eq!(receipt.worktree_count, 66);
@@ -9571,6 +10314,7 @@ sleep 3600
             usage: Arc::new(Mutex::new(AgentUsage {
                 input_tokens: 3,
                 output_tokens: 5,
+                prompt_cache: PromptCacheUsage::default(),
             })),
             stderr_task: None,
             http_cancel: None,
@@ -9706,6 +10450,7 @@ sleep 3600
                 seen: seen.clone(),
                 allowance,
             })),
+            None,
             None,
             None,
             None,
@@ -10251,6 +10996,7 @@ sleep 3600
                 seen: seen.clone(),
                 root: None,
             })),
+            None,
             None,
             None,
             None,
@@ -11123,6 +11869,7 @@ sleep 3600
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("start");
@@ -11682,6 +12429,7 @@ sleep 3600
                 seen: seen.clone(),
                 revision: revision.clone(),
             })),
+            None,
             None,
             None,
             None,
