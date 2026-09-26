@@ -2491,6 +2491,8 @@ export const pages = {
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/cancel`, {}),
   launchAction: (actionId: string, request: LaunchLivePageActionRequest) =>
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/launch`, request),
+  actionPrefill: (actionId: string, bindings: Record<string, string>) =>
+    api<Record<string, string>>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/prefill`, { bindings }),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

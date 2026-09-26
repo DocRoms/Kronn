@@ -9528,6 +9528,8 @@ _PAGE_ACTION_CONTRACT = (
     "source_ref such as `<page.title>`, `<page.dataset.summary.owner>` or "
     "`<page.dataset.tickets.find(key).id>`. For the last form, "
     "`data-kronn-bindings` carries only a JSON selector map keyed by variable name. "
+    "A `user_input` value with such a source_ref starts from that row's value and "
+    "stays editable; its selector is the one keyed by its name, or the click's only one. "
     "Never put secrets or resolved environment values in HTML. The sandbox emits "
     "an intention; only the native card's explicit human launch can execute it."
     "\n\nOne block serves every row: give each row's button its own "

@@ -13,6 +13,10 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A Page action's `user_input` field can start from the clicked row's data:
+  with a `<page.dataset…>` `source_ref`, Kronn resolves it server-side when the
+  card opens and the reader edits it before launching, instead of retyping a
+  debrief that is already in the dataset.
 - `task_exec_status` can wait for an execution: `wait_for` lists statuses (for
   example `["AwaitingReview", "Done", "Blocked"]`) and the call returns as soon
   as the execution is in one of them, with `wait: {matched, timed_out,
@@ -80,6 +84,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A kronn-action block removed from a Page's HTML is no longer listed among
+  its actions after the next publication; its launches stay in the history.
 - A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is
   refused before it reaches disk when it leaves an orphan delimiter or an
   unclosed Twig block, or when an `edit_lines` replacement shifts the

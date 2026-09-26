@@ -354,7 +354,9 @@ declared `values` contract as a Discussion `kronn-action`. A Page-only
 `dynamic_binding` value requires a declarative `source_ref` such as
 `<page.title>`, `<page.dataset.summary.owner>` or
 `<page.dataset.tickets.find(key).id>`; the CTA's `data-kronn-bindings` contains
-only the row selector keyed by variable name. Never place a resolved value or
+only the row selector keyed by variable name. A `user_input` value with such a
+`source_ref` starts from that row's value (an existing debrief, a draft) and
+stays editable before launch. Never place a resolved value or
 secret in Page HTML. The sandbox proposes an intention only; Kronn renders the
 native preflight card and the human launches it explicitly.
 One block serves every row: give each row's button its own

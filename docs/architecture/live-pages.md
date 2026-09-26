@@ -329,6 +329,17 @@ previous launch one click away; a Discussion card never relaunches, since a
 fence carries one intention.
 [src: file: frontend/src/hooks/useLivePageActions.ts]
 
+A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
+opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
+the clicked row (the selector keyed by the field's name, or the click's only
+selector) and the field starts from that value, still editable; a missing row
+or a null field leaves it empty, and a value the reader already typed is never
+overwritten. The launch runs what the reader sends. `GET /api/pages/{id}/actions`
+lists only the blocks of the current revision: a block removed from the
+published HTML keeps its row for the launches that reference it, but is no
+longer offered, and its old id refuses a launch.
+[src: file: backend/src/db/live_page_actions.rs]
+
 The periodic refresh of a Page (every 30 s, in the Pages view and in its own
 tab) keeps an open card, and what was typed in it, while the Page still offers
 its action; switching Page closes it. When new data makes the Page redraw its

@@ -104,6 +104,7 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
         action={action}
         offer={offer}
         bindings={active.bindings}
+        prefill={active.prefill}
         onChanged={handleChanged}
         onOpenDiscussion={onOpenDiscussion}
       />
