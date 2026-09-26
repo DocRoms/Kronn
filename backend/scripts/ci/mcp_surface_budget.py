@@ -56,9 +56,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # rewritten to carry the pointer and still weighs 9 B less; ceiling lowered.
 # `disc_wait_for_peer` now says a later Kronn call ends a backgrounded wait, in
 # 12 B less than the text it corrects; ceiling lowered.
+# KT-790/KT-791: the principal-notice and compact-status rewrites net 10 B less;
+# ceiling lowered.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
-CATALOGUE_MAX_BYTES = 86_597
+CATALOGUE_MAX_BYTES = 86_587
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
