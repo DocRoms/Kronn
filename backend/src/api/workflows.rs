@@ -2980,6 +2980,7 @@ pub async fn test_step(
             &ctx,
             &agent_extra_context,
             Some(progress_tx),
+            None,
             Some(&model_tiers),
             Some(&http_endpoints),
             Some(&ollama_context_overrides),

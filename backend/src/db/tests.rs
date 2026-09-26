@@ -2724,6 +2724,56 @@ fn list_runs_enriches_subworkflow_parent_provenance() {
     assert_eq!(one.parent_workflow_name.as_deref(), Some("Cron Parent"));
 }
 
+/// KT-795 — the live activity is written beside the runner's own snapshots,
+/// so it may land only on the result still in flight.
+#[test]
+fn in_flight_step_activity_lands_only_on_the_running_step_it_names() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let step = |name: &str, status: RunStatus| {
+        let mut result: StepResult = serde_json::from_value(serde_json::json!({
+            "step_name": name, "status": "Success", "output": "", "duration_ms": 0
+        }))
+        .unwrap();
+        result.status = status;
+        result
+    };
+    let mut run = sample_run("r1", "w1");
+    run.step_results = vec![
+        step("plan", RunStatus::Success),
+        step("build", RunStatus::Running),
+    ];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    let activity = AgentActivity {
+        tool: "Edit".into(),
+        target: Some("src/é.rs".into()),
+        at: Utc::now(),
+    };
+    let set = |index: usize, name: &str| {
+        crate::db::workflows::set_in_flight_step_activity(&conn, "r1", index, name, &activity)
+            .unwrap()
+    };
+
+    assert!(!set(0, "plan"), "a finished step never gains an activity");
+    assert!(!set(1, "plan"), "the index must still hold the named step");
+    assert!(set(1, "build"));
+    let stored = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(stored.step_results[0].last_activity, None);
+    assert_eq!(
+        stored.step_results[1].last_activity.as_ref(),
+        Some(&activity)
+    );
+
+    // The runner's terminal snapshot replaces the in-flight row; a late write
+    // then matches nothing and cannot put the activity back.
+    run.step_results[1].status = RunStatus::Success;
+    let snapshot = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+    assert!(crate::db::workflows::update_run_progress(&conn, snapshot).unwrap());
+    assert!(!set(1, "build"));
+    let finished = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(finished.step_results[1].last_activity, None);
+}
+
 #[test]
 fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
     let conn = test_db();
@@ -2749,6 +2799,9 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         StepResult {
             step_name: "deploy".into(),
@@ -2768,6 +2821,9 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
     ];
     crate::db::workflows::insert_run(&conn, &run).unwrap();
@@ -2885,6 +2941,9 @@ fn workflow_runs_update() {
         child_run_id: None,
         agent_provenance: None,
         native_tool_calls: Box::default(),
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 

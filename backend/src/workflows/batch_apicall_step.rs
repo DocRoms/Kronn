@@ -326,6 +326,9 @@ pub async fn execute_batch_apicall_step(
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -536,6 +539,9 @@ fn empty_success(step: &WorkflowStep, start: Instant) -> StepOutcome {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -567,6 +573,9 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }
@@ -851,6 +860,9 @@ mod tests {
                 child_run_id: None,
                 agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             },
             condition_action: None,
         };

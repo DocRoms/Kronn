@@ -83,6 +83,62 @@ mod tests {
         }
     }
 
+    /// KT-795 — on the production Claude route, cache usage, the served model
+    /// and the latest tool call reach the caller; the token total is unchanged.
+    #[tokio::test]
+    async fn claude_adapted_route_reports_cache_served_model_and_activity() {
+        let project = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            project.path(),
+            crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+        );
+        let transport: Arc<dyn AcpTransport> = Arc::new(
+            crate::acp::ClaudeAcpAdapter::new_with_program(fixture.to_string_lossy(), None, false),
+        );
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let capture = crate::agents::provenance::AgentProvenanceCapture::default();
+        let (activity, activity_rx) = tokio::sync::watch::channel(None);
+        let mut process = start_agent_with_config(AgentStartConfig {
+            provenance: Some(capture.clone()),
+            activity: Some(activity),
+            test_acp_transport: Some(transport),
+            ..AgentStartConfig::new(
+                &AgentType::ClaudeCode,
+                project.path().to_str().unwrap(),
+                "orchestrate",
+                &tokens,
+            )
+        })
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+
+        assert_eq!(process.reported_token_usage(), Some(48 + 21_545));
+        assert_eq!(
+            process.reported_prompt_cache(),
+            PromptCacheUsage {
+                cached_prompt_tokens: Some(1_554_330),
+                cache_write_prompt_tokens: Some(80_271),
+            }
+        );
+        assert_eq!(
+            capture.lock().unwrap().observed_models,
+            ["claude-opus-5-5-20260915"]
+        );
+        let latest = activity_rx.borrow().clone().expect("tool call recorded");
+        assert_eq!(
+            (latest.tool.as_str(), latest.target.as_deref()),
+            ("Read", Some("src/lib.rs"))
+        );
+    }
+
     #[tokio::test]
     async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
         let fixture = Arc::new(NativeRouteFixture {
@@ -670,7 +726,54 @@ mod tests {
                 input_tokens: 21,
                 output_tokens: 8,
                 cost_usd: Some(cost),
+                ..
             } if (cost - 0.01).abs() < f64::EPSILON
+        ));
+    }
+
+    /// KT-795 — Anthropic counts cache reads and writes beside `input_tokens`.
+    #[test]
+    fn parse_result_reports_cache_reads_and_writes_beside_input() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}"#;
+        match parse_claude_stream_line(line) {
+            StreamJsonEvent::Usage {
+                input_tokens,
+                output_tokens,
+                prompt_cache,
+                ..
+            } => {
+                assert_eq!((input_tokens, output_tokens), (48, 21_545));
+                assert_eq!(
+                    prompt_cache,
+                    PromptCacheUsage {
+                        cached_prompt_tokens: Some(1_554_330),
+                        cache_write_prompt_tokens: Some(80_271),
+                    }
+                );
+            }
+            other => panic!("Expected Usage, got {other:?}"),
+        }
+        let delta = r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":5,"cache_read_input_tokens":0}}}"#;
+        assert!(matches!(
+            parse_claude_stream_line(delta),
+            StreamJsonEvent::Usage {
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: Some(0),
+                    cache_write_prompt_tokens: None,
+                },
+                ..
+            }
+        ));
+        let unreported = r#"{"type":"result","subtype":"success","usage":{"input_tokens":21,"output_tokens":8}}"#;
+        assert!(matches!(
+            parse_claude_stream_line(unreported),
+            StreamJsonEvent::Usage {
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                },
+                ..
+            }
         ));
     }
 
@@ -6637,6 +6740,7 @@ mod tests {
                 input_tokens,
                 output_tokens,
                 cost_usd,
+                ..
             } => {
                 assert_eq!(input_tokens, 100);
                 assert_eq!(output_tokens, 50);
@@ -6654,6 +6758,7 @@ mod tests {
                 input_tokens,
                 output_tokens,
                 cost_usd,
+                ..
             } => {
                 assert_eq!(input_tokens, 200);
                 assert_eq!(output_tokens, 100);
@@ -10209,6 +10314,7 @@ sleep 3600
             usage: Arc::new(Mutex::new(AgentUsage {
                 input_tokens: 3,
                 output_tokens: 5,
+                prompt_cache: PromptCacheUsage::default(),
             })),
             stderr_task: None,
             http_cancel: None,

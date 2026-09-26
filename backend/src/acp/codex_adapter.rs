@@ -465,6 +465,7 @@ impl AcpTransport for CodexAcpAdapter {
                             .send(AcpSessionEvent::Usage {
                                 input_tokens,
                                 output_tokens,
+                                prompt_cache: Default::default(),
                             })
                             .await;
                     }

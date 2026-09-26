@@ -1399,6 +1399,40 @@ pub struct WorkflowAgentAttempt {
     pub started_at: DateTime<Utc>,
     pub duration_ms: u64,
     pub succeeded: bool,
+    /// Prompt tokens read from the provider's prompt cache, on top of the
+    /// uncached input counted in `tokens_used`. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt tokens written to the provider's prompt cache. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
+}
+
+impl WorkflowAgentProvenance {
+    /// Cache reads and writes summed over the attempts that reported them.
+    pub fn prompt_cache_totals(&self) -> (Option<u64>, Option<u64>) {
+        fn sum(values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
+            values.flatten().fold(None, |total: Option<u64>, value| {
+                Some(total.unwrap_or(0).saturating_add(value))
+            })
+        }
+        (
+            sum(self.attempts.iter().map(|a| a.cached_prompt_tokens)),
+            sum(self.attempts.iter().map(|a| a.cache_write_prompt_tokens)),
+        )
+    }
+}
+
+/// The latest tool call an agent started, as its runtime reported it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentActivity {
+    pub tool: String,
+    /// The call's most informative input (file, command, pattern or URL),
+    /// truncated. `None` until the input is complete or when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1494,6 +1528,17 @@ pub struct StepResult {
     /// stay in the provider round-trip and can never leak into run history.
     #[serde(default, skip_serializing_if = "is_empty_tool_call_log")]
     pub native_tool_calls: Box<[NativeToolCallLog]>,
+    /// Prompt-cache reads of this step's agent attempts. `tokens_used` counts
+    /// only uncached input and output, so this is additional. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt-cache writes of this step's agent attempts. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
+    /// Latest tool call of an Agent step while it runs. The terminal result
+    /// replaces the in-flight row, so it survives only an interrupted step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<AgentActivity>,
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {

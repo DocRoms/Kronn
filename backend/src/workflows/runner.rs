@@ -76,6 +76,47 @@ fn try_emit_run_event(events_tx: Option<&EventSender>, event: RunEvent) {
     }
 }
 
+/// Store each tool call a running Agent step reports on its in-flight result,
+/// until `stop` fires, the sink closes or the step is no longer in flight.
+fn spawn_step_activity_publisher(
+    db: std::sync::Arc<crate::db::Database>,
+    run_id: String,
+    step_index: usize,
+    step_name: String,
+    mut activity: tokio::sync::watch::Receiver<Option<AgentActivity>>,
+    stop: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                changed = activity.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            let Some(latest) = activity.borrow_and_update().clone() else {
+                continue;
+            };
+            let (run_id, step_name) = (run_id.clone(), step_name.clone());
+            match db
+                .with_conn(move |conn| {
+                    crate::db::workflows::set_in_flight_step_activity(
+                        conn, &run_id, step_index, &step_name, &latest,
+                    )
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => tracing::warn!("step activity not recorded: {error}"),
+            }
+        }
+    })
+}
+
 enum InFlightStepOutcome {
     Completed(Box<StepOutcome>),
     Cancelled,
@@ -352,6 +393,9 @@ pub async fn settle_errored_run(
         native_tool_calls: Box::default(),
         step_agent: None,
         step_model: None,
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
     });
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let run_id = run.id.clone();
@@ -750,6 +794,9 @@ async fn execute_run_with_notify_policy(
                                 native_tool_calls: Box::default(),
                                 step_agent: None,
                                 step_model: None,
+                                cached_prompt_tokens: None,
+                                cache_write_prompt_tokens: None,
+                                last_activity: None,
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
@@ -819,6 +866,9 @@ async fn execute_run_with_notify_policy(
                     child_run_id: None,
                     agent_provenance: None,
                     native_tool_calls: Box::default(),
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -852,6 +902,9 @@ async fn execute_run_with_notify_policy(
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1030,6 +1083,9 @@ async fn execute_run_with_notify_policy(
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1110,6 +1166,9 @@ async fn execute_run_with_notify_policy(
                     native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1190,6 +1249,9 @@ async fn execute_run_with_notify_policy(
                 child_run_id: None,
                 agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             all_success = false;
             break;
@@ -1219,6 +1281,9 @@ async fn execute_run_with_notify_policy(
                 child_run_id: None,
                     agent_provenance: None,
                     native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             break;
         }
@@ -1262,6 +1327,9 @@ async fn execute_run_with_notify_policy(
                 child_run_id: None,
                 agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             stopped_by_guard = true;
             break;
@@ -1304,6 +1372,9 @@ async fn execute_run_with_notify_policy(
                 child_run_id: None,
                 agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             stopped_by_guard = true;
             break;
@@ -1361,6 +1432,9 @@ async fn execute_run_with_notify_policy(
                 child_run_id: None,
                 agent_provenance: None,
                 native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
             });
             stopped_by_guard = true;
             break;
@@ -1420,6 +1494,9 @@ async fn execute_run_with_notify_policy(
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         };
         apply_step_snapshot(
             step,
@@ -1574,6 +1651,9 @@ async fn execute_run_with_notify_policy(
                                 child_run_id: None,
                                 agent_provenance: None,
                                 native_tool_calls: Box::default(),
+                                cached_prompt_tokens: None,
+                                cache_write_prompt_tokens: None,
+                                last_activity: None,
                             },
                             condition_action: None,
                         }
@@ -1616,6 +1696,19 @@ async fn execute_run_with_notify_policy(
                                 }
                             }
                         });
+                        // The SSE stream reaches only the client that started the
+                        // run; the in-flight row is what every other reader sees.
+                        let (activity_tx, activity_rx) = tokio::sync::watch::channel(None);
+                        let activity_stop = tokio_util::sync::CancellationToken::new();
+                        let activity_publisher = spawn_step_activity_publisher(
+                            state.db.clone(),
+                            run.id.clone(),
+                            in_flight_result_index,
+                            step.name.clone(),
+                            activity_rx,
+                            activity_stop.clone(),
+                        );
+                        let activity_stop = activity_stop.drop_guard();
                         // 0.8.2 — Stamp the wall-clock step start so the
                         // frontend's live-elapsed counter reads an authoritative
                         // value instead of estimating via `runStart + sum of
@@ -1633,6 +1726,7 @@ async fn execute_run_with_notify_policy(
                             &ctx,
                             &agent_extra_context,
                             Some(progress_tx),
+                            Some(&activity_tx),
                             Some(&agents_config.model_tiers),
                             Some(&crate::models::setup::HttpEndpoints::from_agents(
                                 agents_config,
@@ -1649,6 +1743,10 @@ async fn execute_run_with_notify_policy(
                         // tail of the channel buffer, losing the last few chunks
                         // of the step's output to the SSE stream).
                         let _ = forwarder.await;
+                        drop(activity_tx);
+                        // Awaited so no activity write can land after the terminal result.
+                        drop(activity_stop);
+                        let _ = activity_publisher.await;
                         // Never restore/delete observed writes: another process
                         // may have authored them. Reject the step instead, while
                         // preserving all content and the original agent outcome.
@@ -1900,6 +1998,9 @@ async fn execute_run_with_notify_policy(
                         child_run_id: None,
                         agent_provenance: None,
                         native_tool_calls: Box::default(),
+                        cached_prompt_tokens: None,
+                        cache_write_prompt_tokens: None,
+                        last_activity: None,
                     },
                     condition_action: None,
                 }
@@ -1956,6 +2057,9 @@ async fn execute_run_with_notify_policy(
                         child_run_id: None,
                         agent_provenance: None,
                         native_tool_calls: Box::default(),
+                        cached_prompt_tokens: None,
+                        cache_write_prompt_tokens: None,
+                        last_activity: None,
                     },
                     condition_action: None,
                 }
@@ -2640,6 +2744,7 @@ async fn execute_run_with_notify_policy(
                         full_access,
                         &ctx,
                         &agent_extra_context,
+                        None,
                         None,
                         Some(&agents_config.model_tiers),
                         Some(&crate::models::setup::HttpEndpoints::from_agents(
@@ -3844,6 +3949,9 @@ mod tests {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 
@@ -4183,6 +4291,9 @@ mod tests {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 
@@ -4309,6 +4420,9 @@ mod tests {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 
@@ -5736,6 +5850,187 @@ mod tests {
                 .get("docs_write_rejections.advise")
                 .map(String::as_str),
             Some("1")
+        );
+    }
+
+    /// A Claude Code turn that reports one tool call, then waits for the test
+    /// before answering, so the step can be observed while it is running.
+    struct PausedClaudeTurn {
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::acp::AcpTransport for PausedClaudeTurn {
+        async fn initialize(
+            &self,
+            _: crate::acp::AcpInitialize,
+        ) -> Result<crate::acp::AcpNegotiatedCapabilities, crate::acp::AcpError> {
+            Ok(crate::acp::AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: std::collections::BTreeSet::from([
+                    crate::acp::AcpCapability::Sessions,
+                    crate::acp::AcpCapability::Streaming,
+                    crate::acp::AcpCapability::Cancellation,
+                    crate::acp::AcpCapability::McpInjection,
+                ]),
+            })
+        }
+        async fn create_session(
+            &self,
+        ) -> Result<crate::acp::AcpSessionTarget, crate::acp::AcpError> {
+            crate::acp::AcpSessionTarget::new(crate::acp::AcpAgent::ClaudeCode, "paused-turn")
+        }
+        async fn config_options(&self) -> Vec<crate::acp::AcpConfigOption> {
+            Vec::new()
+        }
+        async fn set_config_option(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn resume_session(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn prompt(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            events: tokio::sync::mpsc::Sender<crate::acp::AcpSessionEvent>,
+        ) -> Result<(), crate::acp::AcpError> {
+            use crate::acp::AcpSessionEvent;
+            let _ = events
+                .send(AcpSessionEvent::ToolCall {
+                    name: "Bash".into(),
+                })
+                .await;
+            let _ = events
+                .send(AcpSessionEvent::ToolTarget(
+                    "cargo test --no-fail-fast".into(),
+                ))
+                .await;
+            self.release.notified().await;
+            let _ = events.send(AcpSessionEvent::TextDelta("done".into())).await;
+            let _ = events.send(AcpSessionEvent::Completed).await;
+            Ok(())
+        }
+        async fn cancel(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+    }
+
+    /// KT-795 — a running Agent step's latest tool call is readable through the
+    /// API, not only the starter's SSE stream, and gone once the step ends.
+    #[tokio::test]
+    async fn a_running_agent_step_exposes_its_latest_tool_call_through_the_api() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id":"proj-activity", "name":"activity", "path":repo_path,
+            "repo_url":null, "token_override":null, "ai_config":{"detected":false,"configs":[]},
+            "created_at":chrono::Utc::now().to_rfc3339(), "updated_at":chrono::Utc::now().to_rfc3339()
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let work_dir =
+            crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
+        let _route = crate::agents::runner::test_acp_routes::route(
+            &work_dir,
+            std::sync::Arc::new(PausedClaudeTurn {
+                release: release.clone(),
+            }),
+        );
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-activity".into();
+        wf.project_id = Some("proj-activity".into());
+        let mut agent = fake_step("orchestrateur");
+        agent.prompt_template = "Orchestrate".into();
+        wf.steps = vec![agent];
+        let mut run = pending_run("run-activity", &wf.id);
+        insert_wf_and_run(&state, &wf, &run).await;
+
+        let runner_state = state.clone();
+        let runner = tokio::spawn(async move {
+            execute_run(
+                runner_state,
+                &wf,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map(|_| run)
+        });
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let axum::Json(response) = crate::api::mcp_remote::workflow_run_status(
+                    axum::extract::State(state.clone()),
+                    axum::extract::Path("run-activity".to_string()),
+                )
+                .await;
+                if let Some(status) = response.data.filter(|s| s.current_activity.is_some()) {
+                    return status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the running step's activity must become readable");
+        assert_eq!(status.current_step.as_deref(), Some("orchestrateur"));
+        let activity = status.current_activity.unwrap();
+        assert_eq!(
+            (activity.tool.as_str(), activity.target.as_deref()),
+            ("Bash", Some("cargo test --no-fail-fast"))
+        );
+        let axum::Json(detail) = crate::api::workflows::get_run(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("wf-activity".to_string(), "run-activity".to_string())),
+        )
+        .await;
+        let in_flight = detail.data.unwrap().step_results.pop().unwrap();
+        assert_eq!(in_flight.status, RunStatus::Running);
+        assert_eq!(in_flight.last_activity, Some(activity));
+
+        release.notify_one();
+        let run = runner.await.unwrap().expect("run completes");
+        assert_eq!(run.status, RunStatus::Success);
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-activity"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.step_results[0].status, RunStatus::Success);
+        assert_eq!(
+            persisted.step_results[0].last_activity, None,
+            "the terminal result replaces the in-flight one"
         );
     }
 

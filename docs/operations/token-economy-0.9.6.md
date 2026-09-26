@@ -51,6 +51,10 @@ Kronn had no counter for a CLI it did not spawn. That single reading is why:
   have been cached or not. `cache_write_prompt_tokens` (Anthropic's
   `cache_creation_input_tokens`, billed above the input rate) follows the same
   rule and sums over its own `cache_write_reported_turns`.
+- a workflow Agent step's `tokens_used` stays uncached input plus output. Claude
+  Code reports cache reads and writes beside them (`cache_read_input_tokens`,
+  `cache_creation_input_tokens`), so the step result and each attempt carry
+  `cached_prompt_tokens` and `cache_write_prompt_tokens`, absent when unreported.
 
 Anthropic caches only what a request marks, so Claude through LiteLLM reports
 zero cached tokens. `KRONN_LITELLM_PROMPT_CACHE=1` on the backend adds LiteLLM's

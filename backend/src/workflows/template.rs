@@ -1372,6 +1372,8 @@ mod tests {
             started_at: chrono::Utc::now(),
             duration_ms: 1,
             succeeded: true,
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
         }
     }
 

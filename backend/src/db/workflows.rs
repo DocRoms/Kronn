@@ -1879,6 +1879,31 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
     Ok(affected > 0)
 }
 
+/// Record the latest activity on the in-flight result at `step_index`.
+///
+/// Written beside the runner's own snapshots, so it lands only while that
+/// result is still the running `step_name`: once the runner stores the
+/// terminal result, a late write matches nothing. Returns whether it landed.
+pub fn set_in_flight_step_activity(
+    conn: &Connection,
+    run_id: &str,
+    step_index: usize,
+    step_name: &str,
+    activity: &AgentActivity,
+) -> Result<bool> {
+    let path = format!("$[{step_index}]");
+    let affected = conn.execute(
+        "UPDATE workflow_runs
+         SET step_results_json = json_set(step_results_json, ?3 || '.last_activity', json(?4))
+         WHERE id = ?1 AND status = 'Running'
+           AND json_valid(step_results_json)
+           AND json_extract(step_results_json, ?3 || '.status') = 'Running'
+           AND json_extract(step_results_json, ?3 || '.step_name') = ?2",
+        params![run_id, step_name, path, serde_json::to_string(activity)?],
+    )?;
+    Ok(affected > 0)
+}
+
 /// Delete a single run.
 pub fn delete_run(conn: &Connection, run_id: &str) -> Result<()> {
     conn.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;

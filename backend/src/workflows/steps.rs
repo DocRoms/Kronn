@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::{timeout, Duration};
 
+use crate::agents::activity::AgentActivitySink;
 use crate::agents::runner::{self, OutputMode, StreamJsonEvent};
 use crate::models::*;
 
@@ -27,6 +28,7 @@ struct AgentOutput {
     text: String,
     /// `None`: the runtime reported no usage for this run.
     tokens_used: Option<u64>,
+    prompt_cache: runner::PromptCacheUsage,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
 }
@@ -161,6 +163,7 @@ pub async fn execute_step(
     ctx: &TemplateContext,
     extra_context: &str,
     progress_tx: Option<ProgressSender>,
+    activity: Option<&AgentActivitySink>,
     // 2026-06-12 (run-9 finding) — the user's [agents.model_tiers] overrides
     // never reached workflow agent spawns: a step pinned to Reasoning ran on
     // the BUILT-IN fallback (opus) instead of the configured model (fable).
@@ -197,6 +200,9 @@ pub async fn execute_step(
                     child_run_id: None,
                     agent_provenance: Some(Box::default()),
                     native_tool_calls: Box::default(),
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 },
                 condition_action: None,
             };
@@ -290,6 +296,9 @@ pub async fn execute_step(
                     child_run_id: None,
                     agent_provenance: Some(Box::default()),
                     native_tool_calls: Box::default(),
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 },
                 condition_action: None,
             };
@@ -341,6 +350,9 @@ pub async fn execute_step(
                     child_run_id: None,
                     agent_provenance: Some(Box::default()),
                     native_tool_calls: Box::default(),
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 },
                 condition_action: None,
             };
@@ -388,6 +400,7 @@ pub async fn execute_step(
             ollama_context_overrides,
             native_tools.clone(),
             progress_tx.as_ref(),
+            activity,
             external_http.as_ref(),
             model_override.as_deref(),
             &mut provenance,
@@ -484,6 +497,7 @@ pub async fn execute_step(
                             ollama_context_overrides,
                             native_tools.clone(),
                             None,
+                            activity,
                             external_http.as_ref(),
                             model_override.as_deref(),
                             &mut provenance,
@@ -585,6 +599,7 @@ pub async fn execute_step(
                                 ollama_context_overrides,
                                 native_tools.clone(),
                                 None,
+                                activity,
                                 None,
                                 escalated_model.as_deref(),
                                 &mut provenance,
@@ -642,6 +657,8 @@ pub async fn execute_step(
                                     step.name,
                                     err_msg
                                 );
+                                let (cached_prompt_tokens, cache_write_prompt_tokens) =
+                                    provenance.prompt_cache_totals();
                                 return StepOutcome {
                                     result: StepResult {
                                         step_name: step.name.clone(),
@@ -664,6 +681,9 @@ pub async fn execute_step(
                                         child_run_id: None,
                                         agent_provenance: Some(Box::new(provenance)),
                                         native_tool_calls: native_tool_calls.into_boxed_slice(),
+                                        cached_prompt_tokens,
+                                        cache_write_prompt_tokens,
+                                        last_activity: None,
                                     },
                                     condition_action: None,
                                 };
@@ -687,6 +707,7 @@ pub async fn execute_step(
                         ollama_context_overrides,
                         native_tools.clone(),
                         progress_tx.as_ref(),
+                        activity,
                         external_http.as_ref(),
                         model_override.as_deref(),
                         resolved_connection.as_ref(),
@@ -780,6 +801,8 @@ pub async fn execute_step(
                     None
                 };
 
+                let (cached_prompt_tokens, cache_write_prompt_tokens) =
+                    provenance.prompt_cache_totals();
                 return StepOutcome {
                     result: StepResult {
                         step_name: step.name.clone(),
@@ -799,6 +822,9 @@ pub async fn execute_step(
                         child_run_id: None,
                         agent_provenance: Some(Box::new(provenance)),
                         native_tool_calls: native_tool_calls.into_boxed_slice(),
+                        cached_prompt_tokens,
+                        cache_write_prompt_tokens,
+                        last_activity: None,
                     },
                     condition_action,
                 };
@@ -844,6 +870,9 @@ pub async fn execute_step(
             child_run_id: None,
             agent_provenance: Some(Box::new(provenance)),
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -896,19 +925,8 @@ pub(crate) fn timeout_routing(
 /// Char-truncates at 120 to keep the live feed on one line; multi-byte
 /// codepoints at the cut are safe by construction.
 fn format_tool_input_suffix(raw_input: &str) -> String {
-    let detail = serde_json::from_str::<serde_json::Value>(raw_input)
-        .ok()
-        .and_then(|v| {
-            ["file_path", "path", "command", "pattern", "url"]
-                .iter()
-                .find_map(|k| v.get(*k).and_then(|s| s.as_str()).map(str::to_string))
-        });
-    match detail {
-        Some(d) if d.chars().count() > 120 => {
-            let truncated: String = d.chars().take(120).collect();
-            format!(" · {}…\n", truncated)
-        }
-        Some(d) => format!(" · {}\n", d),
+    match crate::agents::activity::tool_input_target(raw_input) {
+        Some(detail) => format!(" · {detail}\n"),
         None => "\n".into(),
     }
 }
@@ -1069,6 +1087,7 @@ async fn run_agent_with_timeout(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
+    activity: Option<&AgentActivitySink>,
     external_http: Option<&runner::ExternalHttpRuntime>,
     effective_model: Option<&str>,
     provenance: &mut WorkflowAgentProvenance,
@@ -1097,6 +1116,7 @@ async fn run_agent_with_timeout(
     let result = async {
         let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
             provenance: Some(capture.clone()),
+            activity: activity.cloned(),
             work_dir: Some(work_dir),
             full_access,
             skill_ids: &step.skill_ids,
@@ -1143,6 +1163,7 @@ async fn run_agent_with_timeout(
         drive_agent_to_output(
             agent_process,
             progress_tx,
+            activity,
             stall_timeout,
             &step.agent,
             &step.name,
@@ -1180,6 +1201,14 @@ async fn run_agent_with_timeout(
         started_at,
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         succeeded: result.is_ok(),
+        cached_prompt_tokens: result
+            .as_ref()
+            .ok()
+            .and_then(|output| output.prompt_cache.cached_prompt_tokens),
+        cache_write_prompt_tokens: result
+            .as_ref()
+            .ok()
+            .and_then(|output| output.prompt_cache.cache_write_prompt_tokens),
     });
     result.map(|mut output: AgentOutput| {
         output.attempt_id = id;
@@ -1221,6 +1250,7 @@ fn format_silent_exit_error(exit_desc: &str, killed_by_signal: bool, stdout: &st
 async fn drive_agent_to_output(
     mut process: impl runner::AgentIo,
     progress_tx: Option<&ProgressSender>,
+    activity: Option<&AgentActivitySink>,
     stall_timeout: Duration,
     agent: &AgentType,
     step_name: &str,
@@ -1228,6 +1258,7 @@ async fn drive_agent_to_output(
     let mut output = String::new();
     let is_stream_json = process.output_mode() == OutputMode::StreamJson;
     let mut stream_json_tokens: u64 = 0;
+    let mut stream_json_cache = runner::PromptCacheUsage::default();
     let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
     // Tool-call accumulator (see run_agent_with_timeout's doc): Claude Code's
     // stream-json emits tool input as partial JSON deltas; we buffer them and
@@ -1252,9 +1283,11 @@ async fn drive_agent_to_output(
                         StreamJsonEvent::Usage {
                             input_tokens,
                             output_tokens,
+                            prompt_cache,
                             ..
                         } => {
                             stream_json_tokens = input_tokens + output_tokens;
+                            stream_json_cache = prompt_cache;
                         }
                         StreamJsonEvent::TerminalError(failure) => {
                             stream_json_tokens = stream_json_tokens
@@ -1269,6 +1302,7 @@ async fn drive_agent_to_output(
                             if let Some(tx) = progress_tx {
                                 let _ = tx.send(format!("\n🔧 {}", name)).await;
                             }
+                            crate::agents::activity::tool_started(activity, &name);
                             current_tool = Some(name);
                             current_tool_input.clear();
                         }
@@ -1284,6 +1318,11 @@ async fn drive_agent_to_output(
                                     let _ = tx
                                         .send(format_tool_input_suffix(&current_tool_input))
                                         .await;
+                                }
+                                if let Some(target) =
+                                    crate::agents::activity::tool_input_target(&current_tool_input)
+                                {
+                                    crate::agents::activity::tool_target(activity, target);
                                 }
                             }
                             current_tool_input.clear();
@@ -1378,6 +1417,11 @@ async fn drive_agent_to_output(
     // 2. Structured transports (ACP): usage events reported by the runtime
     // 3. Codex/Kiro/etc: tokens parsed from stderr/stdout after execution
     // A model run is never free, so a zero from every source means unknown.
+    let prompt_cache = if stream_json_tokens > 0 {
+        stream_json_cache
+    } else {
+        process.reported_prompt_cache()
+    };
     let tokens_used = if stream_json_tokens > 0 {
         Some(stream_json_tokens)
     } else if let Some(reported) = process.reported_token_usage() {
@@ -1403,6 +1447,7 @@ async fn drive_agent_to_output(
         attempt_id: 0, // Assigned by the launch recorder, outside the IO loop.
         text: output,
         tokens_used,
+        prompt_cache,
         native_tool_calls,
         runtime_notices: stderr_lines
             .into_iter()
@@ -1469,6 +1514,7 @@ async fn run_multi_agent_debate(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
+    activity: Option<&AgentActivitySink>,
     // The step's own connection. It applies to the AUTHOR, which runs on the
     // step's agent — never to the reviewer, which runs on its own.
     external_http: Option<&runner::ExternalHttpRuntime>,
@@ -1564,6 +1610,7 @@ async fn run_multi_agent_debate(
             ollama_context_overrides,
             native_tools.clone(),
             progress_tx,
+            activity,
             // Only when it is the same agent: a reviewer on a DIFFERENT agent
             // has no connection of its own to name yet, and handing it this
             // one would point it at an endpoint that does not serve it.
@@ -1631,6 +1678,7 @@ async fn run_multi_agent_debate(
             ollama_context_overrides,
             native_tools.clone(),
             progress_tx,
+            activity,
             external_http,
             author_model,
             provenance,
@@ -1739,6 +1787,9 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             child_run_id: None,
             agent_provenance: Some(Box::default()),
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     })
@@ -2560,9 +2611,10 @@ mod drive_agent_to_output_tests {
     async fn structured_output_notice_survives_collection_and_replaced_answer() {
         let notice = "[structured-output fallback: Ollama rejected constrained JSON]";
         let process = ScriptedProcess::raw(["initial invalid answer"]).with_stderr([notice]);
-        let collected = drive_agent_to_output(process, None, LONG, &AgentType::Ollama, "advise")
-            .await
-            .expect("successful collection");
+        let collected =
+            drive_agent_to_output(process, None, None, LONG, &AgentType::Ollama, "advise")
+                .await
+                .expect("successful collection");
         assert_eq!(collected.runtime_notices, [notice]);
         let repaired = r#"{"data":{"ok":true},"status":"OK"}"#;
         let recorded = super::with_runtime_notices(repaired.into(), &collected.runtime_notices);
@@ -2606,7 +2658,7 @@ mod drive_agent_to_output_tests {
             usage(100, 50),
             text_delta("world"),
         ]);
-        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "step1")
+        let out = drive_agent_to_output(proc, None, None, LONG, &AgentType::ClaudeCode, "step1")
             .await
             .expect("clean exit");
         assert_eq!(out.text, "Hello world");
@@ -2617,10 +2669,62 @@ mod drive_agent_to_output_tests {
         );
     }
 
+    /// KT-795 — the direct `--print` route: the cache counts of the final
+    /// `result` and the latest tool call reach the step, `tokens_used` unchanged.
+    #[tokio::test]
+    async fn stream_json_reports_cache_usage_and_the_latest_tool_call() {
+        let proc = ScriptedProcess::stream_json([
+            tool_start("Grep"),
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"pattern\":\"StepProgress\"}"}}}"#.to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_stop"}}"#.to_string(),
+            text_delta("done"),
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}"#.to_string(),
+        ]);
+        let (activity, activity_rx) = tokio::sync::watch::channel(None);
+        let out = drive_agent_to_output(
+            proc,
+            None,
+            Some(&activity),
+            LONG,
+            &AgentType::ClaudeCode,
+            "orchestrateur",
+        )
+        .await
+        .expect("clean exit");
+        assert_eq!(out.tokens_used, Some(48 + 21_545));
+        assert_eq!(
+            out.prompt_cache,
+            crate::agents::runner::PromptCacheUsage {
+                cached_prompt_tokens: Some(1_554_330),
+                cache_write_prompt_tokens: Some(80_271),
+            }
+        );
+        let latest = activity_rx.borrow().clone().expect("tool call recorded");
+        assert_eq!(
+            (latest.tool.as_str(), latest.target.as_deref()),
+            ("Grep", Some("StepProgress"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_acp_process_hands_its_reported_cache_usage_to_the_step() {
+        let cache = crate::agents::runner::PromptCacheUsage {
+            cached_prompt_tokens: Some(7),
+            cache_write_prompt_tokens: None,
+        };
+        let proc = ScriptedProcess::raw(["answer"])
+            .with_reported_usage(12)
+            .with_reported_prompt_cache(cache);
+        let out = drive_agent_to_output(proc, None, None, LONG, &AgentType::ClaudeCode, "acp")
+            .await
+            .expect("clean exit");
+        assert_eq!((out.tokens_used, out.prompt_cache), (Some(12), cache));
+    }
+
     #[tokio::test]
     async fn raw_mode_joins_lines() {
         let proc = ScriptedProcess::raw(["first", "second"]);
-        let out = drive_agent_to_output(proc, None, LONG, &AgentType::Vibe, "step-raw")
+        let out = drive_agent_to_output(proc, None, None, LONG, &AgentType::Vibe, "step-raw")
             .await
             .expect("clean exit");
         assert!(out.text.contains("first"));
@@ -2633,7 +2737,7 @@ mod drive_agent_to_output_tests {
         // the workflow run view shows a sign of life during tool loops.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
         let proc = ScriptedProcess::stream_json([text_delta("thinking"), tool_start("Edit")]);
-        let out = drive_agent_to_output(proc, Some(&tx), LONG, &AgentType::ClaudeCode, "s")
+        let out = drive_agent_to_output(proc, Some(&tx), None, LONG, &AgentType::ClaudeCode, "s")
             .await
             .expect("clean exit");
         drop(tx);
@@ -2657,7 +2761,7 @@ mod drive_agent_to_output_tests {
         let proc = ScriptedProcess::stream_json(Vec::<String>::new())
             .with_exit(false, Some(1))
             .with_stderr(["Error: rate limit reached", "retry later"]);
-        let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "boom")
+        let err = drive_agent_to_output(proc, None, None, LONG, &AgentType::ClaudeCode, "boom")
             .await
             .expect_err("non-zero exit must bail");
         let msg = err.to_string();
@@ -2672,9 +2776,16 @@ mod drive_agent_to_output_tests {
     async fn failed_fable_result_bails_with_structured_stdout_cause() {
         let fable_429 = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"You've hit your org's monthly spend limit · run /usage-credits to manage your plan.","api_error_status":429,"terminal_reason":"api_error","cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
         let proc = ScriptedProcess::stream_json([fable_429]).with_exit(false, Some(1));
-        let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "fable-quota")
-            .await
-            .expect_err("structured provider error must fail the step");
+        let err = drive_agent_to_output(
+            proc,
+            None,
+            None,
+            LONG,
+            &AgentType::ClaudeCode,
+            "fable-quota",
+        )
+        .await
+        .expect_err("structured provider error must fail the step");
         let msg = err.to_string();
         assert!(msg.contains("monthly spend limit"), "got: {msg}");
         assert!(msg.contains("HTTP 429"), "got: {msg}");
@@ -2684,7 +2795,7 @@ mod drive_agent_to_output_tests {
     #[tokio::test]
     async fn failed_exit_no_stderr_gives_actionable_message() {
         let proc = ScriptedProcess::stream_json(Vec::<String>::new()).with_exit(false, Some(137)); // SIGKILL-ish, no stderr
-        let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "killed")
+        let err = drive_agent_to_output(proc, None, None, LONG, &AgentType::ClaudeCode, "killed")
             .await
             .expect_err("non-zero exit must bail");
         let msg = err.to_string();
@@ -2697,7 +2808,7 @@ mod drive_agent_to_output_tests {
     #[tokio::test]
     async fn clean_exit_empty_output_is_ok() {
         let proc = ScriptedProcess::stream_json(Vec::<String>::new());
-        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "empty")
+        let out = drive_agent_to_output(proc, None, None, LONG, &AgentType::ClaudeCode, "empty")
             .await
             .expect("clean empty exit is ok");
         assert_eq!(out.text, "");
@@ -2710,9 +2821,16 @@ mod drive_agent_to_output_tests {
     #[tokio::test]
     async fn acp_reported_usage_reaches_the_step_output() {
         let proc = ScriptedProcess::raw(["orchestrated"]).with_reported_usage(48_213);
-        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "orchestrate")
-            .await
-            .expect("clean exit");
+        let out = drive_agent_to_output(
+            proc,
+            None,
+            None,
+            LONG,
+            &AgentType::ClaudeCode,
+            "orchestrate",
+        )
+        .await
+        .expect("clean exit");
         assert_eq!(out.text, "orchestrated");
         assert_eq!(out.tokens_used, Some(48_213));
     }
@@ -2720,9 +2838,16 @@ mod drive_agent_to_output_tests {
     #[tokio::test]
     async fn acp_run_without_reported_usage_is_unknown_not_zero() {
         let proc = ScriptedProcess::raw(["orchestrated"]);
-        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "orchestrate")
-            .await
-            .expect("clean exit");
+        let out = drive_agent_to_output(
+            proc,
+            None,
+            None,
+            LONG,
+            &AgentType::ClaudeCode,
+            "orchestrate",
+        )
+        .await
+        .expect("clean exit");
         assert_eq!(out.tokens_used, None);
     }
 
@@ -2893,6 +3018,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             None,
+            None,
             Some(&db),
         )
         .await;
@@ -2948,6 +3074,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             None,
+            None,
             Some(&db),
         )
         .await;
@@ -2995,6 +3122,7 @@ mod http_native_tool_step_tests {
             false,
             &TemplateContext::new(),
             "",
+            None,
             None,
             None,
             Some(&endpoints),
@@ -3045,6 +3173,7 @@ mod http_native_tool_step_tests {
             false,
             &TemplateContext::new(),
             "",
+            None,
             None,
             None,
             Some(&endpoints),
@@ -3121,6 +3250,7 @@ mod http_native_tool_step_tests {
             false,
             &TemplateContext::new(),
             "",
+            None,
             None,
             None,
             Some(&crate::models::setup::HttpEndpoints {
@@ -3213,6 +3343,7 @@ mod http_native_tool_step_tests {
             false,
             &TemplateContext::new(),
             "",
+            None,
             None,
             None,
             None,

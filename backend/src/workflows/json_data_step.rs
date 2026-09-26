@@ -100,6 +100,9 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -138,6 +141,9 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }

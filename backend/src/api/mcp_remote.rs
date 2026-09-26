@@ -202,6 +202,9 @@ pub struct McpRunStatusResponse {
     pub finished_at: Option<chrono::DateTime<Utc>>,
     pub elapsed_ms: u64,
     pub current_step: Option<String>,
+    /// Latest tool call of the step in progress, when its runtime reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_activity: Option<AgentActivity>,
     pub step_count: u32,
     pub tokens_used: u64,
     pub steps: Vec<StepResultSummary>,
@@ -308,13 +311,12 @@ pub async fn workflow_run_status(
         ))
     };
 
-    let current_step = run.step_results.last().and_then(|s| {
-        if matches!(s.status, RunStatus::Running | RunStatus::Pending) {
-            Some(s.step_name.clone())
-        } else {
-            None
-        }
-    });
+    let in_flight = run
+        .step_results
+        .last()
+        .filter(|s| matches!(s.status, RunStatus::Running | RunStatus::Pending));
+    let current_step = in_flight.map(|s| s.step_name.clone());
+    let current_activity = in_flight.and_then(|s| s.last_activity.clone());
 
     let steps: Vec<StepResultSummary> = run
         .step_results
@@ -344,6 +346,7 @@ pub async fn workflow_run_status(
         finished_at: run.finished_at,
         elapsed_ms,
         current_step,
+        current_activity,
         step_count,
         tokens_used: run.tokens_used,
         steps,
@@ -1199,6 +1202,9 @@ mod tests {
             child_run_id: None,
                     agent_provenance: None,
                     native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         }
     }
 

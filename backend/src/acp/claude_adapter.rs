@@ -83,7 +83,7 @@ impl ClaudeAcpAdapter {
 
     /// Test-only: drive a fixture script instead of the real `claude` binary.
     #[cfg(test)]
-    fn new_with_program(
+    pub(crate) fn new_with_program(
         program: impl Into<String>,
         model: Option<String>,
         full_access: bool,
@@ -327,6 +327,8 @@ impl AcpTransport for ClaudeAcpAdapter {
 
         let mut lines = BufReader::new(stdout).lines();
         let mut failure: Option<String> = None;
+        // Input of the tool call in progress, streamed as partial JSON.
+        let mut tool_input: Option<String> = None;
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
@@ -340,26 +342,39 @@ impl AcpTransport for ClaudeAcpAdapter {
                         StreamJsonEvent::Usage {
                             input_tokens,
                             output_tokens,
+                            prompt_cache,
                             ..
                         } => {
                             let _ = events
                                 .send(AcpSessionEvent::Usage {
                                     input_tokens,
                                     output_tokens,
+                                    prompt_cache,
                                 })
                                 .await;
                         }
                         StreamJsonEvent::ToolStart(name) => {
+                            tool_input = Some(String::new());
                             let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
+                        }
+                        StreamJsonEvent::ToolInputDelta(partial) => {
+                            if let Some(input) = tool_input.as_mut() {
+                                input.push_str(&partial);
+                            }
+                        }
+                        StreamJsonEvent::ToolEnd => {
+                            let target = tool_input.take().and_then(|input| {
+                                crate::agents::activity::tool_input_target(&input)
+                            });
+                            if let Some(target) = target {
+                                let _ = events.send(AcpSessionEvent::ToolTarget(target)).await;
+                            }
                         }
                         StreamJsonEvent::TerminalError(terminal_failure) => {
                             failure = Some(terminal_failure.user_message());
                         }
                         // The adapter carries its own ACP session identity.
-                        StreamJsonEvent::ToolInputDelta(_)
-                        | StreamJsonEvent::ToolEnd
-                        | StreamJsonEvent::SessionId(_)
-                        | StreamJsonEvent::Skip => {}
+                        StreamJsonEvent::SessionId(_) | StreamJsonEvent::Skip => {}
                     }
                 }
                 Ok(None) => break,
@@ -493,6 +508,55 @@ mod tests {
             .unwrap_or_else(|error| panic!("second prompt failed: {error}"));
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("resumed".into())));
+    }
+
+    /// KT-795 — cache counts and the completed tool input reach the ACP events.
+    #[tokio::test]
+    async fn prompt_reports_cache_usage_and_the_completed_tool_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+        );
+        let adapter = std::sync::Arc::new(ClaudeAcpAdapter::new_with_program(
+            fixture.to_string_lossy(),
+            None,
+            false,
+        ));
+        let mut host = AcpHost::new(1, adapter);
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        host.prompt(&target, "orchestrate", tx).await.unwrap();
+        let events = drain(rx).await;
+
+        let tool_call = events
+            .iter()
+            .position(|event| {
+                *event
+                    == AcpSessionEvent::ToolCall {
+                        name: "Read".into(),
+                    }
+            })
+            .expect("tool call reported");
+        let tool_target = events
+            .iter()
+            .position(|event| *event == AcpSessionEvent::ToolTarget("src/lib.rs".into()))
+            .expect("tool target reported");
+        assert!(tool_call < tool_target, "{events:?}");
+        assert!(events.contains(&AcpSessionEvent::Usage {
+            input_tokens: 48,
+            output_tokens: 21_545,
+            prompt_cache: crate::agents::runner::PromptCacheUsage {
+                cached_prompt_tokens: Some(1_554_330),
+                cache_write_prompt_tokens: Some(80_271),
+            },
+        }));
+        assert!(events.contains(&AcpSessionEvent::ModelObserved(
+            "claude-opus-5-5-20260915".into()
+        )));
     }
 
     #[tokio::test]

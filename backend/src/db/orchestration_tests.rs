@@ -726,7 +726,8 @@ fn reassignment_preserves_git_and_records_provider_separately_from_identity() {
     .unwrap();
     conn.execute(
         "UPDATE task_executions SET candidate_target_sha = 'target-sha', \
-                candidate_merge_sha = 'merge-sha', integrated_sha = NULL WHERE id = ?1",
+                candidate_merge_sha = 'merge-sha', integrated_sha = NULL, \
+                worker_served_model = 'previous-worker-model' WHERE id = ?1",
         [&execution.id],
     )
     .unwrap();
@@ -754,6 +755,11 @@ fn reassignment_preserves_git_and_records_provider_separately_from_identity() {
     );
     assert_eq!(reassigned.worker_agent_type.as_deref(), Some("ClaudeCode"));
     assert_eq!(reassigned.worker_model.as_deref(), Some("claude-reasoning"));
+    assert_eq!(
+        get_worker_served_model(&conn, &execution.id).unwrap(),
+        None,
+        "the new worker has served nothing yet"
+    );
     let (provider, identity, generation): (String, String, i64) = conn
         .query_row(
             "SELECT worker_agent_type, worker_target_kind, generation \

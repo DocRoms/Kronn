@@ -1496,6 +1496,8 @@ pub enum StreamJsonEvent {
         input_tokens: u64,
         output_tokens: u64,
         cost_usd: Option<f64>,
+        /// Anthropic counts cache reads and writes apart from `input_tokens`.
+        prompt_cache: PromptCacheUsage,
     },
     /// A terminal provider/CLI failure carried by Claude Code's final
     /// `result` event. Claude may write nothing to stderr and still exit 1,
@@ -1597,6 +1599,29 @@ pub struct AgentProcess {
 struct AgentUsage {
     input_tokens: u64,
     output_tokens: u64,
+    prompt_cache: PromptCacheUsage,
+}
+
+/// Prompt-cache tokens a runtime reported beside its input and output.
+/// `None` means not reported, never zero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PromptCacheUsage {
+    pub cached_prompt_tokens: Option<u64>,
+    pub cache_write_prompt_tokens: Option<u64>,
+}
+
+impl PromptCacheUsage {
+    /// Read Anthropic's `cache_read_input_tokens` / `cache_creation_input_tokens`.
+    pub fn from_anthropic_usage(usage: &serde_json::Value) -> Self {
+        Self {
+            cached_prompt_tokens: usage
+                .get("cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            cache_write_prompt_tokens: usage
+                .get("cache_creation_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+        }
+    }
 }
 
 impl AgentProcess {
@@ -1646,6 +1671,10 @@ impl AgentProcess {
         let usage = *self.usage.lock().unwrap();
         let total = usage.input_tokens.saturating_add(usage.output_tokens);
         (total > 0).then_some(total)
+    }
+
+    pub fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        self.usage.lock().unwrap().prompt_cache
     }
 
     /// Fix file ownership after agent execution.
@@ -1758,6 +1787,10 @@ pub trait AgentIo: Send {
     fn reported_token_usage(&self) -> Option<u64> {
         None
     }
+    /// Prompt-cache usage reported by a structured transport, if any.
+    fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        PromptCacheUsage::default()
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -1787,6 +1820,9 @@ impl AgentIo for AgentProcess {
     }
     fn reported_token_usage(&self) -> Option<u64> {
         AgentProcess::reported_token_usage(self)
+    }
+    fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        AgentProcess::reported_prompt_cache(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -2020,6 +2056,7 @@ pub struct ScriptedProcess {
     hangs_forever: bool,
     /// Usage a structured transport (ACP) would report for the run.
     reported_usage: Option<u64>,
+    reported_prompt_cache: PromptCacheUsage,
 }
 
 #[cfg(test)]
@@ -2037,6 +2074,7 @@ impl ScriptedProcess {
             stderr: Vec::new(),
             hangs_forever: false,
             reported_usage: None,
+            reported_prompt_cache: PromptCacheUsage::default(),
         }
     }
 
@@ -2053,6 +2091,7 @@ impl ScriptedProcess {
             stderr: Vec::new(),
             hangs_forever: false,
             reported_usage: None,
+            reported_prompt_cache: PromptCacheUsage::default(),
         }
     }
 
@@ -2071,6 +2110,11 @@ impl ScriptedProcess {
     /// Simulate usage reported by a structured transport such as ACP.
     pub fn with_reported_usage(mut self, tokens: u64) -> Self {
         self.reported_usage = Some(tokens);
+        self
+    }
+
+    pub fn with_reported_prompt_cache(mut self, prompt_cache: PromptCacheUsage) -> Self {
+        self.reported_prompt_cache = prompt_cache;
         self
     }
 
@@ -2101,6 +2145,9 @@ impl AgentIo for ScriptedProcess {
     }
     fn reported_token_usage(&self) -> Option<u64> {
         self.reported_usage
+    }
+    fn reported_prompt_cache(&self) -> PromptCacheUsage {
+        self.reported_prompt_cache
     }
     async fn kill(&mut self) {
         self.killed = true;
@@ -2464,6 +2511,9 @@ pub struct AgentStartConfig<'a> {
     pub agent_type: &'a AgentType,
     /// Optional caller-owned capture survives spawn/provider failures.
     pub provenance: Option<AgentProvenanceCapture>,
+    /// Receives each tool call the ACP transport reports. The stream-json
+    /// consumer reports its own calls, since only it parses them.
+    pub activity: Option<super::activity::AgentActivitySink>,
     /// Used to read .mcp.json and resolve MCP context.
     pub project_path: &'a str,
     /// Working directory for the agent. If `None`, defaults to `project_path`.
@@ -2602,6 +2652,7 @@ impl<'a> AgentStartConfig<'a> {
         Self {
             agent_type,
             provenance: None,
+            activity: None,
             project_path,
             prompt,
             tokens,
@@ -3538,9 +3589,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 session_store: config.acp_session_store.clone(),
                 fallback_prompt: config.native_acp_full_prompt,
                 provenance: config.provenance.clone(),
+                activity: config.activity.clone(),
             };
             #[cfg(test)]
-            if let Some(transport) = config.test_acp_transport.clone() {
+            if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(request, transport).await;
             }
             return start_native_acp(request, config.full_access).await;
@@ -3565,9 +3617,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 session_store: config.acp_session_store.clone(),
                 fallback_prompt: config.native_acp_full_prompt,
                 provenance: config.provenance.clone(),
+                activity: config.activity.clone(),
             };
             #[cfg(test)]
-            if let Some(transport) = config.test_acp_transport.clone() {
+            if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(
                     AcpSessionRequest {
                         model_flag: None,
@@ -3923,6 +3976,7 @@ struct AcpSessionRequest<'a> {
     session_store: Option<AcpSessionStore>,
     fallback_prompt: Option<&'a str>,
     provenance: Option<AgentProvenanceCapture>,
+    activity: Option<super::activity::AgentActivitySink>,
 }
 
 async fn start_native_acp(
@@ -4017,6 +4071,50 @@ async fn start_adapted_acp(
     .await
 }
 
+/// Test-only routing of every ACP launch in one working directory to a
+/// fixture transport, so tests can drive callers that build their own
+/// `AgentStartConfig` (workflow steps, discussion turns).
+#[cfg(test)]
+pub(crate) mod test_acp_routes {
+    use super::AgentStartConfig;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    type Transport = Arc<dyn crate::acp::AcpTransport>;
+
+    static ROUTES: LazyLock<Mutex<HashMap<PathBuf, Transport>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Removes the route when dropped.
+    pub(crate) struct RouteGuard(PathBuf);
+
+    impl Drop for RouteGuard {
+        fn drop(&mut self) {
+            ROUTES.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    /// `work_dir` must be the directory the runner resolves for the launch.
+    pub(crate) fn route(work_dir: &Path, transport: Transport) -> RouteGuard {
+        ROUTES
+            .lock()
+            .unwrap()
+            .insert(work_dir.to_path_buf(), transport);
+        RouteGuard(work_dir.to_path_buf())
+    }
+
+    pub(super) fn transport_for(
+        config: &AgentStartConfig<'_>,
+        work_dir: &Path,
+    ) -> Option<Transport> {
+        config
+            .test_acp_transport
+            .clone()
+            .or_else(|| ROUTES.lock().unwrap().get(work_dir).cloned())
+    }
+}
+
 /// Shared session-run core behind `AcpHost`, common to every ACP transport
 /// (native JSON-RPC and the Codex/Claude adapters alike): negotiate, scope
 /// the project MCP registry, create the session, apply a resolved model when
@@ -4045,6 +4143,7 @@ async fn run_acp_session(
         session_store,
         fallback_prompt,
         provenance,
+        activity,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4252,14 +4351,20 @@ async fn run_acp_session(
                         if let Ok(mut capture) = forwarder_stderr.lock() {
                             capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
+                        super::activity::tool_started(activity.as_ref(), &name);
+                    }
+                    AcpSessionEvent::ToolTarget(target) => {
+                        super::activity::tool_target(activity.as_ref(), target);
                     }
                     AcpSessionEvent::Usage {
                         input_tokens,
                         output_tokens,
+                        prompt_cache,
                     } => {
                         *task_usage.lock().unwrap() = AgentUsage {
                             input_tokens,
                             output_tokens,
+                            prompt_cache,
                         };
                     }
                     AcpSessionEvent::NativeSessionId(conversation_id) => {
@@ -11165,6 +11270,7 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
                             input_tokens: input,
                             output_tokens: output,
                             cost_usd: None,
+                            prompt_cache: PromptCacheUsage::from_anthropic_usage(usage),
                         };
                     }
                 }
@@ -11243,11 +11349,12 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
                     cost_usd: cost,
                 });
             }
-            if json.get("usage").is_some() && (input > 0 || output > 0) {
+            if let Some(usage) = json.get("usage").filter(|_| input > 0 || output > 0) {
                 return StreamJsonEvent::Usage {
                     input_tokens: input,
                     output_tokens: output,
                     cost_usd: cost,
+                    prompt_cache: PromptCacheUsage::from_anthropic_usage(usage),
                 };
             }
             StreamJsonEvent::Skip
@@ -11693,6 +11800,7 @@ mod acp_resume_tests {
                         .send(AcpSessionEvent::Usage {
                             input_tokens: 3,
                             output_tokens: 5,
+                            prompt_cache: Default::default(),
                         })
                         .await
                         .unwrap();
@@ -11761,6 +11869,7 @@ mod acp_resume_tests {
                 session_store,
                 fallback_prompt,
                 provenance: None,
+                activity: None,
             },
             transport,
         )
@@ -12104,6 +12213,7 @@ mod acp_resume_tests {
                     session_store: None,
                     fallback_prompt: Some("complete history"),
                     provenance: None,
+                    activity: None,
                 },
                 transport.clone(),
             )

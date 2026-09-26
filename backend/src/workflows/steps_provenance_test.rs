@@ -72,6 +72,7 @@ async fn run(step: &WorkflowStep, replies: Vec<(u16, serde_json::Value)>) -> Ste
         &TemplateContext::new(),
         "",
         None,
+        None,
         Some(&tiers),
         Some(&crate::models::setup::HttpEndpoints {
             lite_llm: Some(server.uri()),
@@ -320,6 +321,8 @@ fn provenance_snapshot_keeps_escalation_after_config_changes_and_unknown_acp_def
             started_at: chrono::Utc::now(),
             duration_ms: 20,
             succeeded: true,
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
         }],
     }));
     let mut step = step();
@@ -406,4 +409,129 @@ async fn provenance_retains_failed_retry_before_the_successful_launch() {
             .collect::<Vec<_>>(),
         [(1, false), (2, true)]
     );
+}
+
+/// KT-795 — a Claude Code step on the production adapter route reports cache
+/// reads and writes beside `tokens_used`.
+#[tokio::test]
+async fn a_claude_code_step_reports_its_cache_reads_and_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_string_lossy().into_owned();
+    let fixture = crate::acp::test_support::write_fixture_script(
+        dir.path(),
+        crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+    );
+    let work_dir = crate::agents::runner::resolve_agent_work_dir(Some(&project), &project).unwrap();
+    let _route = crate::agents::runner::test_acp_routes::route(
+        &work_dir,
+        std::sync::Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+            fixture.to_string_lossy(),
+            None,
+            false,
+        )),
+    );
+    let step = WorkflowStep {
+        name: "orchestrateur".into(),
+        step_type: StepType::Agent,
+        agent: AgentType::ClaudeCode,
+        prompt_template: "Orchestrate".into(),
+        ..WorkflowStep::default()
+    };
+    let tokens = TokensConfig {
+        anthropic: None,
+        openai: None,
+        google: None,
+        keys: vec![],
+        disabled_overrides: vec![],
+    };
+    let (activity, activity_rx) = tokio::sync::watch::channel(None);
+    let mut result = execute_step(
+        &step,
+        &project,
+        &project,
+        &tokens,
+        false,
+        &TemplateContext::new(),
+        "",
+        None,
+        Some(&activity),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .result;
+    super::super::runner::apply_step_snapshot(&step, &mut result, None);
+
+    assert_eq!(result.status, RunStatus::Success, "{}", result.output);
+    assert_eq!(
+        result.tokens_used,
+        Some(48 + 21_545),
+        "the total keeps its meaning"
+    );
+    assert_eq!(result.cached_prompt_tokens, Some(1_554_330));
+    assert_eq!(result.cache_write_prompt_tokens, Some(80_271));
+    let attempt = &result.agent_provenance.as_ref().unwrap().attempts[0];
+    assert_eq!(
+        (
+            attempt.cached_prompt_tokens,
+            attempt.cache_write_prompt_tokens
+        ),
+        (Some(1_554_330), Some(80_271))
+    );
+    assert_eq!(
+        result.step_model.as_deref(),
+        Some("claude-opus-5-5-20260915")
+    );
+    let latest = activity_rx.borrow().clone().expect("tool call recorded");
+    assert_eq!(
+        (latest.tool.as_str(), latest.target.as_deref()),
+        ("Read", Some("src/lib.rs"))
+    );
+
+    let persisted: serde_json::Value = serde_json::to_value(&result).unwrap();
+    assert_eq!(persisted["cached_prompt_tokens"], 1_554_330);
+    assert_eq!(persisted["cache_write_prompt_tokens"], 80_271);
+    assert!(
+        persisted.get("last_activity").is_none(),
+        "a finished step has none"
+    );
+}
+
+#[test]
+fn step_cache_totals_sum_reporting_attempts_and_stay_unknown_otherwise() {
+    let attempt = |read: Option<u64>, write: Option<u64>| WorkflowAgentAttempt {
+        id: 1,
+        role: WorkflowAgentAttemptRole::Initial,
+        retry: 1,
+        agent: AgentType::ClaudeCode,
+        tier: ModelTier::Default,
+        connection_id: None,
+        requested_model: None,
+        resolved_model: None,
+        model_applied: None,
+        observed_models: vec![],
+        format_fallback: false,
+        started_at: chrono::Utc::now(),
+        duration_ms: 1,
+        succeeded: true,
+        cached_prompt_tokens: read,
+        cache_write_prompt_tokens: write,
+    };
+    let mut provenance = WorkflowAgentProvenance::default();
+    assert_eq!(provenance.prompt_cache_totals(), (None, None));
+    provenance.attempts = vec![attempt(None, None)];
+    assert_eq!(
+        provenance.prompt_cache_totals(),
+        (None, None),
+        "unreported is not zero"
+    );
+    provenance.attempts = vec![
+        attempt(Some(10), None),
+        attempt(Some(0), Some(4)),
+        attempt(None, None),
+    ];
+    assert_eq!(provenance.prompt_cache_totals(), (Some(10), Some(4)));
 }

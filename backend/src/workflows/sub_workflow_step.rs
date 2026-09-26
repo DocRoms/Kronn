@@ -274,6 +274,9 @@ pub async fn execute_sub_workflow_step(
             child_run_id: Some(child_run.id.clone()),
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -958,6 +961,9 @@ async fn execute_foreach(
             child_run_id: last_child_id,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -1010,6 +1016,9 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }

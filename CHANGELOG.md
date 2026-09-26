@@ -22,6 +22,15 @@ Release notes for 0.9.3 and earlier are available in the
   as the execution is in one of them, with `wait: {matched, timed_out,
   waited_ms}`, instead of the principal sleeping and re-reading. `timeout_secs`
   bounds it (60 s by default, 170 s at most).
+- A workflow Agent step records the prompt-cache tokens Claude Code reports
+  beside its input and output: `cached_prompt_tokens` (reads) and
+  `cache_write_prompt_tokens` (writes), on the step result and on each attempt.
+  `tokens_used` keeps counting uncached input plus output; an orchestrator step
+  that declared 21 593 tokens had also read 1 554 330 cached tokens and written
+  80 271. While an Agent step runs, its latest tool call (tool, target, time) is
+  stored on the in-flight step result as `last_activity` and returned by
+  `workflow_run_status` as `current_activity`, so every reader sees what the
+  step is doing, not only the client that started the run.
 - A room's native agent can prepare and launch a task execution itself, as
   its principal, without a CLI joining the room. Kronn identifies it from the
   turn it is running, so only that room's agent is accepted.
@@ -100,6 +109,10 @@ Release notes for 0.9.3 and earlier are available in the
   id (`data-kronn-action-launch`), so a Page tells a new attempt from the
   previous one. A field's placeholder reads as an example (`e.g. ollama`)
   instead of passing for the value an empty field would send.
+- An accepted delivery from a Claude Code worker names the model its runtime
+  reported serving (from the `assistant` event of its stream) instead of
+  "Model unknown". A requested model is shown only when none was reported, and
+  reassigning the worker clears the previous one (migration 192).
 - A restart in the middle of a task execution's integration no longer keeps the
   backend from answering while the interrupted validations are replayed, which
   could outlast the 300 health probes `kronn start-dev` waits for. Boot still

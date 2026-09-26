@@ -57,6 +57,16 @@ scope: HostScope,
  */
 name: string, };
 
+/**
+ * The latest tool call an agent started, as its runtime reported it.
+ */
+export type AgentActivity = { tool: string,
+/**
+ * The call's most informative input (file, command, pattern or URL),
+ * truncated. `None` until the input is complete or when it has none.
+ */
+target?: string | null, at: string, };
+
 export type AgentApiCallRequest = {
 /**
  * `KRONN_DISCUSSION_ID` of the disc making the call, when the
@@ -6434,7 +6444,21 @@ agent_provenance?: WorkflowAgentProvenance | null,
  * LiteLLM). Only tool name + outcome are persisted; arguments/results
  * stay in the provider round-trip and can never leak into run history.
  */
-native_tool_calls?: Array<NativeToolCallLog>, };
+native_tool_calls?: Array<NativeToolCallLog>,
+/**
+ * Prompt-cache reads of this step's agent attempts. `tokens_used` counts
+ * only uncached input and output, so this is additional. `None` when not reported.
+ */
+cached_prompt_tokens?: number | null,
+/**
+ * Prompt-cache writes of this step's agent attempts. `None` when not reported.
+ */
+cache_write_prompt_tokens?: number | null,
+/**
+ * Latest tool call of an Agent step while it runs. The terminal result
+ * replaces the in-flight row, so it survives only an interrupted step.
+ */
+last_activity?: AgentActivity | null, };
 
 export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" };
 
@@ -7440,7 +7464,16 @@ model_applied: boolean | null,
  * Distinct model identifiers reported by structured runtime responses.
  * Empty means unreported; never inferred from generated prose or config.
  */
-observed_models: Array<string>, format_fallback: boolean, started_at: string, duration_ms: number, succeeded: boolean, };
+observed_models: Array<string>, format_fallback: boolean, started_at: string, duration_ms: number, succeeded: boolean,
+/**
+ * Prompt tokens read from the provider's prompt cache, on top of the
+ * uncached input counted in `tokens_used`. `None` when not reported.
+ */
+cached_prompt_tokens?: number | null,
+/**
+ * Prompt tokens written to the provider's prompt cache. `None` when not reported.
+ */
+cache_write_prompt_tokens?: number | null, };
 
 export type WorkflowAgentAttemptRole = "Initial" | "Repair" | "Escalation" | "Review" | "Author";
 

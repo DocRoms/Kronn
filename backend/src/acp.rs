@@ -44,6 +44,21 @@ pub(crate) mod test_support {
     /// substrings it cares about, exactly like a real shell script would.
     /// The fixture executes on POSIX hosts; its helper must also compile for
     /// Windows, where the portability gate builds the complete test library.
+    /// A Claude Code `stream-json` turn shaped like a real one: the served
+    /// model on the assistant event, one `Read` call, a reply, and a `result`
+    /// whose usage counts cache reads and writes apart from `input_tokens`.
+    pub(crate) const CLAUDE_TURN_WITH_CACHE: &str = r#"
+cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture-session","model":"claude-opus-5-5"}'
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5-5-20260915","content":[]}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"src/lib.rs\"}"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"orchestrated"}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}'
+"#;
+
     pub(crate) fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fixture-cli");
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fixture script");
@@ -356,9 +371,12 @@ pub enum AcpSessionEvent {
     ToolCall {
         name: String,
     },
+    /// The informative input of the latest `ToolCall`, once that input is complete.
+    ToolTarget(String),
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        prompt_cache: crate::agents::runner::PromptCacheUsage,
     },
     Completed,
 }
@@ -924,6 +942,7 @@ fn usage_from_prompt_result(result: &Value) -> Option<AcpSessionEvent> {
     (input_tokens > 0 || output_tokens > 0).then_some(AcpSessionEvent::Usage {
         input_tokens,
         output_tokens,
+        prompt_cache: Default::default(),
     })
 }
 
@@ -1001,6 +1020,7 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                         .get("outputTokens")
                         .and_then(Value::as_u64)
                         .unwrap_or_default(),
+                    prompt_cache: Default::default(),
                 });
             }
             (!events.is_empty()).then_some(events)
@@ -2007,7 +2027,8 @@ mod tests {
                 AcpSessionEvent::TextDelta("Bonjour 🦀".into()),
                 AcpSessionEvent::Usage {
                     input_tokens: 30,
-                    output_tokens: 4
+                    output_tokens: 4,
+                    prompt_cache: Default::default(),
                 },
             ]
         );
@@ -2039,7 +2060,8 @@ mod tests {
             usage_from_prompt_result(&result),
             Some(AcpSessionEvent::Usage {
                 input_tokens: 6126,
-                output_tokens: 28
+                output_tokens: 28,
+                prompt_cache: Default::default(),
             }),
         );
     }
@@ -2134,7 +2156,8 @@ mod tests {
                 AcpSessionEvent::TextDelta("before response".into()),
                 AcpSessionEvent::Usage {
                     input_tokens: 3,
-                    output_tokens: 5
+                    output_tokens: 5,
+                    prompt_cache: Default::default(),
                 },
                 AcpSessionEvent::Completed,
             ]
