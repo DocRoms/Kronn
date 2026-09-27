@@ -662,6 +662,18 @@ pub fn slug(id: &str) -> String {
     }
 }
 
+/// True when `s` is safe to join onto a custom skill/directive/profile
+/// directory as a bare file stem: non-empty, and made only of Unicode
+/// alphanumerics and hyphens — the exact alphabet every slug generator in
+/// this codebase emits (`slug` above, plus the directive/profile
+/// equivalents). No path separator, no `.`, no NUL can pass this check, so
+/// `dir.join(format!("{s}.md"))` can never escape `dir` — including when
+/// `s` is taken straight from a URL path segment (`custom-<id>`) rather
+/// than freshly derived from a display name.
+pub fn is_valid_slug(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-')
+}
+
 /// Check if a directory contains at least one SKILL.md file (in any subdirectory).
 fn has_skill_md_files(dir: &Path) -> bool {
     std::fs::read_dir(dir).ok().is_some_and(|entries| {

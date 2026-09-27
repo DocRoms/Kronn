@@ -24,6 +24,20 @@ path only) append `-2`, `-3`, … until they find a filename that doesn't
 already exist, so two different display names that produce the same slug
 (e.g. "Foo Bar" and "foo-bar") never overwrite each other.
 
+## Slug validation on update/delete
+
+The id passed to `update_custom_*` / `delete_custom_*` comes straight from a
+URL path segment (`custom-<slug>`), not from a freshly slugified display
+name — `strip_prefix("custom-")` alone does not stop a `slug` containing `/`
+or `..` from escaping the resource directory when joined into a path.
+`core::native_files::is_valid_slug` gates every one of these six functions
+before the id-derived slug touches a path: it accepts only non-empty,
+Unicode-alphanumeric-or-hyphen input, the exact alphabet every slug
+generator in this codebase (`native_files::slug`, `directive_slug`,
+`profile_slug`) can produce, so no legitimate existing id is rejected.
+`path.parent() != Some(dir)` is a second, defense-in-depth check on the
+joined path.
+
 ## Run snapshot
 
 `core::resource_snapshot::RunSnapshotCache<T>` pins each `(run_id, resource_id)`

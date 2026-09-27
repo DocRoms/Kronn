@@ -351,8 +351,14 @@ pub fn update_custom_directive(
     let slug = id
         .strip_prefix("custom-")
         .ok_or("Cannot modify builtin directives")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
     let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
     let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
     if !path.exists() {
         return Err(format!("Directive '{}' not found", id));
     }
@@ -370,8 +376,14 @@ pub fn delete_custom_directive(id: &str) -> Result<bool, String> {
         return Err("Cannot delete builtin directives".into());
     }
     let slug = id.strip_prefix("custom-").unwrap();
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
     let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
     let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
 
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Cannot delete directive: {}", e))?;
@@ -508,6 +520,47 @@ mod tests {
         assert_ne!(first, second, "colliding names must get distinct ids");
         assert_eq!(get_directive(&first).unwrap().content, "content A");
         assert_eq!(get_directive(&second).unwrap().content, "content B");
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_and_delete_reject_a_path_traversal_id() {
+        let dir = scratch_config_dir("directives-traversal");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        // Lives one level above the directives/ dir the traversal id targets.
+        let sentinel = dir.join("sentinel.md");
+        std::fs::write(&sentinel, "untouched").unwrap();
+        let traversal_id = "custom-../sentinel";
+
+        assert!(
+            update_custom_directive(
+                traversal_id,
+                "Name",
+                "desc",
+                "🔧",
+                &DirectiveCategory::Output,
+                "content",
+                &[],
+            )
+            .is_err(),
+            "a path traversal id must be rejected on update"
+        );
+        assert!(
+            delete_custom_directive(traversal_id).is_err(),
+            "a path traversal id must be rejected on delete"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "untouched",
+            "a file outside the directives dir must never be touched"
+        );
 
         match previous {
             Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
