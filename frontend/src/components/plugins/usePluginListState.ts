@@ -4,8 +4,7 @@ import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../../lib/api'
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { usePersistentIdSet } from '../../hooks/usePersistentIdSet';
 import { userError } from '../../lib/userError';
-import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, PluginInterface } from '../../types/generated';
-import { pluginKind, type PluginKind } from '../../lib/pluginKind';
+import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, PluginInterface, PluginKind } from '../../types/generated';
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { hasAgentScope, slugify } from './mcpPageHelpers';
 
@@ -341,24 +340,23 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
   );
   const builtinConfig = configs.find(isBuiltinConfig);
 
-  const serverById = new Map(servers.map(server => [server.id, server]));
-  const registryById = new Map(mcpRegistry.map(definition => [definition.id, definition]));
-  const kindForServer = (serverId: string): PluginKind => {
-    const descriptor = registryById.get(serverId) ?? serverById.get(serverId);
-    return descriptor ? pluginKind(descriptor) : 'mcp';
-  };
+  // KT-828 — the badge/filter classification is computed once server-side
+  // (`effective_kind`/`interfaces`) so it can't drift from what the agent
+  // actually uses. The API/MCP filters read `interfaces` rather than
+  // `effective_kind` directly so a CLI-first plugin that ALSO exposes an
+  // API or MCP surface (Fastly: Cli + [Api, Mcp, Cli]) still matches those
+  // filters — only the CLI filter is gated on the `cli` kind itself.
   const visibleConfigs = [...configs]
     .filter(cfg => {
-      const kind = kindForServer(cfg.server_id);
       const matchesKind = mcpKindFilter === 'all'
-        || (mcpKindFilter === 'mcp' && (kind === 'mcp' || kind === 'hybrid'))
-        || (mcpKindFilter === 'api' && (kind === 'api' || kind === 'hybrid'))
-        || (mcpKindFilter === 'cli' && kind === 'cli');
+        || (mcpKindFilter === 'mcp' && cfg.interfaces.includes('mcp'))
+        || (mcpKindFilter === 'api' && cfg.interfaces.includes('api'))
+        || (mcpKindFilter === 'cli' && cfg.effective_kind === 'cli');
       return matchesKind;
     })
     .sort((a, b) => {
-      const aKind = kindForServer(a.server_id);
-      const bKind = kindForServer(b.server_id);
+      const aKind = a.effective_kind;
+      const bKind = b.effective_kind;
       const byName = a.label.localeCompare(b.label, undefined, {
         sensitivity: 'base',
         numeric: true,
@@ -417,6 +415,6 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     contextEditor, setContextEditor, contextSaving, handleOpenContext, handleSaveContext,
 
     servers, configs, totalConfigs, globalConfigs, isBuiltinConfig, builtinConfig, builtinMatchesList,
-    kindForServer, visibleConfigs,
+    visibleConfigs,
   };
 }

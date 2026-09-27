@@ -80,6 +80,15 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   host_sync: opts?.host_sync ?? 'None',
   preferred_interface: opts?.preferred_interface ?? 'mcp',
   registry_drift: opts?.registry_drift,
+  // KT-828 — these mirror what the backend computes once
+  // (`registry::effective_plugin_kind` / `available_plugin_interfaces` /
+  // `credential_source`); tests that exercise a specific classification
+  // override them explicitly instead of relying on a derivation from
+  // `mcpRegistry`/`mcpOverview.servers` the components no longer do.
+  interfaces: opts?.interfaces ?? ['mcp'],
+  effective_kind: opts?.effective_kind ?? 'mcp',
+  effective_preferred_interface: opts?.effective_preferred_interface ?? opts?.preferred_interface ?? 'mcp',
+  credential_source: opts?.credential_source ?? 'stored',
 });
 
 const makeProject = (id: string, name: string): Project => ({
@@ -543,7 +552,11 @@ describe('McpPage', () => {
       servers: [githubServer, chartbeatServer],
       configs: [
         makeConfig('github-config', 'github', 'GitHub'),
-        makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat'),
+        makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat', {
+          interfaces: ['api'],
+          effective_kind: 'api',
+          effective_preferred_interface: 'api',
+        }),
       ],
       customized_contexts: [],
       incompatibilities: [],
@@ -712,6 +725,9 @@ describe('McpPage', () => {
     };
     const config = makeConfig('fastly-config', 'mcp-fastly', 'Fastly', {
       preferred_interface: 'api',
+      interfaces: ['api', 'mcp', 'cli'],
+      effective_kind: 'cli',
+      effective_preferred_interface: 'api',
     });
     const overview: McpOverview = {
       servers: [server],
@@ -759,6 +775,9 @@ describe('McpPage', () => {
       servers: [server],
       configs: [makeConfig('api-config', 'api-only', 'API only', {
         preferred_interface: 'api',
+        interfaces: ['api'],
+        effective_kind: 'api',
+        effective_preferred_interface: 'api',
       })],
       customized_contexts: [],
       incompatibilities: [],
@@ -815,9 +834,9 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [mcpServer, apiServer, cliServer],
       configs: [
-        makeConfig('mcp-config', 'mcp', 'MCP server', { label: 'Zulu MCP' }),
-        makeConfig('api-config', 'api', 'API server', { label: 'Alpha API' }),
-        makeConfig('cli-config', 'cli', 'CLI server', { label: 'Beta CLI' }),
+        makeConfig('mcp-config', 'mcp', 'MCP server', { label: 'Zulu MCP', interfaces: ['mcp'], effective_kind: 'mcp' }),
+        makeConfig('api-config', 'api', 'API server', { label: 'Alpha API', interfaces: ['api'], effective_kind: 'api' }),
+        makeConfig('cli-config', 'cli', 'CLI server', { label: 'Beta CLI', interfaces: ['mcp', 'cli'], effective_kind: 'cli' }),
       ],
       customized_contexts: [],
       incompatibilities: [],
@@ -1289,8 +1308,17 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [makeServer('mcp-fastly', 'Fastly'), makeServer('api-direct', 'Direct API')],
       configs: [
-        makeConfig('fastly-config', 'mcp-fastly', 'Fastly'),
-        makeConfig('api-config', 'api-direct', 'Direct API', { env_keys: ['DIRECT_API_TOKEN'] }),
+        makeConfig('fastly-config', 'mcp-fastly', 'Fastly', {
+          interfaces: ['api', 'mcp', 'cli'],
+          effective_kind: 'cli',
+          credential_source: 'cli_token',
+        }),
+        makeConfig('api-config', 'api-direct', 'Direct API', {
+          env_keys: ['DIRECT_API_TOKEN'],
+          interfaces: ['api'],
+          effective_kind: 'api',
+          credential_source: 'stored',
+        }),
       ],
       customized_contexts: [],
       incompatibilities: [],

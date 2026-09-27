@@ -6,7 +6,7 @@ import {
 import type { McpConfigDisplay, McpServer, PluginInterface } from '../../types/generated';
 import { linkify } from '../../lib/linkify';
 import { isHiddenPath } from '../../lib/constants';
-import { pluginCredentialKeys, pluginCredentialKind } from '../../lib/pluginCredentials';
+import { pluginCredentialKeys } from '../../lib/pluginCredentials';
 import { HostSyncPreview } from '../HostSyncPreview';
 import { CustomApiForm } from './CustomApiForm';
 import { hasAgentScope, slugify } from './mcpPageHelpers';
@@ -24,7 +24,7 @@ const PROJECT_TOGGLE_LIMIT = 10;
 export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state: McpPageState }) {
   const {
     t, projects, mcpOverview, mcpRegistry,
-    kindForServer, probeByConfig, probingConfigId, handleProbeConfig,
+    probeByConfig, probingConfigId, handleProbeConfig,
     handleSetPreferredInterface,
     editingLabelId, editingLabelText, setEditingLabelId, setEditingLabelText, handleSaveLabel,
     editingCustomServerId,
@@ -38,12 +38,12 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     expandedProjectLists, setExpandedProjectLists, handleOpenContext,
   } = state;
 
-  // 0.7.0 — derive plugin kind from the server registry so
-  // we can hide host-sync UI on API-only plugins (they're
-  // injected into prompts, never written to ~/.claude.json
-  // & co — showing a "Sync CLI" toggle on them was a UX bug).
+  // KT-828 — `effective_kind` is computed once server-side so it can't
+  // drift from what the agent actually uses; hides host-sync UI on
+  // API-only plugins (they're injected into prompts, never written to
+  // ~/.claude.json & co — showing a "Sync CLI" toggle on them was a UX bug).
   const cfgServer = mcpOverview.servers.find(s => s.id === cfg.server_id);
-  const cfgKind = kindForServer(cfg.server_id);
+  const cfgKind = cfg.effective_kind;
   const supportsHostSync = cfgKind !== 'api';
   const hasVisibleScope = hasAgentScope(
     cfg.is_global,
@@ -65,13 +65,10 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
   const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === cfg.server_id);
   const probeResult = probeByConfig[cfg.id];
   const isProbing = probingConfigId === cfg.id;
-  const availableInterfaces: PluginInterface[] = [];
-  if (cfgServer?.api_spec) availableInterfaces.push('api');
-  if (cfgServer && cfgServer.transport !== 'ApiOnly') availableInterfaces.push('mcp');
-  if (def?.tags.includes('cli')) availableInterfaces.push('cli');
-  const effectivePreferredInterface = availableInterfaces.includes(cfg.preferred_interface)
-    ? cfg.preferred_interface
-    : availableInterfaces[0] ?? 'mcp';
+  // KT-828 — both computed once server-side (`registry::
+  // available_plugin_interfaces` / the `preferred_interface` clamp).
+  const availableInterfaces: PluginInterface[] = cfg.interfaces;
+  const effectivePreferredInterface = cfg.effective_preferred_interface;
 
   // 0.8.6 (#29) — open the edit form pre-filled with the
   // current Custom plugin's spec. Shared between the Edit
@@ -397,7 +394,12 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
               </div>
             );
           }
-          const credentialKind = pluginCredentialKind(def);
+          // KT-821/KT-828 — driven by the backend's `credential_source`
+          // (derived from `ApiAuthKind`), not the registry's `cli` tag: a
+          // `CliToken` auth (Microsoft 365, no `cli` tag; Fastly, tagged)
+          // never stores an API-authenticating value, so both get the
+          // "not stored, CLI-resolved" copy instead of "used by the API".
+          const credentialKind = cfg.credential_source === 'cli_token' ? 'cli' : 'api';
           const displayEnvKeys = pluginCredentialKeys(def, cfg.env_keys);
           const hasAnything = displayEnvKeys.length > 0 || def?.token_help;
           return hasAnything ? (

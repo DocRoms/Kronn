@@ -25,7 +25,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
     mcpSearch, setMcpSearch, selectedConfigId, setSelectedConfigId,
     selectedConfigIds, setSelectedConfigIds, handleDeleteSelectedMcpConfigs,
     sidebarOpen, setSidebarOpen,
-    kindForServer, isBuiltinConfig, driftBySlug,
+    isBuiltinConfig, driftBySlug,
     collapsedMcpGroups, setCollapsedMcpGroups,
     handleDeleteMcpConfig, showBuiltinFallback,
     setShowAddMcp, setAddMcpSelected, setAddMcpSearch, addMcpTriggerRef,
@@ -105,7 +105,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
             };
             const row = (config: McpConfigDisplay, keyPrefix: string) => {
               const rowProps = getRowProps(config);
-              const kind = kindForServer(config.server_id);
+              const kind = config.effective_kind;
               const isBuiltin = isBuiltinConfig(config);
               const selected = isMultiSelected(config);
               const scopeLabels = [
