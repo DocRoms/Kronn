@@ -57,6 +57,28 @@ describe('DiscussionMosaicComposer with the real ChatInput', () => {
     expect(mocks.send).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a draft typed the moment the input appears', async () => {
+    // Types from a MutationObserver callback, before any passive effect has
+    // run: the window a slow runner's waitFor can land in.
+    const typedEarly = new Promise<void>(resolve => {
+      const observer = new MutationObserver(() => {
+        const field = textarea();
+        if (!field) return;
+        observer.disconnect();
+        fireEvent.change(field, { target: { value: 'tapé tout de suite' } });
+        resolve();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+    const view = render(<DiscussionMosaicComposer discussionId="a" title="Alpha" toast={vi.fn()} />);
+    await typedEarly;
+    await waitFor(() => expect(textarea().value).toBe('tapé tout de suite'));
+    view.rerender(<DiscussionMosaicComposer discussionId="b" title="Beta" toast={vi.fn()} />);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('b'));
+    view.rerender(<DiscussionMosaicComposer discussionId="a" title="Alpha" toast={vi.fn()} />);
+    await waitFor(() => expect(textarea()?.value).toBe('tapé tout de suite'));
+  });
+
   it('keeps the draft when the input is collapsed and reopened', async () => {
     render(<DiscussionMosaicComposer discussionId="a" title="Alpha" toast={vi.fn()} />);
     await waitFor(() => expect(textarea()).not.toBeNull());

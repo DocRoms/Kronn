@@ -1,6 +1,7 @@
 import type { Route } from '@playwright/test';
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { stubDiscussionPoll } from '../fixtures/discussion-poll';
 
 /**
  * KT-49 — one click on the jump arrow must land on the real last message.
@@ -66,6 +67,7 @@ test.describe('Discussions — jump arrow reaches the last message', () => {
       if (route.request().method() !== 'GET') return route.fallback();
       await route.fulfill({ json: { success: true, data: discussion } });
     });
+    await stubDiscussionPoll(page, DISC_ID, () => discussion);
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();

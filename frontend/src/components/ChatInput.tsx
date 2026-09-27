@@ -350,7 +350,9 @@ export function ChatInput({
 
   // On discussion switch: flush the previous discussion's draft (without
   // waiting for the debounce), then rehydrate the textarea for the new one.
-  useEffect(() => {
+  // A layout effect: text typed as soon as the field exists must find its
+  // discussion bound, or it is neither saved nor kept.
+  useLayoutEffect(() => {
     const prevDiscId = currentDiscIdRef.current;
     const nextDiscId = discussion?.id ?? null;
 

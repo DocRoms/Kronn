@@ -82,9 +82,11 @@ test.describe('Live Page inline action — each row is its own launch', () => {
     await frame.locator('button:has-text("Framer EW-7704")').click();
     await expect(card).toHaveCount(0);
 
-    // A row that has run reopens on what happened — its own run — with the
-    // way to run it again.
+    // A row that has run opens a fresh offer, since relaunching is the usual
+    // intent, with its own last run one click away.
     await frame.locator('button:has-text("Framer EW-7706")').click();
+    await expect(card).toHaveAttribute('data-state', 'proposed');
+    await page.getByTestId('page-action-overlay-previous').click();
     await expect(card).toHaveAttribute('data-state', 'succeeded');
     await expect(output).toContainText('EW-7706');
     await page.getByTestId('action-card-relaunch').click();

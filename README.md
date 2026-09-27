@@ -23,97 +23,33 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.14.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.14.1 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.14.0
+## What's new in 0.14.1
 
-- **More automation tools for HTTP agents:** discover and run saved Quick
-  Prompts, edit them, and author disabled workflow drafts for human review.
-  Media requests can omit the connection when only one supports the modality.
-- **Readable attachments and steadier Live Pages:** text, JSON and logs open
-  beside images and videos in the discussion carousel, with the original
-  available to download. Pages follow Kronn's theme and keep their local state
-  when a refresh brings no changed data.
-- **Workflow fixes:** optional inputs left empty stay available to Gate and
-  Exec templates (#213). Quick Exec results retain exit codes and stderr, and
-  Quick APIs referenced by workflows cannot be deleted accidentally.
-- **Easier setup:** browse the folders the server can actually reach and select
-  several repository roots in the setup wizard.
+- **Workflows that chain and scale safely:** a `TriggerWorkflow` step launches
+  another workflow with its variables and continues at once; `concurrency_key`
+  limits runs per ticket; an isolated run can start from `origin/main`
+  (`base_ref`); and a run carries a business label found back in one call.
+- **Workflow agents that steer their own room:** an Agent step with `room_id`
+  is the room's principal without an invite token, again after `/resume`, and a
+  room's native agent can launch task executions itself.
+- **Artifacts, formerly Pages:** images from an authenticated API (Jira
+  attachments) display inside an Artifact, an action field can start from the
+  clicked row's data, and Artifacts export and import as versioned bundles.
+- **Lighter and steadier:** Anthropic prompt caching through LiteLLM is on by
+  default, a long discussion no longer freezes or re-downloads its transcript,
+  and the dark themes pass WCAG AA.
+- **Safer with your repositories:** Kronn no longer deletes a repository's own
+  skills and agent files at startup, and the worktree of an interrupted run
+  nobody resumed is reclaimed after 7 days, its commits kept on a branch.
 
-See the [0.14.0 release notes](CHANGELOG.md), including validation scope and
-retained model-campaign results.
-
-## What's new in 0.13.2
-
-- **Images and video from any discussion:** 0.13.0 promised that an agent
-  generates media from a discussion, and it only held in rooms. In a plain
-  discussion, `agent_list`, the only place a media connection id appears,
-  refused the agent, so nothing could be generated without a human pasting an
-  opaque id. It now answers in every discussion, a generation accepts the
-  connection's alias or name, and a refusal lists the connections that can do
-  what was asked.
-- **Clips played as one film:** the Assets panel of a discussion now has tabs.
-  Tout is the inventory, Creator the generation form, and Editor, from the
-  second clip on, puts the clips in order, leaves out the ones unrelated to the
-  film, and plays the rest one after the other in a full-screen player. The
-  order is saved with the discussion; nothing is rendered into a single file.
-
-See the [0.13.2 release notes](CHANGELOG.md) and the
-[external API connection guide](docs/operations/external-api-connections.md).
-
-## What's new in 0.13.1
-
-- **Live Page buttons that launch their own row:** a Page listing tickets can
-  put a button on every row from a single action block. Each click runs for its
-  own row, the button shows how that row's run went, and clicking it again
-  opens what the run produced (its steps, the discussions it opened, the
-  agent's answer) with a way to launch it again. Before this, the first click
-  used up the block for every row, and later clicks replayed its result while
-  nothing ran.
-- **Action cards that tell the truth and read their result:** a Quick Prompt is
-  done when its agent has answered, not when its discussion was created. A
-  Quick API shows its summary line and first rows, a Quick Exec its output, a
-  workflow its steps, instead of raw JSON. Discussions and Pages share the
-  same card.
-
-See the [0.13.1 release notes](CHANGELOG.md) and the
-[Live Pages architecture](docs/architecture/live-pages.md).
-
-## What's new in 0.13.0
-
-- **Image and video generation on HTTP connections:** LiteLLM, NVIDIA and
-  OpenRouter generate media from a discussion or from the assets carousel, with
-  the cost shown before the click. Agents read what each model actually
-  advertises — durations, resolutions, ratios — instead of discovering its
-  limits from a refusal, and can chain a clip's last image into the next clip.
-- **HTTP agents reach the automations:** an Ollama or LiteLLM agent lists saved
-  Quick Execs, runs one, and authors Quick APIs and Quick Execs the way a CLI
-  agent does. Credentials stay server-side; authoring stays out of worker rooms.
-- **Important messages and published decision cards:** a plain-text form above
-  the composer produces a persisted, structured object — not formatting — and an
-  agent can put a decision to a human and stop, with the question surviving as
-  its own record.
-- **Multi-agent rooms that survive:** mention three agents and three answer; a
-  backend restart no longer silently cancels the ones that had not spoken; a
-  delegated worker's child room keeps accepting messages after its task ends.
-- **A database you can see the weight of:** Settings charts where the bytes
-  actually sit, one bar per table, measured on demand. Discussions report their
-  own storage split by what a cleanup would reclaim.
-- **Markdown that repairs itself:** tool markers no longer land in the middle of
-  a message, ACP replies are no longer shredded mid-word, and a long transcript
-  upgrades progressively instead of freezing the room on open.
-
-See the complete [0.13.0 release notes](CHANGELOG.md), the
-[external API connection guide](docs/operations/external-api-connections.md)
-and the [task delegation guide](docs/guides/task-orchestration.md).
+Earlier releases are described in the [CHANGELOG](CHANGELOG.md).
 
 ## Contents
 
-- [What's new in 0.14.0](#whats-new-in-0140)
-- [What's new in 0.13.2](#whats-new-in-0132)
-- [What's new in 0.13.1](#whats-new-in-0131)
-- [What's new in 0.13.0](#whats-new-in-0130)
+- [What's new in 0.14.1](#whats-new-in-0141)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -174,7 +110,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.14.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.14.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -205,7 +141,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.14.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.14.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140

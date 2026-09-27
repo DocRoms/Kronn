@@ -11,6 +11,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-26
+
 ### Added
 
 - A Claude Code or Codex workflow Agent step can name its room: `room_id` (a
@@ -161,6 +163,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A workflow whose Agent step uses LiteLLM starts when the LiteLLM proxy is
+  declared in Settings (`agents.lite_llm.base_url`), even with no local
+  `litellm` binary. The pre-flight check refused it as "not installed",
+  although that proxy can run on another machine.
+- The "RTK not installed" badge of an agent card reads at 4.5:1 in the matrix
+  theme: its tinted background took the low-emphasis text to 4.41:1.
+- Text typed the instant a discussion's input appears is kept and saved as
+  its draft. The input bound its discussion only after the first paint, so
+  such text was neither saved nor kept when the discussion finished loading.
+- `scripts/check-app-icons.mjs` requires the desktop icons to be 8-bit RGBA,
+  which Tauri needs to build the app, and compares them with a fresh render on
+  exact pixels. A lossless re-encode no longer fails it; a resample or a
+  retouch still does. The shipped icons are unchanged from 0.14.0.
 - The boot purge of finished workflow runs no longer removes a worktree that a
   finished sub-workflow shares with its parent while that parent is still
   running, paused at a gate or resumable after an interruption.
@@ -309,9 +324,6 @@ Release notes for 0.9.3 and earlier are available in the
   the detail only if it changed, and a burst of events collapses into one
   request. On a 2,000-message room with a workflow running: opening it went
   from 66 MB to 27 MB, and 20 s at rest from up to 27 MB to 1.9 MB.
-- The desktop application icons are back to the exact bytes of their
-  canonical render. An unrelated change had re-encoded them without changing a
-  pixel, which made `scripts/check-app-icons.mjs` fail.
 - In `kronn start-dev`, a build that writes generated sources under a
   `target/` directory (another checkout's Cargo build, for example) no longer
   restarts the backend and cuts the agents it is running. The file watcher now
