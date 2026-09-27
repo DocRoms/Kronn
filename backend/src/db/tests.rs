@@ -6896,3 +6896,55 @@ fn get_run_backfills_foreach_child_metrics_from_child_rows() {
     assert_eq!(items[1]["tokens"], 900);
     assert_eq!(items[1]["duration_ms"], 12000);
 }
+
+// ─── KT-842 (KT-819/3) — audit run survives the backend that launched it ──
+
+#[tokio::test]
+async fn restarting_kronn_interrupts_an_orphaned_audit_run_and_keeps_it_resumable() {
+    // A real restart, not just a call to the reconcile function: drop the
+    // `Database` (no `cancel_audit`, no clean shutdown — exactly what a
+    // crash or `kill -9` leaves behind) and reopen the SAME file, which is
+    // what `main.rs` does on the next boot via `Database::open`.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("kt842-restart.db");
+
+    {
+        let db = crate::db::Database::open_path(&db_path).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-kt842', 'KT842', '/tmp/kt842', datetime('now'), datetime('now'))",
+                [],
+            )?;
+            crate::db::audit_runs::insert_running(
+                conn,
+                "run-kt842",
+                "p-kt842",
+                "Full",
+                "ClaudeCode",
+                Utc::now(),
+            )?;
+            crate::db::audit_runs::update_last_completed_step(conn, "run-kt842", 4)
+        })
+        .await
+        .unwrap();
+        // `db` dropped here with the row still `Running` — the orphan a
+        // real crash leaves behind.
+    }
+
+    // "Restart Kronn": `open_path` runs the exact same boot-time reconcile
+    // as `open_path_for_backend_boot` (the audit_runs reconcile isn't
+    // gated on `recover_commit_leases`).
+    let db2 = crate::db::Database::open_path(&db_path).unwrap();
+    let resumable = db2
+        .with_conn(|conn| crate::db::audit_runs::latest_resumable(conn, "p-kt842"))
+        .await
+        .unwrap()
+        .expect("the orphaned run must be resumable after a restart");
+    assert_eq!(resumable.id, "run-kt842");
+    assert_eq!(resumable.status, "Interrupted");
+    assert_eq!(
+        resumable.last_completed_step, 4,
+        "progress must survive the restart so resume picks up at step 5"
+    );
+}

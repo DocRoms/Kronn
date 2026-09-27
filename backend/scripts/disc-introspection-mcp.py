@@ -2679,11 +2679,15 @@ TOOLS = [
     {
         "name": "audit_launch",
         "description": (
-            "Launch a `full` or `partial` project audit and return immediately. This is "
-            "NOT detached: closing/reloading this MCP interrupts its SSE-driven run. Check "
-            "`audit_status`; only interrupted full/specialized runs resume with "
-            "`resume_run_id`, while partial requires 1-based `steps` and is relaunched. "
-            "One audit per project. Run `audit_prepare` first. Lifecycle, briefing and "
+            "Launch a `full` or `partial` project audit and return immediately. "
+            "KT-842: `full` (and every specialized kind) now runs as a DETACHED "
+            "backend job — closing/reloading this MCP, or the browser, does NOT "
+            "interrupt it; this call and `audit_status` only subscribe to it. A "
+            "backend restart still interrupts it (resumable via `resume_run_id`). "
+            "`partial` is NOT detached yet: closing/reloading this MCP interrupts "
+            "its SSE-driven run — relaunch it on its still-stale scope (it has no "
+            "resume path; 1-based `steps` is required). Check `audit_status`. One "
+            "audit per project. Run `audit_prepare` first. Lifecycle, briefing and "
             "validation-discussion rules: `tool_manual({tool: \"audit_launch\"})`."
         ),
         "inputSchema": {
@@ -9140,14 +9144,20 @@ def call_workflow_step_schema(_args):
     return _unwrap(_http("GET", "/api/workflows/step-schema"))
 
 
-# ─── Audit tools (0.8.12 PR A) ─────────────────────────────────────────────
+# ─── Audit tools (0.8.12 PR A; detached run KT-842) ────────────────────────
 #
-# The backend audit endpoints are SSE-DRIVEN: the audit only advances while
-# a client reads the stream (there is no detached server-side spawn). The
-# bridge therefore consumes the stream in a daemon thread and the launch
-# tool returns immediately with a correlation — the documented trade-off is
-# that the audit dies with this bridge process (MCP reload = interruption;
-# the run is then observable via audit_status and resumable).
+# `full` (and every specialized kind) is a DETACHED backend job since
+# KT-842: the backend keeps driving it on a spawned task independent of the
+# SSE connection, so this bridge (or the browser) reloading/exiting no
+# longer interrupts it — only a backend restart does (then resumable via
+# `resume_run_id`, see `audit_status.resumable`). `partial` is NOT detached
+# yet and keeps the pre-KT-842 SSE-driven trade-off below.
+#
+# Either way, the bridge only CONSUMES the stream (daemon thread) and the
+# launch tool returns immediately with a correlation — it never drives the
+# run. For `partial`, that consumption is load-bearing (the backend still
+# advances only while a client reads its stream), so reloading THIS bridge
+# still kills a partial run mid-flight; observe it via audit_status.
 
 _AUDIT_LOCK = threading.Lock()
 # project_id -> mutable entry shared between the launcher and its reader
@@ -9966,9 +9976,12 @@ TOOL_MANUALS = {
     ),
     "audit_launch": (
         "Call `audit_prepare` first and read its briefing status. A full audit runs the complete "
-        "pipeline; a partial audit requires explicit 1-based step indices. The bridge consumes "
-        "the SSE in a background thread, but the execution remains owned by this MCP process: "
-        "closing or reloading it interrupts the run. Only one audit may run per project.\n\n"
+        "pipeline; a partial audit requires explicit 1-based step indices. KT-842: full (and every "
+        "specialized kind) now runs DETACHED on the backend — the bridge only subscribes to its "
+        "SSE, so closing or reloading this MCP does NOT interrupt it (only a backend restart does). "
+        "Partial is NOT detached yet: this MCP consuming its SSE is still what drives it, so "
+        "closing/reloading it interrupts a partial run mid-flight. Only one audit may run per "
+        "project.\n\n"
         "Observe durable truth with `audit_status`. An interrupted full or specialized run may "
         "resume by its reported `resume_run_id`; an interrupted partial is relaunched for its "
         "stale scope. Successful full audits and fully successful partial audits create a "
@@ -10274,22 +10287,35 @@ def call_audit_launch(args):
         briefing = _briefing_state(project if isinstance(project, dict) else {})
     except Exception:
         pass
+    if mode == "full":
+        # KT-842 — the backend now runs this detached from the SSE
+        # connection: this bridge (and the read-loop thread above) is only
+        # a subscriber. Reloading/exiting this MCP does NOT interrupt it.
+        lifecycle_warning = (
+            "This audit runs DETACHED on the backend (KT-842): reloading or "
+            "exiting THIS MCP does NOT interrupt it — this bridge is only "
+            "subscribing to it. A backend RESTART still interrupts it "
+            "(shows under audit_status.resumable, relaunch with "
+            "`resume_run_id`). The run_id and the validation discussion_id "
+            "become available via audit_status once done."
+        )
+    else:
+        lifecycle_warning = (
+            "This PARTIAL audit still lives only as long as THIS MCP "
+            "session: a reload or CLI exit interrupts it mid-flight (not "
+            "yet detached — KT-842 only covers full/specialized runs). It "
+            "has no resume path — relaunch it on its still-stale scope. A "
+            "fully-successful partial gets its own validation "
+            "discussion_id, scoped to the refreshed sections, available "
+            "via audit_status once done."
+        )
     out = {
             "launched": True,
             "project_id": project_id,
             "mode": mode,
             "started_at": entry.get("started_at", started_at),
             "total_steps": entry.get("total_steps"),
-            "lifecycle_warning": (
-                "This audit lives only as long as THIS MCP session: a reload "
-                "or CLI exit interrupts it mid-flight. The run_id and the "
-                "validation discussion_id (full, and fully-successful "
-                "partial — scoped to the refreshed sections) become "
-                "available via audit_status once done. An interrupted full/"
-                "specialized run shows under audit_status.resumable; an "
-                "interrupted PARTIAL does not — relaunch it on its "
-                "still-stale scope."
-            ),
+            "lifecycle_warning": lifecycle_warning,
         }
     if briefing and not briefing.get("present"):
         out["briefing_warning"] = briefing["hint"]
@@ -10677,12 +10703,19 @@ def _schedule_bridge_reload():
         )
         return dict(_BRIDGE_RELOAD_STATE)
     with _AUDIT_LOCK:
+        # KT-842 — full/specialized audits are detached backend jobs now:
+        # reloading this bridge no longer interrupts them (it only drops
+        # this process's SSE subscription; the run itself keeps going and
+        # stays observable via audit_status). Only `partial` still needs
+        # this bridge's SSE consumption to advance, so it's the only mode
+        # left gating the reload.
         active_audits = sorted(project_id for project_id, entry in _AUDIT_STREAMS.items()
-                               if entry.get("state") in ("launching", "running"))
+                               if entry.get("state") in ("launching", "running")
+                               and entry.get("mode") == "partial")
     if active_audits:
         _BRIDGE_RELOAD_STATE.update(
             status="deferred_active_audit",
-            error="active audit SSE stream(s): " + ", ".join(active_audits),
+            error="active partial-audit SSE stream(s): " + ", ".join(active_audits),
         )
         return dict(_BRIDGE_RELOAD_STATE)
     global _BRIDGE_ARTIFACT_FD
@@ -10888,8 +10921,9 @@ def _bridge_stale_result(rid, tool_name, message):
             "max_attempts": 1,
         },
         "action": (
-            "Wait for the active audit to finish (or stop it explicitly), then retry; "
-            "the bridge will reload without interrupting its SSE stream."
+            "Wait for the active partial audit to finish (or stop it explicitly), "
+            "then retry; the bridge will reload without interrupting its SSE stream. "
+            "(A running full/specialized audit never causes this — it is detached.)"
             if reload_state["status"] == "deferred_active_audit" else
             "Reconnect the Kronn MCP manually once, recover with task_exec_status, "
             "then retry once with the same idempotency key."
