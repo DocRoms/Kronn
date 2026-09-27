@@ -2048,6 +2048,7 @@ const fr: TranslationDict = {
   'disc.action.outcome.idle': 'Sans réponse',
   'disc.action.outcome.more': 'et {0} autres discussions',
   'disc.action.resolvedAtLaunch': 'Résolue par Kronn au lancement',
+  'disc.action.placeholderExample': 'ex. : {0}',
   'disc.action.dynamicBinding': 'Résolue depuis l’Artifact · {0}',
   'disc.action.stalePageSource': 'Cette action vient d’une ancienne révision de l’Artifact. Son résultat reste disponible, mais son emplacement source a changé.',
   'disc.action.unavailablePageAction': 'Cette action n’est plus disponible dans la révision actuelle de l’Artifact.',

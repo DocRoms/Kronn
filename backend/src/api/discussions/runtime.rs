@@ -132,7 +132,11 @@ pub(crate) fn persist_dispatch_settlement(
                 &interrupted.parent_discussion_id,
             )?
             .context("parent discussion vanished before undelivered-worker notice")?;
-            let target = crate::models::MessageTarget::discussion_agent(parent.agent);
+            let target = crate::db::orchestration::principal_notice_target(
+                &transaction,
+                &interrupted.execution_id,
+                parent.agent,
+            )?;
             let (title, instruction) = if error.is_some() {
                 (
                     "Worker échoué sans livraison durable",

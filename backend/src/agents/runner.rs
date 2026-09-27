@@ -1299,14 +1299,20 @@ fn worker_repair_call_matches_target(
                     .unwrap_or(false))
 }
 
-fn rust_syntax_refusal(outcome: &crate::agents::tools::ToolOutcome) -> bool {
-    outcome
+/// Which pre-write validator refused an edit, if one did: its name leads the
+/// strict repair prompt.
+fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'static str> {
+    let error = outcome
         .content
         .get("error")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|error| {
-            error.starts_with(crate::api::agent_workspace_tools::RUST_SYNTAX_REFUSAL_PREFIX)
-        })
+        .and_then(serde_json::Value::as_str)?;
+    if error.starts_with(crate::api::agent_workspace_tools::RUST_SYNTAX_REFUSAL_PREFIX) {
+        Some("Rust syntax")
+    } else if error.starts_with(crate::api::agent_workspace_structure::STRUCTURE_REFUSAL_PREFIX) {
+        Some("Structure")
+    } else {
+        None
+    }
 }
 
 fn worker_repair_iteration_limit(
@@ -8075,6 +8081,7 @@ async fn start_ollama_http(
             let mut delivered_this_turn = false;
             let mut failed_edit_this_turn = false;
             let mut syntax_refused_edit_this_turn = false;
+            let mut syntax_refusal_kind = "Rust syntax";
             let mut successful_edit_this_turn = false;
             let mut refused_finalization_read_this_turn = false;
             let mut repair_read_succeeded = false;
@@ -8464,8 +8471,9 @@ async fn start_ollama_http(
                         }
                     } else {
                         failed_edit_this_turn = true;
-                        if rust_syntax_refusal(&outcome) {
+                        if let Some(kind) = structural_refusal(&outcome) {
                             syntax_refused_edit_this_turn = true;
+                            syntax_refusal_kind = kind;
                             worker_repair_target.get_or_insert_with(|| call.clone());
                         }
                         if let Some(payload) = outcome.content.as_object_mut() {
@@ -8777,15 +8785,24 @@ async fn start_ollama_http(
                     constrain_worker_repair_tool(&mut body, target);
                     (
                         format!(
-                            "Rust syntax validation refused the edit and wrote nothing. The prior \
+                            "{syntax_refusal_kind} validation refused the edit and wrote nothing. The prior \
                              receipt is still authoritative. One strict correction remains: use \
                              only `{tool_name}` on the exact preconstructed path and anchor/range \
                              frozen in its schema; change only the replacement bytes using the \
-                             parser error above. Any prose, exploration, different target or \
+                             {evidence} above. Any prose, exploration, different target or \
                              second invalid proposal ends this local attempt and hands the task \
-                             back for a stronger worker."
+                             back for a stronger worker.",
+                            evidence = if syntax_refusal_kind == "Rust syntax" {
+                                "parser error"
+                            } else {
+                                "diagnostic"
+                            },
                         ),
-                        "worker Rust syntax refusal — entering one strict repair edit",
+                        if syntax_refusal_kind == "Rust syntax" {
+                            "worker Rust syntax refusal — entering one strict repair edit"
+                        } else {
+                            "worker structure refusal — entering one strict repair edit"
+                        },
                     )
                 } else {
                     reset_tool_loop_state(&["read_file"]);

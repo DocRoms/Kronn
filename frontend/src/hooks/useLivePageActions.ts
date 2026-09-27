@@ -92,6 +92,7 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
   }, []);
 
   const reload = useCallback(async (pageId: string | null) => {
+    const samePage = pageIdRef.current === pageId;
     pageIdRef.current = pageId;
     const [nextActions, nextLaunches] = pageId
       ? await Promise.all([
@@ -101,10 +102,17 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
         Promise.resolve().then(() => pagesApi.actionLaunches(pageId)).catch(() => [] as LivePageAction[]),
       ])
       : [[], []];
+    // The answer for a Page the reader has since left must not replace this one.
+    if (pageIdRef.current !== pageId) return;
     setActions(nextActions);
     actionsRef.current = nextActions;
     setLaunches(nextLaunches);
-    setActiveAction(null);
+    // A periodic refresh keeps the open card, and what was typed in it, while
+    // the Page still offers its action.
+    const current = activeActionRef.current;
+    if (!samePage || !current || !nextActions.some(action => action.action_ref === current.actionRef)) {
+      setActiveAction(null);
+    }
   }, [setActiveAction, setLaunches]);
 
   const moveAnchor = useCallback((anchor: LivePageActiveActionState['anchor']) => {

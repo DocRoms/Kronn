@@ -1225,6 +1225,72 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             }),
         ])
 
+    def test_status_forwards_a_bounded_wait_and_refuses_unknown_statuses(self):
+        """KT-790 — `wait_for` and `timeout_secs` reach the backend, which bounds
+        the wait; a misspelt status fails here rather than waiting for nothing."""
+        http = mock.MagicMock(return_value={"success": True, "data": {
+            "lineage": {"execution": {"status": "AwaitingReview"}},
+            "wait": {"matched": True, "timed_out": False, "waited_ms": 1200},
+        }})
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "session-1"),
+        ), mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_task_exec_status({
+                "task_execution_id": "exec-1",
+                "wait_for": ["AwaitingReview", "Done", "Blocked"],
+                "timeout_secs": 90,
+            })
+            self.assertTrue(result["wait"]["matched"])
+            for bad in (
+                {"wait_for": ["awaiting_review"]},
+                {"wait_for": []},
+                {"wait_for": "Done"},
+                {"timeout_secs": 0},
+                {"timeout_secs": True},
+            ):
+                with self.subTest(args=bad), self.assertRaises(RuntimeError):
+                    self.mod.call_task_exec_status({"task_execution_id": "exec-1", **bad})
+        http.assert_called_once_with(
+            "POST", "/api/orchestration/tool/executions/exec-1/status", {
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+                "wait_for": ["AwaitingReview", "Done", "Blocked"],
+                "timeout_secs": 90,
+            },
+        )
+        schema = next(
+            tool["inputSchema"]["properties"] for tool in self.mod.TOOLS
+            if tool["name"] == "task_exec_status"
+        )
+        self.assertIn("wait_for", schema)
+        self.assertIn("timeout_secs", schema)
+
+    def test_status_forwards_the_compact_view_without_rewriting_its_next_action(self):
+        """KT-791 — the compact projection carries the backend's own `next_action`;
+        the full-view resume heuristic must not run on it."""
+        compact = {
+            "id": "exec-1", "status": "AwaitingReview", "attempt": 1,
+            "next_action": {"tool": "task_exec_review", "reason": "review"},
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": compact})
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "session-1"),
+        ), mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(
+                self.mod.call_task_exec_status({"task_execution_id": "exec-1", "view": "compact"}),
+                compact,
+            )
+            with self.assertRaises(RuntimeError):
+                self.mod.call_task_exec_status({"task_execution_id": "exec-1", "view": "tiny"})
+        http.assert_called_once_with(
+            "POST", "/api/orchestration/tool/executions/exec-1/status", {
+                "source_agent": "Codex", "source_session_id": "session-1", "view": "compact",
+            },
+        )
+        reassign = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_exec_reassign")
+        self.assertIn("awaiting-review", reassign["description"])
+        self.assertIn("AwaitingReview", self.mod.TOOL_MANUALS["task_exec_reassign"])
+
     def test_task_exec_reassign_accepts_every_message_target_kind_from_agent_list(self):
         """KT-492 — `worker` is the flat MessageTarget object copied verbatim
         from `agent_list`, for every transport it can report: an HTTP provider
