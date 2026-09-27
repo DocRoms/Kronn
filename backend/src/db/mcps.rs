@@ -519,6 +519,22 @@ pub fn list_configs_display(
                 false
             };
 
+            let (interfaces, effective_kind) = match server_map.get(&c.server_id) {
+                Some(server) => (
+                    crate::core::registry::available_plugin_interfaces(server),
+                    crate::core::registry::effective_plugin_kind(server),
+                ),
+                // Orphaned config (server row missing): no capability to
+                // offer, badge falls back to the same default the frontend
+                // used when it couldn't resolve a registry descriptor.
+                None => (Vec::new(), PluginKind::default()),
+            };
+            let effective_preferred_interface = if interfaces.contains(&preferred_interface) {
+                preferred_interface
+            } else {
+                interfaces.first().copied().unwrap_or_default()
+            };
+
             let registry_drift = server_map.get(&c.server_id).and_then(|server| {
                 if server.source != McpSource::Registry {
                     return None;
@@ -599,6 +615,10 @@ pub fn list_configs_display(
                 host_sync: c.host_sync,
                 preferred_interface,
                 registry_drift,
+                interfaces,
+                effective_kind,
+                effective_preferred_interface,
+                merged_into_existing: None,
             }
         })
         .collect())

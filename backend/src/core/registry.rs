@@ -1,6 +1,6 @@
 use crate::models::{
     ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpServer, McpTransport,
-    OAuth2ExtraHeader, PluginInterface, TokenInjection,
+    OAuth2ExtraHeader, PluginInterface, PluginKind, TokenInjection,
 };
 
 /// Sentinel id surfaced at the top of the registry. Picking it in the UI
@@ -2500,6 +2500,17 @@ pub fn search(query: &str) -> Vec<McpDefinition> {
         .collect()
 }
 
+/// Whether the builtin registry entry for `server_id` carries the `cli`
+/// tag. The single lookup both `available_plugin_interfaces` and
+/// `effective_plugin_kind` read, so a plugin's CLI-wrapper status is never
+/// computed two different ways.
+fn has_cli_tag(server_id: &str) -> bool {
+    builtin_registry()
+        .iter()
+        .find(|definition| definition.id == server_id)
+        .is_some_and(|definition| definition.tags.iter().any(|tag| tag == "cli"))
+}
+
 pub fn available_plugin_interfaces(server: &McpServer) -> Vec<PluginInterface> {
     let mut interfaces = Vec::with_capacity(3);
     if server.api_spec.is_some() {
@@ -2508,14 +2519,27 @@ pub fn available_plugin_interfaces(server: &McpServer) -> Vec<PluginInterface> {
     if !matches!(server.transport, McpTransport::ApiOnly) {
         interfaces.push(PluginInterface::Mcp);
     }
-    if builtin_registry()
-        .iter()
-        .find(|definition| definition.id == server.id)
-        .is_some_and(|definition| definition.tags.iter().any(|tag| tag == "cli"))
-    {
+    if has_cli_tag(&server.id) {
         interfaces.push(PluginInterface::Cli);
     }
     interfaces
+}
+
+/// Single canonical classification of a plugin's invocation surface,
+/// computed once from `transport` + `api_spec` + the registry's `cli` tag.
+/// The CLI check runs FIRST so a CLI wrapper that also exposes MCP/API
+/// (Fastly) stays bucketed as `Cli` — the prerequisite the user must
+/// satisfy — rather than `Hybrid`.
+pub fn effective_plugin_kind(server: &McpServer) -> PluginKind {
+    if has_cli_tag(&server.id) {
+        PluginKind::Cli
+    } else if matches!(server.transport, McpTransport::ApiOnly) {
+        PluginKind::Api
+    } else if server.api_spec.is_some() {
+        PluginKind::Hybrid
+    } else {
+        PluginKind::Mcp
+    }
 }
 
 #[cfg(test)]
@@ -2552,6 +2576,57 @@ mod tests {
         assert!(api_readiness_probe(CUSTOM_API_SERVER_ID).is_none());
         assert!(api_readiness_probe("api-google-search").is_none());
     }
+
+    fn registry_server(server_id: &str) -> McpServer {
+        let definition = builtin_registry()
+            .into_iter()
+            .find(|definition| definition.id == server_id)
+            .expect("registry definition");
+        McpServer {
+            id: definition.id,
+            name: definition.name,
+            description: definition.description,
+            transport: definition.transport,
+            source: crate::models::McpSource::Registry,
+            api_spec: definition.api_spec,
+        }
+    }
+
+    #[test]
+    fn effective_plugin_kind_microsoft_365_is_api_only_no_stored_token() {
+        // CliToken auth, ApiOnly transport, no `cli` tag: the badge must say
+        // API — there is no MCP transport and no CLI wrapper to satisfy.
+        let server = registry_server("api-microsoft-365");
+        assert_eq!(effective_plugin_kind(&server), PluginKind::Api);
+        assert_eq!(
+            available_plugin_interfaces(&server),
+            vec![PluginInterface::Api]
+        );
+    }
+
+    #[test]
+    fn effective_plugin_kind_fastly_is_cli_first_even_with_api() {
+        // Stdio transport + api_spec + `cli` tag: CLI wins over Hybrid
+        // because the CLI prerequisite is what the user must satisfy first.
+        let server = registry_server("mcp-fastly");
+        assert_eq!(effective_plugin_kind(&server), PluginKind::Cli);
+        assert_eq!(
+            available_plugin_interfaces(&server),
+            vec![PluginInterface::Api, PluginInterface::Mcp, PluginInterface::Cli]
+        );
+    }
+
+    #[test]
+    fn effective_plugin_kind_github_is_hybrid_mcp_and_api() {
+        // Stdio transport + api_spec, no `cli` tag: MCP + API, no CLI prereq.
+        let server = registry_server("mcp-github");
+        assert_eq!(effective_plugin_kind(&server), PluginKind::Hybrid);
+        assert_eq!(
+            available_plugin_interfaces(&server),
+            vec![PluginInterface::Api, PluginInterface::Mcp]
+        );
+    }
+
     use std::collections::HashSet;
 
     /// Packages whose upstream switched runtime (e.g. to bun) and MUST stay pinned to a Node-compatible version.

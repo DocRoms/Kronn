@@ -631,12 +631,17 @@ pub async fn create_config(
                 }
                 db::mcps::set_config_projects(conn, &existing.id, &all_pids)?;
 
-                // Return updated display
+                // Return updated display, flagged as a merge: the caller's
+                // label, scope and CLI-exposure choice for this request were
+                // NOT applied to the pre-existing config — only project
+                // scope was merged above. Silently returning `existing` here
+                // used to look identical to a fresh creation.
                 let configs = db::mcps::list_configs_display(conn, None)?;
-                let display = configs
+                let mut display = configs
                     .into_iter()
                     .find(|c| c.id == existing.id)
                     .ok_or_else(|| anyhow::anyhow!("Config disappeared"))?;
+                display.merged_into_existing = Some(existing.id.clone());
                 return Ok(display);
             }
 
@@ -1496,6 +1501,11 @@ pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverv
                             include_general: true,
                             config_hash: hash,
                             project_ids: vec![project.id.clone()],
+                            // Detected from this project's own `.mcp.json` —
+                            // it is already scoped there. Writing it back out
+                            // to a host CLI's global config file would be an
+                            // exposure escalation the operator never asked
+                            // for, so rescan never opts a config into sync.
                             host_sync: HostSyncMode::None,
                         };
                         db::mcps::insert_config(conn, &config)?;
@@ -2652,6 +2662,10 @@ pub async fn import_custom_plugin_file(
                 is_global: false,
                 config_hash,
                 include_general: false,
+                // Documented default, not an omission: `materialize_custom_server`
+                // always produces an API-only server (no MCP transport), and
+                // `CustomApiPayload` carries no host_sync override — CLI
+                // sync has nothing to opt into here.
                 host_sync: HostSyncMode::None,
                 project_ids: vec![],
             };
@@ -3604,6 +3618,10 @@ mod tests {
             host_sync: HostSyncMode::None,
             preferred_interface: PluginInterface::Mcp,
             registry_drift: None,
+            interfaces: vec![PluginInterface::Mcp],
+            effective_kind: PluginKind::Mcp,
+            effective_preferred_interface: PluginInterface::Mcp,
+            merged_into_existing: None,
         }
     }
 

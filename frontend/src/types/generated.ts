@@ -3758,7 +3758,31 @@ host_sync: HostSyncMode, preferred_interface: PluginInterface,
  * `None` means the config still matches, or belongs to a user-managed
  * (manual/detected/imported) server for which no registry contract exists.
  */
-registry_drift?: McpConfigRegistryDrift, };
+registry_drift?: McpConfigRegistryDrift,
+/**
+ * Interfaces this plugin's server actually exposes (`registry::
+ * available_plugin_interfaces`). Empty when the server row is missing
+ * (orphaned config). The frontend reads this instead of rebuilding the
+ * list from transport/api_spec/tags itself.
+ */
+interfaces: Array<PluginInterface>,
+/**
+ * Canonical badge classification — see `PluginKind`.
+ */
+effective_kind: PluginKind,
+/**
+ * `preferred_interface` clamped to `interfaces`: falls back to the
+ * first available interface (or `Mcp`) when a registry change made the
+ * stored preference stale. What the agent will actually use.
+ */
+effective_preferred_interface: PluginInterface,
+/**
+ * Set to the pre-existing config's id when this response is the result
+ * of re-adding an identical plugin: creation merged project scope into
+ * that config instead of silently dropping the new request's label,
+ * scope and CLI-exposure choice.
+ */
+merged_into_existing?: string, };
 
 export type McpConfigRegistryDrift = {
 /**
@@ -4811,6 +4835,16 @@ export type PluginBundleValueDescriptor = { key: string, sensitive: boolean, exp
  * the operator's choice among those capabilities.
  */
 export type PluginInterface = "api" | "mcp" | "cli";
+
+/**
+ * Canonical classification of a plugin's invocation surface — the badge
+ * shown on its config card, computed once server-side (`registry::
+ * effective_plugin_kind`) from `transport` + `api_spec` + the registry's
+ * `cli` tag. Mirrors the bucketing order previously duplicated in the
+ * frontend: a CLI wrapper is `Cli` even when it also exposes MCP/API,
+ * because the CLI prerequisite is what the user needs to satisfy first.
+ */
+export type PluginKind = "mcp" | "api" | "hybrid" | "cli";
 
 /**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by

@@ -1139,15 +1139,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, favor
   const builtinMatchesList = (mcpKindFilter === 'all' || mcpKindFilter === 'mcp')
     && (!mcpSearch || t('mcp.builtin.tileTitle').toLowerCase().includes(mcpSearch.toLowerCase()));
   const showBuiltinFallback = !builtinConfig && !showAddMcp && builtinMatchesList;
-  const serverById = new Map(servers.map(server => [server.id, server]));
-  const registryById = new Map(mcpRegistry.map(definition => [definition.id, definition]));
-  const kindForServer = (serverId: string): PluginKind => {
-    const descriptor = registryById.get(serverId) ?? serverById.get(serverId);
-    return descriptor ? pluginKind(descriptor) : 'mcp';
-  };
   const visibleConfigs = [...configs]
     .filter(cfg => {
-      const kind = kindForServer(cfg.server_id);
+      const kind = cfg.effective_kind;
       const matchesKind = mcpKindFilter === 'all'
         || (mcpKindFilter === 'mcp' && (kind === 'mcp' || kind === 'hybrid'))
         || (mcpKindFilter === 'api' && (kind === 'api' || kind === 'hybrid'))
@@ -1155,8 +1149,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, favor
       return matchesKind;
     })
     .sort((a, b) => {
-      const aKind = kindForServer(a.server_id);
-      const bKind = kindForServer(b.server_id);
+      const aKind = a.effective_kind;
+      const bKind = b.effective_kind;
       const byName = a.label.localeCompare(b.label, undefined, {
         sensitivity: 'base',
         numeric: true,
@@ -2271,12 +2265,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, favor
               const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
               const isSelected = selectedConfigId === cfg.id;
               const isBuiltin = isBuiltinConfig(cfg);
-              // 0.7.0 — derive plugin kind from the server registry so
-              // we can hide host-sync UI on API-only plugins (they're
-              // injected into prompts, never written to ~/.claude.json
-              // & co — showing a "Sync CLI" toggle on them was a UX bug).
+              // KT-828 — the badge/filter classification is computed once
+              // server-side (`effective_kind`) so it can't drift from what
+              // the agent actually uses; hides host-sync UI on API-only
+              // plugins (they're injected into prompts, never written to
+              // ~/.claude.json & co — showing a "Sync CLI" toggle on them
+              // was a UX bug).
               const cfgServer = mcpOverview.servers.find(s => s.id === cfg.server_id);
-              const cfgKind = kindForServer(cfg.server_id);
+              const cfgKind = cfg.effective_kind;
               const supportsHostSync = cfgKind !== 'api';
               const hasVisibleScope = hasAgentScope(
                 cfg.is_global,
@@ -2390,13 +2386,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, favor
               const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === cfg.server_id);
               const probeResult = probeByConfig[cfg.id];
               const isProbing = probingConfigId === cfg.id;
-              const availableInterfaces: PluginInterface[] = [];
-              if (cfgServer?.api_spec) availableInterfaces.push('api');
-              if (cfgServer && cfgServer.transport !== 'ApiOnly') availableInterfaces.push('mcp');
-              if (def?.tags.includes('cli')) availableInterfaces.push('cli');
-              const effectivePreferredInterface = availableInterfaces.includes(cfg.preferred_interface)
-                ? cfg.preferred_interface
-                : availableInterfaces[0] ?? 'mcp';
+              // KT-828 — both computed once server-side from transport +
+              // api_spec + the registry's `cli` tag, so this can't drift
+              // from what the agent actually uses.
+              const availableInterfaces: PluginInterface[] = cfg.interfaces;
+              const effectivePreferredInterface = cfg.effective_preferred_interface;
 
               // 0.8.6 (#29) — open the edit form pre-filled with the
               // current Custom plugin's spec. Shared between the Edit
@@ -2722,7 +2716,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, favor
                         );
                       }
                       const specKeys: string[] = cfgServer?.api_spec?.config_keys?.map(ck => ck.env_key) ?? [];
-                      const credentialKind = pluginCredentialKind(def);
+                      // KT-828 — this config exists server-side, so read its
+                      // computed classification instead of re-deriving from
+                      // the registry `cli` tag.
+                      const credentialKind = cfgKind === 'cli' ? 'cli' : 'api';
                       const displayEnvKeys = pluginCredentialKeys(def, cfg.env_keys);
                       const orphanEnvKeys: string[] = [];
                       const hasAnything = displayEnvKeys.length > 0 || def?.token_help;
@@ -3042,7 +3039,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, favor
                     };
                     const row = (config: McpConfigDisplay, keyPrefix: string) => {
                       const rowProps = getRowProps(config);
-                      const kind = kindForServer(config.server_id);
+                      const kind = config.effective_kind;
                       const isBuiltin = isBuiltinConfig(config);
                       const selected = isMultiSelected(config);
                       const scopeLabels = [

@@ -13513,6 +13513,215 @@ async fn mcp_update_config_persists_only_available_plugin_interfaces() {
         .is_some_and(|error| error.contains("unavailable")));
 }
 
+#[tokio::test]
+async fn mcp_create_config_from_registry_defaults_host_sync_to_none_when_omitted() {
+    // "registre" creation path: no `host_sync` in the request body must
+    // resolve to the documented default, never a silent unrelated value.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "mcp-github",
+            "label": "GitHub default host_sync",
+            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_test" },
+            "args_override": null,
+            "is_global": false,
+            "project_ids": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_create_config_custom_api_defaults_host_sync_to_none_when_omitted() {
+    // "Custom API" creation path — same `/api/mcps/configs` endpoint as the
+    // registry path, routed through `custom_spec` instead of a registry id.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "api-custom",
+            "label": "Custom plugin default host_sync",
+            "env": {},
+            "args_override": null,
+            "is_global": false,
+            "project_ids": [],
+            "custom_spec": {
+                "name": "Custom plugin default host_sync",
+                "base_url": "https://example.test",
+                "description": "test",
+                "docs_url": null,
+                "fields": [],
+                "endpoints": [],
+                "auth": "None"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_custom_import_file_defaults_host_sync_to_none() {
+    // "JSON" creation path: `/api/mcps/custom/import-file` is a distinct
+    // endpoint from `/api/mcps/configs` (reads a `.kronn-plugin.json` file,
+    // not a `custom_spec` on the create request) — its own explicit,
+    // documented default must be exercised separately.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, imported) = post_json(
+        app,
+        "/api/mcps/custom/import-file",
+        serde_json::json!({
+            "name": "Imported plugin default host_sync",
+            "base_url": "https://example.test",
+            "description": "test",
+            "docs_url": null,
+            "fields": [],
+            "endpoints": [],
+            "auth": "None"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import failed: {imported:?}");
+    assert_eq!(imported["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_create_config_reports_merge_into_existing_config() {
+    // Re-adding an identical plugin (same server + env + args) must signal
+    // the merge instead of silently discarding the second request's label,
+    // scope and CLI-exposure choice.
+    let state = test_state();
+    let first_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "GitHub original",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_same_token" },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": [],
+        "host_sync": "None"
+    });
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, first) = post_json(app, "/api/mcps/configs", first_body).await;
+    assert_eq!(status, StatusCode::OK, "first create failed: {first:?}");
+    assert_eq!(
+        first["data"]["merged_into_existing"],
+        Value::Null,
+        "a genuinely new config must not report a merge"
+    );
+    let existing_id = first["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(first["data"]["label"], "GitHub original");
+
+    // Same server, same env/args → identical config_hash → merge branch.
+    let second_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "GitHub duplicate attempt",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_same_token" },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": [],
+        "host_sync": "GlobalOnly"
+    });
+    let app = build_router_with_auth(state, false);
+    let (status, second) = post_json(app, "/api/mcps/configs", second_body).await;
+    assert_eq!(status, StatusCode::OK, "second create failed: {second:?}");
+    assert_eq!(second["data"]["id"], existing_id);
+    assert_eq!(
+        second["data"]["merged_into_existing"], existing_id,
+        "re-adding an identical plugin must flag the merge with the existing id"
+    );
+    // Label/host_sync of the pre-existing config are untouched by the
+    // duplicate request — only project scope gets merged.
+    assert_eq!(second["data"]["label"], "GitHub original");
+    assert_eq!(second["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
+    // "rescan" creation path: a plugin surfaced from a project's own
+    // `.mcp.json` must never be silently opted into host sync.
+    let state = test_state();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
+
+    let mut mcp_servers = std::collections::HashMap::new();
+    mcp_servers.insert(
+        "github".to_string(),
+        kronn::core::mcp_scanner::McpServerEntry {
+            command: Some("npx".to_string()),
+            args: Some(vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ]),
+            url: None,
+            env: std::collections::HashMap::new(),
+        },
+    );
+    kronn::core::mcp_scanner::write_mcp_json(
+        &project_path,
+        &kronn::core::mcp_scanner::McpJsonFile { mcp_servers },
+    )
+    .unwrap();
+
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "rescan-test-proj".to_string(),
+        name: "Rescan Test".to_string(),
+        path: project_path,
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, refreshed) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "refresh failed: {refreshed:?}");
+    assert_eq!(refreshed["success"], true, "{refreshed:?}");
+
+    let configs = refreshed["data"]["configs"]
+        .as_array()
+        .expect("configs array");
+    let detected = configs
+        .iter()
+        .find(|c| c["server_id"] == "mcp-github")
+        .expect("rescan should have detected the github entry from .mcp.json");
+    assert_eq!(
+        detected["host_sync"], "None",
+        "a config detected from a project's own .mcp.json must not be opted into host sync"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Export/Import ZIP tests
 // ═══════════════════════════════════════════════════════════════════════════════
