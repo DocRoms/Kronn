@@ -512,7 +512,7 @@ coupling the template to every upstream provider response.
 ## Agent and MCP authoring contract
 
 The built-in Workflow Architect and the `kronn-internal` MCP expose the same
-twelve-step taxonomy. For a Page pipeline, an agent must discover dependencies
+thirteen-step taxonomy. For a Page pipeline, an agent must discover dependencies
 before composing the workflow:
 
 1. `qa_list` resolves every saved Quick API used by `CollectApiData`; `qe_list`

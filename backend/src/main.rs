@@ -502,6 +502,31 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // KT-798 — an Interrupted run nobody resumed within its lifetime gives its
+    // worktree back; dirty checkouts stay and unintegrated commits keep a branch.
+    let interrupted_ttl_days = state
+        .config
+        .read()
+        .await
+        .server
+        .interrupted_worktree_ttl_days;
+    let reclaimed = kronn::workflows::interrupted_worktrees::reclaim_stale_interrupted_worktrees(
+        &state.db,
+        interrupted_ttl_days,
+        chrono::Utc::now(),
+    )
+    .await;
+    if reclaimed != Default::default() {
+        tracing::info!(
+            reclaimed = reclaimed.reclaimed,
+            preserved_branches = reclaimed.preserved_branches,
+            kept_dirty = reclaimed.kept_dirty,
+            kept_other = reclaimed.kept_other,
+            ttl_days = interrupted_ttl_days,
+            "Interrupted workflow worktree reclamation completed"
+        );
+    }
+
     // Partial-response recovery — agents whose `full_response` was being
     // checkpointed into discussions.partial_response when the previous
     // process died. Convert each into an Agent message with an "interrupted"

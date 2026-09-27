@@ -234,6 +234,34 @@ export function forcedTextOnTokenBackground(file: string, css: string): Finding[
   return findings;
 }
 
+/** The same pairing in a React inline `style={{ … }}` object, which no
+ *  stylesheet check sees. */
+export function forcedTextInInlineStyles(file: string, code: string): Finding[] {
+  const findings: Finding[] = [];
+  for (const m of code.matchAll(/style=\{\{/g)) {
+    const start = (m.index ?? 0) + m[0].length;
+    let depth = 1;
+    let end = start;
+    while (end < code.length && depth > 0) {
+      if (code[end] === '{') depth += 1;
+      else if (code[end] === '}') depth -= 1;
+      end += 1;
+    }
+    const body = code.slice(start, end - 1);
+    const value = (prop: string) =>
+      body.match(new RegExp(`(?:^|[\\s,{])${prop}\\s*:\\s*(['"\`])([^'"\`]*)\\1`))?.[2].trim();
+    const background = value('background') ?? value('backgroundColor');
+    const color = value('color');
+    if (background && /var\(\s*--kr-/.test(background) && color && LITERAL_WHITE_OR_BLACK.test(color)) {
+      findings.push({
+        file, line: lineOf(code, m.index ?? 0),
+        detail: `style={{ background: ${background}, color: ${color} }}`,
+      });
+    }
+  }
+  return findings;
+}
+
 /** A `:focus-visible` rule that drops the outline without drawing a ring of
  *  its own (box-shadow): keyboard focus becomes a faint background change. */
 export function focusRingRemovals(file: string, css: string): Finding[] {
@@ -309,7 +337,10 @@ export function auditRepo(srcDir: string): RepoAudit {
     contrast: measureTextContrast(themes),
     undefinedTokens: undefinedTokenUsages(sources, new Set(themes.get('dark')?.keys() ?? [])),
     undeclaredProperties: undeclaredCustomProperties(sources),
-    forcedText: css.flatMap(s => forcedTextOnTokenBackground(s.file, s.text)),
+    forcedText: [
+      ...css.flatMap(s => forcedTextOnTokenBackground(s.file, s.text)),
+      ...sources.filter(s => s.file.endsWith('.tsx')).flatMap(s => forcedTextInInlineStyles(s.file, s.text)),
+    ],
     focusRemovals: css.flatMap(s => focusRingRemovals(s.file, s.text)),
   };
 }

@@ -1914,6 +1914,8 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -1924,6 +1926,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: ::std::collections::HashMap::new(),
         on_failure: vec![],
@@ -2032,6 +2035,8 @@ pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -2432,6 +2437,139 @@ fn terminal_workspace_cleanup_candidates_exclude_interrupted_and_owned_paths() {
             .as_deref(),
         Some("/repo/.kronn/worktrees/owned"),
         "an active child retains durable ownership of the checkout"
+    );
+}
+
+#[test]
+fn a_finished_child_never_purges_the_worktree_its_resumable_parent_shares() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-shared");
+    workflow.project_id = Some("p-shared".into());
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-shared', 'Shared', '/repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let shared = "/repo/.kronn/worktrees/parent";
+    for (parent_status, parent_id) in [
+        (RunStatus::Interrupted, "parent-interrupted"),
+        (RunStatus::WaitingApproval, "parent-paused"),
+    ] {
+        let mut parent = sample_run(parent_id, "w-shared");
+        parent.status = parent_status;
+        parent.workspace_path = Some(format!("{shared}-{parent_id}"));
+        crate::db::workflows::insert_run(&conn, &parent).unwrap();
+        let mut child = sample_run(&format!("{parent_id}-child"), "w-shared");
+        child.status = RunStatus::Success;
+        child.parent_run_id = Some(parent_id.into());
+        child.run_type = "subworkflow".into();
+        child.workspace_path = parent.workspace_path.clone();
+        crate::db::workflows::insert_run(&conn, &child).unwrap();
+    }
+    let mut finished = sample_run("parent-done", "w-shared");
+    finished.status = RunStatus::Failed;
+    finished.workspace_path = Some(format!("{shared}-done"));
+    crate::db::workflows::insert_run(&conn, &finished).unwrap();
+    let mut finished_child = sample_run("parent-done-child", "w-shared");
+    finished_child.status = RunStatus::Success;
+    finished_child.parent_run_id = Some("parent-done".into());
+    finished_child.workspace_path = finished.workspace_path.clone();
+    crate::db::workflows::insert_run(&conn, &finished_child).unwrap();
+
+    let mut candidates: Vec<String> =
+        crate::db::workflows::terminal_workspace_cleanup_candidates(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.run_id)
+            .collect();
+    candidates.sort();
+    assert_eq!(
+        candidates,
+        ["parent-done", "parent-done-child"],
+        "only a worktree every sharer has finished with is purged"
+    );
+}
+
+#[test]
+fn stale_interrupted_candidates_follow_the_cutoff_and_name_the_owner() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-stale");
+    workflow.project_id = Some("p-stale".into());
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-stale', 'Stale', '/repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let now = Utc::now();
+    let interrupted = |id: &str, days: i64, path: &str| {
+        let mut run = sample_run(id, "w-stale");
+        run.status = RunStatus::Interrupted;
+        run.finished_at = Some(now - chrono::Duration::days(days));
+        run.workspace_path = Some(path.into());
+        run
+    };
+    let old = interrupted("old-owner", 10, "/repo/.kronn/worktrees/old");
+    crate::db::workflows::insert_run(&conn, &old).unwrap();
+    let mut old_child = interrupted("old-child", 10, "/repo/.kronn/worktrees/old");
+    old_child.parent_run_id = Some("old-owner".into());
+    crate::db::workflows::insert_run(&conn, &old_child).unwrap();
+    crate::db::workflows::insert_run(
+        &conn,
+        &interrupted("recent", 2, "/repo/.kronn/worktrees/recent"),
+    )
+    .unwrap();
+    let mut unknown_age = interrupted("unknown-age", 10, "/repo/.kronn/worktrees/unknown");
+    unknown_age.finished_at = None;
+    crate::db::workflows::insert_run(&conn, &unknown_age).unwrap();
+
+    let candidates = crate::db::workflows::stale_interrupted_workspace_candidates(
+        &conn,
+        now - chrono::Duration::days(7),
+    )
+    .unwrap();
+    assert_eq!(
+        candidates,
+        vec![crate::db::workflows::InterruptedWorkspaceCandidate {
+            run_id: "old-owner".into(),
+            workflow_name: "Test Workflow".into(),
+            project_path: "/repo".into(),
+            workspace_path: "/repo/.kronn/worktrees/old".into(),
+        }],
+        "one candidate per path, attributed to the top-level run"
+    );
+
+    let branch = crate::models::ProducedBranch {
+        branch_name: "kronn/Test-Workflow/old-owne".into(),
+        head_sha: "abc123".into(),
+        ahead: 2,
+        pushed_upstream: false,
+    };
+    for _ in 0..2 {
+        assert!(crate::db::workflows::record_reclaimed_interrupted_branch(
+            &conn,
+            "old-owner",
+            "/repo/.kronn/worktrees/old",
+            &branch,
+        )
+        .unwrap());
+    }
+    let stored = crate::db::workflows::get_run(&conn, "old-owner")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.produced_branches.len(), 1, "recorded once");
+    assert!(
+        !crate::db::workflows::record_reclaimed_interrupted_branch(
+            &conn,
+            "recent",
+            "/repo/.kronn/worktrees/elsewhere",
+            &branch,
+        )
+        .unwrap(),
+        "a run that no longer owns that path is left alone"
     );
 }
 
@@ -3268,6 +3406,8 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        concurrency_key: None,
+        triggered_by_run_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -3571,20 +3711,33 @@ fn workflow_latest_run_aggregation_does_not_read_run_payload_pages() {
 fn workflow_latest_run_index_upgrade_preserves_existing_runs_and_ties() {
     let conn = Connection::open_in_memory().unwrap();
     migrations::run_through(&conn, "189_artifact_message_origin").unwrap();
-    for id in ["latest-wf", "without-runs", "qp:latest-batch"] {
-        crate::db::workflows::insert_workflow(&conn, &sample_workflow(id)).unwrap();
-    }
     let start = Utc.with_ymd_and_hms(2026, 9, 24, 8, 0, 0).unwrap();
+    // Rows written with the 189 schema: today's insert helpers name later columns.
+    for id in ["latest-wf", "without-runs", "qp:latest-batch"] {
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES (?1, ?1, '\"Manual\"', '[]', ?2, ?2)",
+            rusqlite::params![id, start.to_rfc3339()],
+        )
+        .unwrap();
+    }
     for (id, workflow_id, minute) in [
         ("earlier", "latest-wf", 0),
         ("latest-a", "latest-wf", 1),
         ("latest-b", "latest-wf", 1),
         ("batch", "qp:latest-batch", 0),
     ] {
-        let mut run = sample_run(id, workflow_id);
-        run.started_at = start + chrono::Duration::minutes(minute);
-        run.tokens_used = 123;
-        crate::db::workflows::insert_run(&conn, &run).unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json, tokens_used, started_at, run_type)
+             VALUES (?1, ?2, 'Success', ?3, 123, ?4, 'linear')",
+            rusqlite::params![
+                id,
+                workflow_id,
+                format!(r#"[{{"step_name":"{id}","status":"Success","output":"kept","tokens_used":1,"duration_ms":1}}]"#),
+                (start + chrono::Duration::minutes(minute)).to_rfc3339(),
+            ],
+        )
+        .unwrap();
     }
     let saved = |conn: &Connection| -> Vec<(String, String)> {
         conn.prepare("SELECT id, step_results_json FROM workflow_runs ORDER BY id")
@@ -5073,6 +5226,8 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
                 id: None,
@@ -5139,6 +5294,8 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
                 id: None,
@@ -5202,6 +5359,8 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
+                room_id: None,
+                sub_workflow_variables: std::collections::HashMap::new(),
             },
         ],
         actions: vec![],
@@ -5213,6 +5372,7 @@ fn workflow_multi_step_roundtrip() {
         },
         workspace_config: None,
         concurrency_limit: None,
+        concurrency_key: None,
         guards: None,
         artifacts: ::std::collections::HashMap::new(),
         on_failure: vec![],
@@ -5319,6 +5479,8 @@ fn workflow_update_steps_count() {
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
+        room_id: None,
+        sub_workflow_variables: std::collections::HashMap::new(),
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 

@@ -2291,7 +2291,8 @@
 }
 
 .wf-step-edit-card[data-step-type='batch-qp']::before,
-.wf-step-edit-card[data-step-type='sub-workflow']::before {
+.wf-step-edit-card[data-step-type='sub-workflow']::before,
+.wf-step-edit-card[data-step-type='trigger-workflow']::before {
   background: var(--kr-purple, rgb(var(--kr-purple-rgb)));
 }
 
@@ -4827,6 +4828,7 @@
 }
 
 .wf-pipe-chip-type[data-kind='subworkflow'],
+.wf-pipe-chip-type[data-kind='triggerworkflow'],
 .wf-pipe-chip-type[data-kind='batch-qp'] {
   color: var(--kr-purple);
   background: rgba(var(--kr-purple-rgb), 0.1);

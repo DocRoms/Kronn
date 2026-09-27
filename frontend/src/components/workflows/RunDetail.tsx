@@ -858,6 +858,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'data'
                       : ws_step.step_type.type === 'PublishPageData' ? 'page'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'subwf'
+                      : ws_step.step_type.type === 'TriggerWorkflow' ? 'subwf'
                       : 'agent'
                   }>
                     {ws_step.step_type.type === 'ApiCall' ? 'API'
@@ -871,6 +872,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'TRANSFORM'
                       : ws_step.step_type.type === 'PublishPageData' ? 'PAGE'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'SUB-WF'
+                      : ws_step.step_type.type === 'TriggerWorkflow' ? 'TRIGGER'
                       : 'AGENT'}
                   </span>
                 )}

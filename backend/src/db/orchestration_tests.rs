@@ -5157,6 +5157,85 @@ fn a_replayed_campaign_gate_publishes_nothing_and_breaks_no_transition() {
     );
 }
 
+/// KT-793 — a workflow step replayed after a resume takes over the executions its
+/// previous session steered, so their notices wake the replayed agent.
+#[test]
+fn a_replayed_workflow_step_takes_over_the_notices_of_its_earlier_session() {
+    let conn = setup();
+    conn.execute(
+        "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at) \
+         VALUES ('wf-793', 'W', '{}', '[]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO workflow_runs (id, workflow_id, status, started_at) \
+         VALUES ('run-793', 'wf-793', 'Running', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    let first = crate::db::workflow_step_rooms::join(
+        &conn,
+        "run-793",
+        "orchestrate",
+        DISC,
+        "ClaudeCode",
+        "s1",
+    )
+    .unwrap();
+    seed_session(&conn, 7930, "Codex", "human-cli");
+    let launch = |task: &str, number: i64| {
+        seed_task(&conn, task, number);
+        launch_single_task(
+            &conn,
+            &LaunchSingleTaskInput::new(task, DISC),
+            &backend_actor(),
+        )
+        .unwrap()
+        .execution
+    };
+    let steered = launch("t-793-steered", 17931);
+    let human = launch("t-793-human", 17932);
+    assert!(pin_principal_cli_session(&conn, &steered.id, first.session_pk).unwrap());
+    assert!(pin_principal_cli_session(&conn, &human.id, 7930).unwrap());
+
+    let replay = crate::db::workflow_step_rooms::join(
+        &conn,
+        "run-793",
+        "orchestrate",
+        DISC,
+        "ClaudeCode",
+        "s2",
+    )
+    .unwrap();
+    assert_eq!(replay.repinned, 1);
+    let room_agent = crate::db::discussions::get_discussion(&conn, DISC)
+        .unwrap()
+        .unwrap()
+        .agent;
+    assert_eq!(
+        principal_notice_target(&conn, &steered.id, room_agent.clone()).unwrap(),
+        MessageTarget::cli(AgentType::ClaudeCode, replay.session_pk),
+        "the replayed step is woken by its execution's notices"
+    );
+    assert_eq!(
+        principal_notice_target(&conn, &human.id, room_agent).unwrap(),
+        MessageTarget::cli(AgentType::Codex, 7930),
+        "a human CLI keeps the executions it steers"
+    );
+    let first_status: String = conn
+        .query_row(
+            "SELECT status FROM discussion_sessions WHERE id = ?1",
+            [first.session_pk],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        first_status, "left",
+        "the interrupted step's session left the room"
+    );
+}
+
 /// KT-790 — parent-room notices address the CLI steering the execution, and only
 /// a live session of that very room can take that role.
 #[test]
