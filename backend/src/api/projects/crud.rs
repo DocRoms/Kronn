@@ -691,6 +691,19 @@ pub async fn set_linked_repos(
                 ALLOWED_KINDS.join(", ")
             )));
         }
+        // A missing local path cannot be read by agents here; `try_exists` keeps
+        // permission errors out of this check.
+        if let Some(location) = repo.local_location() {
+            if matches!(
+                crate::core::scanner::resolve_host_path(location).try_exists(),
+                Ok(false)
+            ) {
+                return Json(ApiResponse::err(format!(
+                    "Linked repository `{}`: the local path `{location}` does not exist on this machine. Fix the path, or use a remote URL.",
+                    repo.name.trim()
+                )));
+            }
+        }
     }
 
     // Cap the list at 20 to keep the prompt prelude bounded.

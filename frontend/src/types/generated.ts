@@ -2579,6 +2579,12 @@ completed_active: number, total_active: number,
  */
 stats: PlanningPlanStats, };
 
+/**
+ * A detail refresh: `detail` is omitted when `revision` still matches the
+ * one the client sent.
+ */
+export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
+
 export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
 export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
@@ -6318,7 +6324,12 @@ export type StepOutputFormat = { "type": "FreeText" } | { "type": "Structured" }
  */
 schema: any, on_invalid: OnInvalid, };
 
-export type StepResult = { step_name: string, status: RunStatus, output: string, tokens_used: number, duration_ms: number,
+export type StepResult = { step_name: string, status: RunStatus, output: string,
+/**
+ * `None` when an agent ran but its runtime reported no usage: a step
+ * that called a model was not free, so unknown must not read as zero.
+ */
+tokens_used: number | null, duration_ms: number,
 /**
  * 0.8.2 — Wall-clock timestamp at which the step started executing.
  * Optional for backward compatibility with runs written before this

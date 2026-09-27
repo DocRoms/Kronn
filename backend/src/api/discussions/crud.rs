@@ -59,57 +59,124 @@ pub async fn list(
     }
 }
 
+/// The detail the transcript renders: discussion, dispatches, targets and the
+/// in-flight checkpoint.
+fn load_detail(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> anyhow::Result<Option<crate::models::DiscussionDetail>> {
+    let id = id.to_string();
+    let Some(discussion) = crate::db::discussions::get_discussion(conn, &id)? else {
+        return Ok(None);
+    };
+    let active_agent_dispatches =
+        crate::db::agent_dispatch::list_active_for_discussion(conn, &id, &discussion.agent)?;
+    let partial_response =
+        crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
+    let message_targets = crate::db::discussions::list_discussion_message_targets(conn, &id)?;
+    // Same rule as `canonical_targets`: the native agent owns an
+    // ordinary turn unless it is switched off, and then the joined
+    // sessions do. Resolved here so the transcript can name the real
+    // destination instead of guessing from `agent`.
+    let default_targets = if crate::db::discussions::disc_is_no_agent(conn, &id)? {
+        crate::db::discussion_sessions::list_sessions(conn, &id, false)?
+            .iter()
+            .map(|session| {
+                Ok(crate::models::MessageTarget::cli(
+                    crate::db::discussions::parse_agent_type(&session.agent_type)?,
+                    session.id,
+                ))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        let mut target = crate::models::MessageTarget::discussion_agent(discussion.agent.clone());
+        target.connection_id = discussion.connection_id.clone();
+        vec![target]
+    };
+    Ok(Some(crate::models::DiscussionDetail {
+        discussion,
+        active_agent_dispatches,
+        message_targets,
+        partial_response,
+        default_targets,
+    }))
+}
+
 /// GET /api/discussions/:id
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<crate::models::DiscussionDetail>> {
-    match state
+    match state.db.with_conn(move |conn| load_detail(conn, &id)).await {
+        Ok(Some(d)) => Json(ApiResponse::ok(d)),
+        Ok(None) => Json(ApiResponse::err("Discussion not found")),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DiscussionPollQuery {
+    pub revision: Option<String>,
+}
+
+/// Hash of the detail with object keys sorted, so map iteration order never
+/// changes the revision of identical content.
+fn canonical_revision(value: &serde_json::Value) -> String {
+    use std::hash::{Hash, Hasher};
+    fn feed(value: &serde_json::Value, hasher: &mut std::collections::hash_map::DefaultHasher) {
+        match value {
+            serde_json::Value::Null => 0u8.hash(hasher),
+            serde_json::Value::Bool(b) => (1u8, b).hash(hasher),
+            serde_json::Value::Number(n) => (2u8, n.to_string()).hash(hasher),
+            serde_json::Value::String(s) => (3u8, s).hash(hasher),
+            serde_json::Value::Array(items) => {
+                (4u8, items.len()).hash(hasher);
+                for item in items {
+                    feed(item, hasher);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                (5u8, map.len()).hash(hasher);
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for key in keys {
+                    key.hash(hasher);
+                    feed(&map[key], hasher);
+                }
+            }
+        }
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    feed(value, &mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// GET /api/discussions/{id}/poll?revision=… — the same detail as `get`, but
+/// omitted when it still matches the revision the client already holds, so an
+/// idle open discussion no longer re-downloads its whole transcript.
+pub async fn poll(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<DiscussionPollQuery>,
+) -> Json<ApiResponse<DiscussionPoll>> {
+    let loaded = state
         .db
         .with_conn(move |conn| {
-            let Some(discussion) = crate::db::discussions::get_discussion(conn, &id)? else {
+            let Some(detail) = load_detail(conn, &id)? else {
                 return Ok(None);
             };
-            let active_agent_dispatches = crate::db::agent_dispatch::list_active_for_discussion(
-                conn,
-                &id,
-                &discussion.agent,
-            )?;
-            let partial_response =
-                crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
-            let message_targets =
-                crate::db::discussions::list_discussion_message_targets(conn, &id)?;
-            // Same rule as `canonical_targets`: the native agent owns an
-            // ordinary turn unless it is switched off, and then the joined
-            // sessions do. Resolved here so the transcript can name the real
-            // destination instead of guessing from `agent`.
-            let default_targets = if crate::db::discussions::disc_is_no_agent(conn, &id)? {
-                crate::db::discussion_sessions::list_sessions(conn, &id, false)?
-                    .iter()
-                    .map(|session| {
-                        Ok(crate::models::MessageTarget::cli(
-                            crate::db::discussions::parse_agent_type(&session.agent_type)?,
-                            session.id,
-                        ))
-                    })
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            } else {
-                let mut target =
-                    crate::models::MessageTarget::discussion_agent(discussion.agent.clone());
-                target.connection_id = discussion.connection_id.clone();
-                vec![target]
-            };
-            Ok(Some(crate::models::DiscussionDetail {
-                discussion,
-                active_agent_dispatches,
-                message_targets,
-                partial_response,
-                default_targets,
-            }))
+            let value = serde_json::to_value(&detail)?;
+            Ok(Some((canonical_revision(&value), detail)))
         })
-        .await
-    {
-        Ok(Some(d)) => Json(ApiResponse::ok(d)),
+        .await;
+    match loaded {
+        Ok(Some((revision, detail))) => {
+            let unchanged = query.revision.as_deref() == Some(revision.as_str());
+            Json(ApiResponse::ok(DiscussionPoll {
+                revision,
+                detail: (!unchanged).then_some(detail),
+            }))
+        }
         Ok(None) => Json(ApiResponse::err("Discussion not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }

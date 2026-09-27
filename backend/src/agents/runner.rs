@@ -2012,6 +2012,8 @@ pub struct ScriptedProcess {
     /// `next_line` never resolves — the only way to reach a deadline branch in a
     /// test, since a drained scripted stream ends the loop normally.
     hangs_forever: bool,
+    /// Usage a structured transport (ACP) would report for the run.
+    reported_usage: Option<u64>,
 }
 
 #[cfg(test)]
@@ -2028,6 +2030,7 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
         }
     }
 
@@ -2043,6 +2046,7 @@ impl ScriptedProcess {
             killed: false,
             stderr: Vec::new(),
             hangs_forever: false,
+            reported_usage: None,
         }
     }
 
@@ -2055,6 +2059,12 @@ impl ScriptedProcess {
     /// Pre-load stderr lines for the StdoutOnly diagnostic path.
     pub fn with_stderr(mut self, lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.stderr = lines.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Simulate usage reported by a structured transport such as ACP.
+    pub fn with_reported_usage(mut self, tokens: u64) -> Self {
+        self.reported_usage = Some(tokens);
         self
     }
 
@@ -2082,6 +2092,9 @@ impl AgentIo for ScriptedProcess {
     }
     fn output_mode(&self) -> OutputMode {
         self.output_mode
+    }
+    fn reported_token_usage(&self) -> Option<u64> {
+        self.reported_usage
     }
     async fn kill(&mut self) {
         self.killed = true;
@@ -2159,6 +2172,17 @@ pub fn fix_file_ownership(work_dir: &Path) {
 /// durable task. The child process forwards this opaque context through the
 /// Kronn MCP bridge; the backend still revalidates every field against the
 /// execution and dispatch rows before accepting a delivery.
+/// Identity of a room's own native agent for the current turn, derived by the
+/// dispatcher from the running dispatch job. Like the worker context it only
+/// travels in the process environment, never in the prompt or tool arguments.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoomAgentBridgeContext {
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TaskWorkerBridgeContext {
     pub execution_id: String,
@@ -2177,6 +2201,7 @@ pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_BACKEND_URL",
     "KRONN_AUTH_TOKEN",
     "KRONN_TASK_WORKER_CONTEXT",
+    "KRONN_ROOM_AGENT_CONTEXT",
     "KRONN_SESSION_ID",
     "KRONN_CALLER_SESSION_ID",
     "KRONN_AGENT_TYPE",
@@ -2496,6 +2521,9 @@ pub struct AgentStartConfig<'a> {
     /// environment; it is never rendered into the model prompt or accepted as
     /// a tool argument. HTTP workers keep using the in-process native executor.
     pub task_worker_context: Option<&'a TaskWorkerBridgeContext>,
+    /// The room's native agent identity for this turn, so it can act as the
+    /// principal of `task_exec`. Ignored when a worker context is present.
+    pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
     /// Ollama-only: a JSON Schema (a `TypedSchema` step's schema, already
     /// wrapped in the canonical envelope shape by the caller) forwarded as
     /// the `/api/chat` `format` param — grammar-constrained decoding +
@@ -2588,6 +2616,7 @@ impl<'a> AgentStartConfig<'a> {
             native_acp_full_prompt: None,
             cli_resume_id: None,
             task_worker_context: None,
+            room_agent_context: None,
             ollama_format: None,
             model_override: None,
             reasoning_effort_override: None,
@@ -3567,6 +3596,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             };
             let launch = AdapterLaunchOptions {
                 worker_context: config.task_worker_context.cloned(),
+                room_agent_context: config.room_agent_context.cloned(),
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
             };
@@ -3682,6 +3712,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         SpawnIo::Direct(stdin_prompt.as_deref()),
         config.discussion_id,
         config.task_worker_context,
+        config.room_agent_context,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -3697,6 +3728,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     SpawnIo::Direct(stdin_prompt.as_deref()),
                     config.discussion_id,
                     config.task_worker_context,
+                    config.room_agent_context,
                 )?
             } else {
                 return Err(e);
@@ -3822,7 +3854,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 /// Common inputs to every ACP session-start path (native and adapted alike).
 /// The adapter owns prompt writes; the direct runner schedules them. Keep
 /// this distinction explicit so sharing spawn policy cannot close ACP stdin
-/// prematurely or leave an unread stderr pipe (adapters historically discard it).
+/// prematurely. Both variants pipe stderr: whoever spawns must drain it.
 #[derive(Clone, Copy)]
 pub(crate) enum SpawnIo<'a> {
     Direct(Option<&'a str>),
@@ -3833,6 +3865,7 @@ pub(crate) enum SpawnIo<'a> {
 #[derive(Default)]
 pub(crate) struct AdapterLaunchOptions {
     pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
+    pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
 }
@@ -9448,33 +9481,41 @@ impl ClaudeSandboxCatalogueReceipt {
     }
 }
 
+/// One Git root measured by the catalogue preflight; `label` names it in a
+/// refusal without exposing its path.
+pub(crate) struct ClaudeSandboxCatalogueRoot {
+    pub label: String,
+    pub path: PathBuf,
+}
+
 fn claude_sandbox_catalogue_receipt(
-    repo_roots: &[PathBuf],
+    repo_roots: &[ClaudeSandboxCatalogueRoot],
 ) -> Result<ClaudeSandboxCatalogueReceipt, String> {
     let mut common_dirs = std::collections::BTreeSet::new();
     let mut worktrees = std::collections::BTreeSet::new();
-    for repo_root in repo_roots {
+    for root in repo_roots {
+        let unreadable = || claude_sandbox_catalogue_unreadable(&root.label);
         let common_output = sync_cmd("git")
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(repo_root)
+            .current_dir(&root.path)
             .output()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !common_output.status.success() {
-            return Err(claude_sandbox_catalogue_unreadable());
+            return Err(unreadable());
         }
         let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim())
             .canonicalize()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !common_dirs.insert(common_dir) {
             continue;
         }
         let output = sync_cmd("git")
             .args(["worktree", "list", "--porcelain"])
-            .current_dir(repo_root)
+            .current_dir(&root.path)
             .output()
-            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+            .map_err(|_| unreadable())?;
         if !output.status.success() {
-            return Err(claude_sandbox_catalogue_unreadable());
+            return Err(unreadable());
         }
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             if let Some(path) = line.strip_prefix("worktree ") {
@@ -9489,11 +9530,44 @@ fn claude_sandbox_catalogue_receipt(
     })
 }
 
-fn claude_sandbox_catalogue_unreadable() -> String {
-    "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
-     the registered Git worktree catalogue could not be measured. No repository or worktree path \
-     was logged. Use `task_exec_reassign` to move this execution to another available worker."
-        .to_string()
+fn claude_sandbox_catalogue_unreadable(label: &str) -> String {
+    format!(
+        "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+         the Git root of {label} is inaccessible, so its registered worktrees could not be measured. \
+         No repository or worktree path was logged. Make that repository readable as a Git \
+         checkout, or fix or remove it from the project's linked repositories."
+    )
+}
+
+/// Roots whose worktree catalogue the Claude sandbox could enumerate. A linked
+/// location that does not exist has no catalogue to enumerate, so it is skipped;
+/// any other access failure stays in the list and fails closed.
+pub(crate) fn claude_sandbox_catalogue_roots(
+    project: &crate::models::Project,
+) -> Vec<ClaudeSandboxCatalogueRoot> {
+    let mut roots = vec![ClaudeSandboxCatalogueRoot {
+        label: format!("project `{}`", project.name),
+        path: crate::core::scanner::resolve_host_path(&project.path),
+    }];
+    for repo in &project.linked_repos {
+        let Some(location) = repo.local_location() else {
+            continue;
+        };
+        let path = crate::core::scanner::resolve_host_path(location);
+        if matches!(path.try_exists(), Ok(false)) {
+            tracing::warn!(
+                "Claude sandbox catalogue: linked repository `{}` of project `{}` does not exist on this host; skipped",
+                repo.name,
+                project.name
+            );
+            continue;
+        }
+        roots.push(ClaudeSandboxCatalogueRoot {
+            label: format!("linked repository `{}`", repo.name),
+            path,
+        });
+    }
+    roots
 }
 
 pub(crate) fn claude_task_worker_catalogue_preflight(
@@ -9502,16 +9576,7 @@ pub(crate) fn claude_task_worker_catalogue_preflight(
     if !super::host_is_macos() {
         return Ok(());
     }
-    let mut repo_roots = vec![crate::core::scanner::resolve_host_path(&project.path)];
-    repo_roots.extend(project.linked_repos.iter().filter_map(|repo| {
-        let location = repo.location.trim();
-        (!location.is_empty()
-            && !location.starts_with("http://")
-            && !location.starts_with("https://")
-            && !location.starts_with("git@"))
-        .then(|| crate::core::scanner::resolve_host_path(location))
-    }));
-    claude_sandbox_catalogue_receipt(&repo_roots)?.validate()
+    claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project))?.validate()
 }
 
 async fn run_claude_task_worker_auth_probe(
@@ -10602,11 +10667,76 @@ pub(crate) fn should_skip_home_override(binary: &str, npx_package: Option<&str>)
     )
 }
 
+/// Longest positional argument logged verbatim; longer ones are prompts or
+/// inline JSON (MCP registries) and only their size is logged.
+const ARGV_LOG_VALUE_MAX_CHARS: usize = 96;
+
+/// Argv as it may appear in a debug log: flags verbatim, `-c key=value`
+/// overrides reduced to the key when the value is long or secret-shaped, and
+/// prompt-like values replaced by their length. Every kept part is redacted.
+pub(crate) fn loggable_argv(args: &[String]) -> String {
+    let elided = |value: &str| format!("<{} chars>", value.chars().count());
+    let short_plain = |value: &str| {
+        value.chars().count() <= ARGV_LOG_VALUE_MAX_CHARS && !value.chars().any(char::is_whitespace)
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut after_config_flag = false;
+    let mut after_secret_flag = false;
+    for arg in args {
+        let shown = if after_secret_flag {
+            elided(arg)
+        } else if after_config_flag {
+            match arg.split_once('=') {
+                Some((key, value)) if short_plain(value) && !looks_secret(value) => {
+                    format!("{key}={value}")
+                }
+                Some((key, value)) => format!("{key}={}", elided(value)),
+                None => elided(arg),
+            }
+        } else if arg.starts_with('-') && short_plain(arg) {
+            match arg.split_once('=') {
+                Some((flag, value)) if secret_flag_name(flag) => {
+                    format!("{flag}={}", elided(value))
+                }
+                _ => arg.clone(),
+            }
+        } else if short_plain(arg) && !looks_secret(arg) {
+            arg.clone()
+        } else {
+            elided(arg)
+        };
+        after_config_flag = matches!(arg.as_str(), "-c" | "--config");
+        after_secret_flag = arg.starts_with('-') && !arg.contains('=') && secret_flag_name(arg);
+        out.push(crate::core::redact::redact_for_audit_artifact(&shown).0);
+    }
+    out.join(" ")
+}
+
+fn secret_flag_name(flag: &str) -> bool {
+    let flag = flag.to_ascii_lowercase();
+    [
+        "token",
+        "key",
+        "secret",
+        "passw",
+        "credential",
+        "bearer",
+        "auth",
+    ]
+    .iter()
+    .any(|needle| flag.contains(needle))
+}
+
+fn looks_secret(value: &str) -> bool {
+    crate::core::redact::redact_for_audit_artifact(value).1 > 0
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
-/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write
-/// and uses null stderr because adapters consume structured stdout events.
+/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write.
+/// stderr is piped in both modes; the caller must drain it concurrently or a
+/// verbose child blocks once the pipe buffer fills.
 ///
 /// 9 args: each is genuinely independent — bundling them into a config
 /// struct would just shuffle the verbosity from the direct and adapter call
@@ -10626,6 +10756,7 @@ pub(crate) fn try_spawn(
     io: SpawnIo<'_>,
     discussion_id: Option<&str>,
     task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -10665,11 +10796,8 @@ pub(crate) fn try_spawn(
             cmd_args.splice(exec_idx + 1..exec_idx + 1, overrides);
         }
     }
-    // Never log argv: prompts may contain user data and, historically, API
-    // credentials. Besides the persistent log, argv is already visible to
-    // the child process; duplicating it at INFO turns a transient exposure
-    // into a durable one. Operational diagnostics only need the executable,
-    // argument count, workdir and auth mode.
+    // INFO never carries argv: prompts may contain user data and, historically,
+    // API credentials. The debug line below logs a redacted, elided form.
     tracing::info!(
         "Spawning agent: {} ({} args) in {} (key: {})",
         cmd_name,
@@ -10689,6 +10817,8 @@ pub(crate) fn try_spawn(
         work_dir,
     );
 
+    tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
+
     let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
@@ -10700,11 +10830,9 @@ pub(crate) fn try_spawn(
             },
         )
         .stdout(Stdio::piped())
-        .stderr(if matches!(io, SpawnIo::Adapter) {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        })
+        // Adapters once used a null stderr so an undrained pipe could never
+        // stall them; they now drain it into a bounded tail for diagnostics.
+        .stderr(Stdio::piped())
         // SIGKILL the agent process if its `Child` is dropped before
         // `wait()` returns. This is what makes workflow-run cancellation
         // actually stop in-flight Agent steps: when the runner drops the
@@ -10785,6 +10913,16 @@ pub(crate) fn try_spawn(
     } else {
         // A normal turn must never inherit a caller's worker capability.
         cmd.env_remove("KRONN_TASK_WORKER_CONTEXT");
+    }
+    match room_agent_context.filter(|_| task_worker_context.is_none()) {
+        Some(context) => {
+            let encoded = serde_json::to_string(context)
+                .map_err(|error| format!("Unable to encode room agent context: {error}"))?;
+            cmd.env("KRONN_ROOM_AGENT_CONTEXT", encoded);
+        }
+        None => {
+            cmd.env_remove("KRONN_ROOM_AGENT_CONTEXT");
+        }
     }
 
     let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {
@@ -12066,5 +12204,69 @@ mod acp_resume_tests {
         let short = acp_failure_diagnostic("prompt", "short 🦀 non-secret error");
         assert_eq!(short, "ACP prompt failed: short 🦀 non-secret error");
         assert!(!short.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod argv_log_tests {
+    use super::loggable_argv;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn keeps_the_command_shape_but_never_prompts_or_secret_values() {
+        let prompt = "Refactor the billing module and keep customer data private";
+        let registry = format!(
+            "mcp_servers={{\"kronn\":{{\"command\":\"bridge\",\"args\":[\"{}\"]}}}}",
+            "x".repeat(200)
+        );
+        let logged = loggable_argv(&argv(&[
+            "exec",
+            "resume",
+            "th-1",
+            "--json",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+            "-c",
+            &registry,
+            "-c",
+            "api_key=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+            "--model",
+            "gpt-5",
+            "--token",
+            "opaque-bearer-value",
+            "--api-key=raw-secret-value",
+            "--sandbox=workspace-write",
+            prompt,
+            "-",
+        ]));
+
+        for kept in [
+            "exec resume th-1 --json",
+            "-c model_reasoning_effort=\"high\"",
+            "--model gpt-5",
+            "--sandbox=workspace-write",
+            " -",
+        ] {
+            assert!(logged.contains(kept), "{kept:?} missing from {logged}");
+        }
+        assert!(logged.contains(&format!("mcp_servers=<{} chars>", registry.len() - 12)));
+        assert!(logged.contains(&format!("<{} chars>", prompt.chars().count())));
+        for leaked in [
+            "billing",
+            "sk-proj",
+            "opaque-bearer-value",
+            "raw-secret-value",
+            "xxxx",
+        ] {
+            assert!(!logged.contains(leaked), "{leaked:?} leaked into {logged}");
+        }
+    }
+
+    #[test]
+    fn counts_unicode_prompts_in_chars() {
+        assert_eq!(loggable_argv(&argv(&["-p", "résumé 🙂"])), "-p <8 chars>");
     }
 }

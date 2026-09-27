@@ -2659,7 +2659,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_name: "build".into(),
             status: RunStatus::Success,
             output: "x".repeat(200_000),
-            tokens_used: 42,
+            tokens_used: Some(42),
             duration_ms: 1234,
             started_at: None,
             condition_result: None,
@@ -2678,7 +2678,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             step_name: "deploy".into(),
             status: RunStatus::Failed,
             output: "y".repeat(200_000),
-            tokens_used: 7,
+            tokens_used: None,
             duration_ms: 99,
             started_at: None,
             condition_result: None,
@@ -2711,7 +2711,11 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
     assert_eq!(listed.step_results[0].step_name, "build");
     assert_eq!(listed.step_results[1].status, RunStatus::Failed);
     assert_eq!(listed.step_results[0].duration_ms, 1234);
-    assert_eq!(listed.step_results[0].tokens_used, 42);
+    assert_eq!(listed.step_results[0].tokens_used, Some(42));
+    assert_eq!(
+        listed.step_results[1].tokens_used, None,
+        "unknown usage must survive persistence as unknown, not zero"
+    );
     assert_eq!(listed.step_results[0].step_kind.as_deref(), Some("Agent"));
 
     // ...but not their outputs, which are the entire weight of the column.
@@ -2791,7 +2795,7 @@ fn workflow_runs_update() {
         step_name: "step1".into(),
         status: RunStatus::Success,
         output: "Done".into(),
-        tokens_used: 500,
+        tokens_used: Some(500),
         duration_ms: 1234,
         started_at: None,
         condition_result: None,
@@ -3377,6 +3381,73 @@ fn workflow_get_last_runs_all_empty() {
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
     let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
     assert!(last_runs.is_empty());
+}
+
+#[test]
+fn workflow_latest_run_aggregation_does_not_read_run_payload_pages() {
+    let conn = test_db();
+    let mut statement = conn
+        .prepare("EXPLAIN QUERY PLAN SELECT workflow_id, MAX(started_at) FROM workflow_runs GROUP BY workflow_id")
+        .unwrap();
+    let plan: Vec<String> = statement
+        .query_map([], |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|detail| detail.contains("USING COVERING INDEX")),
+        "latest-run aggregation must stay on index pages rather than visiting every payload row: {plan:?}"
+    );
+    assert!(!plan.iter().any(|detail| detail.contains("TEMP B-TREE")));
+}
+
+#[test]
+fn workflow_latest_run_index_upgrade_preserves_existing_runs_and_ties() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrations::run_through(&conn, "189_artifact_message_origin").unwrap();
+    for id in ["latest-wf", "without-runs", "qp:latest-batch"] {
+        crate::db::workflows::insert_workflow(&conn, &sample_workflow(id)).unwrap();
+    }
+    let start = Utc.with_ymd_and_hms(2026, 9, 24, 8, 0, 0).unwrap();
+    for (id, workflow_id, minute) in [
+        ("earlier", "latest-wf", 0),
+        ("latest-a", "latest-wf", 1),
+        ("latest-b", "latest-wf", 1),
+        ("batch", "qp:latest-batch", 0),
+    ] {
+        let mut run = sample_run(id, workflow_id);
+        run.started_at = start + chrono::Duration::minutes(minute);
+        run.tokens_used = 123;
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    let saved = |conn: &Connection| -> Vec<(String, String)> {
+        conn.prepare("SELECT id, step_results_json FROM workflow_runs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let before = saved(&conn);
+    migrations::run(&conn).unwrap();
+    migrations::run(&conn).unwrap();
+    assert_eq!(saved(&conn), before);
+    let indexed: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'idx_workflow_runs_workflow_started')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(indexed, "the upgrade must create the latest-run index");
+    let latest = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    assert_eq!(latest.len(), 2);
+    assert!(!latest.contains_key("without-runs"));
+    assert_eq!(latest["qp:latest-batch"].id, "batch");
+    let retained = &latest["latest-wf"];
+    assert!(matches!(retained.id.as_str(), "latest-a" | "latest-b"));
+    assert_eq!(retained.started_at, start + chrono::Duration::minutes(1));
+    assert_eq!(retained.tokens_used, 123);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

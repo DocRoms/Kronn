@@ -13,6 +13,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A room's native agent can prepare and launch a task execution itself, as
+  its principal, without a CLI joining the room. Kronn identifies it from the
+  turn it is running, so only that room's agent is accepted.
 - Workflow Agent results retain execution provenance for initial, repair,
   escalation and debate attempts, including model resolution, structured
   runtime model observations and format fallback. Compact agent/model badges
@@ -67,6 +70,35 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The Automations list no longer waits on a scan of every workflow run to find
+  each workflow's latest one. A `(workflow_id, started_at)` index answers it
+  directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.
+- An open discussion no longer re-downloads its whole transcript every five
+  seconds. The refresh sends the revision it holds and the server returns the
+  detail only when it changed; on a 2,000-message room this removes about
+  40 MB per minute of transfer while it sits idle.
+- `disc_link` now reports whether the session it just bound is actually usable
+  by `task_exec_prepare`/`task_exec_launch`, instead of a bare success that
+  left the gap to surface later as an unexplained `rejoin_required`. The
+  response now says so at link time and names the exact next call
+  (`disc_invite_peer` then `disc_join`) when a rejoin is still needed (KT-737).
+- A workflow Agent step run through ACP now records the token usage its agent
+  reports instead of 0. When the agent reports none, the step's
+  `tokens_used` is `null` (with `tokens_status: "not_measured"` in the MCP run
+  status) and the run view shows "tokens unknown" rather than a zero. Run
+  totals still add up only the measured steps (KT-735).
+- When a Claude or Codex agent run through ACP fails, the error now includes
+  the end of what the agent printed on stderr (for example an expired login)
+  instead of only "exited with status 1". A prompt that cannot be delivered
+  because the agent already quit reports the agent's exit status and stderr
+  rather than "Broken pipe". The executed command line is logged at debug
+  level with prompts and secret values left out (KT-666).
+- A local linked repository whose path does not exist on this machine no longer
+  makes the Claude task worker unavailable for the whole project on macOS: it is
+  skipped with a warning. A linked repository or project that exists but cannot
+  be read as a Git checkout still refuses the worker, and the refusal now names
+  it instead of suggesting a reassignment. Saving linked repositories now
+  rejects a local path that does not exist; remote URLs are unchanged (KT-741).
 - Native ACP replies no longer include echoed user prompts, including Vibe's
   copy of Kronn's injected instructions. Only agent message chunks contribute
   answer text; tool and usage events remain separate (KT-729).
@@ -108,6 +140,12 @@ Release notes for 0.9.3 and earlier are available in the
 - A failed workflow import rolls back every bundled resource, including Pages
   and Quick Prompts created before the error. Late validation or database
   failures no longer leave partial imports or activate an empty Pages library.
+- A Live Page's 30-second auto-refresh, and switching to another Page, each
+  fetch that Page's detail exactly once instead of twice (KT-736).
+- Triggering a workflow from MCP with an argument its tool does not declare
+  (for example `vars` instead of `variables`) now fails with an error naming
+  the expected `variables` argument, instead of silently dropping the value
+  and reporting an unrelated "variable is required" error (KT-738).
 
 ## [0.14.0] - 2026-09-23
 

@@ -599,7 +599,7 @@ async fn execute_run_with_notify_policy(
                                 step_name: "__workspace__".to_string(),
                                 status: RunStatus::Failed,
                                 output: msg.clone(),
-                                tokens_used: 0,
+                                tokens_used: Some(0),
                                 duration_ms: 0,
                                 started_at: None,
                                 condition_result: None,
@@ -653,7 +653,7 @@ async fn execute_run_with_notify_policy(
                     step_name: "__workspace__".to_string(),
                     status: RunStatus::Failed,
                     output: msg.clone(),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: 0,
                     started_at: None,
                     condition_result: None,
@@ -830,7 +830,7 @@ async fn execute_run_with_notify_policy(
                     step_name: "__preflight__".to_string(),
                     status: RunStatus::Failed,
                     output: msg.clone(),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: 0,
                     started_at: None,
                     condition_result: None,
@@ -910,7 +910,7 @@ async fn execute_run_with_notify_policy(
                     step_name: "__preflight__".to_string(),
                     status: RunStatus::Failed,
                     output: msg.clone(),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: 0,
                     started_at: None,
                     condition_result: None,
@@ -990,7 +990,7 @@ async fn execute_run_with_notify_policy(
                 step_name: "__cancelled_by_user__".to_string(),
                 status: RunStatus::Cancelled,
                 output: "Workflow run cancelled by user".to_string(),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -1019,7 +1019,7 @@ async fn execute_run_with_notify_policy(
                 step_name: "__safeguard_abort__".to_string(),
                 status: RunStatus::Failed,
                 output: format!("Workflow aborted: exceeded {} total step iterations (possible infinite Goto loop)", max_total_iterations),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
             condition_result: None,
@@ -1062,7 +1062,7 @@ async fn execute_run_with_notify_policy(
                     "Stopped by Timeout guard: {}s elapsed (limit {}s)",
                     elapsed_secs, resolved_guards.timeout_seconds
                 ),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -1104,7 +1104,7 @@ async fn execute_run_with_notify_policy(
                     budget.llm_calls(),
                     budget.max_llm_calls()
                 ),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -1161,7 +1161,7 @@ async fn execute_run_with_notify_policy(
                     "Stopped by LoopDetection guard: step '{}' visited {} times (limit {})",
                     step_name, visit_count, resolved_guards.loop_detection_max_revisits
                 ),
-                tokens_used: 0,
+                tokens_used: Some(0),
                 duration_ms: 0,
                 started_at: None,
                 condition_result: None,
@@ -1220,7 +1220,7 @@ async fn execute_run_with_notify_policy(
             step_name: step.name.clone(),
             status: RunStatus::Running,
             output: String::new(),
-            tokens_used: 0,
+            tokens_used: None,
             duration_ms: 0,
             started_at: Some(step_started_at),
             condition_result: None,
@@ -1374,7 +1374,7 @@ async fn execute_run_with_notify_policy(
                                 step_name: step.name.clone(),
                                 status: RunStatus::Failed,
                                 output: e,
-                                tokens_used: 0,
+                                tokens_used: Some(0),
                                 duration_ms: step_start.elapsed().as_millis() as u64,
                                 started_at: None,
                                 condition_result: None,
@@ -1700,7 +1700,7 @@ async fn execute_run_with_notify_policy(
                         step_name: step.name.clone(),
                         status: RunStatus::Cancelled,
                         output: format!("Step '{}' cancelled by user mid-flight.", step.name),
-                        tokens_used: 0,
+                        tokens_used: interrupted_step_tokens(&step.step_type),
                         duration_ms: step_start.elapsed().as_millis() as u64,
                         started_at: None,
                         condition_result: None,
@@ -1756,7 +1756,7 @@ async fn execute_run_with_notify_policy(
                             "Step '{}' stopped by workflow Timeout guard after {}s (limit {}s).",
                             step.name, actual_secs, resolved_guards.timeout_seconds
                         ),
-                        tokens_used: 0,
+                        tokens_used: interrupted_step_tokens(&step.step_type),
                         duration_ms: step_start.elapsed().as_millis() as u64,
                         started_at: None,
                         condition_result: None,
@@ -1813,7 +1813,7 @@ async fn execute_run_with_notify_policy(
         }
 
         // Accumulate tokens
-        run.tokens_used += outcome.result.tokens_used;
+        run.tokens_used += outcome.result.tokens_used.unwrap_or(0);
 
         // 0.7.0 — count this step toward the LLM-calls quota. Only step
         // types that spawn an agent are counted: BatchQuickPrompt counts
@@ -2544,7 +2544,7 @@ async fn execute_run_with_notify_policy(
             for (k, v) in super::template::extract_state(&rb_outcome.result.output) {
                 run.state.insert(k, v);
             }
-            run.tokens_used += rb_outcome.result.tokens_used;
+            run.tokens_used += rb_outcome.result.tokens_used.unwrap_or(0);
             apply_step_snapshot(
                 rb_step,
                 &mut rb_outcome.result,
@@ -3379,6 +3379,15 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
     }
 }
 
+/// A step dropped mid-flight may already have spent model tokens it never
+/// reported; only step kinds that run no model can claim a measured zero.
+fn interrupted_step_tokens(step_type: &StepType) -> Option<u64> {
+    match step_type {
+        StepType::Agent | StepType::BatchQuickPrompt | StepType::SubWorkflow => None,
+        _ => Some(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3627,7 +3636,7 @@ mod tests {
             step_name: name.into(),
             status: crate::models::RunStatus::Success,
             output: String::new(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: 0,
             started_at: None,
             condition_result: None,
@@ -3966,7 +3975,7 @@ mod tests {
             step_name: "s".into(),
             status: RunStatus::Success,
             output: String::new(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: 0,
             started_at: None,
             condition_result: None,
@@ -4092,7 +4101,7 @@ mod tests {
             step_name: "gate".into(),
             status: RunStatus::WaitingApproval,
             output: output.into(),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: 0,
             started_at: None,
             condition_result: None,

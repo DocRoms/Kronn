@@ -25,9 +25,16 @@ pub struct StepOutcome {
 struct AgentOutput {
     attempt_id: u32,
     text: String,
-    tokens_used: u64,
+    /// `None`: the runtime reported no usage for this run.
+    tokens_used: Option<u64>,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
+}
+
+/// A total that includes an unmeasured run is itself unknown: summing only
+/// the known parts would present a lower bound as the step's cost.
+fn add_tokens(total: Option<u64>, more: Option<u64>) -> Option<u64> {
+    Some(total?.saturating_add(more?))
 }
 
 // Keep transport notices when repair/escalation replaces the model's answer.
@@ -176,7 +183,7 @@ pub async fn execute_step(
                     step_name: step.name.clone(),
                     status: RunStatus::Failed,
                     output: e,
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: start.elapsed().as_millis() as u64,
                     started_at: None,
                     condition_result: None,
@@ -269,7 +276,7 @@ pub async fn execute_step(
                     step_name: step.name.clone(),
                     status: RunStatus::Failed,
                     output: format!("preflight_failed:{error}"),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: start.elapsed().as_millis() as u64,
                     started_at: None,
                     condition_result: None,
@@ -320,7 +327,7 @@ pub async fn execute_step(
                         "preflight_failed:{}",
                         serde_json::to_string(&failure).unwrap_or_default()
                     ),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: start.elapsed().as_millis() as u64,
                     started_at: None,
                     condition_result: None,
@@ -491,7 +498,7 @@ pub async fn execute_step(
                         }
                         if let Ok(repair_output) = repair_res {
                             runtime_notices.extend(repair_output.runtime_notices.clone());
-                            total_tokens += repair_output.tokens_used;
+                            total_tokens = add_tokens(total_tokens, repair_output.tokens_used);
                             native_tool_calls.extend(repair_output.native_tool_calls.clone());
                             let repaired_env = crate::workflows::template::extract_step_envelope(
                                 &repair_output.text,
@@ -595,7 +602,7 @@ pub async fn execute_step(
                             }
                             if let Ok(esc) = esc_res {
                                 runtime_notices.extend(esc.runtime_notices.clone());
-                                total_tokens += esc.tokens_used;
+                                total_tokens = add_tokens(total_tokens, esc.tokens_used);
                                 native_tool_calls.extend(esc.native_tool_calls.clone());
                                 let esc_env =
                                     crate::workflows::template::extract_step_envelope(&esc.text);
@@ -688,7 +695,7 @@ pub async fn execute_step(
                         attempt + 1,
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls, selected_attempt)) => {
-                            total_tokens += debate_tokens;
+                            total_tokens = add_tokens(total_tokens, debate_tokens);
                             native_tool_calls.extend(debate_tool_calls);
                             // Envelope safety: on a Structured/TypedSchema step
                             // the converged output MUST still carry a valid
@@ -822,7 +829,8 @@ pub async fn execute_step(
             step_name: step.name.clone(),
             status: RunStatus::Failed,
             output,
-            tokens_used: 0,
+            // Failed attempts may have spent tokens that were never collected.
+            tokens_used: None,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -1365,11 +1373,15 @@ async fn drive_agent_to_output(
         );
     }
 
-    // Extract token usage — same logic as discussions:
-    // 1. Claude Code: tokens from stream-json events (input + output)
-    // 2. Codex/Kiro/etc: tokens parsed from stderr/stdout after execution
+    // Extract token usage — same precedence as discussions:
+    // 1. Claude Code CLI: tokens from stream-json events (input + output)
+    // 2. Structured transports (ACP): usage events reported by the runtime
+    // 3. Codex/Kiro/etc: tokens parsed from stderr/stdout after execution
+    // A model run is never free, so a zero from every source means unknown.
     let tokens_used = if stream_json_tokens > 0 {
-        stream_json_tokens
+        Some(stream_json_tokens)
+    } else if let Some(reported) = process.reported_token_usage() {
+        Some(reported)
     } else {
         let (cleaned, count) = runner::parse_token_usage(agent, &output, &stderr_lines);
         // Adopt the cleaned output unconditionally: some agents (GeminiCli)
@@ -1377,14 +1389,13 @@ async fn drive_agent_to_output(
         // "[MCP error]…" lines) — gating on count>0 silently re-injected that
         // noise into the recorded step output and every {{steps.X.output}}.
         output = cleaned;
-        count
+        (count > 0).then_some(count)
     };
 
-    tracing::info!(
-        "Step '{}' finished — {} tokens used",
-        step_name,
-        tokens_used
-    );
+    match tokens_used {
+        Some(tokens) => tracing::info!("Step '{}' finished — {} tokens used", step_name, tokens),
+        None => tracing::info!("Step '{}' finished — token usage not reported", step_name),
+    }
 
     let native_tool_calls = native_tool_calls_from_stderr(&stderr_lines);
 
@@ -1466,7 +1477,7 @@ async fn run_multi_agent_debate(
     catalog_db: Option<&crate::db::Database>,
     provenance: &mut WorkflowAgentProvenance,
     retry: u32,
-) -> Result<(String, u64, Vec<NativeToolCallLog>, Option<u32>)> {
+) -> Result<(String, Option<u64>, Vec<NativeToolCallLog>, Option<u32>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
         t.lines()
@@ -1480,7 +1491,7 @@ async fn run_multi_agent_debate(
         step.agent, planner_output
     );
     let mut converged = planner_output.to_string();
-    let mut tokens = 0u64;
+    let mut tokens = Some(0u64);
     let mut native_tool_calls = Vec::new();
     let mut selected_attempt = None;
 
@@ -1565,7 +1576,7 @@ async fn run_multi_agent_debate(
             retry,
         )
         .await?;
-        tokens += rev.tokens_used;
+        tokens = add_tokens(tokens, rev.tokens_used);
         native_tool_calls.extend(rev.native_tool_calls);
         transcript.push_str(&format!(
             "\n\n=== REVIEWER ({:?}, round {}) ===\n{}",
@@ -1627,7 +1638,7 @@ async fn run_multi_agent_debate(
             retry,
         )
         .await?;
-        tokens += auth.tokens_used;
+        tokens = add_tokens(tokens, auth.tokens_used);
         native_tool_calls.extend(auth.native_tool_calls);
         transcript.push_str(&format!(
             "\n\n=== AUTHOR ({:?}, round {}) ===\n{}",
@@ -1714,7 +1725,7 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
                 pour exposer `.data` / `.summary` / `.status`, et sa sortie doit \
                 contenir l'enveloppe `---STEP_OUTPUT---`."
             ),
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: elapsed_ms,
             started_at: None,
             condition_result: None,
@@ -2342,7 +2353,8 @@ mod tests {
             "Error message must hint at the fix (output_format: Structured)"
         );
         assert_eq!(
-            outcome.result.tokens_used, 0,
+            outcome.result.tokens_used,
+            Some(0),
             "No tokens spent on failed fail-fast"
         );
     }
@@ -2599,7 +2611,8 @@ mod drive_agent_to_output_tests {
             .expect("clean exit");
         assert_eq!(out.text, "Hello world");
         assert_eq!(
-            out.tokens_used, 150,
+            out.tokens_used,
+            Some(150),
             "tokens come from the stream-json Usage event"
         );
     }
@@ -2688,7 +2701,36 @@ mod drive_agent_to_output_tests {
             .await
             .expect("clean empty exit is ok");
         assert_eq!(out.text, "");
-        assert_eq!(out.tokens_used, 0);
+        assert_eq!(
+            out.tokens_used, None,
+            "no reported usage is unknown, not zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_reported_usage_reaches_the_step_output() {
+        let proc = ScriptedProcess::raw(["orchestrated"]).with_reported_usage(48_213);
+        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "orchestrate")
+            .await
+            .expect("clean exit");
+        assert_eq!(out.text, "orchestrated");
+        assert_eq!(out.tokens_used, Some(48_213));
+    }
+
+    #[tokio::test]
+    async fn acp_run_without_reported_usage_is_unknown_not_zero() {
+        let proc = ScriptedProcess::raw(["orchestrated"]);
+        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "orchestrate")
+            .await
+            .expect("clean exit");
+        assert_eq!(out.tokens_used, None);
+    }
+
+    #[test]
+    fn a_step_total_with_an_unmeasured_run_is_unknown() {
+        assert_eq!(super::add_tokens(Some(10), Some(5)), Some(15));
+        assert_eq!(super::add_tokens(Some(10), None), None);
+        assert_eq!(super::add_tokens(None, Some(5)), None);
     }
 }
 

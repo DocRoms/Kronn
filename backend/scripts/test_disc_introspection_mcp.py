@@ -673,7 +673,9 @@ class DiscSourceBindingToolTests(unittest.TestCase):
                 "source_agent": "Codex",
                 "source_session_id": "session-1",
             })
-        self.fake_http.assert_called_once_with("POST", "/api/disc/link", {
+        # A runtime-status read now follows the bind; check the bind call
+        # itself rather than assuming it's the only one.
+        self.fake_http.assert_any_call("POST", "/api/disc/link", {
             "disc_id": "disc-a",
             "source_agent": "Codex",
             "source_session_id": "session-1",
@@ -688,8 +690,47 @@ class DiscSourceBindingToolTests(unittest.TestCase):
                 "source_session_id": "session-2",
                 "force_reassign": True,
             })
-        body = self.fake_http.call_args.args[2]
+        body = self.fake_http.call_args_list[0].args[2]
         self.assertIs(body["force_reassign"], True)
+
+    def test_disc_link_reports_rejoin_required_when_not_an_active_member(self):
+        # The write succeeds (durable resume mapping), but no active
+        # `discussion_sessions` row backs it, so the response must say so and
+        # name the exact remedy instead of a bare success.
+        self.mod._set_current_disc_id("disc-a")
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            result = self.mod.call_disc_link({
+                "disc_id": "disc-a",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            })
+        self.assertFalse(result["runtime_bound"])
+        self.assertTrue(result["rejoin_required"])
+        self.assertIn("disc_join", result["hint"])
+        self.assertIn("disc_invite_peer", result["hint"])
+
+    def test_disc_link_reports_runtime_bound_when_already_an_active_member(self):
+        # A session that already has a live `discussion_sessions` row on this
+        # exact disc is genuinely usable by task_exec_prepare; say so.
+        def respond(method, path, body=None):
+            if path == "/api/disc/link":
+                return {"success": True, "data": True}
+            self.assertTrue(path.startswith("/api/disc/session-status?"))
+            return {"success": True, "data": {
+                "binding_version": 1,
+                "bound_disc_id": "disc-a",
+                "connected_disc_id": "disc-a",
+                "connection_status": "active",
+            }}
+        http = mock.MagicMock(side_effect=respond)
+        with mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_disc_link({
+                "disc_id": "disc-a",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            })
+        self.assertTrue(result["runtime_bound"])
+        self.assertNotIn("rejoin_required", result)
 
     def test_disc_transfer_session_requires_pinned_source_and_confirmation(self):
         tool = next(
@@ -1056,6 +1097,39 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
                 })
             self.assertIn("forbids worker_scope", str(refused.exception))
             refused_http.assert_not_called()
+
+    def test_a_room_native_agent_is_the_principal_through_its_injected_context(self):
+        context = {
+            "discussion_id": "disc-parent", "agent_type": "ClaudeCode",
+            "dispatch_job_id": "job-1", "source_message_id": "msg-1",
+        }
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "agent", "agent_type": "Codex"}
+        identity = mock.MagicMock(side_effect=AssertionError("CLI identity must not be read"))
+        with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps(context)}), \
+                mock.patch.object(self.mod, "_task_exec_identity", identity), \
+                mock.patch.object(self.mod, "_http", http):
+            for call in (self.mod.call_task_exec_prepare, self.mod.call_task_exec_launch):
+                call({"task_reference": "KT-740", "worker": worker, "worker_scope_intent": "generic"})
+        self.assertEqual(len(http.call_args_list), 2)
+        for recorded_call in http.call_args_list:
+            body = recorded_call.args[2]
+            self.assertEqual(body["room_agent"], context)
+            self.assertNotIn("source_agent", body)
+            self.assertNotIn("source_session_id", body)
+
+    def test_an_incomplete_room_agent_context_fails_closed_before_http(self):
+        http = mock.MagicMock()
+        with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": json.dumps({"discussion_id": "disc-parent"})}), \
+                mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_prepare({
+                    "task_reference": "KT-740",
+                    "worker": {"kind": "agent", "agent_type": "Codex"},
+                    "worker_scope_intent": "generic",
+                })
+        self.assertIn("room agent context is incomplete", str(refused.exception))
+        http.assert_not_called()
 
     def test_stale_bridge_refuses_capability_mutations_before_http(self):
         self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
@@ -4522,6 +4596,20 @@ class WorkflowTriggerTests(unittest.TestCase):
         })
         _, _, body = self.fake_http.call_args.args
         self.assertNotIn("variables", body)
+
+    def test_undeclared_key_is_named_instead_of_silently_dropped(self):
+        # KT-738 — `vars` (not `variables`) used to be dropped silently, so
+        # the backend answered an unrelated "Variable X is required" instead
+        # of pointing at the caller's actual mistake.
+        with self.assertRaises(RuntimeError) as ctx:
+            self.mod.call_workflow_trigger({
+                "workflow_id": "wf-1",
+                "vars": {"ticketKey": "KT-738"},
+            })
+        self.fake_http.assert_not_called()
+        message = str(ctx.exception)
+        self.assertIn("vars", message)
+        self.assertIn("variables", message)
 
 
 class WorkflowActiveRunsTests(unittest.TestCase):

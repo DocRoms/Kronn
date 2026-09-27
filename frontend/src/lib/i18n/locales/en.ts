@@ -3941,6 +3941,8 @@ suggestion; that would overwrite the real value with a placeholder
   'wf.tokensTotal': 'tokens (run total)',
   'wf.tokensTotalHint': 'Sum of tokens used by every step in this run since it started. Includes the agent steps; gates always contribute 0.',
   'wf.stepTokensSuffix': 'tk',
+  'wf.stepTokensUnknown': 'tokens unknown',
+  'wf.stepTokensUnknownHint': 'The agent runtime did not report token usage for this step. It is not zero; it was simply not measured.',
   'wf.stepTokensHint': 'Tokens consumed by this step. Gates / Exec / ApiCall / Notify burn nothing — they stay at 0. Agent / BatchQuickPrompt steps scale with prompt + response length.',
   'wf.gate.title': 'Human decision required',
   'wf.gate.defaultMessage': 'Approval required to continue.',
