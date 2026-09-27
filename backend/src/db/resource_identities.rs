@@ -65,6 +65,29 @@ pub fn lookup(
     .map_err(Into::into)
 }
 
+/// The local id `(kind, slug)` currently maps to, trying `project_key` first
+/// and falling back to the global scope (`""`) when it is non-empty and the
+/// project-scoped lookup misses. Migration 196 placed every identity
+/// recorded before this table existed into the global scope, so a resource
+/// previously imported with no project must still resolve when the same
+/// slug is later imported into a project — this is the single rule shared
+/// by `resolve_symbolic_reference` and the artifact importer's candidate
+/// lookups.
+pub fn lookup_scoped(
+    conn: &Connection,
+    project_key: &str,
+    kind: &str,
+    slug: &str,
+) -> Result<Option<String>> {
+    if let Some(id) = lookup(conn, project_key, kind, slug)? {
+        return Ok(Some(id));
+    }
+    if project_key.is_empty() {
+        return Ok(None);
+    }
+    lookup(conn, "", kind, slug)
+}
+
 /// Resolves a symbolic reference (`prompt:<slug>`, `workflow:<slug>`,
 /// `qe:<slug>`, `qa:<slug>`, `skill:<slug>`, `plugin:<server>`) to the local
 /// identifier it names. Project-scoped kinds try the same project first,
@@ -98,13 +121,7 @@ pub fn resolve_symbolic_reference(
         "qa" => "quick_api",
         _ => return Ok(None),
     };
-    if let Some(id) = lookup(conn, project_key, table_kind, slug)? {
-        return Ok(Some(id));
-    }
-    if project_key.is_empty() {
-        return Ok(None);
-    }
-    lookup(conn, "", table_kind, slug)
+    lookup_scoped(conn, project_key, table_kind, slug)
 }
 
 #[cfg(test)]

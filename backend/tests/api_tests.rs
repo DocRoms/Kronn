@@ -2648,6 +2648,139 @@ async fn artifact_import_identities_are_scoped_per_project_and_deduplicated_on_r
 }
 
 #[tokio::test]
+async fn artifact_import_reuses_a_pre_migration_global_identity_when_importing_into_a_project() {
+    // Migration 196 placed every identity recorded before this table existed
+    // into the global scope (project_key = ""). Importing the same slug into
+    // a project whose repo_url is known must still find that row — first the
+    // project scope, then the global one — and reuse it, not create a copy.
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let content = serde_json::to_string(&exported["data"]).unwrap();
+
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "proj-repo".into(),
+        name: "proj-repo".into(),
+        path: "/tmp/kronn-test-proj-repo".into(),
+        repo_url: Some("https://github.com/acme/demo.git".into()),
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    // A quick_prompt already imported previously (e.g. with no project), and
+    // the identity row a pre-slice-3 import — or this table's own migration —
+    // left in the global scope.
+    let existing_quick_prompt = kronn::models::QuickPrompt {
+        id: "existing-qp".into(),
+        pinned: false,
+        name: "Portable analysis".into(),
+        icon: "✨".into(),
+        prompt_template: "Analyse the collected data".into(),
+        variables: vec![],
+        agent: kronn::models::AgentType::ClaudeCode,
+        connection_id: None,
+        project_id: Some("proj-repo".into()),
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: kronn::models::ModelTier::Default,
+        agent_settings: None,
+        description: "Bundled prompt".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::quick_prompts::insert_quick_prompt(conn, &existing_quick_prompt)?;
+            kronn::db::resource_identities::upsert(conn, "", "quick_prompt", "qp-portable", "existing-qp")
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({
+            "content":content,"project_id":"proj-repo","approved_quick_exec_ids":["qe-portable"]
+        }),
+    )
+    .await;
+    assert_eq!(preview["data"]["can_import"], true, "{preview}");
+    let entries = preview["data"]["entries"].as_array().unwrap();
+    let qp_entry = entries
+        .iter()
+        .find(|entry| entry["kind"] == "quick_prompt")
+        .unwrap();
+    assert_eq!(qp_entry["disposition"], "reuse", "{qp_entry}");
+    assert_eq!(
+        qp_entry["existing_id"], "existing-qp",
+        "the global-scope identity left by the migration must be proposed as the candidate: {qp_entry}"
+    );
+
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/pages/import",
+        serde_json::json!({
+            "content":content,"project_id":"proj-repo","approved_quick_exec_ids":["qe-portable"],
+            "preview_digest":preview["data"]["digest"]
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                kronn::db::quick_prompts::list_quick_prompts(conn)?.len(),
+                1,
+                "reusing the existing resource must not create a duplicate copy"
+            );
+            let identities: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM resource_identities WHERE kind = 'quick_prompt'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                identities, 1,
+                "reuse must not add a second identity row next to the global one"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn artifact_import_resolves_workflow_skill_profile_directive_ids_and_warns_on_the_rest() {
     let (source, _) = workflow_portability_fixture().await;
     let (_, exported) = get_json(

@@ -464,7 +464,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
             // Observe the identity this slug currently maps to, so committing
             // a DIFFERENT mapping between preview and commit invalidates the
             // stale preview, without hydrating every previous copy.
-            let prior_identity = crate::db::resource_identities::lookup(
+            let prior_identity = crate::db::resource_identities::lookup_scoped(
                 conn,
                 &project_key,
                 &kind_key(source.kind),
@@ -490,7 +490,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
             continue;
         }
         let mut candidate_ids = BTreeSet::from([source.id.clone()]);
-        candidate_ids.extend(crate::db::resource_identities::lookup(
+        candidate_ids.extend(crate::db::resource_identities::lookup_scoped(
             conn,
             &project_key,
             &kind_key(source.kind),
