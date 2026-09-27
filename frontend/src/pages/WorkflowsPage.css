@@ -3212,6 +3212,21 @@
   border: 1px solid var(--kr-border-faint);
 }
 
+.wf-import-redacted {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+}
+
+.wf-import-redacted ul {
+  margin: 0;
+  padding-left: var(--kr-sp-4);
+}
+
 /* B4 (0.7.0 UX pass) — Bandeau "Démarrer depuis un pattern" en haut
    du wizard Steps. 3 cartes de présets non-triviaux. Auto-disparaît
    dès que l'user customise. */

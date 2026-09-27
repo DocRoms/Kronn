@@ -82,7 +82,7 @@ export function standaloneLivePageMosaicUrl(
 /** The discussion a `#discussion-<id>` URL names, or null. */
 export function standaloneDiscussionId(hash: string): string | null {
   if (!hash.startsWith(STANDALONE_DISCUSSION_HASH_PREFIX)) return null;
-  const encodedId = hash.slice(STANDALONE_DISCUSSION_HASH_PREFIX.length);
+  const encodedId = hash.slice(STANDALONE_DISCUSSION_HASH_PREFIX.length).split('?')[0];
   if (!encodedId) return null;
   try {
     const discussionId = decodeURIComponent(encodedId).trim();
@@ -97,6 +97,17 @@ export function standaloneDiscussionUrl(
   location: Pick<Location, 'origin' | 'pathname'> = window.location,
 ): string {
   return `${location.origin}${location.pathname}${STANDALONE_DISCUSSION_HASH_PREFIX}${encodeURIComponent(discussionId)}`;
+}
+
+export function standaloneDiscussionMessageId(hash: string): string | null {
+  if (!standaloneDiscussionId(hash) || !hash.includes('?')) return null;
+  const id = new URLSearchParams(hash.slice(hash.indexOf('?') + 1)).get('message')?.trim();
+  return id && id.length <= 128 ? id : null;
+}
+
+export function standaloneDiscussionMessageUrl(discussionId: string, messageId: string,
+  location: Pick<Location, 'origin' | 'pathname'> = window.location): string {
+  return `${standaloneDiscussionUrl(discussionId, location)}?message=${encodeURIComponent(messageId)}`;
 }
 
 /**

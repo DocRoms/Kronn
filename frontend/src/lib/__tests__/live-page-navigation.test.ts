@@ -4,6 +4,8 @@ import {
   openStandaloneDiscussion,
   standaloneDiscussionId,
   standaloneDiscussionUrl,
+  standaloneDiscussionMessageId,
+  standaloneDiscussionMessageUrl,
   standaloneLivePageId,
   standaloneLivePageMosaic,
   standaloneLivePageMosaicUrl,
@@ -11,6 +13,15 @@ import {
 } from '../live-page-navigation';
 
 describe('standalone Live Page navigation', () => {
+  it('keeps message provenance shareable without changing the discussion identity', () => {
+    const url = standaloneDiscussionMessageUrl('disc?é', 'msg/🦀', { origin: 'http://localhost:5173', pathname: '/' });
+    const hash = new URL(url).hash;
+    expect(standaloneDiscussionId(hash)).toBe('disc?é');
+    expect(standaloneDiscussionMessageId(hash)).toBe('msg/🦀');
+    expect(standaloneDiscussionMessageId('#discussion-one')).toBeNull();
+    expect(standaloneDiscussionMessageId('#page/one?message=msg')).toBeNull();
+    expect(standaloneDiscussionMessageId('#discussion-one?message=')).toBeNull();
+  });
   afterEach(() => {
     sessionStorage.clear();
   });

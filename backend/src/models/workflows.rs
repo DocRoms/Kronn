@@ -1715,6 +1715,10 @@ pub struct WorkflowExportEnvelope {
     /// Empty when the workflow has no SubWorkflow steps. Excludes the root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_workflows: Vec<Workflow>,
+    /// Fields whose literal secret was replaced before export (never the
+    /// value). An importer shows them so nothing silently runs without them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

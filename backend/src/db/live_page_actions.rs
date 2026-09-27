@@ -119,7 +119,7 @@ pub enum LivePageActionClaimOutcome {
 /// fixed, so a tag/attribute scan is sufficient and keeps this dependency
 /// footprint at zero. `to_ascii_lowercase` (not `to_lowercase`) preserves
 /// byte offsets even when the surrounding HTML contains non-ASCII text.
-fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
+pub(crate) fn page_action_block_ranges(html: &str) -> Vec<(String, std::ops::Range<usize>)> {
     let lower = html.to_ascii_lowercase();
     let mut blocks = Vec::new();
     let mut cursor = 0usize;
@@ -158,12 +158,16 @@ fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
         if !valid_action_ref(action_ref) {
             continue;
         }
-        blocks.push((
-            action_ref.to_string(),
-            html[body_start..body_end].trim().to_string(),
-        ));
+        blocks.push((action_ref.to_string(), body_start..body_end));
     }
     blocks
+}
+
+pub(crate) fn extract_page_action_blocks(html: &str) -> Vec<(String, String)> {
+    page_action_block_ranges(html)
+        .into_iter()
+        .map(|(reference, range)| (reference, html[range].trim().to_string()))
+        .collect()
 }
 
 fn find_tag_end(tag: &str, start: usize) -> Option<usize> {

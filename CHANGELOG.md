@@ -22,6 +22,11 @@ Release notes for 0.9.3 and earlier are available in the
   reported or resolved model, format fallback, duration, outcome) and marks the
   one whose output was kept. A step with no recorded model shows "unknown
   model" instead of today's step configuration.
+- Later workflow steps can read an Agent step's provenance as
+  `steps.<name>.provenance` (agent, model, connection, role, whether the output
+  was retained), and `PublishPageData` can publish it as a typed value, so a Page
+  names the agent behind its analysis instead of hard-coding it. A step without
+  recorded provenance exposes none.
 - Task execution usage for HTTP agents records the prompt tokens a provider
   served from its cache, when it reports them (`prompt_tokens_details.cached_tokens`
   or `cache_read_input_tokens`). Turns that do not report it stay unknown and are
@@ -31,19 +36,46 @@ Release notes for 0.9.3 and earlier are available in the
   Each tile scrolls independently and links to its full discussion. The bounded
   read-only monitor shares one WebSocket and batches refreshes without marking
   discussions read or launching agents; a missing room does not block its peers.
+  Selecting a tile opens a collapsible input bound to that discussion, with its
+  mentions and draft; messages use the durable outbox route.
   [Monitoring limits and behavior](docs/operations/discussion-mosaic.md).
 - The discussion asset carousel has a copy button. Text, JSON and log files are
   copied whole (up to 2 MiB), images as PNG, and videos only where the browser
   accepts that type; otherwise the button says why it is unavailable.
+- Artifacts can be exported and imported as versioned JSON bundles containing
+  current HTML, retained data and linked automation definitions. Import previews
+  creation, reuse and conflicts, remaps references into a new Artifact and keeps
+  new workflows disabled. Missing local configuration is shown before import;
+  stale previews and failed imports leave no partial resources.
+- Artifact import shows each new Quick Exec's command and arguments and
+  requires explicit approval before creating it. New Quick APIs show their
+  method and endpoint in the preview.
+- HTML previews in discussion messages can become Artifacts with an editable
+  title, unchanged HTML/CSS/JavaScript, and a link back to the source message.
+  Repeated titles create distinct Artifacts without overwriting existing ones.
 
 ### Changed
 
 - The Pages interface is now named Artifacts in all four languages, including
   workflow publishing and the mosaic. Existing URLs, identifiers, API routes
   and MCP tool names remain compatible.
+- Workflow, Quick API, Quick Exec and Artifact exports replace literal credentials
+  (authorization headers, secret query or body values, `--token`-style
+  arguments) with a marker and list the masked fields in the file, never their
+  values. `{{…}}` references are kept. A notice follows the download, and the
+  import preview lists the masked fields before confirmation.
 
 ### Fixed
 
+- Native ACP replies no longer include echoed user prompts, including Vibe's
+  copy of Kronn's injected instructions. Only agent message chunks contribute
+  answer text; tool and usage events remain separate (KT-729).
+- Codex discussions with a project-synced internal MCP bridge no longer fail
+  immediately during bootstrap: the adapter emits the reserved
+  `kronn-internal` entry exactly once (KT-730).
+- A draft typed in a discussion after sending, then left for another
+  discussion, is no longer erased when the earlier message is acknowledged;
+  only the sent text itself is cleared.
 - Native backend hot reload uses the initial startup readiness budget instead
   of stopping a still-starting backend after roughly 30 seconds. Slow project
   MCP synchronization can finish before the HTTP listener becomes ready;

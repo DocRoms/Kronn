@@ -195,6 +195,147 @@ describe('Live Page sandbox', () => {
     relay.dispose();
   });
 
+  it('paints the Page in the host palette before its own markup parses', () => {
+    const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1', 'dark',
+      { 'bg-surface': '#1f1140', 'border-medium': 'rgba(255, 255, 255, 0.1)' });
+    expect(out.indexOf('--kr-bg-surface:#1f1140')).toBeGreaterThan(-1);
+    expect(out.indexOf('--kr-bg-surface:#1f1140')).toBeLessThan(out.indexOf('<body'));
+    expect(out).toContain('--kr-border-medium:rgba(255, 255, 255, 0.1)');
+  });
+
+  it('drops anything that is not a plain colour value, and any unknown token', () => {
+    const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1', 'dark', {
+      'bg-surface': 'red;}</style><script>alert(1)</script>',
+      'bg-base': 'url(https://evil.example/x.png)',
+      'text-primary': '#e8eaed',
+      'not-a-token': '#000',
+    });
+    expect(out).not.toContain('alert(1)');
+    expect(out).not.toContain('evil.example');
+    expect(out).not.toContain('--kr-not-a-token');
+    expect(out).toContain('--kr-text-primary:#e8eaed');
+  });
+
+  it('applies the palette the host sends with a theme change, and only safe values', async () => {
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    frame.document.write(buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1'));
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-theme', version: 1, channel_id: 'channel-1', theme: 'dark',
+      tokens: { 'bg-surface': '#1f1140', 'bg-base': 'url(x)', 'not-a-token': '#000' },
+    } }));
+    const root = frame.document.documentElement;
+    expect(root.getAttribute('data-theme')).toBe('dark');
+    expect(root.style.getPropertyValue('--kr-bg-surface')).toBe('#1f1140');
+    expect(root.style.getPropertyValue('--kr-bg-base')).toBe('');
+    expect(root.style.getPropertyValue('--kr-not-a-token')).toBe('');
+    await frame.happyDOM.close();
+  });
+
+  it('opens the collapse over exactly the row\'s columns', async () => {
+    // A colspan larger than the row adds phantom columns: a table-layout:fixed table then
+    // shares its free width with them and its auto column collapses to a few pixels.
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    const page = '<html><head></head><body><table style="table-layout:fixed"><tbody>'
+      + '<tr><td>a</td><td>b</td><td colspan="2">c</td><td>d</td><td>e</td>'
+      + '<td><button data-kronn-action="autocode-ticket" data-kronn-bindings=\'{"ticketKey":"EW-1"}\'>x</button></td></tr>'
+      + '<tr><td colspan="7">next</td></tr></tbody></table></body></html>';
+    frame.document.write(buildSandboxDocument(page, 'channel-1'));
+    // `document.write` builds the DOM without running it; run the injected scripts ourselves.
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-action-slot', version: 1, channel_id: 'channel-1',
+      slot: { action_ref: 'autocode-ticket', binding_key: liveActionBindingKey({ ticketKey: 'EW-1' }), height: 120 },
+    } }));
+    const cell = frame.document.querySelector('[data-kronn-action-slot] > td') as unknown as HTMLTableCellElement | null;
+    expect(cell).not.toBeNull();
+    expect(cell!.colSpan).toBe(7);
+    expect(cell!.style.height).toBe('120px');
+    await frame.happyDOM.close();
+  });
+
+  it('opens the collapse inside the block the Page names, right under its CTA', async () => {
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    const page = '<html><head></head><body><table><tbody><tr><td>'
+      + '<div class="step" data-kronn-action-slot-host><p>x</p>'
+      + '<button data-kronn-action="autocode-implem" data-kronn-bindings=\'{"ticketKey":"EW-1"}\'>go</button></div>'
+      + '<p class="after">description</p></td></tr></tbody></table></body></html>';
+    frame.document.write(buildSandboxDocument(page, 'channel-1'));
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-action-slot', version: 1, channel_id: 'channel-1',
+      slot: { action_ref: 'autocode-implem', binding_key: liveActionBindingKey({ ticketKey: 'EW-1' }), height: 90 },
+    } }));
+    const slot = frame.document.querySelector('[data-kronn-action-slot]') as unknown as HTMLElement | null;
+    expect(slot?.tagName).toBe('DIV');
+    expect(slot?.parentElement?.classList.contains('step')).toBe(true);
+    expect(slot?.style.height).toBe('90px');
+    // Not after the table row: the description stays below the card.
+    expect(frame.document.querySelectorAll('tr').length).toBe(1);
+    await frame.happyDOM.close();
+  });
+
+  async function framePosting(page: string, height: number) {
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    frame.document.write(buildSandboxDocument(page, 'channel-1'));
+    // The bridge captures the native at start: patch before running it.
+    const received: unknown[] = [];
+    const natives = frame as unknown as {
+      Element: { prototype: { getBoundingClientRect: () => unknown } };
+      MessagePort: { prototype: { postMessage: (m: unknown) => void; start: () => void } };
+    };
+    natives.Element.prototype.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height, right: 800, bottom: height });
+    natives.MessagePort.prototype.postMessage = (m: unknown) => { received.push(m); };
+    natives.MessagePort.prototype.start = () => {};
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', {
+      data: { type: 'kronn:page-link-port', version: 1, channel_id: 'channel-1' },
+      ports: [{} as never],
+    }));
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await frame.happyDOM.close();
+    return received.filter(m => (m as { type?: string }).type === 'kronn:page-height');
+  }
+
+  it('reports its content height when the Page opts in', async () => {
+    const posted = await framePosting(
+      '<html><head><meta name="kronn-page-height" content="auto"></head><body>x</body></html>', 2480.4);
+    expect(posted).toEqual([{ type: 'kronn:page-height', version: 1, channel_id: 'channel-1', height: 2481 }]);
+  });
+
+  it('never reports a height for a Page that did not opt in', async () => {
+    expect(await framePosting('<html><head></head><body>x</body></html>', 2480)).toEqual([]);
+  });
+
+  it('relays a valid Page height without user activation, and drops the rest', async () => {
+    const postMessage = vi.fn();
+    const onHeight = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), vi.fn(), vi.fn(), onHeight);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    Object.defineProperty(navigator, 'userActivation', { configurable: true, value: { isActive: false, hasBeenActive: true } });
+    for (const height of [Number.NaN, -1, 0, 300_000, '900']) {
+      port.postMessage({ type: 'kronn:page-height', version: 1, channel_id: 'channel-1', height });
+    }
+    port.postMessage({ type: 'kronn:page-height', version: 1, channel_id: 'other', height: 700 });
+    port.postMessage({ type: 'kronn:page-height', version: 1, channel_id: 'channel-1', height: 1234.2 });
+    await vi.waitFor(() => expect(onHeight).toHaveBeenCalledWith(1235));
+    expect(onHeight).toHaveBeenCalledTimes(1);
+    relay.dispose();
+  });
+
   it('reports an anchor that is the collapse the Page opened, not its row', async () => {
     const postMessage = vi.fn();
     const onAnchor = vi.fn();

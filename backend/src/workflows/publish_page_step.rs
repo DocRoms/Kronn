@@ -254,6 +254,46 @@ mod tests {
     }
 
     #[test]
+    fn provenance_can_be_published_as_a_typed_value() {
+        use crate::models::{
+            AgentType, ModelTier, WorkflowAgentAttempt, WorkflowAgentAttemptRole,
+            WorkflowAgentProvenance,
+        };
+        let mut context = TemplateContext::new();
+        context.set_step_provenance(
+            "advise",
+            Some(&WorkflowAgentProvenance {
+                attempts: vec![WorkflowAgentAttempt {
+                    id: 1,
+                    role: WorkflowAgentAttemptRole::Initial,
+                    retry: 1,
+                    agent: AgentType::LiteLlm,
+                    tier: ModelTier::Default,
+                    connection_id: None,
+                    requested_model: None,
+                    resolved_model: Some("claude-sonnet-4-6".into()),
+                    model_applied: None,
+                    observed_models: vec![],
+                    format_fallback: false,
+                    started_at: chrono::Utc::now(),
+                    duration_ms: 1,
+                    succeeded: true,
+                }],
+                selected_attempt: Some(1),
+            }),
+        );
+        let request = build_request(
+            &step("steps.advise.provenance"),
+            "workflow-1",
+            "run-7",
+            &context,
+        )
+        .expect("typed provenance");
+        assert_eq!(request.writes[0].value["agent"], "LiteLlm");
+        assert_eq!(request.writes[0].value["model"], "claude-sonnet-4-6");
+    }
+
+    #[test]
     fn mixed_text_source_is_rejected_instead_of_stringifying_json() {
         let context = TemplateContext::new();
         let error = build_request(

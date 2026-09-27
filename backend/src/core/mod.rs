@@ -16,6 +16,7 @@ pub mod docs_write_filter;
 pub mod document_optimization;
 pub mod env;
 pub mod execution_variables;
+pub mod export_secrets;
 pub mod faithfulness;
 pub mod fs_guard;
 pub mod host_mcp_discovery;

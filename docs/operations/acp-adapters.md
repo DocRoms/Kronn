@@ -101,6 +101,15 @@ qualification on each target OS.
 
 ## Observability
 
+Native ACP updates distinguish `user_message_chunk` (including Vibe's echo
+of the injected prompt) from `agent_message_chunk`. Only the latter contributes
+to the displayed reply. Thought, tool-content and unknown labelled updates do
+not become answer text; tool and usage events still follow their own paths.
+Older runtimes with unlabelled content retain their compatibility path.
+An echo without an agent message therefore supplies no answer text.
+[src: file: backend/src/acp.rs:940]
+[ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
+
 Claude's SDK model catalogue is discovered independently of these execution
 toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
 adapter's empty configuration options. See [catalogue discovery and selector
@@ -196,6 +205,15 @@ project path never reuses that identifier.
   set.
 
 ## Troubleshooting
+
+- **Codex exits immediately for a project but works in a project-less room:**
+  check the project MCP override for a duplicate `kronn-internal` key. Project
+  sync may already declare the bridge in `.mcp.json`. The adapter must exclude
+  that reserved entry before adding its trusted bridge declaration exactly
+  once, or Codex refuses the invalid TOML during bootstrap (exit 1). Other
+  authorized project servers remain in the override; no global configuration
+  change or MCP permission bypass is needed.
+  [src: file: backend/src/acp/codex_adapter.rs:140]
 
 - **"no verified production ACP command" / adapter never engages:** check the
   exact toggle name (`KRONN_ACP_ADAPTER_CODEX` / `KRONN_ACP_ADAPTER_CLAUDE`,

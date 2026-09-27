@@ -11,6 +11,68 @@ label does not migrate or duplicate it. Historical code and documentation use
 [src: file: frontend/src/lib/i18n/locales/en.ts:55]
 [src: file: frontend/src/lib/live-page-navigation.ts:1]
 
+## Portable JSON bundles
+
+The Artifact export action downloads a `kronn.artifact` version-1 JSON bundle.
+It contains the current HTML, named dataset values (including JSON `null`
+distinct from an unpopulated snapshot), schemas, retention settings and every
+retained time-series point with its observation time and deduplication key.
+It follows parsed action targets and workflow dependencies transitively,
+including saved workflows that publish into the root Artifact, their failure
+steps, sub-workflows, Quick Prompts, Quick APIs, Quick Execs and secondary
+Artifacts. Secondary Artifacts do not pull in unrelated incoming publishers.
+Export uses one read transaction. Missing dependencies, unsupported bundles and
+bundles exceeding 16 MiB or 512 resources fail explicitly; nothing is silently
+truncated. Historical HTML revisions, run/publication history and discussion
+links are not included.
+[src: file: backend/src/models/artifact_portability.rs:1]
+[src: file: backend/src/api/artifact_portability.rs:1]
+
+Import is available in the library and in a workflow's publishing step before
+the library is activated. The user selects a project and reviews each planned
+creation, reuse or conflict before committing. Reuse requires a matching source
+identity (or a recorded earlier import) and definition; names alone never match.
+Changed definitions require an explicit local-version or new-copy choice.
+The root Artifact is always new. Publishers and action-bearing dependencies
+that need different destinations are copied, with typed references remapped;
+literal text, CSS and unrelated JavaScript are not rewritten. An explicit reuse
+that cannot target the new destination is rejected. New workflows are disabled;
+existing workflows keep their state and no automation is executed by import.
+For every Quick Exec that will be created, the preview shows the exact saved
+command and argument array. The user must approve each command and refresh the
+preview before import is enabled. The server requires these explicit source
+identities in `approved_quick_exec_ids`; the reviewed digest includes approvals
+and bundle content, so changing either invalidates the previous review.
+Reused local Quick Execs require no new approval. Choosing another file clears
+all approvals. New Quick APIs show their saved method, endpoint and plugin;
+an unspecified method is shown as unknown, not inferred.
+[src: file: backend/src/api/artifact_portability/import.rs:1]
+[src: file: frontend/src/components/ArtifactImportDialog.tsx:1]
+
+Configured connections, their stored credentials, agent-library entries and
+local files are not bundled. Definitions retain those references; preview lists missing known
+plugin/model connections, skills, profiles and directives, and offers an
+explicit import-and-configure-later confirmation. File paths and endpoint
+availability are not checked. Copied webhook approval tokens are cleared.
+A literal credential typed into an embedded Workflow, Quick API or Quick Exec
+(authorization header, secret query/body value, `--token`-style argument) is
+replaced by a marker and listed in `redacted_fields`, never its value; the
+import preview shows that list. `{{…}}` references are kept.
+[src: file: backend/src/core/export_secrets.rs:1]
+The selected project applies to newly created automation definitions and
+Artifact action scopes. A deliberately reused local definition is unchanged.
+[src: file: backend/src/api/artifact_portability/import.rs:1]
+
+`GET /api/pages/{id}/export`, `POST /api/pages/import/preview` and
+`POST /api/pages/import` retain the established Page API naming. Import requires
+the digest from the reviewed preview, recomputes it against current local
+definitions and import identities, and refuses stale decisions. All resources,
+datasets, points, origin mappings and the library activation commit in one
+SQLite transaction; an error rolls everything back. Origin mappings identify
+earlier imported copies without overwriting their source or local definitions.
+[src: file: backend/src/lib.rs:1]
+[src: file: backend/src/db/sql/188_artifact_import_origins.sql:1]
+
 ## Status
 
 Shipped in the first v0.10.0 vertical. Later phases may extend the rendering
@@ -70,6 +132,20 @@ A Page may also be linked to one or more Discussions. `created_from` records
 the room where an agent authored the Page; `attached` is an explicit later
 association. These links are independent from Workflow publisher links and are
 deleted automatically if either side is removed.
+
+An HTML preview in a persisted discussion message can be promoted with
+**Make an Artifact**. The title is editable; the preview's HTML, CSS and JavaScript
+are copied unchanged to a new Artifact, with no workflow or command execution.
+The creation request includes `discussion_id` and `source_message_id`; the
+server verifies their relationship, inherits the discussion's project when no
+project was supplied, and resolves title/slug collisions with a fresh suffix.
+The Artifact, initial revision and source link are created in one transaction.
+The library's source link opens the discussion at that exact message. Removing
+the message clears only its source anchor and preserves the Artifact and its
+discussion link. Streamed previews without a persisted message id do not offer
+this action.
+[src: file: backend/src/api/live_pages.rs:365]
+[src: file: frontend/src/components/DocPreviewArtifact.tsx:10]
 
 ## Domain model
 
