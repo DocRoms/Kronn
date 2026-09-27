@@ -51,7 +51,8 @@ export async function copyAsset(
   env: CopyEnv,
 ): Promise<void> {
   const refusal = copyRefusal(kind, mime, env);
-  if (refusal) throw new CopyAssetError(refusal);
+  const clipboard = env.clipboard;
+  if (refusal || !clipboard) throw new CopyAssetError(refusal ?? 'insecure');
   // Our own refusal while preparing the payload, distinct from the browser's.
   let preparation: CopyAssetError | null = null;
   const prepare = async (): Promise<Blob> => {
@@ -68,13 +69,13 @@ export async function copyAsset(
   try {
     if (!env.ClipboardItem) {
       // Text only reaches here: nothing better than writing once it is loaded.
-      await env.clipboard!.writeText(await (await prepare()).text());
+      await clipboard.writeText(await (await prepare()).text());
       return;
     }
     // WebKit only honours a write started within the click, so the item is
     // handed over at once and resolves once the download is done.
     const type = kind === 'text' ? 'text/plain' : kind === 'image' ? 'image/png' : mime;
-    await env.clipboard!.write([new env.ClipboardItem({ [type]: prepare() })]);
+    await clipboard.write([new env.ClipboardItem({ [type]: prepare() })]);
   } catch (error) {
     if (preparation) throw preparation;
     if (error instanceof CopyAssetError) throw error;
@@ -87,8 +88,13 @@ async function encodePng(blob: Blob): Promise<Blob> {
   const canvas = document.createElement('canvas');
   canvas.width = bitmap.width;
   canvas.height = bitmap.height;
-  canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
-  bitmap.close();
+  try {
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('PNG canvas unavailable');
+    context.drawImage(bitmap, 0, 0);
+  } finally {
+    bitmap.close();
+  }
   return new Promise((resolve, reject) => {
     canvas.toBlob(png => (png ? resolve(png) : reject(new Error('PNG encoding failed'))), 'image/png');
   });

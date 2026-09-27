@@ -18,7 +18,7 @@ import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
-import { standaloneDiscussionId } from '../lib/live-page-navigation';
+import { standaloneDiscussionId, standaloneDiscussionMessageId } from '../lib/live-page-navigation';
 import {
   readActiveDiscussionId,
   readDashboardPage,
@@ -1533,6 +1533,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             markAllDiscussionsSeen={markAllDiscussionsSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
             initialActiveDiscussionId={openDiscussionId ?? deepLinkedDiscussionId ?? restorableDiscussionId}
+            initialMessageId={deepLinkedDiscussionId && !openDiscussionId ? standaloneDiscussionMessageId(window.location.hash) : null}
             lastSeenMsgCount={lastSeenMsgCount}
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}

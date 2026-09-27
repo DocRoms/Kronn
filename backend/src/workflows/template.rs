@@ -85,6 +85,47 @@ impl TemplateContext {
         }
     }
 
+    /// Provenance of the output a step kept, or of its last launch when none was
+    /// kept (`retained: false`). A step without recorded provenance exposes
+    /// nothing: templates must not rebuild it from today's configuration.
+    pub fn set_step_provenance(
+        &mut self,
+        step_name: &str,
+        provenance: Option<&crate::models::WorkflowAgentProvenance>,
+    ) {
+        // Clear first: a step without provenance must not inherit the previous
+        // step's (or its own earlier iteration's) through the aliases.
+        self.values.remove(&format!("steps.{step_name}.provenance"));
+        self.values.remove("previous_step.provenance");
+        let Some(provenance) = provenance else { return };
+        let selected = provenance
+            .selected_attempt
+            .and_then(|id| provenance.attempts.iter().find(|attempt| attempt.id == id));
+        let Some(attempt) = selected.or_else(|| provenance.attempts.last()) else {
+            return;
+        };
+        let model = if !attempt.observed_models.is_empty() {
+            Some(attempt.observed_models.join(" / "))
+        } else if attempt.model_applied == Some(false) {
+            None
+        } else {
+            attempt.resolved_model.clone()
+        };
+        let json = serde_json::json!({
+            "agent": format!("{:?}", attempt.agent),
+            "model": model,
+            "connection_id": attempt.connection_id,
+            "role": attempt.role,
+            "retained": selected.is_some(),
+            "format_fallback": attempt.format_fallback,
+            "attempts": provenance.attempts.len(),
+        })
+        .to_string();
+        self.values
+            .insert(format!("steps.{step_name}.provenance"), json.clone());
+        self.values.insert("previous_step.provenance".into(), json);
+    }
+
     pub fn set_step_output(&mut self, step_name: &str, output: &str) {
         self.values
             .insert(format!("steps.{}.output", step_name), output.into());
@@ -482,22 +523,19 @@ pub(crate) fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -
     resolve_typed_path(values, key).map(|v| stringify_json_leaf(&v))
 }
 
-/// Anchor a dotted key on its `.data` OR `.data_json` segment, returning
-/// `(prefix, path-after-anchor)`. `steps.X.data.subtasks.0` and
-/// `steps.X.data_json.subtasks.0` both anchor identically — the JSON source is
-/// always the parseable `<prefix>.data_json` sibling regardless of which alias
-/// the author wrote. Returns None when there's no anchor, the anchor is the
-/// last segment (a bare flat key, handled elsewhere), or it's the first segment
-/// (no prefix).
-fn anchor_and_path(key: &str) -> Option<(String, Vec<&str>)> {
-    let parts: Vec<&str> = key.split('.').collect();
-    let idx = parts
-        .iter()
-        .position(|p| *p == "data" || *p == "data_json")?;
-    if idx == 0 || idx == parts.len() - 1 {
-        return None;
+/// The JSON behind an anchor: the step envelope for `data`, the recorded
+/// attempt summary for `provenance`.
+fn anchored_json<'a>(
+    values: &'a HashMap<String, String>,
+    prefix: &str,
+    anchor: &str,
+) -> Option<&'a String> {
+    if anchor == "provenance" {
+        return values.get(&format!("{prefix}.provenance"));
     }
-    Some((parts[..idx].join("."), parts[idx + 1..].to_vec()))
+    values
+        .get(&format!("{prefix}.data_json"))
+        .or_else(|| values.get(&format!("{prefix}.data")))
 }
 
 /// Like [`resolve_nested_path`] but returns the TYPED `serde_json::Value` at the
@@ -511,30 +549,28 @@ pub(crate) fn resolve_typed_path(
     key: &str,
 ) -> Option<serde_json::Value> {
     let parts: Vec<&str> = key.split('.').collect();
-    // Whole-payload form: `<prefix>.data` or `<prefix>.data_json` (no sub-path).
-    if parts.len() >= 2 && matches!(*parts.last().unwrap(), "data" | "data_json") {
-        let prefix = parts[..parts.len() - 1].join(".");
-        let json_str = values
-            .get(&format!("{prefix}.data_json"))
-            .or_else(|| values.get(&format!("{prefix}.data")))?;
-        return serde_json::from_str(json_str).ok();
-    }
-
-    // Nested form: walk the path under the `.data`/`.data_json` anchor.
-    let (prefix, path) = anchor_and_path(key)?;
-    let json_str = values
-        .get(&format!("{prefix}.data_json"))
-        .or_else(|| values.get(&format!("{prefix}.data")))?;
-    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let mut current = &parsed;
-    for segment in &path {
-        current = if let Ok(idx) = segment.parse::<usize>() {
-            current.as_array()?.get(idx)?
-        } else {
-            current.get(*segment)?
+    // An anchor word can also be a step name (`steps.provenance.data.x`) or a
+    // payload field (`steps.X.data.provenance`): take the first position whose
+    // anchored JSON actually exists, then walk what follows it.
+    for (idx, anchor) in parts.iter().enumerate().skip(1) {
+        if !matches!(*anchor, "data" | "data_json" | "provenance") {
+            continue;
+        }
+        let Some(json) = anchored_json(values, &parts[..idx].join("."), anchor) else {
+            continue;
         };
+        let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+        let mut current = &parsed;
+        for segment in &parts[idx + 1..] {
+            current = if let Ok(index) = segment.parse::<usize>() {
+                current.as_array()?.get(index)?
+            } else {
+                current.get(*segment)?
+            };
+        }
+        return Some(current.clone());
     }
-    Some(current.clone())
+    None
 }
 
 fn stringify_json_leaf(v: &serde_json::Value) -> String {
@@ -1313,6 +1349,178 @@ mod tests {
             .render("{{steps.exec.agent}}")
             .unwrap()
             .contains("{{steps.exec.agent}}"));
+    }
+
+    fn attempt(
+        id: u32,
+        role: crate::models::WorkflowAgentAttemptRole,
+        agent: crate::models::AgentType,
+        resolved: Option<&str>,
+    ) -> crate::models::WorkflowAgentAttempt {
+        crate::models::WorkflowAgentAttempt {
+            id,
+            role,
+            retry: 1,
+            agent,
+            tier: crate::models::ModelTier::Default,
+            connection_id: None,
+            requested_model: None,
+            resolved_model: resolved.map(str::to_owned),
+            model_applied: None,
+            observed_models: vec![],
+            format_fallback: false,
+            started_at: chrono::Utc::now(),
+            duration_ms: 1,
+            succeeded: true,
+        }
+    }
+
+    #[test]
+    fn provenance_names_the_attempt_that_produced_the_kept_output() {
+        use crate::models::{AgentType, WorkflowAgentAttemptRole as Role, WorkflowAgentProvenance};
+        let mut escalation = attempt(2, Role::Escalation, AgentType::ClaudeCode, Some("opus"));
+        escalation.observed_models = vec!["claude-opus-5".into()];
+        let provenance = WorkflowAgentProvenance {
+            attempts: vec![
+                attempt(1, Role::Initial, AgentType::Ollama, Some("qwen3.8:27b-mlx")),
+                escalation,
+            ],
+            selected_attempt: Some(2),
+        };
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_provenance("advise", Some(&provenance));
+
+        assert_eq!(
+            ctx.render("{{steps.advise.provenance.agent}} · {{steps.advise.provenance.model}}")
+                .unwrap(),
+            "ClaudeCode · claude-opus-5"
+        );
+        let typed = ctx.resolve_value("steps.advise.provenance").unwrap();
+        assert_eq!(typed["role"], "Escalation");
+        assert_eq!(typed["retained"], true);
+        assert_eq!(typed["attempts"], 2);
+        assert_eq!(
+            ctx.resolve_value("previous_step.provenance.agent").unwrap(),
+            "ClaudeCode"
+        );
+    }
+
+    #[test]
+    fn provenance_without_a_kept_output_describes_the_last_launch_as_not_retained() {
+        use crate::models::{AgentType, WorkflowAgentAttemptRole as Role, WorkflowAgentProvenance};
+        let mut failed = attempt(1, Role::Initial, AgentType::Codex, Some("gpt-x"));
+        failed.model_applied = Some(false);
+        failed.succeeded = false;
+        let provenance = WorkflowAgentProvenance {
+            attempts: vec![failed],
+            selected_attempt: None,
+        };
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_provenance("draft", Some(&provenance));
+        let typed = ctx.resolve_value("steps.draft.provenance").unwrap();
+        assert_eq!(typed["retained"], false);
+        assert_eq!(
+            typed["model"],
+            serde_json::Value::Null,
+            "a CLI default is not the requested model"
+        );
+    }
+
+    #[test]
+    fn a_step_without_recorded_provenance_exposes_none() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_provenance("legacy", None);
+        ctx.set_step_provenance(
+            "empty",
+            Some(&crate::models::WorkflowAgentProvenance::default()),
+        );
+        assert!(ctx.resolve_value("steps.legacy.provenance").is_none());
+        assert!(ctx.resolve_value("steps.empty.provenance.agent").is_none());
+        assert!(ctx
+            .render_strict("{{steps.legacy.provenance.agent}}")
+            .is_err());
+    }
+
+    #[test]
+    fn a_later_step_without_provenance_clears_the_previous_step_alias() {
+        use crate::models::{AgentType, WorkflowAgentAttemptRole as Role, WorkflowAgentProvenance};
+        let agent = WorkflowAgentProvenance {
+            attempts: vec![attempt(1, Role::Initial, AgentType::Codex, Some("gpt-x"))],
+            selected_attempt: Some(1),
+        };
+        for later in [None, Some(WorkflowAgentProvenance::default())] {
+            let mut ctx = TemplateContext::new();
+            ctx.set_step_provenance("a", Some(&agent));
+            ctx.set_step_provenance("b", later.as_ref());
+            assert!(ctx
+                .render_strict("{{previous_step.provenance.agent}}")
+                .is_err());
+            assert!(ctx.resolve_value("steps.b.provenance").is_none());
+            assert_eq!(
+                ctx.resolve_value("steps.a.provenance.agent").unwrap(),
+                "Codex"
+            );
+            // A step looping back without history drops its own stale value too.
+            ctx.set_step_provenance("a", later.as_ref());
+            assert!(ctx.resolve_value("steps.a.provenance").is_none());
+        }
+    }
+
+    #[test]
+    fn a_step_named_provenance_or_data_keeps_resolving() {
+        use crate::models::{AgentType, WorkflowAgentAttemptRole as Role, WorkflowAgentProvenance};
+        let mut ctx = TemplateContext::new();
+        let payload = |value: serde_json::Value| {
+            crate::workflows::step_output_format::format_step_output_simple(value, "OK", "fixture")
+        };
+        ctx.set_step_output("provenance", &payload(serde_json::json!({"field": 7})));
+        ctx.set_step_output("data", &payload(serde_json::json!({"rows": [1]})));
+        ctx.set_step_provenance(
+            "provenance",
+            Some(&WorkflowAgentProvenance {
+                attempts: vec![attempt(1, Role::Initial, AgentType::Ollama, Some("qwen"))],
+                selected_attempt: Some(1),
+            }),
+        );
+        assert_eq!(ctx.resolve_value("steps.provenance.data.field").unwrap(), 7);
+        assert_eq!(
+            ctx.resolve_value("steps.provenance.provenance.agent")
+                .unwrap(),
+            "Ollama"
+        );
+        assert_eq!(
+            ctx.resolve_value("steps.data.data.rows").unwrap(),
+            serde_json::json!([1])
+        );
+    }
+
+    #[test]
+    fn a_data_field_named_provenance_still_resolves_under_data() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output(
+            "fetch",
+            &crate::workflows::step_output_format::format_step_output_simple(
+                serde_json::json!({"provenance": "api"}),
+                "OK",
+                "fixture",
+            ),
+        );
+        assert_eq!(
+            ctx.resolve_value("steps.fetch.data.provenance").unwrap(),
+            "api"
+        );
+        ctx.set_step_output(
+            "nested",
+            &crate::workflows::step_output_format::format_step_output_simple(
+                serde_json::json!({"data": [1, 2]}),
+                "OK",
+                "fixture",
+            ),
+        );
+        assert_eq!(
+            ctx.resolve_value("steps.nested.data.data").unwrap(),
+            serde_json::json!([1, 2])
+        );
     }
 
     #[test]

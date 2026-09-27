@@ -10,10 +10,12 @@ vi.mock('../../hooks/useWebSocket', () => ({
 vi.mock('../DiscussionsPage', () => ({
   DiscussionsPage: ({
     initialActiveDiscussionId,
+    initialMessageId,
   }: {
     initialActiveDiscussionId?: string | null;
+    initialMessageId?: string | null;
   }) => (
-    <div data-testid="discussion-page">
+    <div data-testid="discussion-page" data-message-id={initialMessageId}>
       {initialActiveDiscussionId ?? 'discussion-list'}
     </div>
   ),
@@ -188,12 +190,13 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     // list is paginated and loads asynchronously, so filtering it refused to
     // open a discussion merely absent from the first page — or created a
     // second ago. The page fetches the target by id anyway.
-    window.location.hash = '#discussion-disc-deep';
+    window.location.hash = '#discussion-disc-deep?message=message-origin';
     vi.mocked(discussionsApi.list).mockResolvedValue([]);
 
     await renderDashboard();
 
     expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-deep');
+    expect(screen.getByTestId('discussion-page')).toHaveAttribute('data-message-id', 'message-origin');
     window.location.hash = '';
   });
 

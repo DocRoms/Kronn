@@ -365,25 +365,55 @@ pub async fn create(
         created_by_agent: request.created_by_agent,
         created_at: now,
     };
-    let page_for_insert = page.clone();
+    let mut page_for_insert = page.clone();
     let revision_for_insert = revision.clone();
     let datasets = request.datasets;
     let discussion_id = request.discussion_id;
+    let source_message_id = request.source_message_id;
     if let Err(error) = state
         .db
         .with_conn(move |conn| {
-            crate::db::live_pages::create_live_page(
-                conn,
+            let tx = conn.unchecked_transaction()?;
+            if let Some(message_id) = &source_message_id {
+                let origin: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1 AND discussion_id = ?2)",
+                    rusqlite::params![message_id, discussion_id], |row| row.get(0),
+                )?;
+                if !origin {
+                    anyhow::bail!("Source message must belong to the originating discussion");
+                }
+                // Promoting another preview with the same title creates a new
+                // Artifact. Ordinary explicit-slug creation keeps its conflict contract.
+                let base = page_for_insert.slug.clone();
+                while tx.query_row("SELECT EXISTS(SELECT 1 FROM live_pages WHERE slug = ?1)",
+                    [&page_for_insert.slug], |row| row.get::<_, bool>(0))? {
+                    page_for_insert.slug = format!("{}-{}", base.chars().take(80).collect::<String>().trim_end_matches('-'), Uuid::new_v4().simple());
+                }
+                if page_for_insert.project_id.is_none() {
+                    page_for_insert.project_id = tx.query_row("SELECT project_id FROM discussions WHERE id = ?1",
+                        [&discussion_id], |row| row.get(0))?;
+                }
+            }
+            crate::db::live_pages::create_live_page_in_transaction(
+                &tx,
                 &page_for_insert,
                 &revision_for_insert,
                 &datasets,
                 discussion_id.as_deref(),
-            )
+            )?;
+            if let Some(message_id) = source_message_id {
+                tx.execute("UPDATE live_page_discussion_links SET source_message_id = ?1 WHERE page_id = ?2 AND discussion_id = ?3",
+                    rusqlite::params![message_id, page_for_insert.id, discussion_id])?;
+            }
+            tx.commit()?;
+            Ok(())
         })
         .await
     {
         let message = error.to_string();
-        let code = if message.contains("UNIQUE constraint") || message.contains("Dataset names") {
+        let code = if message.starts_with("Source message") {
+            ApiErrorCode::Validation
+        } else if message.contains("UNIQUE constraint") || message.contains("Dataset names") {
             ApiErrorCode::Conflict
         } else {
             ApiErrorCode::Internal

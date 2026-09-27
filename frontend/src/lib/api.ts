@@ -1,3 +1,4 @@
+import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
@@ -2452,6 +2453,9 @@ export const executionVariables = {
 // ─── Pages vivantes (0.10.0) ──────────────────────────────────────────────
 
 export const pages = {
+  exportArtifact: (id: string) => api<ArtifactBundle>('GET', `/pages/${encodeURIComponent(id)}/export`),
+  previewImport: (request: ArtifactImportRequest) => api<ArtifactImportPreview>('POST', '/pages/import/preview', request),
+  importArtifact: (request: ArtifactImportRequest) => api<ArtifactImportResult>('POST', '/pages/import', request),
   capability: () => api<LivePagesCapability>('GET', '/pages/capability'),
   list: () => api<LivePage[]>('GET', '/pages'),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),

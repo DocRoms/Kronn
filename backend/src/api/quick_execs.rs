@@ -522,11 +522,15 @@ pub async fn export(
             }
         })
         .collect();
+    let mut item = item;
+    let mut redacted_fields = Vec::new();
+    crate::core::export_secrets::redact_quick_exec(&mut item, &mut redacted_fields);
     let body = serde_json::to_string_pretty(&QuickExecExportEnvelope {
         kind: EXPORT_KIND.to_string(),
         version: EXPORT_VERSION,
         exported_at: Utc::now(),
         quick_exec: item,
+        redacted_fields,
     })
     .unwrap_or_default();
     (

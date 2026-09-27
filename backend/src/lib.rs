@@ -648,6 +648,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Live Pages (v0.10.0) ──
         .route("/api/pages/capability", get(api::live_pages::capability))
         .route(
+            "/api/pages/import",
+            post(api::artifact_portability::import)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/api/pages/import/preview",
+            post(api::artifact_portability::preview)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
             "/api/pages",
             get(api::live_pages::list).post(api::live_pages::create),
         )
@@ -656,6 +666,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::live_pages::get)
                 .patch(api::live_pages::update)
                 .delete(api::live_pages::delete),
+        )
+        .route(
+            "/api/pages/{id}/export",
+            get(api::artifact_portability::export),
         )
         .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
         .route("/api/pages/{id}/workflows", get(api::live_pages::workflows))

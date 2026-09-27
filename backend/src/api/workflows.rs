@@ -1653,7 +1653,7 @@ pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
         .collect()
 }
 
-fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
+pub(crate) fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
     sub_workflow_child_ids(&workflow.steps)
         .into_iter()
         .chain(sub_workflow_child_ids(&workflow.on_failure))
@@ -1661,17 +1661,17 @@ fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct WorkflowDependencyIds {
-    quick_prompts: std::collections::BTreeSet<String>,
-    quick_apis: std::collections::BTreeSet<String>,
-    quick_execs: std::collections::BTreeSet<String>,
-    pages: std::collections::BTreeSet<String>,
+pub(crate) struct WorkflowDependencyIds {
+    pub(crate) quick_prompts: std::collections::BTreeSet<String>,
+    pub(crate) quick_apis: std::collections::BTreeSet<String>,
+    pub(crate) quick_execs: std::collections::BTreeSet<String>,
+    pub(crate) pages: std::collections::BTreeSet<String>,
 }
 
 /// Collect every saved resource referenced by the complete workflow graph.
 /// Dynamic Page ids cannot be bundled because their destination only exists at
 /// run time; static ids/slugs are included and remapped during import.
-fn workflow_dependency_ids<'a>(
+pub(crate) fn workflow_dependency_ids<'a>(
     workflows: impl IntoIterator<Item = &'a Workflow>,
 ) -> WorkflowDependencyIds {
     let mut dependencies = WorkflowDependencyIds::default();
@@ -1855,16 +1855,35 @@ pub async fn export_workflow(
         }
     };
 
+    // A literal credential must not travel with a file meant to be shared.
+    let mut redacted_fields = Vec::new();
+    let mut exported = wf.clone();
+    let (mut referenced_workflows, mut referenced_quick_apis, mut referenced_quick_execs) = (
+        referenced_workflows,
+        referenced_quick_apis,
+        referenced_quick_execs,
+    );
+    crate::core::export_secrets::redact_workflow(&mut exported, &mut redacted_fields);
+    for workflow in &mut referenced_workflows {
+        crate::core::export_secrets::redact_workflow(workflow, &mut redacted_fields);
+    }
+    for api in &mut referenced_quick_apis {
+        crate::core::export_secrets::redact_quick_api(api, &mut redacted_fields);
+    }
+    for exec in &mut referenced_quick_execs {
+        crate::core::export_secrets::redact_quick_exec(exec, &mut redacted_fields);
+    }
     let envelope = WorkflowExportEnvelope {
         kind: WORKFLOW_EXPORT_KIND.to_string(),
         version: EXPORT_VERSION,
         exported_at: Utc::now(),
-        workflow: wf.clone(),
+        workflow: exported,
         referenced_quick_prompts,
         referenced_quick_apis,
         referenced_quick_execs,
         referenced_pages,
         referenced_workflows,
+        redacted_fields,
     };
 
     // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
@@ -1909,7 +1928,7 @@ pub async fn export_workflow(
 /// Validate one workflow from an import bundle exactly like a fresh create
 /// (POST /api/workflows). Applied to the root AND every bundled child so a
 /// malformed child can't slip in. Returns a user-facing error string.
-fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
+pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
     if wf.steps.is_empty() {
         return Err("Workflow must have at least one step".into());
     }
@@ -1987,7 +2006,7 @@ fn rebind_quick_api_config(
     }
 }
 
-fn remap_workflow_step_dependencies(
+pub(crate) fn remap_workflow_step_dependencies(
     step: &mut WorkflowStep,
     quick_prompts: &std::collections::HashMap<String, String>,
     quick_apis: &std::collections::HashMap<String, String>,
@@ -5698,6 +5717,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![child],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -5718,6 +5738,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -5738,6 +5759,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
@@ -5763,6 +5785,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -5799,6 +5822,7 @@ mod tests {
             referenced_quick_execs: vec![],
             referenced_pages: vec![],
             referenced_workflows: vec![],
+            redacted_fields: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();

@@ -44,3 +44,7 @@
   font: 500 var(--kr-fs-sm) var(--kr-font-sans);
   text-align: center;
 }
+
+/* Content-sized Page: the frame is as tall as its document and this shell scrolls it,
+   so the action card positioned inside the shell moves with the Page natively. */
+.standalone-live-page-frame-shell.is-content-sized { overflow-y: auto; }

@@ -482,11 +482,61 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
  */
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
 
+export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>,
+/**
+ * Literal credentials replaced before export; locations only, never values.
+ */
+redacted_fields?: Array<RedactedField>, };
+
+export type ArtifactBundleDataset = { name: string, kind: LivePageDatasetKind,
+/**
+ * Distinguishes a dataset that has never been populated from a JSON null.
+ */
+has_current: boolean, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, points: Array<ArtifactBundlePoint>, };
+
+export type ArtifactBundlePage = { id: string, title: string, slug: string, html: string, created_by_agent: string | null, datasets: Array<ArtifactBundleDataset>, };
+
+export type ArtifactBundlePoint = { observed_at: string, payload: any, dedupe_key: string | null, };
+
+export type ArtifactImportAction = "create" | "reuse";
+
+export type ArtifactImportApiReview = { method: string | null, endpoint: string, plugin: string, };
+
+export type ArtifactImportChoice = { kind: ArtifactResourceKind, source_id: string, action: ArtifactImportAction, target_id: string | null, };
+
+export type ArtifactImportDisposition = "create" | "reuse" | "conflict";
+
+export type ArtifactImportEntry = { kind: ArtifactResourceKind, source_id: string, name: string, disposition: ArtifactImportDisposition, existing_id: string | null,
+/**
+ * UI translation key suffix: missing, identical, changed, retargeted, chosen.
+ */
+reason: string, quick_exec?: ArtifactImportExecReview, quick_api?: ArtifactImportApiReview, };
+
+export type ArtifactImportExecReview = { command: string, args: Array<string>, approved: boolean, };
+
+export type ArtifactImportPreview = { title: string, entries: Array<ArtifactImportEntry>, issues: Array<string>, warnings: Array<ArtifactImportWarning>, digest: string, can_import: boolean, };
+
+export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
+/**
+ * Source identities of new Quick Execs explicitly reviewed by the user.
+ */
+approved_quick_exec_ids?: Array<string>,
+/**
+ * The preview digest is required at commit; stale decisions are rejected.
+ */
+preview_digest?: string | null, };
+
+export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>, };
+
+export type ArtifactImportWarning = { kind: string, id: string, };
+
 /**
  * Where the full streams were kept. Bytes are the real size on disk; `truncated`
  * says the process produced more than that.
  */
 export type ArtifactRef = { path: string, bytes: number, truncated: boolean, };
+
+export type ArtifactResourceKind = "artifact" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec";
 
 /**
  * Declared artifact in a workflow. Phase-3 minimal model — only
@@ -1422,7 +1472,11 @@ export type CreateLivePageRequest = { title: string, slug?: string | null, proje
  * Optional discussion that originated this Page. Agents set this to the
  * current room so the artifact remains discoverable from both places.
  */
-discussion_id?: string | null, datasets?: Array<CreateLivePageDataset>, };
+discussion_id?: string | null,
+/**
+ * Optional source message, which must belong to discussion_id.
+ */
+source_message_id?: string, datasets?: Array<CreateLivePageDataset>, };
 
 export type CreateMcpConfigRequest = { server_id: string, label: string, env: Record<string, string>, args_override?: Array<string> | null, is_global: boolean, project_ids: Array<string>,
 /**
@@ -3590,7 +3644,7 @@ pinned: boolean,
  */
 archived: boolean, };
 
-export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, };
+export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, source_message_id?: string, };
 
 export type LivePageDiscussionRelation = "created_from" | "attached";
 
@@ -5109,7 +5163,11 @@ export type QuickApiExportEnvelope = { kind: string, version: number, exported_a
  * `id`, `project_id`, `created_at`, `updated_at` are present on the
  * wire but reset at import — fresh values are minted by the importer.
  */
-quick_api: QuickApi, };
+quick_api: QuickApi,
+/**
+ * Fields whose literal secret was replaced before export (never the value).
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type QuickExec = { id: string, name: string, icon: string, description: string, project_id: string | null, command: string, args: Array<string>, timeout_secs: number, output_format: CollectQuickExecOutputFormat, variables: Array<PromptVariable>,
 /**
@@ -5127,7 +5185,11 @@ exit_code: number | null,
  */
 stderr: string | null, };
 
-export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec, };
+export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec,
+/**
+ * Fields whose literal secret was replaced before export (never the value).
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type QuickExecResult = { status: QuickExecStatus,
 /**
@@ -5249,6 +5311,16 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
 preview: string, };
 
 export type RecoveryStatus = { configured: boolean, };
+
+export type RedactedField = {
+/**
+ * `quick_api`, `quick_exec` or `workflow_step`.
+ */
+kind: string, resource_id: string, name: string,
+/**
+ * Dotted location, e.g. `api_headers.Authorization` or `args.3`.
+ */
+field: string, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
@@ -7394,7 +7466,12 @@ referenced_pages?: Array<WorkflowExportPage>,
  * atomic operation and remaps `sub_workflow_id` to the fresh child ids.
  * Empty when the workflow has no SubWorkflow steps. Excludes the root.
  */
-referenced_workflows?: Array<Workflow>, };
+referenced_workflows?: Array<Workflow>,
+/**
+ * Fields whose literal secret was replaced before export (never the
+ * value). An importer shows them so nothing silently runs without them.
+ */
+redacted_fields?: Array<RedactedField>, };
 
 export type WorkflowExportPage = { id: string, slug: string, title: string, html: string, created_by_agent: string | null, datasets: Array<WorkflowExportPageDataset>, };
 

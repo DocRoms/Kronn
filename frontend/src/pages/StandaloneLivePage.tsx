@@ -4,6 +4,7 @@ import { pages as pagesApi } from '../lib/api';
 import {
   buildSandboxDocument,
   hostTheme,
+  hostThemeTokens,
   createLivePageOpenLinkRelay,
   runtimeData,
 } from '../lib/live-page-sandbox';
@@ -65,7 +66,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
   }, [detail]);
 
   const sandboxDocument = useMemo(
-    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme()) : '',
+    () => detail ? buildSandboxDocument(detail.revision.html, bridgeChannel, hostTheme(), hostThemeTokens()) : '',
     [bridgeChannel, detail],
   );
   const publishToFrame = useCallback(() => {
@@ -80,11 +81,17 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
       data: runtimeData(detail),
     }, '*');
   }, [bridgeChannel, detail]);
+  // A content-sized Page reports its height; it only applies to the document that sent it,
+  // so a new revision that does not opt in never inherits the previous one's size.
+  const [frameSize, setFrameSize] = useState<{ doc: string; height: number } | null>(null);
+  const frameDocRef = useRef(sandboxDocument);
+  useEffect(() => { frameDocRef.current = sandboxDocument; }, [sandboxDocument]);
+  const frameHeight = frameSize && frameSize.doc === sandboxDocument ? frameSize.height : null;
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
       setActionUnavailable(false);
       handlePageActionIntent(intent);
-    }, movePageActionAnchor);
+    }, movePageActionAnchor, height => setFrameSize({ doc: frameDocRef.current, height }));
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
@@ -109,7 +116,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
 
   return (
     <main className="standalone-live-page" data-testid="standalone-live-page">
-      <div className="standalone-live-page-frame-shell">
+      <div className={frameHeight ? "standalone-live-page-frame-shell is-content-sized" : "standalone-live-page-frame-shell"}>
         {actionUnavailable && (
           <p className="standalone-live-page-action-error" role="alert">
             {t('disc.action.unavailablePageAction')}
@@ -117,6 +124,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
         )}
         <iframe
           ref={iframeRef}
+                  style={frameHeight ? { height: frameHeight } : undefined}
           title={detail.title}
           sandbox="allow-scripts"
           srcDoc={sandboxDocument}

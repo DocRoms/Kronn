@@ -252,11 +252,15 @@ pub async fn export_qa(
         }
     };
 
+    let mut exported = qa.clone();
+    let mut redacted_fields = Vec::new();
+    crate::core::export_secrets::redact_quick_api(&mut exported, &mut redacted_fields);
     let envelope = QuickApiExportEnvelope {
         kind: QA_EXPORT_KIND.to_string(),
         version: QA_EXPORT_VERSION,
         exported_at: Utc::now(),
-        quick_api: qa.clone(),
+        quick_api: exported,
+        redacted_fields,
     };
 
     let safe_name: String = qa

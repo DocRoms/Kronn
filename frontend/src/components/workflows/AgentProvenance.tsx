@@ -1,5 +1,6 @@
 import type { StepResult, WorkflowAgentAttempt } from '../../types/generated';
 import { AGENT_LABELS } from '../../lib/constants';
+import { CopyIdPill } from '../CopyIdPill';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
@@ -12,7 +13,7 @@ const ROLE_KEYS: Record<WorkflowAgentAttempt['role'], string> = {
 };
 
 /** What the provider reported, else what Kronn resolved; never the current config. */
-export function attemptModelLabel(attempt: WorkflowAgentAttempt, t: Translate): string {
+function attemptModelLabel(attempt: WorkflowAgentAttempt, t: Translate): string {
   if (attempt.observed_models.length > 0) return attempt.observed_models.join(' / ');
   if (attempt.model_applied === false) return t('wf.attemptModelCliDefault');
   return attempt.resolved_model ?? t('wf.modelUnknown');
@@ -51,6 +52,9 @@ export function AgentProvenanceDetails({ sr, t }: { sr: StepResult; t: Translate
           >
             {retained ? '★ ' : attempt.succeeded ? '✓ ' : '! '}
             {t(ROLE_KEYS[attempt.role])} · {AGENT_LABELS[attempt.agent] ?? attempt.agent} · {attemptModelLabel(attempt, t)}
+            {attempt.connection_id && (
+              <> · {t('wf.attemptConnection')} <CopyIdPill id={attempt.connection_id} title={t('wf.attemptConnectionCopy', attempt.connection_id)} /></>
+            )}
             {attempt.format_fallback ? ` · ${t('wf.attemptFormatFallback')}` : ''}
             {attempt.duration_ms > 0 ? ` · ${(attempt.duration_ms / 1000).toFixed(1)}s` : ''}
           </span>

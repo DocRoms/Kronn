@@ -150,3 +150,18 @@ describe('ChatInput — QP chain picker', () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('ChatInput — optional controls', () => {
+  it('hides voice, read-aloud and debate controls where the page cannot serve them', () => {
+    const { unmount } = render(<ChatInput {...baseProps({ sending: false })} />);
+    for (const name of ['disc.voiceModeOn', 'disc.ttsEnable', 'debate.title']) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument();
+    }
+    unmount();
+    render(<ChatInput {...baseProps({ sending: false, showVoiceControls: false, showDebate: false })} />);
+    for (const name of ['disc.voiceModeOn', 'disc.ttsEnable', 'debate.title']) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+    expect(screen.getByRole('button', { name: 'disc.micDictate' })).toBeInTheDocument();
+  });
+});

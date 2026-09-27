@@ -99,13 +99,46 @@ export function liveActionBindingKey(bindings: Record<string, string>): string {
  * Mirror the host data-theme into the opaque iframe. Pages style explicit
  * light/dark values and may fall back to their media query for custom themes.
  */
-export function postLivePageTheme(target: Window, channelId: string, theme: string): void {
+export function postLivePageTheme(
+  target: Window,
+  channelId: string,
+  theme: string,
+  tokens: Record<string, string> = {},
+): void {
   target.postMessage({
     type: 'kronn:page-theme',
     version: 1,
     channel_id: channelId,
     theme,
+    tokens,
   }, '*');
+}
+
+/** Kronn's structural colours, mirrored into the Page as `--kr-<name>` so a Page can
+ * paint its surfaces, rules and text in the shell's palette — and match the action
+ * card the host draws over it. Semantic colours are deliberately not shared. */
+export const LIVE_PAGE_THEME_TOKENS = [
+  'bg-base', 'bg-surface', 'bg-elevated', 'text-primary', 'text-secondary', 'text-ghost', 'border-medium',
+] as const;
+
+/** A colour value and nothing else: these land in a Page's stylesheet. */
+const SAFE_TOKEN_VALUE = /^[#(),.%\s\w-]{1,64}$/;
+
+function safeTokens(tokens: Record<string, string> | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of LIVE_PAGE_THEME_TOKENS) {
+    const value = tokens?.[name];
+    if (typeof value === 'string' && SAFE_TOKEN_VALUE.test(value) && !/url\s*\(/i.test(value)) out[name] = value;
+  }
+  return out;
+}
+
+/** The host's current values for {@link LIVE_PAGE_THEME_TOKENS}. */
+export function hostThemeTokens(): Record<string, string> {
+  const style = getComputedStyle(document.documentElement);
+  const read: Record<string, string> = {};
+  for (const name of LIVE_PAGE_THEME_TOKENS) read[name] = style.getPropertyValue('--kr-' + name).trim();
+  return safeTokens(read);
 }
 
 /** The theme the host is currently showing, read from the attribute
@@ -184,7 +217,12 @@ const ACTION_STATE_STYLE = `<style>
  * data bridge. The iframe itself must still use `sandbox="allow-scripts"`
  * without `allow-same-origin`; CSP and sandbox are complementary boundaries.
  */
-export function buildSandboxDocument(html: string, channelId: string, initialTheme?: string | null): string {
+export function buildSandboxDocument(
+  html: string,
+  channelId: string,
+  initialTheme?: string | null,
+  initialTokens?: Record<string, string> | null,
+): string {
   const safeChannel = JSON.stringify(channelId).replaceAll('<', '\\u003c');
   // Set before the Page's own markup parses, so it never paints in the wrong
   // theme for a frame. Runtime changes arrive by message instead, because
@@ -192,7 +230,9 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
   const theme = typeof initialTheme === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(initialTheme)
     ? `<script>document.documentElement.setAttribute('data-theme',${JSON.stringify(initialTheme)})</script>`
     : '';
-  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${theme}${ACTION_STATE_STYLE}`;
+  const tokens = Object.entries(safeTokens(initialTokens));
+  const palette = tokens.length ? `<style>:root{${tokens.map(([k, v]) => `--kr-${k}:${v}`).join(';')}}</style>` : '';
+  const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">${theme}${palette}${ACTION_STATE_STYLE}`;
   const bridge = `<script>(()=>{
     const channel=${safeChannel};
     const userActivation=navigator.userActivation;
@@ -213,8 +253,11 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     let anchored=null;
     let anchorQueued=false;
     // A row, not the button: the card belongs under the whole line it acts on.
+    // A Page may name where its collapse opens: the card then sits under the CTA's own
+    // block instead of after the whole table row that happens to contain it.
+    const slotHost=element=>closest.call(element,'[data-kronn-action-slot-host]');
     const anchorRect=element=>{
-      const row=closest.call(element,'tr,li')||element;
+      const row=slotHost(element)||closest.call(element,'tr,li')||element;
       const rect=getBounds.call(row);
       return {left:rect.left,top:rect.top,width:rect.width,height:rect.height};
     };
@@ -236,24 +279,29 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     };
     const openSlot=(ref,key,height)=>{
       const cta=findCta(ref,key);
-      const row=cta?closest.call(cta,'tr,li')||cta:null;
+      const host=cta?slotHost(cta):null;
+      const row=host||(cta?closest.call(cta,'tr,li')||cta:null);
       if(!row||!row.parentNode){dropSlot();return;}
-      const inRow=row.tagName==='TR';
+      const inRow=!host&&row.tagName==='TR';
       if(!slotEl||slotEl.__row!==row){
         dropSlot();
-        slotEl=document.createElement(inRow?'tr':'li');
+        slotEl=document.createElement(host?'div':inRow?'tr':'li');
         slotEl.setAttribute('data-kronn-action-slot','');
         if(inRow){
+          // Exactly the row's own span: an oversized colspan adds phantom columns, and a
+          // table-layout:fixed table then shares its free width with them.
+          const span=Array.prototype.reduce.call(row.cells,(n,c)=>n+(c.colSpan||1),0)||1;
           const cell=document.createElement('td');
-          cell.setAttribute('colspan','99');
+          cell.setAttribute('colspan',String(span));
           cell.style.padding='0';
           cell.style.border='0';
           slotEl.appendChild(cell);
-        }else{
+        }else if(!host){
           slotEl.style.listStyle='none';
         }
         slotEl.__row=row;
-        row.parentNode.insertBefore(slotEl,row.nextSibling);
+        if(host)host.appendChild(slotEl);
+        else row.parentNode.insertBefore(slotEl,row.nextSibling);
       }
       const box=inRow?slotEl.firstChild:slotEl;
       box.style.height=height+'px';
@@ -366,6 +414,45 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
     try{
       Object.defineProperty(window,'open',{configurable:false,writable:false,value:url=>relayOpenLink(url)});
     }catch(_error){}
+    // A Page that declares <meta name="kronn-page-height" content="auto"> is sized to its
+    // content by the host, which then scrolls it: the host's action card lives in that same
+    // scroll context and follows the Page natively, instead of chasing it frame by frame.
+    // The html box height is the content height, whatever the current frame size — so a
+    // collapse that closes lets the frame shrink back.
+    let heightSent=-1;
+    let heightQueued=false;
+    const autoHeight=()=>{
+      const meta=document.querySelector('meta[name="kronn-page-height"]');
+      return Boolean(meta)&&(getAttribute.call(meta,'content')||'').trim()==='auto';
+    };
+    const sendHeight=()=>{
+      heightQueued=false;
+      if(!linkPort)return;
+      const height=Math.ceil(getBounds.call(document.documentElement).height);
+      if(!isFinite(height)||height<=0||height>200000||height===heightSent)return;
+      heightSent=height;
+      portPost.call(linkPort,{type:'kronn:page-height',version:1,channel_id:channel,height});
+    };
+    const queueHeight=()=>{
+      if(heightQueued)return;
+      heightQueued=true;
+      if(typeof requestAnimationFrame==='function')requestAnimationFrame(sendHeight);else setTimeout(sendHeight,16);
+    };
+    let heightWatched=false;
+    const watchHeight=()=>{
+      if(!autoHeight())return;
+      document.documentElement.style.overflow='hidden';
+      heightSent=-1;
+      queueHeight();
+      if(heightWatched)return;
+      heightWatched=true;
+      if(typeof ResizeObserver==='function'){
+        const observer=new ResizeObserver(queueHeight);
+        observer.observe(document.documentElement);
+        if(document.body)observer.observe(document.body);
+      }
+      addEventListener('load',queueHeight);
+    };
     addEventListener('message',event=>{
       const message=event.data;
       if(!message||message.version!==1||message.channel_id!==channel)return;
@@ -374,6 +461,7 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         stopImmediate.call(event);
         linkPort=event.ports[0];
         portStart.call(linkPort);
+        watchHeight();
         return;
       }
       if(message.type==='kronn:page-data'){
@@ -385,6 +473,13 @@ export function buildSandboxDocument(html: string, channelId: string, initialThe
         const t=message.theme;
         if(typeof t!=='string'||t.length>64)return;
         document.documentElement.setAttribute('data-theme',t);
+        const tokens=message.tokens&&typeof message.tokens==='object'?message.tokens:{};
+        for(const name of ${JSON.stringify(LIVE_PAGE_THEME_TOKENS)}){
+          const value=tokens[name];
+          if(typeof value==='string'&&/^[#(),.%\\s\\w-]{1,64}$/.test(value)&&!/url\\s*\\(/i.test(value)){
+            document.documentElement.style.setProperty('--kr-'+name,value);
+          }
+        }
         dispatchEvent(new CustomEvent('kronn:page-theme',{detail:t}));
         return;
       }
@@ -460,6 +555,7 @@ export function createLivePageOpenLinkRelay(
   openExternal: (url: string, target: string, features: string) => unknown = window.open.bind(window),
   onAction?: (intent: LivePageActionIntent) => void,
   onAnchor?: (anchor: LivePageActionIntent['anchor']) => void,
+  onHeight?: (height: number) => void,
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
   const validAnchor = (anchor: LivePageActionAnchor | undefined): anchor is LivePageActionAnchor => (
@@ -476,6 +572,13 @@ export function createLivePageOpenLinkRelay(
     if (message.type === 'kronn:page-action-anchor') {
       if (!validAnchor(message.anchor)) return;
       onAnchor?.({ ...message.anchor, slot: message.anchor.slot === true });
+      return;
+    }
+    // A content-sized Page reporting its height: layout, not a user action.
+    if ((message as { type?: string }).type === 'kronn:page-height') {
+      const height = (message as { height?: unknown }).height;
+      if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0 || height > 200_000) return;
+      onHeight?.(Math.ceil(height));
       return;
     }
     if (navigator.userActivation && !navigator.userActivation.isActive) return;

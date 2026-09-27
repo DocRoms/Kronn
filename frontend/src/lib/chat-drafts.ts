@@ -37,6 +37,8 @@ export interface DraftRecord {
   text: string;
   savedAt: string; // ISO-8601
   routingTiers: DraftRoutingTiers;
+  /** The text of a send still awaiting its receipt, untouched since. */
+  submitted: boolean;
 }
 
 interface StoredDraft {
@@ -44,6 +46,7 @@ interface StoredDraft {
   text: string;
   savedAt: string;
   routingTiers?: DraftRoutingTiers;
+  submitted?: boolean;
 }
 
 const VALID_TIERS = new Set<ModelTier>(['economy', 'default', 'reasoning']);
@@ -72,6 +75,7 @@ export function saveDraft(
   discussionId: string,
   text: string,
   routingTiers: DraftRoutingTiers = {},
+  options: { submitted?: boolean } = {},
 ): void {
   if (!discussionId) return;
   try {
@@ -84,6 +88,7 @@ export function saveDraft(
       text,
       savedAt: new Date().toISOString(),
       routingTiers: validRoutingTiers(routingTiers),
+      ...(options.submitted ? { submitted: true } : {}),
     };
     localStorage.setItem(storageKey(discussionId), JSON.stringify(payload));
   } catch {
@@ -123,10 +128,18 @@ export function loadDraft(discussionId: string, now: Date = new Date()): DraftRe
       text: parsed.text,
       savedAt: parsed.savedAt,
       routingTiers: parsed.v === 1 ? {} : validRoutingTiers(parsed.routingTiers),
+      submitted: parsed.submitted === true,
     };
   } catch {
     return null;
   }
+}
+
+/** Remove the draft only if it is still the untouched snapshot of this
+ *  accepted send. Text typed afterwards, even identical, is a new draft. */
+export function clearSubmittedDraft(discussionId: string, text: string): void {
+  const draft = loadDraft(discussionId);
+  if (draft?.submitted && draft.text === text) clearDraft(discussionId);
 }
 
 /** Remove the draft for a discussion. Called right after a successful send. */
