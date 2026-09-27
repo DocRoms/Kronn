@@ -1390,8 +1390,9 @@ pub fn write_backup_ref(repo_path: &Path, slug: &str, sha: &str) -> Result<Strin
 /// a fast-forward and never a merge.
 pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<CandidateOutcome, String> {
     reject_option_like_rev(base_sha)?;
+    // Repositories that enforce DCO reject an unsigned merge commit.
     let out = sync_cmd("git")
-        .args(["merge", "--no-edit", base_sha])
+        .args(["merge", "--no-edit", "--signoff", base_sha])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git merge failed: {e}"))?;
@@ -4432,6 +4433,16 @@ mod tests {
         assert!(
             merge_base.status.success(),
             "candidate must descend from the parent tip"
+        );
+
+        let message = sync_cmd("git")
+            .args(["log", "-1", "--format=%B", &sha])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&message.stdout).contains("Signed-off-by: "),
+            "the merge commit must carry a sign-off"
         );
     }
 
