@@ -3,6 +3,7 @@ import type { ToastFn } from '../../hooks/useToast';
 import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../../lib/api';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { usePersistentIdSet } from '../../hooks/usePersistentIdSet';
+import { usePersistentSidebarOpen } from '../../hooks/usePersistentSidebarOpen';
 import { userError } from '../../lib/userError';
 import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, PluginInterface, PluginKind } from '../../types/generated';
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
@@ -32,6 +33,7 @@ interface UsePluginListStateArgs {
   initialSelectedConfigId?: string | null;
   t: (key: string, ...args: (string | number)[]) => string;
   toast: ToastFn;
+  isMobile: boolean;
 }
 
 /** Plugin list + inline detail panel state: search/sort/filter, sidebar,
@@ -40,7 +42,7 @@ interface UsePluginListStateArgs {
  *  delete) and the derived `visibleConfigs` list. Split out of the
  *  monolithic `useMcpPageState` (KT-830) to stay under the page's
  *  per-file line budget — this is the "liste + fiche" half. */
-export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast }: UsePluginListStateArgs) {
+export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile }: UsePluginListStateArgs) {
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
 
@@ -54,7 +56,7 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
   });
   const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
   const [mcpSearchPanel, setMcpSearchPanel] = useState<'filters' | 'sort' | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = usePersistentSidebarOpen('kronn:plugins:sidebarCollapsed', isMobile);
   const [collapsedMcpGroups, setCollapsedMcpGroups] = useState<Set<string>>(readCollapsedMcpGroups);
   const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
   const availableConfigIds = useMemo(() => mcpOverview.configs.map(config => config.id), [mcpOverview.configs]);

@@ -2,6 +2,7 @@ import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'rea
 import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
+import { usePersistentSidebarOpen } from '../hooks/usePersistentSidebarOpen';
 import { useT } from '../lib/I18nContext';
 import { isWorkflowRunning } from '../lib/runFilters';
 import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, externalApi as externalApiConnections } from '../lib/api';
@@ -277,6 +278,9 @@ interface WorkflowsPageProps {
   pendingPreset?: { presetId: string; projectId: string } | null;
   onPendingPresetConsumed?: () => void;
   onNavigatePage?: (pageId: string) => void;
+  /** Switches Dashboard to the Plugins page — used by the "no API plugin
+   *  wired" prerequisite warning on the Quick API tab. */
+  onNavigateMcp?: () => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -297,7 +301,7 @@ function readPostImprovedQuickPromptId(): string | null {
   }
 }
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, initialSelectedWorkflowRunId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, initialSelectedWorkflowRunId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage, onNavigateMcp }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
@@ -314,7 +318,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     postImprovedQpId ? 'quickPrompts' : initialAutomationNavigation.tab,
   );
   const [automationQuery, setAutomationQuery] = useState('');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = usePersistentSidebarOpen('kronn:automation:sidebarCollapsed', isMobile);
   const [automationProjectFilter, setAutomationProjectFilter] = useState('all');
   const [showAutomationProjectFilter, setShowAutomationProjectFilter] = useState(false);
   const automationProjectFilterButtonRef = useRef<HTMLButtonElement>(null);
@@ -1945,6 +1949,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           danger: true,
           disabled: items => items.length === 0,
           onSelect: async items => {
+            if (!confirm(t('collection.deleteConfirm', items.length))) return;
             // Each one is deleted on its own: a failure on the third must not
             // hide that the first two are gone, and the list is reloaded from
             // the server rather than guessed at.
@@ -1980,6 +1985,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         globalSearchShortcut
         showSearchClear
         showControls={false}
+        isMobile={isMobile}
         sidebarOpen={sidebarOpen}
         onSidebarOpenChange={setSidebarOpen}
         labels={{
@@ -2066,7 +2072,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);
             const sidebarQuickPrompts = visibleItems.flatMap(resource => resource.quickPrompt ? [resource.quickPrompt] : []);
             const sidebarQuickExecs = visibleItems.flatMap(resource => resource.quickExec ? [resource.quickExec] : []);
-            const sidebarFavoriteCount = visibleItems.filter(resource => resource.pinned).length;
+            // A favorited item's own kind section already renders it — the
+            // Favorites shortcut only avoids a duplicate row (and a duplicate
+            // checkbox on the same item) when it is hidden during selection.
+            const sidebarFavoriteCount = canMultiSelect ? 0 : visibleItems.filter(resource => resource.pinned).length;
             const rowProps = (kind: AutomationTab, resourceId: string) => {
               const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
               return resource ? getRowProps(resource) : undefined;
@@ -2074,6 +2083,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             const deleteFor = (kind: AutomationTab, resourceId: string) => async () => {
               const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
               if (!resource) return;
+              if (!confirm(t('collection.deleteConfirm', 1))) return;
               try {
                 await deleteAutomationResource(resource);
               } catch (e) {
@@ -3392,13 +3402,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 <div className="wf-restricted-warning mb-4">
                   <AlertTriangle size={12} />
                   <span className="flex-1">{t('qa.noPluginsWarning')}</span>
-                  <button
-                    type="button"
-                    className="wf-allowlist-cta"
-                    onClick={() => { window.location.hash = '#mcps'; }}
-                  >
-                    {t('qa.noPluginsCta')}
-                  </button>
+                  {onNavigateMcp && (
+                    <button
+                      type="button"
+                      className="wf-allowlist-cta"
+                      onClick={onNavigateMcp}
+                    >
+                      {t('qa.noPluginsCta')}
+                    </button>
+                  )}
                 </div>
               )}
 
