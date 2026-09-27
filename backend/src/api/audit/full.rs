@@ -25,19 +25,12 @@ use super::helpers::{
     compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills,
     remove_bootstrap_block,
 };
-use super::{SseStream, PROMPT_PREAMBLE};
+use super::{detach_sse_stream, SseStream, PROMPT_PREAMBLE};
 
 /// POST /api/projects/:id/full-audit
 /// Unified endpoint: install template + run the assembled audit chain + create validation discussion.
-/// KT-842 — the pipeline runs detached (`detach_sse_stream`): closing the
-/// SSE connection (MCP bridge death, browser tab close) no longer drops the
-/// generator, so this guard's abandonment path is now a defense-in-depth net
-/// for an internal panic or an early synchronous error return, not the
-/// everyday "consumer vanished" case it used to cover (pre-KT-842, that drop
-/// left a zombie — tracker frozen on step 1, run row stuck on Running,
-/// orphaned agent, zero logs — which is what armed this guard in the first
-/// place). Armed at pipeline start, disarmed on every normal ending. Drop
-/// can't do async work, so the cleanup is spawned onto the runtime.
+/// Settles durable state and releases shared resources if the pipeline exits abnormally.
+/// Subscriber disconnects cannot trigger it because audit streams run detached.
 ///
 /// Also holds the shared power assertion (`core::power_guard`): default
 /// `pmset` puts the machine to sleep mid-audit (a 1h27 freeze was measured
@@ -48,8 +41,7 @@ pub(super) struct AuditDropGuard {
     armed: bool,
     db: std::sync::Arc<crate::db::Database>,
     tracker: std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-    /// None for partial/drift refreshes — they have no audit_runs row;
-    /// the guard then only clears the tracker (+ power assertion).
+    /// Attached after the durable run row is created.
     run_id: Option<String>,
     project_id: String,
     power: Option<crate::core::power_guard::PowerLease>,
@@ -105,11 +97,7 @@ impl AuditDropGuard {
 
 impl Drop for AuditDropGuard {
     fn drop(&mut self) {
-        // Power assertion FIRST, by design: whatever aborted this run (an
-        // internal panic, an early synchronous error return — KT-842 detached
-        // the pipeline from the SSE consumer, so a mere connection drop no
-        // longer lands here), only the ms-scale DB finalization below
-        // remains, so there is nothing left to keep the machine awake for.
+        // Internal failures leave only the short finalization path below.
         // Distinct from the AUDIT lease just below, which is different.
         self.release_power_assertion();
         // Order matters for the AUDIT (project) lease: it is released LAST,
@@ -118,7 +106,7 @@ impl Drop for AuditDropGuard {
         // Running rows) or have its fresh progress wiped by a late clear.
         if self.armed {
             tracing::warn!(
-                "Audit for {} dropped mid-flight (panic or early error return — the SSE connection can no longer cause this, KT-842) — cleaning up (run: {:?})",
+                "Audit for {} dropped mid-flight; cleaning up (run: {:?})",
                 self.project_id,
                 self.run_id
             );
@@ -143,7 +131,7 @@ impl Drop for AuditDropGuard {
                     handle.spawn(async move {
                         match db.with_conn(move |conn| {
                             crate::db::audit_runs::mark_interrupted(
-                                conn, &run_id, "audit pipeline dropped mid-run (internal panic or early error — KT-842 detached the run from the SSE connection)",
+                                conn, &run_id, "audit pipeline dropped before completion",
                             )
                         }).await {
                             Ok(()) => {
@@ -163,9 +151,7 @@ impl Drop for AuditDropGuard {
                 }
             }
         }
-        // Synchronous release for the remaining paths: disarmed (the pipeline
-        // finalized the run itself before this Drop) and armed-without-row
-        // (partial/drift — tracker cleanup above is all there is to settle).
+        // Release synchronously after normal completion or before row creation.
         if self.leased {
             if let Ok(mut t) = self.tracker.lock() {
                 t.release_lease(&self.project_id);
@@ -209,37 +195,6 @@ async fn wait_for_cancel_ack(
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-}
-
-/// KT-842 — detach the audit pipeline from the SSE response's lifetime.
-///
-/// `producer` is the `async_stream::try_stream!` generator that drives the
-/// whole pipeline (agent runs, `audit_runs` writes, tracker updates,
-/// `drop_guard.disarm()`): every side effect that makes the run durable
-/// happens as a side effect of polling it to its own terminal yield. Before
-/// this, that polling was done by whatever consumed the `Sse` response
-/// (axum, i.e. the HTTP connection), so closing the MCP bridge or a browser
-/// tab dropped the connection, which dropped `producer` mid-flight and cut
-/// the run short (`AuditDropGuard::drop` then had to finalize it as
-/// Interrupted — see its doc comment).
-///
-/// Spawning `producer` onto its own task and forwarding every item through
-/// an unbounded channel decouples the two: the spawned task keeps polling
-/// `producer` to completion regardless of the channel's receiver, and
-/// dropping the RETURNED stream (what happens when the HTTP client goes
-/// away) only drops that receiver — a failed `tx.send` is not a reason to
-/// stop draining.
-fn detach_sse_stream(mut producer: SseStream) -> SseStream {
-    use futures::StreamExt;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
-    tokio::spawn(async move {
-        while let Some(item) = producer.next().await {
-            let _ = tx.send(item);
-        }
-    });
-    Box::pin(futures::stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|item| (item, rx))
-    }))
 }
 
 /// One-shot SSE error response, used for every pre-launch refusal (bad
@@ -2289,9 +2244,7 @@ pub async fn full_audit(
         yield Event::default().event("done").data(done.to_string());
     });
 
-    // KT-842 — the SSE response is a subscriber, not the driver: `stream`
-    // keeps running to completion on its own spawned task even if this HTTP
-    // connection (browser tab, MCP bridge) goes away.
+    // The response only subscribes; the producer owns the run lifecycle.
     Sse::new(detach_sse_stream(stream))
 }
 
@@ -3002,80 +2955,12 @@ pub(crate) fn compute_cluster_recommendations(
 }
 
 #[cfg(test)]
-mod detach_sse_stream_tests {
-    use super::{detach_sse_stream, Event, SseStream};
-    use std::convert::Infallible;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn producer_runs_to_completion_after_its_subscriber_is_dropped() {
-        // KT-842's core invariant: dropping the returned stream (what happens
-        // when the HTTP client — browser tab, MCP bridge — goes away) must
-        // NOT stop the producer. Real `.await` points (not bare synchronous
-        // yields) prove the spawned task is actually driven by the tokio
-        // scheduler on its own, independent of anyone polling the output.
-        let progress = Arc::new(AtomicUsize::new(0));
-        let p = progress.clone();
-        let producer: SseStream = Box::pin(async_stream::try_stream! {
-            for i in 1..=5u32 {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                p.fetch_add(1, Ordering::SeqCst);
-                yield Event::default().event("tick").data(i.to_string());
-            }
-        });
-
-        let detached = detach_sse_stream(producer);
-        // The subscriber vanishes before a single item is read — the worst
-        // case (MCP bridge killed at launch, tab closed before it renders).
-        drop(detached);
-
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while progress.load(Ordering::SeqCst) < 5 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect(
-            "producer must run to completion even though its subscriber was dropped immediately",
-        );
-        assert_eq!(progress.load(Ordering::SeqCst), 5);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn events_still_reach_a_subscriber_that_stays_attached() {
-        // Detaching the producer must not turn it into a black hole for the
-        // common case — a client that stays connected still sees every event,
-        // in order, and the stream still ends when the producer is exhausted.
-        use futures::StreamExt;
-        let producer: SseStream = Box::pin(async_stream::try_stream! {
-            yield Event::default().event("start").data("{}");
-            yield Event::default().event("done").data("{}");
-        });
-        let mut detached = detach_sse_stream(producer);
-        let first: Result<Event, Infallible> = detached.next().await.expect("first event");
-        assert!(first.is_ok());
-        let second: Result<Event, Infallible> = detached.next().await.expect("second event");
-        assert!(second.is_ok());
-        assert!(
-            detached.next().await.is_none(),
-            "stream must end once the producer is exhausted"
-        );
-    }
-}
-
-#[cfg(test)]
 mod drop_guard_tests {
     use super::AuditDropGuard;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn abandoned_run_is_finalized_as_interrupted() {
-        // KT-842: the pipeline is detached from the SSE consumer, so this
-        // exercises the guard's remaining trigger — an internal panic or an
-        // early error return dropping the generator mid-flight — not a
-        // vanished HTTP client. The guard must settle the run row either way
-        // (observed live pre-KT-842: zombie tracker + row stuck on Running
-        // until the next boot reconcile).
+        // Only an internal pipeline failure can reach the armed guard.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         {
             let db = db.clone();
@@ -3131,7 +3016,7 @@ mod drop_guard_tests {
             .report_path
             .as_deref()
             .unwrap_or("")
-            .contains("audit pipeline dropped mid-run"));
+            .contains("audit pipeline dropped before completion"));
         assert!(
             tracker.lock().unwrap().progress.is_empty(),
             "tracker entry must be cleared"

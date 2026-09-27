@@ -7319,8 +7319,8 @@ class AuditToolsTests(unittest.TestCase):
         self.assertLess(_time.time() - t0, 4.0, "launch must not block on the audit")
         self.assertTrue(out["launched"])
         self.assertEqual(out["total_steps"], 10)
-        self.assertIn("runs DETACHED", out["lifecycle_warning"])
-        self.assertIn("does NOT interrupt", out["lifecycle_warning"])
+        self.assertIn("runs detached", out["lifecycle_warning"])
+        self.assertIn("backend restart", out["lifecycle_warning"])
 
     def test_accepted_event_confirms_launch_before_start(self):
         # Codex #7 — `start` only fires after Phase 1 (template install /
@@ -7383,8 +7383,10 @@ class AuditToolsTests(unittest.TestCase):
                                       "audit_run_id": "run-partial-7"}))
         with mock.patch.object(self.mod, "_audit_open_sse",
                                return_value=self._FakeSse(lines)):
-            self.mod.call_audit_launch(
+            out = self.mod.call_audit_launch(
                 {"project_id": "p1", "mode": "partial", "steps": [3, 8]})
+        self.assertIn("runs detached", out["lifecycle_warning"])
+        self.assertIn("backend restart", out["lifecycle_warning"])
         entry = self._wait_state("p1", {"done"})
         self.assertEqual(entry["discussion_id"], "d-partial-val")
         self.assertEqual(entry["audit_run_id"], "run-partial-7")
@@ -7676,21 +7678,16 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             self.assertEqual(self.mod._schedule_bridge_reload()["status"], "failed")
             create.assert_not_called()
 
-    def test_reload_is_deferred_while_a_partial_audit_sse_is_active(self):
-        # KT-842 — `partial` still needs THIS bridge consuming its SSE to
-        # advance, so a reload must still wait for it.
+    def test_reload_is_not_deferred_by_a_detached_partial_audit(self):
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
         self.mod._AUDIT_STREAMS["project-1"] = {"state": "running", "mode": "partial"}
-        response = self.mod._bridge_stale_result(18, "task_exec_review", "stale")
-        payload = json.loads(response["result"]["content"][0]["text"])
-        self.assertEqual(payload["reload"]["status"], "deferred_active_audit")
-        self.assertFalse(payload["retry"]["allowed"])
-        self.assertIn("active partial audit", payload["action"])
+        self.assertEqual(
+            self.mod._schedule_bridge_reload()["status"],
+            "scheduled",
+            "a running partial audit must not block the bridge reload",
+        )
 
     def test_reload_is_not_deferred_by_a_detached_full_audit(self):
-        # KT-842 — a `full`/specialized audit is a detached backend job:
-        # reloading this bridge only drops ITS SSE subscription, the run
-        # itself keeps going. The reload must proceed normally.
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
         self.mod._AUDIT_STREAMS["project-1"] = {"state": "running", "mode": "full"}
         self.assertEqual(

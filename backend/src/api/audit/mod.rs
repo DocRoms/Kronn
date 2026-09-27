@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 
 use axum::response::sse::Event;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
@@ -39,6 +39,67 @@ pub use validate::*;
 pub(crate) use helpers::{check_ai_dir_permissions, detect_project_skills};
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
+
+/// Poll the producer independently so disconnecting a subscriber cannot stop an audit.
+pub(super) fn detach_sse_stream(mut producer: SseStream) -> SseStream {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
+    tokio::spawn(async move {
+        while let Some(item) = producer.next().await {
+            let _ = tx.send(item);
+        }
+    });
+    Box::pin(futures::stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    }))
+}
+
+#[cfg(test)]
+mod detach_sse_stream_tests {
+    use super::{detach_sse_stream, Event, SseStream};
+    use futures::StreamExt;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn producer_runs_to_completion_after_its_subscriber_is_dropped() {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let producer_progress = progress.clone();
+        let producer: SseStream = Box::pin(async_stream::try_stream! {
+            for i in 1..=5u32 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                producer_progress.fetch_add(1, Ordering::SeqCst);
+                yield Event::default().event("tick").data(i.to_string());
+            }
+        });
+
+        drop(detach_sse_stream(producer));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while progress.load(Ordering::SeqCst) < 5 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("producer must finish after its subscriber is dropped");
+        assert_eq!(progress.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_reach_a_subscriber_that_stays_attached() {
+        let producer: SseStream = Box::pin(async_stream::try_stream! {
+            yield Event::default().event("start").data("{}");
+            yield Event::default().event("done").data("{}");
+        });
+        let mut detached = detach_sse_stream(producer);
+
+        let first: Result<Event, Infallible> = detached.next().await.expect("first event");
+        assert!(first.is_ok());
+        let second: Result<Event, Infallible> = detached.next().await.expect("second event");
+        assert!(second.is_ok());
+        assert!(detached.next().await.is_none());
+    }
+}
 
 pub(crate) const PROMPT_PREAMBLE: &str = "\
 Rules: Write in English. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\

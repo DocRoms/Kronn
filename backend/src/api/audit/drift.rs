@@ -962,7 +962,11 @@ pub async fn partial_audit(
         yield Event::default().event("done").data(done.to_string());
     });
 
-    Sse::new(stream)
+    detached_partial_audit_response(stream)
+}
+
+fn detached_partial_audit_response(stream: SseStream) -> Sse<SseStream> {
+    Sse::new(super::detach_sse_stream(stream))
 }
 
 /// Merge the freshly-refreshed step mappings into the stored baseline.
@@ -1088,6 +1092,32 @@ pub(crate) async fn finalize_partial_run(
 #[cfg(test)]
 mod partial_finalize_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn partial_audit_continues_after_its_subscriber_is_dropped() {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let producer_progress = progress.clone();
+        let producer: SseStream = Box::pin(async_stream::try_stream! {
+            for _ in 0..3 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                producer_progress.fetch_add(1, Ordering::SeqCst);
+                yield Event::default().event("progress").data("{}");
+            }
+        });
+
+        drop(detached_partial_audit_response(producer));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while progress.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("partial audit must finish after its subscriber is dropped");
+        assert_eq!(progress.load(Ordering::SeqCst), 3);
+    }
 
     fn mini_disc(id: &str, project: &str) -> (Discussion, DiscussionMessage) {
         let now = chrono::Utc::now();

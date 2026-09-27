@@ -62,7 +62,7 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # types with commas (a `·` costs 6 B on the wire); ceiling lowered by the 49 B.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
-CATALOGUE_MAX_BYTES = 86_538
+CATALOGUE_MAX_BYTES = 86_211
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
