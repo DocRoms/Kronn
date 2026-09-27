@@ -80,7 +80,7 @@ describe('useLivePageActions', () => {
     expect(result.current.activeAction?.bindings).toEqual({ ticket: 'EW-2' });
   });
 
-  it('a row that has run reopens on its latest run, running or finished', async () => {
+  it('a running row reopens on its run, a finished one on a fresh offer that keeps its last run', async () => {
     const running = action({ id: 'page-launch:1', state: 'running', shared_run_id: 'run-1', binding_key: 'ticket=EW-1' });
     const done = action({ id: 'page-launch:2', state: 'succeeded', binding_key: 'ticket=EW-2' });
     vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
@@ -94,7 +94,8 @@ describe('useLivePageActions', () => {
     expect(result.current.selectedOffer).toEqual(action());
 
     act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-2' }, anchor }));
-    expect(result.current.selectedAction).toEqual(done);
+    expect(result.current.selectedAction).toEqual(action());
+    expect(result.current.activeAction?.previous).toEqual(done);
 
     // A row that never ran opens on the offer.
     act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-3' }, anchor }));

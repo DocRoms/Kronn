@@ -5810,6 +5810,7 @@ pub(crate) fn build_ollama_chat_body(
 pub(crate) struct TokenTally {
     prompt: u64,
     cached_prompt: Option<u64>,
+    cache_write_prompt: Option<u64>,
     eval: u64,
     provenance: Option<AgentProvenanceCapture>,
 }
@@ -5987,6 +5988,8 @@ struct HttpTurnTrace {
     // Absent when unreported, and from traces written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cached_prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_write_prompt_tokens: Option<u64>,
     eval_tokens: u64,
     duration_ms: u64,
     provider_ok: bool,
@@ -6057,6 +6060,7 @@ pub(crate) fn parse_http_turn_telemetry(
                     phase: trace.phase,
                     prompt_tokens: trace.prompt_tokens,
                     cached_prompt_tokens: trace.cached_prompt_tokens,
+                    cache_write_prompt_tokens: trace.cache_write_prompt_tokens,
                     eval_tokens: trace.eval_tokens,
                     duration_ms: trace.duration_ms,
                     provider_ok: trace.provider_ok,
@@ -6294,6 +6298,9 @@ pub(crate) async fn forward_chat_line(
     if chunk.cached_prompt_tokens.is_some() {
         tally.cached_prompt = chunk.cached_prompt_tokens;
     }
+    if chunk.cache_write_prompt_tokens.is_some() {
+        tally.cache_write_prompt = chunk.cache_write_prompt_tokens;
+    }
     if chunk.eval_tokens > 0 {
         tally.eval = chunk.eval_tokens;
     }
@@ -6488,6 +6495,12 @@ async fn send_http_agent_request(
     retry_allowed: bool,
     stderr: &Arc<Mutex<Vec<String>>>,
 ) -> Result<(reqwest::Response, usize), HttpProviderFailure> {
+    // Anthropic caches only the prefixes a request marks; opt-in until measured.
+    let hinted = (backend == "LiteLLM"
+        && std::env::var("KRONN_LITELLM_PROMPT_CACHE").as_deref() == Ok("1"))
+    .then(|| crate::agents::chat_codec::with_prompt_cache_hints(body))
+    .flatten();
+    let body = hinted.as_ref().unwrap_or(body);
     let mut attempt = first_attempt;
     loop {
         let mut request = client.post(url).json(body);
@@ -7309,6 +7322,7 @@ async fn start_ollama_http(
                     phase: current_http_phase,
                     prompt_tokens: tally.prompt,
                     cached_prompt_tokens: tally.cached_prompt,
+                    cache_write_prompt_tokens: tally.cache_write_prompt,
                     eval_tokens: tally.eval,
                     duration_ms: request_started_at
                         .elapsed()

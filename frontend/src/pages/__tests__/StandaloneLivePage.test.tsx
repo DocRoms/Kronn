@@ -77,6 +77,31 @@ afterEach(() => {
 });
 
 describe('StandaloneLivePage', () => {
+  it('pushes newly published data into the open frame without rebuilding it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<StandaloneLivePage pageId="page-1" />);
+      const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+      const documentBefore = frame.getAttribute('srcdoc');
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, data_revision: 3 });
+
+      await act(async () => { vi.advanceTimersByTime(30_000); });
+
+      await waitFor(() => expect(post).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'kronn:page-data',
+          data: expect.objectContaining({ page: expect.objectContaining({ data_revision: 3 }) }),
+        }),
+        '*',
+      ));
+      expect(screen.getByTestId('standalone-live-page-frame')).toBe(frame);
+      expect(frame.getAttribute('srcdoc')).toBe(documentBefore);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders the requested Page full-screen inside the opaque sandbox', async () => {
     const previousTitle = document.title;
     const view = render(<StandaloneLivePage pageId="page-1" />);

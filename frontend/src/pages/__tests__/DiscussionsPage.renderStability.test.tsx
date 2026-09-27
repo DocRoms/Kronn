@@ -218,8 +218,9 @@ import {
   runsApi,
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
+import { useWebSocket } from '../../hooks/useWebSocket';
 import { discardImportantDraft } from '../../lib/importantMessageDraft';
-import type { Discussion } from '../../types/generated';
+import type { Discussion, WsMessage } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -353,6 +354,63 @@ describe('DiscussionsPage render stability', () => {
       await act(async () => { vi.advanceTimersByTime(5_000); });
       expect(await screen.findByText('new reply')).toBeInTheDocument();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('collapses a burst of run events into revision polls, never a full reload', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let onWsMessage: ((message: WsMessage) => void) | null = null;
+    vi.mocked(useWebSocket).mockImplementation(handler => {
+      onWsMessage = handler;
+      return { connected: true, connectionState: 'connected' } as never;
+    });
+    try {
+      const fullDisc: Discussion = {
+        ...makeListDiscussion('d-burst', 1),
+        messages: [
+          { id: 'b1', role: 'User', channel: 'main', content: 'burst question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        ],
+      };
+      vi.mocked(discussionsApi.poll).mockReset();
+      vi.mocked(discussionsApi.poll)
+        .mockResolvedValueOnce({ revision: 'rev-1', detail: fullDisc } as never)
+        .mockResolvedValue({ revision: 'rev-1', detail: null } as never);
+      const props = {
+        projects: [], agents: [], allDiscussions: [makeListDiscussion('d-burst', 1)], configLanguage: 'fr',
+        agentAccess: null, refetchDiscussions: noop, refetchProjects: noop, toast: toastFn,
+        initialActiveDiscussionId: 'd-burst', ...liftedProps(),
+      };
+      await wrap(<DiscussionsPage {...props} onNavigate={() => {}} />);
+      expect(await screen.findByText('burst question')).toBeInTheDocument();
+      await act(async () => { await Promise.resolve(); });
+
+      // Hold the next poll open so a whole burst lands while it is in flight.
+      let release: () => void = () => {};
+      vi.mocked(discussionsApi.poll).mockClear();
+      vi.mocked(discussionsApi.poll).mockImplementationOnce(() => new Promise(resolve => {
+        release = () => resolve({ revision: 'rev-1', detail: null } as never);
+      }));
+      await act(async () => {
+        for (let i = 0; i < 6; i += 1) onWsMessage?.({ type: 'shared_run_updated', run_id: 'foreign-run' } as WsMessage);
+      });
+      expect(vi.mocked(discussionsApi.poll)).toHaveBeenCalledTimes(1);
+      await act(async () => { release(); await Promise.resolve(); await Promise.resolve(); });
+      // One trailing poll covers the whole burst, with the revision already held.
+      expect(vi.mocked(discussionsApi.poll)).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(discussionsApi.poll)).toHaveBeenLastCalledWith('d-burst', 'rev-1');
+      expect(vi.mocked(discussionsApi.get)).not.toHaveBeenCalled();
+      expect(screen.getByText('burst question')).toBeInTheDocument();
+
+      // A run of this discussion that did change it (a media launch anchor) still shows live.
+      vi.mocked(discussionsApi.poll).mockResolvedValue({
+        revision: 'rev-2',
+        detail: { ...fullDisc, messages: [...fullDisc.messages, { id: 'b2', role: 'Agent', channel: 'main', content: 'media launched', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null }] },
+      } as never);
+      await act(async () => { onWsMessage?.({ type: 'shared_run_updated', run_id: 'own-media-run' } as WsMessage); });
+      expect(await screen.findByText('media launched')).toBeInTheDocument();
+    } finally {
+      vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }) as never);
       vi.useRealTimers();
     }
   });

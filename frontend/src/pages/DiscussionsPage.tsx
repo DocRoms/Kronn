@@ -965,16 +965,39 @@ export function DiscussionsPage({
     });
   }, []);
 
-  const reloadDiscussion = useCallback((discId: string) => {
-    discussionsApi.get(discId).then(disc => {
-      if (!disc) return;
-      reconcileLoadedDiscussion(disc);
-      /*
-       * A stream interrupted by a backend reload keeps its local text until
-       * this detail fetch proves either a newer durable checkpoint or a
-       * settled Agent message. Network failure deliberately changes nothing.
-       */
-    }).catch(() => {});
+  // The revision of the detail each loaded discussion holds, shared by every
+  // refresh so the server can omit an unchanged transcript.
+  const detailRevisionsRef = useRef<Record<string, string>>({});
+  const detailReloadsRef = useRef<Record<string, { again: boolean; done: Promise<void> }>>({});
+  const reloadDiscussion = useCallback((discId: string): Promise<void> => {
+    // A burst of events for one discussion collapses into the poll in flight
+    // plus at most one more, started after the latest request.
+    const inFlight = detailReloadsRef.current[discId];
+    if (inFlight) {
+      inFlight.again = true;
+      return inFlight.done;
+    }
+    const reload = { again: false, done: Promise.resolve() };
+    detailReloadsRef.current[discId] = reload;
+    const pollUntilSettled = async () => {
+      do {
+        reload.again = false;
+        try {
+          const result = await discussionsApi.poll(discId, detailRevisionsRef.current[discId] ?? null);
+          if (!result) continue;
+          detailRevisionsRef.current[discId] = result.revision;
+          /*
+           * A stream interrupted by a backend reload keeps its local text until
+           * this detail fetch proves either a newer durable checkpoint or a
+           * settled Agent message. Network failure deliberately changes nothing.
+           */
+          if (result.detail) reconcileLoadedDiscussion(result.detail);
+        } catch { /* keep the current state */ }
+      } while (reload.again);
+      delete detailReloadsRef.current[discId];
+    };
+    reload.done = pollUntilSettled();
+    return reload.done;
   }, [reconcileLoadedDiscussion]);
   const openBatchReview = useCallback(async (runId: string, label: string, discIds: string[]) => {
     setBatchReview({ runId, label, discIds });
@@ -1129,21 +1152,11 @@ export function DiscussionsPage({
   const activeSending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   useEffect(() => {
     if (!activeDiscussionId) return;
-    let cancelled = false;
-    // The server omits the detail while it still matches this revision, so an
-    // idle open discussion stops re-downloading its whole transcript.
-    let revision: string | null = null;
-    const fetchActive = () => {
-      discussionsApi.poll(activeDiscussionId, revision).then(result => {
-        if (cancelled || !result) return;
-        revision = result.revision;
-        if (result.detail) reconcileLoadedDiscussion(result.detail);
-      }).catch(() => { /* ignore fetch errors */ });
-    };
+    const fetchActive = () => { void reloadDiscussion(activeDiscussionId); };
     fetchActive();
     const id = setInterval(fetchActive, 5000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [activeDiscussionId, activeSending, reconcileLoadedDiscussion]);
+    return () => clearInterval(id);
+  }, [activeDiscussionId, activeSending, reloadDiscussion]);
 
   // Clear worktree error when switching discussions
   useEffect(() => { setWorktreeError(null); }, [activeDiscussionId]);

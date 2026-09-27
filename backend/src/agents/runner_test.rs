@@ -4206,6 +4206,130 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cache_write_prompt_tokens_reach_the_turn_telemetry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"cache_creation_input_tokens":900,"cache_read_input_tokens":0}}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "hello",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("mock proxy reachable");
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.expect("lifeline").success());
+        let captured = process.stderr_capture.lock().unwrap().clone();
+        let turns = parse_http_turn_telemetry(&captured);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            (
+                turns[0].cached_prompt_tokens,
+                turns[0].cache_write_prompt_tokens
+            ),
+            (Some(0), Some(900))
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn litellm_prompt_cache_switch_marks_only_claude_requests() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"ok"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#,
+            ])))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let previous = std::env::var("KRONN_LITELLM_PROMPT_CACHE").ok();
+        for (switch, model) in [
+            (Some("1"), "anthropic/claude-sonnet-4-6"),
+            (Some("1"), "gemini-2.5-flash"),
+            (None, "claude-sonnet-4-6"),
+        ] {
+            match switch {
+                Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+                None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+            }
+            let mut process = start_ollama_http(
+                &AgentType::LiteLlm,
+                "hello",
+                "",
+                model,
+                None,
+                Some(&server.uri()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mock proxy reachable");
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.expect("lifeline").success());
+        }
+        match previous {
+            Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+            None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+        }
+
+        let requests = server.received_requests().await.expect("request capture");
+        let bodies: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).expect("JSON body"))
+            .collect();
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(
+            bodies[0]["cache_control_injection_points"],
+            serde_json::json!([
+                { "location": "message", "role": "system" },
+                { "location": "message", "index": -1 },
+            ])
+        );
+        assert!(
+            bodies[1].get("cache_control_injection_points").is_none(),
+            "a non-Anthropic model is never sent the key"
+        );
+        assert!(
+            bodies[2].get("cache_control_injection_points").is_none(),
+            "off unless the switch is set"
+        );
+    }
+
     /// The regression this pins (KT-337): the NVIDIA endpoint slot was declared
     /// on the spawn config and read by the runner, but written by no call site.
     /// A saved endpoint was therefore ignored and every run went to the public

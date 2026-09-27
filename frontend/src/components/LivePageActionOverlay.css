@@ -73,3 +73,22 @@
 
 /* Keep the header's state chip clear of the close button. */
 .live-page-action-overlay .discussion-action-card__header { padding-right: 38px; }
+
+/* The row's finished launch stays one click away from the fresh offer. */
+.live-page-action-overlay__previous {
+  display: block;
+  margin: 0 38px 6px 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kr-text-muted);
+  font-size: 12px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.live-page-action-overlay__previous:hover,
+.live-page-action-overlay__previous:focus-visible {
+  color: var(--kr-text-primary);
+  text-decoration: underline;
+}

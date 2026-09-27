@@ -34,6 +34,11 @@ Release notes for 0.9.3 and earlier are available in the
   served from its cache, when it reports them (`prompt_tokens_details.cached_tokens`
   or `cache_read_input_tokens`). Turns that do not report it stay unknown and are
   counted separately, so no cache rate is inferred for them.
+- HTTP task execution usage also records the prompt tokens a provider wrote to
+  its cache (`cache_creation_input_tokens`), per turn, per phase and in total.
+  Setting `KRONN_LITELLM_PROMPT_CACHE=1` asks LiteLLM to mark Anthropic cache
+  breakpoints on the system prompt and the last message of Claude requests.
+  The switch is off by default.
 - Open 2–12 selected discussions in a separate mosaic tab, with Artifact-style
   layouts, plan progress, recent messages and saved response checkpoints.
   Each tile scrolls independently and links to its full discussion. The bounded
@@ -70,6 +75,25 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A Live Page action whose workflow run was interrupted by a restart no longer
+  stays "running" forever and blocks its row. The interruption now reaches
+  the run's shared status, runs left in that state by earlier versions are
+  repaired at startup, and a row whose last launch finished opens on a fresh
+  launch, with the last result one click away.
+- A Page opened in its own tab now keeps up with new data. It is read again
+  every 30 s and when the tab comes back into view, and the new data is sent
+  to the open page without reloading it, so scroll and open rows are kept.
+- Opening a discussion no longer downloads every image it contains. An image
+  thumbnail, which is the whole file, loads as it nears the screen: on a
+  2,000-message room with 12 images, 9.5 MB instead of 15.6 MB at opening.
+- An open discussion no longer re-downloads its whole transcript when an
+  unrelated workflow or media run reports progress. Every refresh now asks for
+  the detail only if it changed, and a burst of events collapses into one
+  request. On a 2,000-message room with a workflow running: opening it went
+  from 66 MB to 27 MB, and 20 s at rest from up to 27 MB to 1.9 MB.
+- The desktop application icons are back to the exact bytes of their
+  canonical render. An unrelated change had re-encoded them without changing a
+  pixel, which made `scripts/check-app-icons.mjs` fail.
 - In `kronn start-dev`, a build that writes generated sources under a
   `target/` directory (another checkout's Cargo build, for example) no longer
   restarts the backend and cuts the agents it is running. The file watcher now
