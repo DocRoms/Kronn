@@ -393,6 +393,24 @@ describe('api.projects', () => {
 // Core api() wrapper — error paths (the actual ApiResponse envelope handling)
 // ════════════════════════════════════════════════════════════════════════════
 describe('api() wrapper', () => {
+  it('shares startup GETs in flight and for the two-second boot window', async () => {
+    const first = config.getServerConfig();
+    const second = config.getServerConfig();
+    await Promise.all([first, second]);
+    await config.getServerConfig();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/config/server', expect.objectContaining({ method: 'GET' }));
+  });
+
+  it('invalidates shared startup reads after a mutation', async () => {
+    await config.getLanguage();
+    await config.saveLanguage('fr');
+    await config.getLanguage();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('attaches Authorization header when authToken is set', async () => {
     setAuthToken('my-secret-token');
     await config.getLanguage();

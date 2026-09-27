@@ -71,6 +71,7 @@ async function renderDashboard() {
 
 beforeEach(() => {
   sessionStorage.clear();
+  window.location.hash = '';
   vi.mocked(discussionsApi.list).mockResolvedValue([]);
   vi.mocked(workflowsApi.list).mockResolvedValue([]);
   vi.mocked(projectsApi.auditStatusAll).mockResolvedValue([]);
@@ -198,6 +199,17 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-deep');
     expect(screen.getByTestId('discussion-page')).toHaveAttribute('data-message-id', 'message-origin');
     window.location.hash = '';
+  });
+
+  it('follows an internal discussion hash without reloading the dashboard', async () => {
+    await renderDashboard();
+
+    await act(async () => {
+      window.history.pushState(null, '', '#discussion-disc-in-place');
+      window.dispatchEvent(new Event('hashchange'));
+    });
+
+    expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-in-place');
   });
 
   it('drops a stale discussion id and keeps the safe list view', async () => {

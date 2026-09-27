@@ -283,69 +283,161 @@ const DETECT_ALL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// returning an empty agent list breaks discussion creation + the Agents page,
 /// so a first/cold sweep always runs to completion (see detect_all_cached).
 const DETECT_ALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
-/// Cache payload: the last completed sweep + the instant it was taken.
-type DetectAllCache = Mutex<Option<(Vec<AgentDetection>, Instant)>>;
-static DETECT_ALL_CACHE: std::sync::LazyLock<DetectAllCache> =
-    std::sync::LazyLock::new(|| Mutex::new(None));
+/// Cache payload plus the single-flight state of an agent sweep.
+#[derive(Default)]
+struct DetectAllCache {
+    value: Option<(Vec<AgentDetection>, Instant)>,
+    refreshing: bool,
+    generation: u64,
+}
+static DETECT_ALL_CACHE: std::sync::LazyLock<Mutex<DetectAllCache>> =
+    std::sync::LazyLock::new(|| Mutex::new(DetectAllCache::default()));
+static DETECT_ALL_REFRESHED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
 
 /// Cached agent-detection sweep. `detect_all` spawns `<binary> --version` for
 /// every installed agent on every call (~5s idle; under concurrent-agent load
 /// the subprocess spawns contend and the call can hang for tens of seconds).
 /// `setup/status` runs on every dashboard boot AND the frontend boot blocks on
 /// it, so an uncached sweep froze the whole app on "Almost ready…" whenever a
-/// batch/WF was spawning agents. Cache the result for `DETECT_ALL_TTL`.
+/// batch/WF was spawning agents. Once a result exists it is always returned
+/// immediately; an expired entry starts one background refresh.
 /// `force = true` bypasses + refreshes (right after an install/uninstall).
 pub async fn detect_all_cached(force: bool) -> Vec<AgentDetection> {
-    if !force {
-        if let Ok(guard) = DETECT_ALL_CACHE.lock() {
-            if let Some((cached, at)) = guard.as_ref() {
-                if at.elapsed() < DETECT_ALL_TTL {
-                    return cached.clone();
+    detect_all_cached_with(force, detect_all()).await
+}
+
+async fn detect_all_cached_with<F>(force: bool, detection: F) -> Vec<AgentDetection>
+where
+    F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
+{
+    enum CacheAction {
+        Return(Vec<AgentDetection>),
+        Wait,
+        Start {
+            generation: u64,
+            stale_len: Option<usize>,
+            return_stale: Option<Vec<AgentDetection>>,
+        },
+    }
+
+    let mut detection = Some(detection);
+    let mut force_refresh = force;
+
+    loop {
+        // Subscribe before inspecting `refreshing`, otherwise a very fast
+        // sweep could finish between the inspection and the await.
+        let mut refreshed = DETECT_ALL_REFRESHED.subscribe();
+        let action = {
+            let mut cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if !force_refresh {
+                match cache.value.as_ref() {
+                    Some((cached, at)) if at.elapsed() < DETECT_ALL_TTL => {
+                        CacheAction::Return(cached.clone())
+                    }
+                    Some((cached, _)) if cache.refreshing => CacheAction::Return(cached.clone()),
+                    Some((cached, _)) => {
+                        let cached = cached.clone();
+                        cache.refreshing = true;
+                        CacheAction::Start {
+                            generation: cache.generation,
+                            stale_len: Some(cached.len()),
+                            return_stale: Some(cached),
+                        }
+                    }
+                    None if cache.refreshing => CacheAction::Wait,
+                    None => {
+                        cache.refreshing = true;
+                        CacheAction::Start {
+                            generation: cache.generation,
+                            stale_len: None,
+                            return_stale: None,
+                        }
+                    }
                 }
+            } else if cache.refreshing {
+                CacheAction::Wait
+            } else {
+                cache.refreshing = true;
+                CacheAction::Start {
+                    generation: cache.generation,
+                    stale_len: cache.value.as_ref().map(|(cached, _)| cached.len()),
+                    return_stale: None,
+                }
+            }
+        };
+
+        match action {
+            CacheAction::Return(cached) => return cached,
+            CacheAction::Wait => {
+                refreshed
+                    .changed()
+                    .await
+                    .expect("refresh signal remains open");
+                // An already-running sweep satisfies a forced refresh. If it
+                // was invalidated while running, `value` is still empty and
+                // the next loop starts a cold sweep for the new generation.
+                force_refresh = false;
+            }
+            CacheAction::Start {
+                generation,
+                stale_len,
+                return_stale,
+            } => {
+                let detection = detection.take().expect("detection future used once");
+                tokio::spawn(run_detect_all_refresh(detection, generation, stale_len));
+                if let Some(stale) = return_stale {
+                    return stale;
+                }
+                refreshed
+                    .changed()
+                    .await
+                    .expect("refresh signal remains open");
+                force_refresh = false;
             }
         }
     }
-    // Snapshot any previous (stale) sweep to fall back on.
-    let stale: Option<Vec<AgentDetection>> = DETECT_ALL_CACHE
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|(v, _)| v.clone()));
+}
 
-    let store = |fresh: Vec<AgentDetection>| -> Vec<AgentDetection> {
-        if let Ok(mut guard) = DETECT_ALL_CACHE.lock() {
-            *guard = Some((fresh.clone(), Instant::now()));
-        }
-        fresh
-    };
-
-    match stale {
-        // COLD cache: an empty agent list breaks discussion creation + the
-        // Agents page, so the first sweep MUST produce real results — run it to
-        // completion, no budget. (The frontend boot has its own timeout-and-
-        // proceed, so a slow first sweep never freezes the UI.)
-        None => store(detect_all().await),
-        // Warm-ish: bound the refresh; on overrun keep serving the previous
-        // (still-valid) sweep rather than block. Never empty here.
-        Some(prev) => match tokio::time::timeout(DETECT_ALL_BUDGET, detect_all()).await {
-            Ok(fresh) => store(fresh),
+async fn run_detect_all_refresh<F>(detection: F, generation: u64, stale_len: Option<usize>)
+where
+    F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
+{
+    // A cold cache must produce a real list. Once stale data exists, keep the
+    // existing 30-second wall so a stuck executable cannot churn forever.
+    let fresh = if stale_len.is_some() {
+        match tokio::time::timeout(DETECT_ALL_BUDGET, detection).await {
+            Ok(fresh) => Some(fresh),
             Err(_) => {
                 tracing::warn!(
                     target: "kronn::agent_detect",
-                    "detect_all exceeded {}s — serving the previous sweep ({} agents)",
-                    DETECT_ALL_BUDGET.as_secs(), prev.len(),
+                    "detect_all exceeded {}s — keeping the previous sweep ({} agents)",
+                    DETECT_ALL_BUDGET.as_secs(), stale_len.unwrap_or_default(),
                 );
-                prev
+                None
             }
-        },
+        }
+    } else {
+        Some(detection.await)
+    };
+
+    let mut cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.generation == generation {
+        if let Some(fresh) = fresh {
+            cache.value = Some((fresh, Instant::now()));
+        }
     }
+    cache.refreshing = false;
+    drop(cache);
+    DETECT_ALL_REFRESHED.send_modify(|completed| *completed = completed.wrapping_add(1));
 }
 
 /// Drop the cached sweep so the next `detect_all_cached(false)` re-probes.
 /// Called after install/uninstall so the UI reflects the change immediately.
 pub fn invalidate_detect_cache() {
-    if let Ok(mut guard) = DETECT_ALL_CACHE.lock() {
-        *guard = None;
-    }
+    let mut cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.value = None;
+    cache.generation = cache.generation.wrapping_add(1);
 }
 
 /// A provider reached over HTTP with a credential, with no local binary and
@@ -1525,7 +1617,8 @@ mod tests {
         // returns empty, it served the cache instead of spawning subprocesses.
         {
             let mut g = DETECT_ALL_CACHE.lock().unwrap();
-            *g = Some((Vec::new(), Instant::now()));
+            g.value = Some((Vec::new(), Instant::now()));
+            g.refreshing = false;
         }
         let hit = detect_all_cached(false).await;
         assert!(
@@ -1540,13 +1633,99 @@ mod tests {
     async fn invalidate_detect_cache_drops_the_entry() {
         {
             let mut g = DETECT_ALL_CACHE.lock().unwrap();
-            *g = Some((Vec::new(), Instant::now()));
+            g.value = Some((Vec::new(), Instant::now()));
+            g.refreshing = false;
         }
         invalidate_detect_cache();
         assert!(
-            DETECT_ALL_CACHE.lock().unwrap().is_none(),
+            DETECT_ALL_CACHE.lock().unwrap().value.is_none(),
             "invalidate must drop the cached entry so the next call re-probes",
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn stale_detection_is_served_immediately_and_refreshed_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        {
+            let mut cache = DETECT_ALL_CACHE.lock().unwrap();
+            cache.value = Some((
+                Vec::new(),
+                Instant::now() - DETECT_ALL_TTL - std::time::Duration::from_secs(1),
+            ));
+            cache.refreshing = false;
+            cache.generation = cache.generation.wrapping_add(1);
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut completed = DETECT_ALL_REFRESHED.subscribe();
+        let make_detection = || {
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                started.notify_one();
+                release.notified().await;
+                Vec::new()
+            }
+        };
+
+        let before = Instant::now();
+        let (first, second) = tokio::join!(
+            detect_all_cached_with(false, make_detection()),
+            detect_all_cached_with(false, make_detection()),
+        );
+        assert!(first.is_empty() && second.is_empty());
+        assert!(
+            before.elapsed() < std::time::Duration::from_millis(100),
+            "stale callers must not wait for the refresh"
+        );
+
+        started.notified().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "concurrent stale reads must share one refresh"
+        );
+        release.notify_one();
+        completed.changed().await.unwrap();
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn concurrent_cold_reads_share_one_detection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        {
+            let mut cache = DETECT_ALL_CACHE.lock().unwrap();
+            cache.value = None;
+            cache.refreshing = false;
+            cache.generation = cache.generation.wrapping_add(1);
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let make_detection = || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                Vec::new()
+            }
+        };
+
+        let (first, second) = tokio::join!(
+            detect_all_cached_with(false, make_detection()),
+            detect_all_cached_with(false, make_detection()),
+        );
+        assert!(first.is_empty() && second.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        invalidate_detect_cache();
     }
 
     // ─── check_prerequisite ──────────────────────────────────────────────────

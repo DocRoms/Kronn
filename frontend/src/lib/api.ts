@@ -263,9 +263,43 @@ import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } 
 // browser / Tauri webview localStorage always exists, so behaviour is unchanged.
 const _ls: Storage | undefined = typeof localStorage !== 'undefined' ? localStorage : undefined;
 
+const SHARED_GET_WINDOW_MS = 2_000;
+interface SharedGetEntry {
+  promise: Promise<unknown>;
+  expiresAt: number;
+}
+const sharedGets = new Map<string, SharedGetEntry>();
+
+function clearSharedGets(): void {
+  sharedGets.clear();
+}
+
+function sharedGet<T>(key: string, request: () => Promise<T>): Promise<T> {
+  const now = Date.now();
+  const existing = sharedGets.get(key);
+  if (existing && existing.expiresAt > now) return existing.promise as Promise<T>;
+
+  const entry: SharedGetEntry = {
+    promise: request(),
+    expiresAt: now + SHARED_GET_WINDOW_MS,
+  };
+  sharedGets.set(key, entry);
+  void entry.promise.then(
+    () => undefined,
+    () => {
+      if (sharedGets.get(key) === entry) sharedGets.delete(key);
+    },
+  );
+  globalThis.setTimeout(() => {
+    if (sharedGets.get(key) === entry) sharedGets.delete(key);
+  }, SHARED_GET_WINDOW_MS);
+  return entry.promise as Promise<T>;
+}
+
 let _authToken: string | null = _ls?.getItem('kronn_auth_token') ?? null;
 
 export function setAuthToken(token: string | null) {
+  clearSharedGets();
   _authToken = token;
   if (token) {
     _ls?.setItem('kronn_auth_token', token);
@@ -291,6 +325,7 @@ export function authHeaders(): Record<string, string> {
 let _apiBase = '';
 
 export function setApiBase(base: string) {
+  clearSharedGets();
   _apiBase = base.replace(/\/$/, ''); // strip trailing slash
 }
 
@@ -607,37 +642,46 @@ async function api<T>(
   const hasBody = body !== undefined;
   if (hasBody) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`${_apiBase}/api${path}`, {
-    method,
-    headers,
-    body: hasBody ? JSON.stringify(body) : undefined,
-    signal,
-  });
+  const execute = async (): Promise<T> => {
+    const res = await fetch(`${_apiBase}/api${path}`, {
+      method,
+      headers,
+      body: hasBody ? JSON.stringify(body) : undefined,
+      signal,
+    });
 
-  const contentType = res.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/json')) {
-    // 0.8.5 — when axum's `Json<T>` extractor rejects a request
-    // (missing field, unknown enum variant, type mismatch), it
-    // returns 422 with `Content-Type: text/plain` and the actual
-    // deserialization failure in the body. Pre-fix we threw away
-    // the body and surfaced a bare "Server error (HTTP 422)" with
-    // zero actionable info — exactly what tripped the QP-Improver
-    // agent on the JIRA helper during 0.8.4 dogfooding. Same path
-    // also covers gateway-style 5xx HTML bodies; we cap at 500
-    // chars so a 10MB nginx error page doesn't drown the toast.
-    const body = await res.text().catch(() => '');
-    const trimmed = body.trim();
-    const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
-    throw new Error(`Server error (HTTP ${res.status})${suffix}`);
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) {
+      // 0.8.5 — when axum's `Json<T>` extractor rejects a request
+      // (missing field, unknown enum variant, type mismatch), it
+      // returns 422 with `Content-Type: text/plain` and the actual
+      // deserialization failure in the body. Pre-fix we threw away
+      // the body and surfaced a bare "Server error (HTTP 422)" with
+      // zero actionable info — exactly what tripped the QP-Improver
+      // agent on the JIRA helper during 0.8.4 dogfooding. Same path
+      // also covers gateway-style 5xx HTML bodies; we cap at 500
+      // chars so a 10MB nginx error page doesn't drown the toast.
+      const responseBody = await res.text().catch(() => '');
+      const trimmed = responseBody.trim();
+      const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
+      throw new Error(`Server error (HTTP ${res.status})${suffix}`);
+    }
+
+    const json: ApiResponse<T> = await res.json();
+
+    if (!json.success) {
+      throw new Error(json.error ?? 'Unknown API error');
+    }
+
+    return json.data as T;
+  };
+
+  if (method === 'GET' && !hasBody && !signal) {
+    const authorization = headers.Authorization ?? '';
+    return sharedGet(`${_apiBase}/api${path}\n${authorization}`, execute);
   }
-
-  const json: ApiResponse<T> = await res.json();
-
-  if (!json.success) {
-    throw new Error(json.error ?? 'Unknown API error');
-  }
-
-  return json.data as T;
+  if (method !== 'GET') clearSharedGets();
+  return execute();
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -677,8 +721,11 @@ export const health = {
   /** `GET /api/health` — unauthed and NOT enveloped (raw JSON), so it bypasses
    *  the `api<T>()` `{success,data}` unwrap. */
   get: async (): Promise<HealthInfo> => {
-    const res = await fetch(`${_apiBase}/api/health`, { headers: { ...authHeaders() } });
-    return res.json() as Promise<HealthInfo>;
+    const headers = { ...authHeaders() };
+    return sharedGet(`${_apiBase}/api/health\n${headers.Authorization ?? ''}`, async () => {
+      const res = await fetch(`${_apiBase}/api/health`, { headers });
+      return res.json() as Promise<HealthInfo>;
+    });
   },
 };
 

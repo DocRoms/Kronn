@@ -220,6 +220,18 @@ export function Dashboard({ onReset }: DashboardProps) {
   }, [page]);
 
   useEffect(() => {
+    const followDiscussionLink = () => {
+      const discussionId = standaloneDiscussionId(window.location.hash);
+      if (!discussionId) return;
+      setOpenDiscussionId(discussionId);
+      setActiveDiscussionId(discussionId);
+      setPage('discussions');
+    };
+    window.addEventListener('hashchange', followDiscussionLink);
+    return () => window.removeEventListener('hashchange', followDiscussionLink);
+  }, []);
+
+  useEffect(() => {
     if (pagesCapability && !pagesCapability.activated && page === 'pages') {
       setPage('projects');
     }
@@ -1534,7 +1546,10 @@ export function Dashboard({ onReset }: DashboardProps) {
             markAllDiscussionsSeen={markAllDiscussionsSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
             initialActiveDiscussionId={openDiscussionId ?? deepLinkedDiscussionId ?? restorableDiscussionId}
-            initialMessageId={deepLinkedDiscussionId && !openDiscussionId ? standaloneDiscussionMessageId(window.location.hash) : null}
+            initialMessageId={deepLinkedDiscussionId
+              && (!openDiscussionId || openDiscussionId === deepLinkedDiscussionId)
+              ? standaloneDiscussionMessageId(window.location.hash)
+              : null}
             lastSeenMsgCount={lastSeenMsgCount}
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { App } from '../App';
-import { setRetryDelay, setStatusTimeout } from '../lib/appBoot';
+import {
+  cacheSetupStatus,
+  clearCachedSetupStatus,
+  setRetryDelay,
+  setStatusTimeout,
+} from '../lib/appBoot';
 
 // Mock the lazy-loaded pages to avoid loading the full component trees
 vi.mock('../pages/SetupWizard', () => ({
@@ -71,6 +76,7 @@ import { setup as setupApi, config as configApi } from '../lib/api';
 beforeEach(() => {
   vi.clearAllMocks();
   window.location.hash = '';
+  clearCachedSetupStatus();
   setRetryDelay(0); // instant retries in tests
   setStatusTimeout(20); // short boot timeout so hangs resolve fast in tests
   // Default: backend unreachable on the fast probe too (matches the existing
@@ -139,6 +145,29 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
   });
 
+  it('renders the last known setup state while refreshing it in the background', async () => {
+    const cached = {
+      is_first_run: false,
+      current_step: 'Complete' as const,
+      agents_detected: [],
+      scan_paths_set: true,
+      scan_paths_explored: [],
+      repos_detected: [],
+      default_scan_path: '/home',
+    };
+    cacheSetupStatus(cached);
+    setStatusTimeout(2_000);
+    let finishRefresh!: (status: typeof cached) => void;
+    vi.mocked(setupApi.getStatus).mockReturnValue(new Promise(resolve => { finishRefresh = resolve; }));
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
+    expect(screen.queryByText(/^Entering the grid/)).not.toBeInTheDocument();
+    expect(setupApi.getStatus).toHaveBeenCalledTimes(1);
+    await act(async () => { finishRefresh(cached); });
+  });
+
   it('opens a direct Live Page URL without mounting the dashboard chrome', async () => {
     window.location.hash = '#page/page-1';
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -153,6 +182,27 @@ describe('App', () => {
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('standalone-page')).toHaveTextContent('page-1'));
     expect(screen.queryByTestId('dashboard')).toBeNull();
+  });
+
+  it('reacts to an internal Page hash without reloading the application', async () => {
+    vi.mocked(setupApi.getStatus).mockResolvedValue({
+      is_first_run: false,
+      current_step: 'Complete',
+      agents_detected: [],
+      scan_paths_set: true,
+      scan_paths_explored: [],
+      repos_detected: [],
+      default_scan_path: '/home',
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
+
+    await act(async () => {
+      window.history.pushState(null, '', '#page/page-in-place');
+      window.dispatchEvent(new Event('hashchange'));
+    });
+
+    expect(await screen.findByTestId('standalone-page')).toHaveTextContent('page-in-place');
   });
 
   it('opens a direct Page mosaic URL without mounting the dashboard chrome', async () => {
