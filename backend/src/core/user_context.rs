@@ -133,10 +133,7 @@ pub fn build_memory_prelude_prompt() -> String {
      `architecture/`, `conventions/`, `gotchas/`, `operations/`, `people/`).\n\
      Use one short file per topic. Prefer markdown links `[name](path.md)` for\n\
      cross-refs to other docs files (Obsidian-friendly graph view).\n\n\
-     `docs/AGENTS.md` mixes `owner=\"audit\"` and `owner=\"human\"` sections.\n\
-     Never rewrite an `owner=\"human\"` section yourself (legacy\n\
-     `curated=\"human\"` is protected too); write your own findings\n\
-     to the subfolders above instead.\n\
+     Never edit `owner=\"human\"` sections of `docs/AGENTS.md`.\n\
      Do NOT write secrets — Kronn rejects writes\n\
      that match `.env`, `.pem`, `.ssh/`, or token shapes (sk-, ghp_, AKIA, JWT).\n\n\
      Some projects still use the legacy `ai/` folder instead of `docs/` —\n\
@@ -318,13 +315,7 @@ mod tests {
         // 0.8.4 cross-agent memory MCP) supersedes it entirely, so
         // the dedicated `docs/templates/` folder + its mention here
         // were removed.
-        //
-        // KT-843 (Template v2) — the old blanket "Do NOT edit
-        // docs/AGENTS.md" ban is gone. Ownership is now per-section:
-        // `owner="human"` sections are off-limits to every agent,
-        // `owner="audit"` sections (and the rest of the file) are the
-        // audit workflow's territory. A regular working agent should
-        // still prefer the dedicated subfolders for its own findings.
+        // Ownership is per section: human-owned sections stay off-limits.
         let prelude = build_memory_prelude_prompt();
         assert!(
             prelude.contains("docs/AGENTS.md"),

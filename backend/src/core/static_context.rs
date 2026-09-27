@@ -25,7 +25,7 @@ use ts_rs::TS;
 /// Ceiling on the CODE-FIXED floor — the blocks Kronn injects unconditionally and
 /// identically on every machine.
 ///
-/// Pinned to the measurement (1 702 B), tightened on a real reduction, never raised
+/// Pinned to the measurement (1 697 B), tightened on a real reduction, never raised
 /// to make a build pass. Same rule as `docs/AGENTS.md` and the MCP catalogue, and
 /// that rule is what stopped an 84 KiB instruction file one defensible paragraph at
 /// a time.
@@ -34,7 +34,7 @@ use ts_rs::TS;
 /// therefore differs per machine: gating on it would make the ceiling pass on a
 /// bare CI runner and fail on the machine of whoever wrote the most notes. A
 /// ceiling that depends on who runs it is not a ceiling.
-pub const FLOOR_MAX_BYTES: usize = 1_702;
+pub const FLOOR_MAX_BYTES: usize = 1_697;
 
 const _: () = assert!(
     FLOOR_MAX_BYTES <= 8_192,
