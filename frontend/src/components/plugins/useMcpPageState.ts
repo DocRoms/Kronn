@@ -68,7 +68,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
   const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
 
-  const list = usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast });
+  const list = usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile });
   const addRegistry = useAddPluginRegistryState({ mcpOverview, mcpRegistry });
   const customForm = useCustomApiFormState();
 

@@ -229,6 +229,12 @@ describe('WorkflowsPage', () => {
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Narrow report' })).toBeInTheDocument();
     fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Narrow report' }));
     expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'true');
+    // Selecting a row on a narrow viewport auto-collapses the list, same as
+    // Discussions — the row's detail is what the user asked to see next.
+    expect(screen.queryByRole('complementary', { name: 'Automatisation' })).toBeNull();
+    const rail = screen.getByRole('button', { name: 'Ouvrir la liste' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    fireEvent.click(rail);
     expect(openAutomationActions()).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Fermer la liste' }));
     expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
@@ -1137,6 +1143,7 @@ describe('WorkflowsPage', () => {
     mockWorkflowsApi.list.mockResolvedValue([summary]);
     mockWorkflowsApi.delete.mockClear();
     mockWorkflowsApi.delete.mockResolvedValue(undefined);
+    vi.stubGlobal('confirm', vi.fn(() => true));
 
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
@@ -1173,6 +1180,7 @@ describe('WorkflowsPage', () => {
     mockWorkflowsApi.list.mockResolvedValue([summary]);
     mockWorkflowsApi.delete.mockClear();
     mockWorkflowsApi.delete.mockResolvedValue(undefined);
+    vi.stubGlobal('confirm', vi.fn(() => true));
 
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />

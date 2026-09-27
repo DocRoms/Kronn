@@ -116,7 +116,9 @@ describe('McpPage', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.getByTestId('mcp-kronn-internal-card')).toHaveTextContent('Intégré');
-    expect(document.body.textContent).not.toContain('Aucun plugin');
+    // The sidebar's own empty-filter message (KT-855: Plugins now has its own
+    // "mcp.filter.empty" copy, distinct from Automation's) is expected here —
+    // the static built-in card below the shell stays the one thing to check.
   });
 
   it('flags an endpoint that keeps failing, and says which kind of fault it is', async () => {

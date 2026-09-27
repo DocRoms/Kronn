@@ -270,7 +270,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
                 </div>}
               </div>}
 
-              {visibleItems.length === 0 && <div className="disc-empty">{t('automation.filter.empty')}</div>}
+              {visibleItems.length === 0 && <div className="disc-empty">{t('mcp.filter.empty')}</div>}
             </div>;
           },
           sidebarFooter: <CollectionSidebarFooter
@@ -283,7 +283,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
               ? <PluginDetailPanel cfg={config} state={state} />
               : <div className="collection-shell-detail-empty-hint">{t('mcp.selectHint')}</div>
           ),
-          renderEmpty: () => <div className="mcp-filter-empty">{t('automation.filter.empty')}</div>,
+          renderEmpty: () => <div className="mcp-filter-empty">{t('mcp.filter.empty')}</div>,
         }}
       />
       {showBuiltinFallback && (

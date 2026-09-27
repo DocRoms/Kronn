@@ -3030,6 +3030,7 @@ const fr: TranslationDict = {
   'mcp.search': 'Rechercher un plugin ou un projet...',
   'mcp.searchRegistry': 'Rechercher un plugin...',
   'mcp.filterKind': 'Filtrer les plugins par type',
+  'mcp.filter.empty': 'Aucun plugin ne correspond à ce filtre.',
   'mcp.sortLabel': 'Trier les plugins',
   'mcp.sortKind': 'Type de plugin',
   'mcp.sortScope': 'Portée',
