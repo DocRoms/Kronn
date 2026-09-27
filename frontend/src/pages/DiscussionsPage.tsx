@@ -38,8 +38,9 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun, QuickPrompt } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useStableCallback } from '../hooks/useStableCallback';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue, type QueuedMessage, type QueuedMessageControl } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
@@ -424,6 +425,7 @@ function getTtsWorker(): Worker {
 }
 
 const EMPTY_ACTIONS: DiscussionAction[] = [];
+const EMPTY_TARGETS: MessageTarget[] = [];
 
 
 export function DiscussionsPage({
@@ -572,7 +574,10 @@ export function DiscussionsPage({
 
   const refreshExecutionDiscussionLinks = useCallback(() => {
     orchestrationApi.discussionLinks()
-      .then(setExecutionDiscussionLinks)
+      // An identical answer keeps the previous array: a new one re-renders the page.
+      .then(next => setExecutionDiscussionLinks(previous => (
+        JSON.stringify(previous) === JSON.stringify(next) ? previous : next
+      )))
       .catch(error => console.warn('execution discussion links fetch failed', error));
   }, []);
 
@@ -3159,6 +3164,25 @@ export function DiscussionsPage({
     return map;
   }, [activeDiscussionId, contextFilesMap]);
 
+  // Built once per transcript change: rebuilding these per render handed every
+  // memoized bubble a new `replies` array and re-rendered the whole thread.
+  const transcriptIndex = useMemo(() => {
+    const messages = activeDiscussion?.messages ?? EMPTY_MESSAGES;
+    const sourceMessages = showDiscussionNotes
+      ? messages
+      : messages.filter(message => message.channel !== 'note');
+    const msgs = messagesInConversationOrder(sourceMessages);
+    const messagesById = new Map(msgs.map(message => [message.id, message]));
+    const repliesByTarget = new Map<string, DiscussionMessage[]>();
+    for (const message of msgs) {
+      if (!message.reply_to_message_id) continue;
+      const replies = repliesByTarget.get(message.reply_to_message_id) ?? [];
+      replies.push(message);
+      repliesByTarget.set(message.reply_to_message_id, replies);
+    }
+    return { msgs, messagesById, repliesByTarget };
+  }, [activeDiscussion?.messages, showDiscussionNotes]);
+
   const handleRetry = async () => {
     if (!activeDiscussionId || sending) return;
     const discId = activeDiscussionId;
@@ -3557,6 +3581,16 @@ export function DiscussionsPage({
     }
   };
 
+  // Stable identities for the per-message handlers: the bubbles are memoized,
+  // and a recreated handler would re-render all of them on every page update.
+  const stableEditMessage = useStableCallback(handleEditMessage);
+  const stableRetry = useStableCallback(handleRetry);
+  const stableLaunchQp = useStableCallback((qp: QuickPrompt) => handleSendMessage(qp.prompt_template));
+  const stableOpenActionDiscussion = useStableCallback((discussionId: string) => {
+    setActiveDiscussionId(discussionId);
+    ensureDiscussionVisible(discussionId);
+  });
+
   const handleOrchestrate = async (
     orchAgents: AgentType[],
     orchRounds: number,
@@ -3658,6 +3692,268 @@ export function DiscussionsPage({
   };
 
   // ─── Render ──────────────────────────────────────────────────────────────
+  // The transcript elements are reused while nothing they show changed, so an
+  // unrelated page update does not rebuild and re-reconcile every bubble.
+  const stableNavigate = useStableCallback(onNavigate);
+  const transcriptElements = useMemo(() => {
+    if (!activeDiscussion) return null;
+        const { msgs, messagesById, repliesByTarget } = transcriptIndex;
+        // Pre-compute indices and timestamps in O(n) instead of O(n²)
+        let lastUserIdx = -1;
+        let lastAgentIdx = -1;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].channel === 'note') continue;
+          if (lastUserIdx < 0 && msgs[i].role === 'User') lastUserIdx = i;
+          if (lastAgentIdx < 0 && msgs[i].role === 'Agent') lastAgentIdx = i;
+          if (lastUserIdx >= 0 && lastAgentIdx >= 0) break;
+        }
+        // Pre-compute previous user timestamp per message (for response duration display)
+        const prevUserTs: (string | null)[] = [];
+        let lastSeenUserTs: string | null = null;
+        for (let i = 0; i < msgs.length; i++) {
+          prevUserTs.push(lastSeenUserTs);
+          if (msgs[i].channel !== 'note' && msgs[i].role === 'User') {
+            lastSeenUserTs = msgs[i].timestamp;
+          }
+        }
+        // Hide the initial system prompt for automated discussions (briefing, validation, bootstrap).
+        // Uses locale-aware detectors — `Briefing` is localized
+        // (EN `Project Briefing`, ES `Briefing del proyecto`,
+        // FR `Briefing projet`) so a `startsWith('Briefing')`
+        // here missed EN and leaked the system prompt as the
+        // first visible message for English users.
+        const isAutoPrompt = (idx: number) => idx === 0 && msgs[0]?.role === 'User' && (
+          isBriefingDisc(activeDiscussion.title) ||
+          isValidationDisc(activeDiscussion.title) ||
+          isBootstrapDisc(activeDiscussion.title)
+        );
+
+        // 0.8.6 phase 4 — group consecutive `[kronn-internal: …]`
+        // / `[agent-native: …]` System messages into ONE collapsible
+        // banner above the next non-tool message. Pre-fix, a QP
+        // that fired 8 tool calls produced 8 separate bubbles
+        // between the user prompt and the agent reply ; with this
+        // fold the user sees a single "🔧 Outils appelés (8)"
+        // line, click to expand. Q1 answer 2026-05-22.
+        //
+        // The algorithm itself lives in `groupMessagesWithToolFold`
+        // (pure fn, unit-tested in discussionMessageGrouping.test.ts) ;
+        // here we just map render items to React elements.
+        const items = groupMessagesWithToolFold(msgs, { isAutoPrompt });
+        const mainUserIds = new Set(
+          msgs
+            .filter(message => message.role === 'User' && message.channel === 'main')
+            .map(message => message.id),
+        );
+        const lastMessageByTurn = new Map<string, string>();
+        let currentTurnId: string | null = null;
+        for (const message of msgs) {
+          if (message.role === 'User' && message.channel === 'main') {
+            currentTurnId = message.id;
+          }
+          const linkedTurn = (message.role === 'Agent' || message.role === 'System')
+            && message.reply_to_message_id
+            && mainUserIds.has(message.reply_to_message_id)
+            ? message.reply_to_message_id
+            : null;
+          const turnId = linkedTurn ?? currentTurnId;
+          if (!turnId) continue;
+          lastMessageByTurn.set(turnId, message.id);
+        }
+        const pendingByAnchor = new Map<string, typeof pendingReplySlots>();
+        for (const reply of pendingReplySlots) {
+          const anchorId = lastMessageByTurn.get(reply.triggerMessageId)
+            ?? reply.triggerMessageId;
+          const replies = pendingByAnchor.get(anchorId) ?? [];
+          replies.push(reply);
+          pendingByAnchor.set(anchorId, replies);
+        }
+        const renderPendingAfter = (messageIds: string[]) => {
+          if (orchState[activeDiscussion.id]?.active) return null;
+          const replies = messageIds.flatMap(messageId => pendingByAnchor.get(messageId) ?? []);
+          return replies.map(reply => (
+            reply.id === visibleStreamingReply?.id && (sending || !!resilientStreamingText)
+              ? (
+                  <StreamingAgentReplyBubble
+                    key={reply.id}
+                    agent={reply.agent}
+                    triggerMessageId={reply.triggerMessageId}
+                    elapsed={sendingElapsed}
+                    text={deferredStreamingText}
+                    logs={agentLogs}
+                    waitingUpstream={durablePartial?.dispatch?.progress_phase === 'upstream_wait'}
+                    showLogs={showLogs}
+                    onToggleLogs={() => setShowLogs(value => !value)}
+                    stopping={stoppingDispatchIds.has(reply.id)}
+                    onStop={() => { void handleStopDispatch(reply.id); }}
+                    recovering={!sending || durablePartial?.dispatch?.last_error === 'backend_restarted'}
+                    recoveryLabel={
+                      durablePartial?.dispatch?.last_error === 'backend_restarted'
+                        ? t('disc.streamRestartSaved', durablePartial.dispatch.attempts ?? 1)
+                        : !sending
+                          ? t('disc.streamDisconnectedSaved')
+                          : null
+                    }
+                    agentLabel={recoveryAgentLabel}
+                    />
+                )
+              : (
+                  <PendingAgentReplyBubble
+                    key={reply.id}
+                    agent={reply.agent}
+                    triggerMessageId={reply.triggerMessageId}
+                    status={reply.status}
+                    lastError={reply.lastError}
+                    stopping={stoppingDispatchIds.has(reply.id)}
+                    onStop={() => { void handleStopDispatch(reply.id); }}
+                  />
+                )
+          ));
+        };
+        let previousDayKey: string | null = null;
+        return items.map(item => {
+          const firstMessage = item.kind === 'tool-group' ? item.messages[0] : item.msg;
+          const linkedDayAnchor = (firstMessage.role === 'Agent' || firstMessage.role === 'System')
+            && firstMessage.reply_to_message_id
+            ? messagesById.get(firstMessage.reply_to_message_id)
+            : null;
+          const dayKey = localCalendarDayKey(
+            linkedDayAnchor?.timestamp ?? firstMessage.timestamp,
+          );
+          const startsDay = dayKey !== null && dayKey !== previousDayKey;
+          if (dayKey !== null) previousDayKey = dayKey;
+          const separator = startsDay ? (
+            <MessageDateSeparator
+              timestamp={firstMessage.timestamp}
+              locale={locale}
+              t={t}
+            />
+          ) : null;
+
+          if (item.kind === 'tool-group') {
+            const pending = renderPendingAfter(item.messages.map(message => message.id));
+            return (
+              <Fragment key={`tools-${item.messages[0].id}`}>
+                {separator}
+                <ToolCallsGroup
+                  messages={item.messages}
+                  targetMessageId={globalSearchTarget?.messageId}
+                  t={t}
+                />
+                {pending}
+              </Fragment>
+            );
+          }
+          const { msg, idx } = item;
+          if (msg.channel === 'note') {
+            const pending = renderPendingAfter([msg.id]);
+            return (
+              <Fragment key={msg.id}>
+                {separator}
+                <DiscussionNote
+                  message={msg}
+                  discussionId={activeDiscussion.id}
+                  t={t}
+                />
+                {pending}
+              </Fragment>
+            );
+          }
+          const pending = renderPendingAfter([msg.id]);
+          const mediaRun = mediaJobsByMessage[msg.id];
+          const isDedicatedMediaAnchor = mediaRun
+            && msg.source_msg_id === `kronn-media-anchor:${mediaRun.id}`;
+          if (isDedicatedMediaAnchor) {
+            return (
+              <Fragment key={msg.id}>
+                {separator}
+                <InlineMediaJob
+                  discussionId={activeDiscussion.id}
+                  messageId={msg.id}
+                  prompt={msg.content}
+                  run={mediaRun}
+                  onOpenAsset={openMediaAsset}
+                />
+                {pending}
+              </Fragment>
+            );
+          }
+          return (
+            <Fragment key={msg.id}>
+              {separator}
+              <MessageBubble
+                msg={msg}
+                targets={activeDiscussion.message_targets?.[msg.id] ?? EMPTY_TARGETS}
+                defaultTargets={activeDiscussion.default_targets ?? EMPTY_TARGETS}
+                idx={idx}
+                attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
+                discussionMedia={activeContextFiles}
+                pendingAttachment={pendingFileMsgIds.has(msg.id)}
+                isLastUser={msg.role === 'User' && idx === lastUserIdx}
+                isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
+                isEditing={editingMsgId === msg.id}
+                isCopied={copiedMsgId === msg.id}
+                isTtsActive={ttsPlayingMsgId === msg.id}
+                ttsState={ttsState}
+                isExpandedSummary={expandedSummaryMsgId === msg.id}
+                prevUserTs={prevUserTs[idx]}
+                defaultAgent={activeDiscussion.agent}
+                defaultAgentAlias={activeExternalConnection
+                  ? `@${activeExternalConnection.mention_alias}`
+                  : undefined}
+                targetConnectionAliases={externalConnectionAliases}
+                summaryCache={activeDiscussion.summary_cache ?? null}
+                language={activeDiscussion.language || 'fr'}
+                sending={sending}
+                editingText={editingMsgId === msg.id ? editingText : ''}
+                hasFullAccess={hasFullAccess(msg.agent_type ?? activeDiscussion.agent)}
+                onCopy={handleMsgCopy}
+                onTts={handleMsgTts}
+                onEditStart={handleMsgEditStart}
+                onEditCancel={handleMsgEditCancel}
+                onEditSubmit={stableEditMessage}
+                onEditTextChange={setEditingText}
+                onRetry={stableRetry}
+                onRetryAgentDispatch={handleRetryAgentDispatch}
+                onExpandSummary={handleMsgExpandSummary}
+                onNavigate={stableNavigate}
+                discussionId={activeDiscussion.id}
+                projectId={activeDiscussion.project_id ?? null}
+                chainableQPs={chainableQPs}
+                onLaunchQp={stableLaunchQp}
+                actions={discussionActionsByMessageId.get(msg.id) ?? EMPTY_ACTIONS}
+                onActionChanged={handleDiscussionActionChanged}
+                onOpenActionDiscussion={stableOpenActionDiscussion}
+                isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
+                isSearchCurrent={
+                  messageSearchMatches[messageSearchIndex]?.messageId === msg.id
+                  || globalSearchTarget?.messageId === msg.id
+                }
+                replyTarget={msg.reply_to_message_id
+                  ? messagesById.get(msg.reply_to_message_id) ?? null
+                  : null}
+                replies={repliesByTarget.get(msg.id) ?? EMPTY_MESSAGES}
+                onReply={handleMsgReply}
+                onReplyNavigate={handleReplyNavigate}
+                onDelete={handleMsgDelete}
+                isDeleting={deletingMessageIds.has(msg.id)}
+                t={t}
+              />
+              {pending}
+            </Fragment>
+          );
+        });
+  }, [activeContextFiles, activeDiscussion, activeExternalConnection, agentLogs, attachmentsByMessageId,
+    chainableQPs, copiedMsgId, deferredStreamingText, deletingMessageIds, discussionActionsByMessageId,
+    durablePartial, editingMsgId, editingText, expandedSummaryMsgId, externalConnectionAliases,
+    globalSearchTarget, handleDiscussionActionChanged, handleMsgCopy, handleMsgDelete, handleMsgEditCancel,
+    handleMsgEditStart, handleMsgExpandSummary, handleMsgReply, handleMsgTts, handleReplyNavigate,
+    handleRetryAgentDispatch, handleStopDispatch, hasFullAccess, locale, mediaJobsByMessage,
+    messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, orchState, pendingFileMsgIds,
+    pendingReplySlots, recoveryAgentLabel, resilientStreamingText, sending, sendingElapsed,
+    showLogs, stableEditMessage, stableLaunchQp, stableOpenActionDiscussion, stableRetry,
+    stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply]);
+
   return (
     <div className="disc-root">
       {/* Sidebar — collapsed mode shows a thin rail with expand button */}
@@ -4221,268 +4517,7 @@ export function DiscussionsPage({
               ref={messagesContainerRef}
               onScroll={handleMessagesScroll}
             >
-              {(() => {
-                const sourceMessages = showDiscussionNotes
-                  ? activeDiscussion.messages
-                  : activeDiscussion.messages.filter(message => message.channel !== 'note');
-                const msgs = messagesInConversationOrder(sourceMessages);
-                // Pre-compute indices and timestamps in O(n) instead of O(n²)
-                let lastUserIdx = -1;
-                let lastAgentIdx = -1;
-                for (let i = msgs.length - 1; i >= 0; i--) {
-                  if (msgs[i].channel === 'note') continue;
-                  if (lastUserIdx < 0 && msgs[i].role === 'User') lastUserIdx = i;
-                  if (lastAgentIdx < 0 && msgs[i].role === 'Agent') lastAgentIdx = i;
-                  if (lastUserIdx >= 0 && lastAgentIdx >= 0) break;
-                }
-                // Pre-compute previous user timestamp per message (for response duration display)
-                const prevUserTs: (string | null)[] = [];
-                let lastSeenUserTs: string | null = null;
-                for (let i = 0; i < msgs.length; i++) {
-                  prevUserTs.push(lastSeenUserTs);
-                  if (msgs[i].channel !== 'note' && msgs[i].role === 'User') {
-                    lastSeenUserTs = msgs[i].timestamp;
-                  }
-                }
-                // Hide the initial system prompt for automated discussions (briefing, validation, bootstrap).
-                // Uses locale-aware detectors — `Briefing` is localized
-                // (EN `Project Briefing`, ES `Briefing del proyecto`,
-                // FR `Briefing projet`) so a `startsWith('Briefing')`
-                // here missed EN and leaked the system prompt as the
-                // first visible message for English users.
-                const isAutoPrompt = (idx: number) => idx === 0 && msgs[0]?.role === 'User' && (
-                  isBriefingDisc(activeDiscussion.title) ||
-                  isValidationDisc(activeDiscussion.title) ||
-                  isBootstrapDisc(activeDiscussion.title)
-                );
-
-                // 0.8.6 phase 4 — group consecutive `[kronn-internal: …]`
-                // / `[agent-native: …]` System messages into ONE collapsible
-                // banner above the next non-tool message. Pre-fix, a QP
-                // that fired 8 tool calls produced 8 separate bubbles
-                // between the user prompt and the agent reply ; with this
-                // fold the user sees a single "🔧 Outils appelés (8)"
-                // line, click to expand. Q1 answer 2026-05-22.
-                //
-                // The algorithm itself lives in `groupMessagesWithToolFold`
-                // (pure fn, unit-tested in discussionMessageGrouping.test.ts) ;
-                // here we just map render items to React elements.
-                const messagesById = new Map(msgs.map(message => [message.id, message]));
-                const repliesByTarget = new Map<string, DiscussionMessage[]>();
-                for (const message of msgs) {
-                  if (!message.reply_to_message_id) continue;
-                  const replies = repliesByTarget.get(message.reply_to_message_id) ?? [];
-                  replies.push(message);
-                  repliesByTarget.set(message.reply_to_message_id, replies);
-                }
-                const items = groupMessagesWithToolFold(msgs, { isAutoPrompt });
-                const mainUserIds = new Set(
-                  msgs
-                    .filter(message => message.role === 'User' && message.channel === 'main')
-                    .map(message => message.id),
-                );
-                const lastMessageByTurn = new Map<string, string>();
-                let currentTurnId: string | null = null;
-                for (const message of msgs) {
-                  if (message.role === 'User' && message.channel === 'main') {
-                    currentTurnId = message.id;
-                  }
-                  const linkedTurn = (message.role === 'Agent' || message.role === 'System')
-                    && message.reply_to_message_id
-                    && mainUserIds.has(message.reply_to_message_id)
-                    ? message.reply_to_message_id
-                    : null;
-                  const turnId = linkedTurn ?? currentTurnId;
-                  if (!turnId) continue;
-                  lastMessageByTurn.set(turnId, message.id);
-                }
-                const pendingByAnchor = new Map<string, typeof pendingReplySlots>();
-                for (const reply of pendingReplySlots) {
-                  const anchorId = lastMessageByTurn.get(reply.triggerMessageId)
-                    ?? reply.triggerMessageId;
-                  const replies = pendingByAnchor.get(anchorId) ?? [];
-                  replies.push(reply);
-                  pendingByAnchor.set(anchorId, replies);
-                }
-                const renderPendingAfter = (messageIds: string[]) => {
-                  if (orchState[activeDiscussion.id]?.active) return null;
-                  const replies = messageIds.flatMap(messageId => pendingByAnchor.get(messageId) ?? []);
-                  return replies.map(reply => (
-                    reply.id === visibleStreamingReply?.id && (sending || !!resilientStreamingText)
-                      ? (
-                          <StreamingAgentReplyBubble
-                            key={reply.id}
-                            agent={reply.agent}
-                            triggerMessageId={reply.triggerMessageId}
-                            elapsed={sendingElapsed}
-                            text={deferredStreamingText}
-                            logs={agentLogs}
-                            waitingUpstream={durablePartial?.dispatch?.progress_phase === 'upstream_wait'}
-                            showLogs={showLogs}
-                            onToggleLogs={() => setShowLogs(value => !value)}
-                            stopping={stoppingDispatchIds.has(reply.id)}
-                            onStop={() => { void handleStopDispatch(reply.id); }}
-                            recovering={!sending || durablePartial?.dispatch?.last_error === 'backend_restarted'}
-                            recoveryLabel={
-                              durablePartial?.dispatch?.last_error === 'backend_restarted'
-                                ? t('disc.streamRestartSaved', durablePartial.dispatch.attempts ?? 1)
-                                : !sending
-                                  ? t('disc.streamDisconnectedSaved')
-                                  : null
-                            }
-                            agentLabel={recoveryAgentLabel}
-                            />
-                        )
-                      : (
-                          <PendingAgentReplyBubble
-                            key={reply.id}
-                            agent={reply.agent}
-                            triggerMessageId={reply.triggerMessageId}
-                            status={reply.status}
-                            lastError={reply.lastError}
-                            stopping={stoppingDispatchIds.has(reply.id)}
-                            onStop={() => { void handleStopDispatch(reply.id); }}
-                          />
-                        )
-                  ));
-                };
-                let previousDayKey: string | null = null;
-                return items.map(item => {
-                  const firstMessage = item.kind === 'tool-group' ? item.messages[0] : item.msg;
-                  const linkedDayAnchor = (firstMessage.role === 'Agent' || firstMessage.role === 'System')
-                    && firstMessage.reply_to_message_id
-                    ? messagesById.get(firstMessage.reply_to_message_id)
-                    : null;
-                  const dayKey = localCalendarDayKey(
-                    linkedDayAnchor?.timestamp ?? firstMessage.timestamp,
-                  );
-                  const startsDay = dayKey !== null && dayKey !== previousDayKey;
-                  if (dayKey !== null) previousDayKey = dayKey;
-                  const separator = startsDay ? (
-                    <MessageDateSeparator
-                      timestamp={firstMessage.timestamp}
-                      locale={locale}
-                      t={t}
-                    />
-                  ) : null;
-
-                  if (item.kind === 'tool-group') {
-                    const pending = renderPendingAfter(item.messages.map(message => message.id));
-                    return (
-                      <Fragment key={`tools-${item.messages[0].id}`}>
-                        {separator}
-                        <ToolCallsGroup
-                          messages={item.messages}
-                          targetMessageId={globalSearchTarget?.messageId}
-                          t={t}
-                        />
-                        {pending}
-                      </Fragment>
-                    );
-                  }
-                  const { msg, idx } = item;
-                  if (msg.channel === 'note') {
-                    const pending = renderPendingAfter([msg.id]);
-                    return (
-                      <Fragment key={msg.id}>
-                        {separator}
-                        <DiscussionNote
-                          message={msg}
-                          discussionId={activeDiscussion.id}
-                          t={t}
-                        />
-                        {pending}
-                      </Fragment>
-                    );
-                  }
-                  const pending = renderPendingAfter([msg.id]);
-                  const mediaRun = mediaJobsByMessage[msg.id];
-                  const isDedicatedMediaAnchor = mediaRun
-                    && msg.source_msg_id === `kronn-media-anchor:${mediaRun.id}`;
-                  if (isDedicatedMediaAnchor) {
-                    return (
-                      <Fragment key={msg.id}>
-                        {separator}
-                        <InlineMediaJob
-                          discussionId={activeDiscussion.id}
-                          messageId={msg.id}
-                          prompt={msg.content}
-                          run={mediaRun}
-                          onOpenAsset={openMediaAsset}
-                        />
-                        {pending}
-                      </Fragment>
-                    );
-                  }
-                  return (
-                    <Fragment key={msg.id}>
-                      {separator}
-                      <MessageBubble
-                        msg={msg}
-                        targets={activeDiscussion.message_targets?.[msg.id] ?? []}
-                        defaultTargets={activeDiscussion.default_targets ?? []}
-                        idx={idx}
-                        attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
-                        discussionMedia={activeContextFiles}
-                        pendingAttachment={pendingFileMsgIds.has(msg.id)}
-                        isLastUser={msg.role === 'User' && idx === lastUserIdx}
-                        isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
-                        isEditing={editingMsgId === msg.id}
-                        isCopied={copiedMsgId === msg.id}
-                        isTtsActive={ttsPlayingMsgId === msg.id}
-                        ttsState={ttsState}
-                        isExpandedSummary={expandedSummaryMsgId === msg.id}
-                        prevUserTs={prevUserTs[idx]}
-                        defaultAgent={activeDiscussion.agent}
-                        defaultAgentAlias={activeExternalConnection
-                          ? `@${activeExternalConnection.mention_alias}`
-                          : undefined}
-                        targetConnectionAliases={externalConnectionAliases}
-                        summaryCache={activeDiscussion.summary_cache ?? null}
-                        language={activeDiscussion.language || 'fr'}
-                        sending={sending}
-                        editingText={editingMsgId === msg.id ? editingText : ''}
-                        hasFullAccess={hasFullAccess(msg.agent_type ?? activeDiscussion.agent)}
-                        onCopy={handleMsgCopy}
-                        onTts={handleMsgTts}
-                        onEditStart={handleMsgEditStart}
-                        onEditCancel={handleMsgEditCancel}
-                        onEditSubmit={handleEditMessage}
-                        onEditTextChange={setEditingText}
-                        onRetry={handleRetry}
-                        onRetryAgentDispatch={handleRetryAgentDispatch}
-                        onExpandSummary={handleMsgExpandSummary}
-                        onNavigate={onNavigate}
-                        discussionId={activeDiscussion.id}
-                        projectId={activeDiscussion.project_id ?? null}
-                        chainableQPs={chainableQPs}
-                        onLaunchQp={qp => handleSendMessage(qp.prompt_template)}
-                        actions={discussionActionsByMessageId.get(msg.id) ?? []}
-                        onActionChanged={handleDiscussionActionChanged}
-                        onOpenActionDiscussion={discussionId => {
-                          setActiveDiscussionId(discussionId);
-                          ensureDiscussionVisible(discussionId);
-                        }}
-                        isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
-                        isSearchCurrent={
-                          messageSearchMatches[messageSearchIndex]?.messageId === msg.id
-                          || globalSearchTarget?.messageId === msg.id
-                        }
-                        replyTarget={msg.reply_to_message_id
-                          ? messagesById.get(msg.reply_to_message_id) ?? null
-                          : null}
-                        replies={repliesByTarget.get(msg.id) ?? EMPTY_MESSAGES}
-                        onReply={handleMsgReply}
-                        onReplyNavigate={handleReplyNavigate}
-                        onDelete={handleMsgDelete}
-                        isDeleting={deletingMessageIds.has(msg.id)}
-                        t={t}
-                      />
-                      {pending}
-                    </Fragment>
-                  );
-                });
-              })()}
+              {transcriptElements}
 
               {/* Streaming: orchestration mode */}
               {orchState[activeDiscussion.id] && (() => {

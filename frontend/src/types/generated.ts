@@ -271,7 +271,13 @@ rtk_hook_configured: boolean,
  *
  * `None` means "no degradation detected, agent is healthy".
  */
-runtime_warning?: string | null, };
+runtime_warning?: string | null,
+/**
+ * Other copies of this CLI on PATH, shadowed by `path`, whose version
+ * differs from the one Kronn runs. The CLI resolves model aliases itself,
+ * so a stale shadowing copy silently changes the model an alias serves.
+ */
+shadowed_installs?: Array<ShadowedInstall>, };
 
 export type AgentProfile = { id: string, name: string, persona_name: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, is_builtin: boolean,
 /**
@@ -881,7 +887,7 @@ parent_run_sequence: number | null, };
  * value surfaces instead of being silently coerced. Variant names serialize to the
  * exact DB strings (snake_case) so `as_str` and the enum stay in lockstep.
  */
-export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere";
+export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere" | "integration_target_not_checked_out" | "integration_refused";
 
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 
@@ -6146,6 +6152,11 @@ export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agen
 scan_paths_explored: Array<string>, };
 
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
+
+/**
+ * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
+ */
+export type ShadowedInstall = { path: string, version: string, };
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
 

@@ -346,7 +346,7 @@ jobs:
 
       - name: Run document-sidecar build bootstrap tests
         working-directory: backend/sidecars/docs
-        run: python3 -m unittest test_build_bundle.py -v
+        run: python3 -m unittest test_build_bundle.py test_parent_watch.py -v
 
   # A Linux unit test cannot prove that CPython can load MSYS2's DLL graph.
   # Exercise the exact Windows release-sidecar path on every tested PR so a

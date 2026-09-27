@@ -19,6 +19,8 @@ while true; do /bin/sleep 0.1; done
 EOF
     cat >"$fixture/bin/watchexec" <<'EOF'
 #!/usr/bin/env bash
+# A real watched build replaces the binary; "unchanged" rebuilds nothing.
+[[ "${KRONN_TEST_REBUILD:-changed}" == unchanged ]] || printf '# rebuilt\n' >>"$KRONN_DEV_BACKEND_BINARY"
 kill -USR1 "$KRONN_DEV_BACKEND_SUPERVISOR_PID"
 trap 'exit 0' TERM INT
 while true; do /bin/sleep 0.1; done
@@ -69,7 +71,7 @@ bash "$1" >"$KRONN_TEST_FIXTURE/log" 2>&1 3>&- &
 supervisor=$!
 finished=0
 for ((attempt=0; attempt<1000; attempt++)); do
-    if grep -q 'Backend hot reload complete.' "$KRONN_TEST_FIXTURE/log"; then
+    if grep -qE 'Backend hot reload complete.|left the binary unchanged' "$KRONN_TEST_FIXTURE/log"; then
         kill -0 "$(cat "$KRONN_TEST_FIXTURE/backend-pid")" || exit 1
         kill -TERM "$supervisor"
         finished=1
@@ -101,6 +103,7 @@ run_readiness_case() {
         BASH_ENV="$fixture/clock" \
         KRONN_TEST_FIXTURE="$fixture" \
         KRONN_TEST_READY_CASE="$1" \
+        KRONN_TEST_REBUILD="${KRONN_TEST_REBUILD:-changed}" \
         KRONN_DEV_BACKEND_DIR="$fixture/backend" \
         KRONN_DEV_BACKEND_BINARY="$fixture/kronn" \
         KRONN_DEV_BACKEND_TARGET_DIR="$fixture/target" \
@@ -152,4 +155,14 @@ run_readiness_case() {
     assert_output --partial 'Backend exited before readiness after the hot-reload swap (exit 0)'
     assert_output --partial 'supervisor-status=1'
     [[ "$(cat "$fixture/failure")" -eq 1 ]]
+}
+
+@test "a watched build that leaves the binary unchanged keeps the backend running" {
+    KRONN_TEST_REBUILD=unchanged run_readiness_case slow
+    assert_success
+    assert_output --partial 'Backend build left the binary unchanged — keeping the running backend.'
+    refute_output --partial 'Backend build ready — restarting'
+    assert_output --partial 'supervisor-status=143'
+    [[ ! -e "$fixture/failure" ]]
+    [[ ! -e "$fixture/probes" ]]
 }

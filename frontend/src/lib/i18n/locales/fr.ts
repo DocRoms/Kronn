@@ -2770,6 +2770,7 @@ const fr: TranslationDict = {
   'liteLlm.catalogueUnavailableDesc': 'LiteLLM est joignable, mais Kronn n’a pas pu charger la liste des modèles.',
   'agentRuntimeWarning.vibe.sdk_fallback': 'SDK Vibe incompatible — Kronn bascule sur l\'API Mistral directe (réponses ~4s plus rapides mais sans outils locaux : bash, fichiers, MCP). Mets à jour `mistral-vibe` ou ignore.',
   'agentRuntimeWarning.vibe.project_config_untrusted': 'Confiance Vibe révoquée sur un dossier `.vibe` géré par Kronn — Vibe ne charge aucun de ses serveurs MCP alors que le fichier de config est bien là. Lance `vibe` dans le projet et accepte l\'invite de confiance, ou retire ce chemin de la liste `untrusted` dans `~/.vibe/trusted_folders.toml`.',
+  'agentRuntimeWarning.shadowedInstall': 'Kronn lance `{0}` ({1}), mais `{2}` ({3}) est aussi installé. Le CLI résout lui-même les alias de modèle (`opus`, `sonnet`…) : la version lancée décide du modèle servi. Supprime ou mets à jour la copie inutile, ou réordonne ton PATH, puis relance Kronn.',
   'app.updateAvailable': 'Kronn {0} → {1} disponible',
   'app.updateOpenRelease': 'Voir la release',
   'app.updateDismiss': 'Masquer cette notification jusqu\'à la prochaine version',

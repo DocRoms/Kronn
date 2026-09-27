@@ -11,8 +11,8 @@
 //!   on stdout — the sidecar prints this once uvicorn has bound.
 //! * Exposes `SidecarHandle` with the base URL so API handlers can
 //!   reqwest directly against `127.0.0.1:<port>`.
-//! * Kills the child on drop so we don't leak Python processes across
-//!   backend restarts.
+//! * Kills the child on drop, and holds its stdin pipe so the sidecar
+//!   exits by itself when the backend is killed outright.
 //!
 //! Graceful degradation: if neither a bundled executable nor the
 //! development virtualenv exists, we log a one-line hint and leave the
@@ -122,8 +122,13 @@ impl DocsSidecar {
                 cmd
             }
         };
+        // The child keeps our end of its stdin pipe open while we live. A
+        // SIGKILL or crash skips kill_on_drop, but the kernel still closes the
+        // pipe, and the sidecar exits on that EOF instead of being orphaned.
         cmd.env("KRONN_DOCS_PORT", port.to_string())
             .env("PYTHONUNBUFFERED", "1")
+            .env("KRONN_DOCS_EXIT_ON_STDIN_EOF", "1")
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
