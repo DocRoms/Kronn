@@ -33,7 +33,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::api::workflows::build_manual_trigger_obj;
 use crate::core::run_eta::{next_check_initial, next_check_polling, NextCheck};
 use crate::models::*;
 use crate::AppState;
@@ -108,57 +107,17 @@ pub struct McpTriggerWorkflowResponse {
 /// POST /api/mcp/workflow-trigger
 ///
 /// JSON wrapper around the existing `POST /api/workflows/:id/trigger`
-/// SSE handler. Creates the run + spawns the runner exactly like the
-/// UI route, but returns the run_id + smart-polling hint synchronously
-/// instead of streaming events.
+/// SSE handler. Creates the run through the same launcher as the UI route
+/// (variable preflight + encrypted snapshot + insert), but returns the
+/// run_id + smart-polling hint synchronously instead of streaming events.
 pub async fn workflow_trigger(
     State(state): State<AppState>,
     Json(req): Json<McpTriggerWorkflowRequest>,
 ) -> Json<ApiResponse<McpTriggerWorkflowResponse>> {
-    let wf_id = req.workflow_id.clone();
-    let wf = match state
-        .db
-        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
-        .await
-    {
-        Ok(Some(wf)) => wf,
-        Ok(None) => return Json(ApiResponse::err("Workflow not found")),
-        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
-    };
-
-    if !wf.enabled {
-        return Json(ApiResponse::err(
-            "Workflow is disabled — enable it in the UI before triggering",
-        ));
-    }
-
-    // Required-variable validation mirrors the existing trigger route.
-    for declared in &wf.variables {
-        if declared.required {
-            let val = req
-                .variables
-                .get(&declared.name)
-                .map(|s| s.trim())
-                .unwrap_or("");
-            if val.is_empty() {
-                let label = if declared.label.is_empty() {
-                    &declared.name
-                } else {
-                    &declared.label
-                };
-                return Json(ApiResponse::err(format!(
-                    "Variable « {} » est obligatoire pour lancer ce workflow.",
-                    label
-                )));
-            }
-        }
-    }
-    let trigger_obj = build_manual_trigger_obj(&req.variables, Utc::now());
-
     // Compute the smart-polling hint BEFORE we insert the new run, so
     // the sample count reflects only history (the new pending run
     // doesn't influence its own ETA).
-    let wf_id_for_avg = wf.id.clone();
+    let wf_id_for_avg = req.workflow_id.clone();
     let history = state
         .db
         .with_conn(move |conn| {
@@ -174,60 +133,17 @@ pub async fn workflow_trigger(
     let (expected_duration_ms, samples) = avg_workflow_duration_ms(&history);
     let next_check = next_check_initial(expected_duration_ms, samples);
 
-    let now = Utc::now();
-    let run = WorkflowRun {
-        id: Uuid::new_v4().to_string(),
-        workflow_id: wf.id.clone(),
-        status: RunStatus::Pending,
-        trigger_context: Some(serde_json::Value::Object(trigger_obj)),
-        step_results: vec![],
-        tokens_used: 0,
-        workspace_path: None,
-        started_at: now,
-        finished_at: None,
-        run_type: "linear".into(),
-        batch_total: 0,
-        batch_completed: 0,
-        batch_failed: 0,
-        batch_no_response: 0,
-        batch_name: None,
-        parent_run_id: None,
-        state: ::std::collections::HashMap::new(),
-        produced_branches: vec![],
-        parent_workflow_id: None,
-        parent_workflow_name: None,
-        parent_run_started_at: None,
-    };
-
-    let r = run.clone();
-    let limit = wf.concurrency_limit;
-    let wf_id_check = wf.id.clone();
-    match state
-        .db
-        .with_conn(move |conn| {
-            if let Some(max) = limit {
-                let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
-                if active >= max {
-                    anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
-                }
-            }
-            crate::db::workflows::insert_run(conn, &r)?;
-            Ok(())
-        })
-        .await
+    let (wf, run) = match crate::api::workflows::create_manual_run(
+        &state,
+        &req.workflow_id,
+        req.variables,
+        crate::core::launch_context::LaunchContext::default(),
+    )
+    .await
     {
-        Ok(()) => {}
-        Err(e) => {
-            let msg = e.to_string();
-            if let Some(rest) = msg.strip_prefix("CONCURRENCY_LIMIT:") {
-                return Json(ApiResponse::err(format!(
-                    "Concurrency limit reached ({})",
-                    rest
-                )));
-            }
-            return Json(ApiResponse::err(format!("DB error: {}", msg)));
-        }
-    }
+        Ok(created) => created,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
 
     tracing::info!(
         "MCP triggered workflow run {} for workflow {}",
@@ -235,43 +151,18 @@ pub async fn workflow_trigger(
         wf.name
     );
 
-    // Background dispatch — identical to the SSE route, just without
-    // an event sink. The runner persists status / step_results to the
-    // run row, which the GET status route reads back.
-    let state_for_run = state.clone();
-    let config = state.config.clone();
-    let wf_for_run = wf.clone();
-    let mut run_exec = run.clone();
-    tokio::spawn(async move {
-        let cfg = config.read().await;
-        let tokens = cfg.tokens.clone();
-        let agents = cfg.agents.clone();
-        drop(cfg);
-        if let Err(e) = crate::workflows::runner::execute_run(
-            state_for_run.clone(),
-            &wf_for_run,
-            &mut run_exec,
-            &tokens,
-            &agents,
-            None,
-            None, // top-level run → fresh shared budget
-            None, // top-level run → own worktree
-        )
-        .await
-        {
-            tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
-        }
-        // Agent-triggered runs are as unattended as cron runs — same webhook
-        // contract on a non-success terminal state (best-effort, bounded).
-        crate::core::run_notify::notify_if_failed(&state_for_run, &wf_for_run, &run_exec).await;
-    });
+    // Agent-triggered runs are as unattended as cron runs — same webhook
+    // contract on a non-success terminal state (best-effort, bounded).
+    let started_at = run.started_at;
+    let (run_id, workflow_id, workflow_name) = (run.id.clone(), wf.id.clone(), wf.name.clone());
+    crate::api::workflows::spawn_manual_run(&state, wf, run, None, true);
 
     Json(ApiResponse::ok(McpTriggerWorkflowResponse {
-        run_id: run.id,
-        workflow_id: wf.id,
-        workflow_name: wf.name,
+        run_id,
+        workflow_id,
+        workflow_name,
         status: "Pending".into(),
-        started_at: now,
+        started_at,
         expected_duration_ms,
         samples,
         next_check,

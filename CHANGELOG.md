@@ -75,6 +75,43 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A prelocalized rework no longer edits the launch line numbers on moved
+  content. When a delivery changed the file's line count, `request_changes`
+  replayed the same range and a local worker deleted the neighbouring rule.
+  Before a rework, a resume or a reassignment, Kronn now re-anchors the range
+  on the lines around it and tells the worker the new range; if anything
+  outside the range changed, it refuses with `stale range: …; relaunch with a
+  new worker_scope`, naming the launch range and the observed change.
+- A CLI task worker that runs `git commit` itself can no longer deliver a
+  commit carrying an invented identity. At delivery, every `Signed-off-by`,
+  `Co-Authored-By` or similar trailer in the delivered commits must name the
+  repository's git identity, the one `git commit -s` signs with; otherwise the
+  delivery is refused with the offending lines and how to fix them, before any
+  review or integration. Approval checks it again for deliveries accepted
+  earlier, and the CLI worker brief now asks for `git commit -s` and no
+  hand-written trailer.
+- A task execution no longer stays in `Applying` forever when another one lands
+  on the same target branch during its validations: Kronn rebuilds the candidate
+  on the new tip, validates it again and applies it (up to three times). Any
+  other refusal to apply, or a target that keeps moving, parks it in `Blocked`
+  with a reason code and a notice in the principal room; `task_exec_resume`
+  then continues from the real target.
+- A workflow with launch variables triggered from MCP (`workflow_trigger`) now
+  runs. That launcher never prepared the encrypted variable snapshot the UI
+  prepares, so the run died at start and stayed "Running" forever, counting
+  against the workflow's concurrency limit. MCP now goes through the UI's
+  launcher, a variable preflight failure is returned to the caller as with
+  `qp_run`, and a run whose execution errors in the background (MCP, UI,
+  schedule, tracker, resume) is marked Failed with the reason (KT-786).
+- Two workflows of one project that run in its main checkout and start at the
+  same moment (crons sharing a minute, for example) no longer make one of them
+  fail at once with "Refusing to run in the main checkout". The later run now
+  waits its turn, in arrival order, for up to 60 s
+  (`KRONN_MAIN_TREE_WAIT_SECS`) and stops waiting if it is cancelled; past that
+  delay the refusal names the run still holding the checkout. A workflow that
+  never writes the checkout can declare it (`workspace_config.main_tree_read_only`,
+  or "Does not write to the project checkout" in its advanced settings) and
+  then runs without taking this lock (KT-787).
 - A Live Page action whose workflow run was interrupted by a restart no longer
   stays "running" forever and blocks its row. The interruption now reaches
   the run's shared status, runs left in that state by earlier versions are

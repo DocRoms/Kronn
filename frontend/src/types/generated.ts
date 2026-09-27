@@ -887,7 +887,7 @@ parent_run_sequence: number | null, };
  * value surfaces instead of being silently coerced. Variant names serialize to the
  * exact DB strings (snake_case) so `as_str` and the enum stay in lockstep.
  */
-export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere" | "integration_target_not_checked_out" | "integration_refused";
+export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere" | "integration_target_not_checked_out" | "integration_refused" | "integration_target_drifted";
 
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 
@@ -7971,7 +7971,13 @@ export type WorkspaceConfig = { hooks: WorkspaceHooks,
  * reporting workflows. Legacy configs that declare workspace hooks still
  * request a worktree so those hooks do not silently stop running.
  */
-require_isolation: boolean, };
+require_isolation: boolean,
+/**
+ * Declares that the workflow never writes the project's checkout (it
+ * reads it, or works through absolute paths / page data), so its
+ * non-isolated runs skip the per-project exclusivity lock.
+ */
+main_tree_read_only?: boolean, };
 
 export type WorkspaceHistoryLease = { id: string, disc_id: string, session_pk: number, session_agent_type: string, session_id: string | null, canonical_path: string, branch: string, backup_ref: string, head_sha: string, acquired_at: string, expires_at: string, };
 

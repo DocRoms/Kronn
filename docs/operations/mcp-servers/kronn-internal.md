@@ -362,6 +362,10 @@ idempotency key after an uncertain response. Native HTTP workers receive a
 narrowed surface: no backlog mutation or execution-status lookup, and
 `task_exec_deliver` accepts only the manifest. They never merge, approve or
 close the task.
+Delivery refuses a commit whose `Signed-off-by`, `Co-Authored-By` or similar
+identity trailer names anyone but the repository's git identity; a CLI worker
+commits with `git commit -s` and never writes such a line by hand.
+`[src: file: backend/src/api/orchestration.rs]`
 The principal is either a CLI session joined to the room or the room's own
 native agent during its turn. For the latter Kronn injects
 `KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
