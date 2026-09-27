@@ -9956,8 +9956,16 @@ TOOL_MANUALS = {
         "supports that scope. Discussion, project and agent provenance are inherited."
     ),
     "audit_launch": (
-        "Runs detached; only a backend restart interrupts an audit, then `audit_status` reports "
-        "any `resume_run_id`."
+        "Call `audit_prepare` first and read its briefing status. A full audit runs the complete "
+        "pipeline; a partial audit requires explicit 1-based step indices. Every audit runs "
+        "detached on the backend: this bridge only subscribes to its SSE, so closing or "
+        "reloading this MCP does not interrupt it; only a backend restart does. Only one audit "
+        "may run per project.\n\n"
+        "Observe durable truth with `audit_status`. An interrupted full or specialized run may "
+        "resume by its reported `resume_run_id`; an interrupted partial is relaunched for its "
+        "stale scope. Successful full audits and fully successful partial audits create a "
+        "validation discussion. Missing briefing context lowers audit quality and should be "
+        "addressed in the UI when relevant."
     ),
     "qe_create_draft": (
         "**DISCOVER → TEST → PERSIST.** Call `qe_list` first. A Quick Exec is a "
