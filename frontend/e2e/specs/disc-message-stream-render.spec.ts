@@ -27,6 +27,7 @@
 import { test, expect } from '../fixtures/kronn-fixture';
 import type { Discussion, DiscussionMessage } from '../../src/types/generated';
 import { DashboardPage } from '../pages/DashboardPage';
+import { stubDiscussionPoll } from '../fixtures/discussion-poll';
 
 const DISC_ID = 'e2e-stream-disc';
 const SEED_USER_MSG = 'message de depart e2e';
@@ -106,17 +107,19 @@ test.describe('Discussion chat — streamed agent reply renders in the browser',
     });
 
     // Single-disc load (initial open + every post-send / 5s re-fetch).
+    const detail = () => mkDisc(sent
+      ? [mkMsg('User', SEED_USER_MSG, 'm-seed'), mkMsg('Agent', AGENT_REPLY, 'm-agent')]
+      : [mkMsg('User', SEED_USER_MSG, 'm-seed')]);
     await page.route(`**/api/discussions/${DISC_ID}`, route => {
       if (route.request().method() !== 'GET') return route.continue();
-      const messages = sent
-        ? [mkMsg('User', SEED_USER_MSG, 'm-seed'), mkMsg('Agent', AGENT_REPLY, 'm-agent')]
-        : [mkMsg('User', SEED_USER_MSG, 'm-seed')];
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: envelope(mkDisc(messages)),
+        body: envelope(detail()),
       });
     });
+    // The open discussion refreshes through its poll, not the full GET.
+    await stubDiscussionPoll(page, DISC_ID, detail);
 
     // The send: flip the flag, then stream the reply as SSE chunks. Three
     // chunks exercise the accumulation path (not a single-shot reply).

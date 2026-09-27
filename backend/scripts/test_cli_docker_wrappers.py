@@ -87,7 +87,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             )
             self.assertIsNotNone(match, job)
             section = match.group("section")
-            expected_timeout = 35 if job == "test-backend" else 30
+            # test-e2e waits on a cold release build before its suite runs.
+            expected_timeout = {"test-backend": 35, "test-e2e": 45}.get(job, 30)
             self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 
     def test_backend_slo_observer_is_non_blocking_and_uses_hot_cold_measurements(self):

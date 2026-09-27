@@ -7,10 +7,11 @@
 // from the other silently drops or adds that plate, which is how the shipped
 // desktop icons drifted from the mark in the first place.
 //
-// Shipped PNGs are compared byte for byte against a fresh render, so a
-// hand-edit or a resample fails and not only a visibly wrong icon. Images
-// embedded in the ICO and ICNS containers are written by the packaging tools,
-// so byte identity does not hold there; they are compared on decoded pixels.
+// Shipped web PNGs are compared byte for byte against a fresh render, so a
+// hand-edit or a resample fails and not only a visibly wrong icon. Desktop PNGs
+// must be RGBA for Tauri, which the renderer does not write for an opaque
+// plate, and images embedded in the ICO and ICNS containers are written by the
+// packaging tools: both are compared on exact decoded pixels instead.
 //
 // Usage: node scripts/check-app-icons.mjs [--verbose]
 // Requires the frontend dev dependencies (Playwright's bundled Chromium).
@@ -22,7 +23,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
-  ICNS_PNG_SIZES, ICO_REQUIRED_SIZES, diffRgba, missingEntries, parseIcns, parseIco,
+  ICNS_PNG_SIZES, ICO_REQUIRED_SIZES, PNG_RGBA, diffRgba, missingEntries, parseIcns, parseIco,
+  readPngPixelFormat,
 } from './icon-containers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -160,12 +162,23 @@ try {
   if (webAlpha.clear === 0) fail(`${WEB_SVG}: expected a transparent ground, every pixel is painted`);
   else say(`ok   ${WEB_SVG} keeps a transparent ground (${webAlpha.clear} clear px)`);
 
-  // ── Shipped PNGs: byte identity against a fresh render ──
+  // ── Shipped PNGs ──
+  // Web icons: byte identity against a fresh render. Desktop icons must be RGBA
+  // for Tauri, which Chromium's encoder never writes for this opaque plate, so
+  // they are compared on exact decoded pixels: a resample or a retouch still
+  // fails, a lossless re-encode does not.
   for (const [rel, [family, size]] of Object.entries(PNGS)) {
     const rendered = await render(family, size);
     const shipped = await readFile(`${root}/${rel}`);
     if (shipped.readUInt32BE(16) !== size || shipped.readUInt32BE(20) !== size) {
       fail(`${rel}: shipped file is ${shipped.readUInt32BE(16)}x${shipped.readUInt32BE(20)}, expected ${size}x${size}`);
+    } else if (family === 'desktop') {
+      const { bitDepth, colourType } = readPngPixelFormat(shipped, rel);
+      if (bitDepth !== 8 || colourType !== PNG_RGBA) {
+        fail(`${rel}: Tauri needs 8-bit RGBA, file is colour type ${colourType} at ${bitDepth} bits`);
+      } else {
+        await sameArtwork(shipped, family, size, rel);
+      }
     } else if (sha(rendered) !== sha(shipped)) {
       fail(`${rel}: shipped bytes do not match a fresh render of ${family === 'desktop' ? DESKTOP_SVG : WEB_SVG}`);
     } else {

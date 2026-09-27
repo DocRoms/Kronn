@@ -1073,9 +1073,18 @@ async fn execute_run_with_notify_policy(
                 .iter()
                 .filter(|s| matches!(s.step_type, StepType::Agent))
             {
-                let ok = usable
-                    .iter()
-                    .any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
+                // A LiteLLM proxy is a server the user declares, reachable
+                // anywhere: it needs no local `litellm` binary.
+                let declared_proxy = matches!(step.agent, crate::models::AgentType::LiteLlm)
+                    && agents_config
+                        .lite_llm
+                        .base_url
+                        .as_deref()
+                        .is_some_and(|url| !url.trim().is_empty());
+                let ok = declared_proxy
+                    || usable
+                        .iter()
+                        .any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
                 if !ok {
                     missing.push((step.name.clone(), format!("{:?}", step.agent)));
                 }

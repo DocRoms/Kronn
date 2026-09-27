@@ -493,7 +493,9 @@ jobs:
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble
       options: --user root
-    timeout-minutes: 30
+    # A cold release build takes ~17 min and the suite ~8-12 min on the runner:
+    # 30 min cancelled a green suite partway through.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 

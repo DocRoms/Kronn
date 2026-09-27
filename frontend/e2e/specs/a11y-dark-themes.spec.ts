@@ -38,6 +38,15 @@ const ROUTES: Route[] = [
 type ContrastNode = { target: string; fg?: string; bg?: string; ratio?: number; expected?: number };
 
 async function readOnly(page: Page, theme: string) {
+  // Every agent card rendered and RTK absent, whatever this machine has: the
+  // runner and a developer's laptop must measure the same screen.
+  await page.route('**/api/agents', async route => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const response = await route.fetch();
+    const json = await response.json();
+    for (const agent of json.data ?? []) Object.assign(agent, { installed: true, enabled: true, rtk_available: false });
+    await route.fulfill({ response, json });
+  });
   await page.addInitScript(([name, secret]) => {
     try {
       window.localStorage.setItem('kronn:tour-completed', 'true');

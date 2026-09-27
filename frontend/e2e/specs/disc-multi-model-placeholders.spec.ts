@@ -1,3 +1,4 @@
+import type { Route } from '@playwright/test';
 import { test, expect } from '../fixtures/kronn-fixture';
 import type {
   AgentDetection,
@@ -6,6 +7,7 @@ import type {
   SendMessageRequest,
 } from '../../src/types/generated';
 import { DashboardPage } from '../pages/DashboardPage';
+import { stubDiscussionPollFrom } from '../fixtures/discussion-poll';
 
 const DISC_ID = 'e2e-multi-model-disc';
 const USER_TEXT = 'Vous devriez connaître vos points forts et faibles.';
@@ -137,7 +139,7 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await page.route(`**/api/discussions/${DISC_ID}/native-agent`, route => route.fulfill({
       status: 200, contentType: 'application/json', body: envelope({ disabled: false }),
     }));
-    await page.route(`**/api/discussions/${DISC_ID}`, route => {
+    const discussionDetail = (route: Route) => {
       if (route.request().method() !== 'GET') return route.continue();
       const sent = sentBody as SendMessageRequest | null;
       const messages = [message('seed', 'User', 'Départ')];
@@ -155,7 +157,9 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
             : {},
         }),
       });
-    });
+    };
+    await page.route(`**/api/discussions/${DISC_ID}`, discussionDetail);
+    await stubDiscussionPollFrom(page, DISC_ID, discussionDetail);
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
@@ -247,7 +251,7 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await page.route(`**/api/discussions/${DISC_ID}/native-agent`, route => route.fulfill({
       status: 200, contentType: 'application/json', body: envelope({ disabled: false }),
     }));
-    await page.route(`**/api/discussions/${DISC_ID}`, route => {
+    const discussionDetail = (route: Route) => {
       if (route.request().method() !== 'GET') return route.continue();
       const elapsed = sentAt === 0 ? 0 : Date.now() - sentAt;
       const triggerId = sentBody?.client_message_id ?? null;
@@ -275,7 +279,9 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
           active_agent_dispatches: activeAgentDispatches,
         }),
       });
-    });
+    };
+    await page.route(`**/api/discussions/${DISC_ID}`, discussionDetail);
+    await stubDiscussionPollFrom(page, DISC_ID, discussionDetail);
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
@@ -369,7 +375,7 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await page.route(`**/api/discussions/${DISC_ID}/native-agent`, route => route.fulfill({
       status: 200, contentType: 'application/json', body: envelope({ disabled: false }),
     }));
-    await page.route(`**/api/discussions/${DISC_ID}`, route => {
+    const discussionDetail = (route: Route) => {
       if (route.request().method() !== 'GET') return route.continue();
       const elapsed = secondSentAt === 0 ? 0 : Date.now() - secondSentAt;
       const messages = [
@@ -399,7 +405,9 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
           active_agent_dispatches: active,
         }),
       });
-    });
+    };
+    await page.route(`**/api/discussions/${DISC_ID}`, discussionDetail);
+    await stubDiscussionPollFrom(page, DISC_ID, discussionDetail);
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
@@ -460,7 +468,7 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await page.route(`**/api/discussions/${DISC_ID}/native-agent`, route => route.fulfill({
       status: 200, contentType: 'application/json', body: envelope({ disabled: false }),
     }));
-    await page.route(`**/api/discussions/${DISC_ID}`, route => {
+    const discussionDetail = (route: Route) => {
       if (route.request().method() !== 'GET') return route.continue();
       if (detailLoadedAt === 0) detailLoadedAt = Date.now();
       const settled = Date.now() - detailLoadedAt >= 1_800;
@@ -485,7 +493,9 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
           }],
         }),
       });
-    });
+    };
+    await page.route(`**/api/discussions/${DISC_ID}`, discussionDetail);
+    await stubDiscussionPollFrom(page, DISC_ID, discussionDetail);
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
@@ -552,7 +562,7 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
         }),
       });
     });
-    await page.route(`**/api/discussions/${DISC_ID}`, route => {
+    const discussionDetail = (route: Route) => {
       if (route.request().method() !== 'GET') return route.continue();
       const failed = message('lite-error', 'System', errorContent(), 'LiteLlm', 'seed');
       failed.model = 'proxy-model';
@@ -570,7 +580,9 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
           }] : [],
         }),
       });
-    });
+    };
+    await page.route(`**/api/discussions/${DISC_ID}`, discussionDetail);
+    await stubDiscussionPollFrom(page, DISC_ID, discussionDetail);
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
