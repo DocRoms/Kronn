@@ -5,27 +5,25 @@ import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { usePersistentIdSet } from '../../hooks/usePersistentIdSet';
 import { usePersistentSidebarOpen } from '../../hooks/usePersistentSidebarOpen';
 import { userError } from '../../lib/userError';
-import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, PluginInterface, PluginKind } from '../../types/generated';
+import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, McpRescanReport, HostSyncMode, PluginInterface, PluginKind, Project } from '../../types/generated';
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { hasAgentScope, slugify } from './mcpPageHelpers';
+import { visibleToPluginProject } from './pluginHealth';
 
 const MCP_COLLAPSED_GROUPS_STORAGE_KEY = 'kronn:mcpCollapsedGroups';
-const MCP_STATIC_GROUPS = new Set(['favorites', 'projects', 'global', 'general', 'unassigned']);
 
 function readCollapsedMcpGroups(): Set<string> {
   try {
     const parsed = JSON.parse(localStorage.getItem(MCP_COLLAPSED_GROUPS_STORAGE_KEY) ?? '[]') as unknown;
     if (!Array.isArray(parsed)) return new Set();
-    return new Set(parsed.filter((group): group is string => (
-      typeof group === 'string'
-      && (MCP_STATIC_GROUPS.has(group) || group.startsWith('project:'))
-    )));
+    return new Set(parsed.filter((group): group is string => typeof group === 'string'));
   } catch {
     return new Set();
   }
 }
 
 interface UsePluginListStateArgs {
+  projects: Project[];
   mcpOverview: McpOverview;
   mcpRegistry: McpDefinition[];
   refetchMcps: () => void;
@@ -42,7 +40,7 @@ interface UsePluginListStateArgs {
  *  delete) and the derived `visibleConfigs` list. Split out of the
  *  monolithic `useMcpPageState` (KT-830) to stay under the page's
  *  per-file line budget — this is the "liste + fiche" half. */
-export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile }: UsePluginListStateArgs) {
+export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile }: UsePluginListStateArgs) {
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
 
@@ -72,8 +70,24 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     } catch { /* localStorage may be unavailable in private/restricted browser modes. */ }
   }, [collapsedMcpGroups]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const [selectedProjectId, setSelectedProjectId] = useState(() => {
+    try {
+      const saved = localStorage.getItem('kronn:mcpSelectedProject') ?? '__all__';
+      return saved === '__all__' || saved === '__none__' || projects.some(project => project.id === saved)
+        ? saved
+        : '__all__';
+    }
+    catch { return '__all__'; }
+  });
   const [syncing, setSyncing] = useState(false);
+  const [testingProjectId, setTestingProjectId] = useState<string | null>(null);
+  const [rescanPreview, setRescanPreview] = useState<McpRescanReport | null>(null);
   const [portabilityMode, setPortabilityMode] = useState<'export' | 'import' | null>(null);
+
+  useEffect(() => {
+    try { localStorage.setItem('kronn:mcpSelectedProject', selectedProjectId); }
+    catch { /* navigation preference remains in memory */ }
+  }, [selectedProjectId]);
 
   // Endpoints that keep failing, grouped by plugin. A spec is written once and
   // never re-checked against the API, so when it drifts nothing says so — this
@@ -95,6 +109,7 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     return () => { cancelled = true; };
   }, []);
   const [probeByConfig, setProbeByConfig] = useState<Record<string, McpProbeResponse>>({});
+  const [probeTestedAtByConfig, setProbeTestedAtByConfig] = useState<Record<string, string>>({});
   const [probingConfigId, setProbingConfigId] = useState<string | null>(null);
 
   const handleProbeConfig = useAsyncGuard(async (configId: string) => {
@@ -102,11 +117,68 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     try {
       const result = await mcpsApi.probeConfig(configId);
       setProbeByConfig(previous => ({ ...previous, [configId]: result }));
+      setProbeTestedAtByConfig(previous => ({ ...previous, [configId]: new Date().toISOString() }));
+      refetchMcps();
     } catch (error) {
       console.warn('Failed to probe plugin:', error);
       toast(t('mcp.probeFailed', userError(error)), 'error');
     } finally {
       setProbingConfigId(null);
+    }
+  });
+
+  const handleTestProject = useAsyncGuard(async (projectId: string, targets: McpConfigDisplay[]) => {
+    setTestingProjectId(projectId);
+    try {
+      const results = projectId === '__all__'
+        ? (await mcpsApi.testAll()).results
+        : await Promise.all(targets.map(async config => ({
+          config_id: config.id,
+          probe: await mcpsApi.probeConfig(config.id),
+        })));
+      const testedAt = new Date().toISOString();
+      setProbeByConfig(previous => ({
+        ...previous,
+        ...Object.fromEntries(results.map(result => [result.config_id, result.probe])),
+      }));
+      setProbeTestedAtByConfig(previous => ({
+        ...previous,
+        ...Object.fromEntries(results.map(result => [result.config_id, testedAt])),
+      }));
+      refetchMcps();
+      toast(t('mcp.projectTestComplete', results.length), 'success');
+    } catch (error) {
+      console.warn('Failed to test plugin project:', error);
+      toast(t('mcp.projectTestFailed', userError(error)), 'error');
+    } finally {
+      setTestingProjectId(null);
+    }
+  });
+
+  const handlePreviewRescan = useAsyncGuard(async () => {
+    setSyncing(true);
+    try {
+      setRescanPreview(await mcpsApi.refresh(true));
+    } catch (error) {
+      console.warn('Failed to preview MCP rescan:', error);
+      toast(t('mcp.rescanFailed', userError(error)), 'error');
+    } finally {
+      setSyncing(false);
+    }
+  });
+
+  const handleApplyRescan = useAsyncGuard(async () => {
+    setSyncing(true);
+    try {
+      const report = await mcpsApi.refresh(false);
+      setRescanPreview(null);
+      refetchMcps();
+      toast(t('mcp.rescanApplied', report.configs_created, report.configs_merged), 'success');
+    } catch (error) {
+      console.warn('Failed to apply MCP rescan:', error);
+      toast(t('mcp.rescanFailed', userError(error)), 'error');
+    } finally {
+      setSyncing(false);
     }
   });
 
@@ -130,26 +202,27 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
       refetchMcps();
     } catch (e) {
       console.warn('Failed to save label:', e);
+      toast(t('common.actionFailed', userError(e)), 'error');
     }
   };
 
-  const handleDeleteMcpConfig = async (configId: string) => {
-    // Pre-fix: this fired on click with no confirm and no toast — operators
-    // accidentally clicked the red Delete button (in a row of 3 actions on
-    // the detail header) and lost their MCP config + linked projects +
-    // env keys with no signal it had happened. Now an explicit native
-    // confirm is required (mirrors the QP / project / skill delete flow)
+  const handleDeleteMcpConfig = async (configId: string, confirmed = false): Promise<boolean> => {
+    // Row-menu deletion keeps the native confirm. The detail sheet owns its
+    // two-step danger-zone confirmation and passes `confirmed=true`; either
+    // path returns success so the caller only closes UI after persistence.
     // and the result is toasted so success/failure is visible.
     const cfg = mcpOverview.configs.find(c => c.id === configId);
     const label = cfg?.label ?? configId;
-    if (!confirm(t('mcp.deleteConfigConfirm', label))) return;
+    if (!confirmed && !confirm(t('mcp.deleteConfigConfirm', label))) return false;
     try {
       await mcpsApi.deleteConfig(configId);
       refetchMcps();
       toast(t('mcp.deleteConfigSuccess', label), 'success');
+      return true;
     } catch (e) {
       console.warn('Failed to delete MCP config:', e);
       toast(t('mcp.deleteConfigError', userError(e)), 'error');
+      return false;
     }
   };
 
@@ -285,6 +358,7 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
       refetchMcps();
     } catch (e) {
       console.warn('Failed to save secrets:', e);
+      toast(t('common.actionFailed', userError(e)), 'error');
     } finally {
       setEditingEnvLoading(false);
     }
@@ -322,6 +396,7 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
       setContextEditor(null);
     } catch (e) {
       console.warn('Failed to save context:', e);
+      toast(t('common.actionFailed', userError(e)), 'error');
     } finally {
       setContextSaving(false);
     }
@@ -379,17 +454,27 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
       return mcpSortReversed ? -result : result;
     });
 
+  const pluginSearchLabel = (config: McpConfigDisplay) => {
+    const visibleProjectNames = projects
+      .filter(project => visibleToPluginProject(config, project.id))
+      .map(project => project.name);
+    const noProject = visibleToPluginProject(config, '__none__') ? t('disc.noProject') : '';
+    return `${config.label} ${config.server_name} ${visibleProjectNames.join(' ')} ${noProject}`;
+  };
+  const query = mcpSearch.trim().toLocaleLowerCase();
+  const matchingConfigs = visibleConfigs.filter(config => (
+    !query || pluginSearchLabel(config).toLocaleLowerCase().includes(query)
+  ));
+
   const builtinMatchesList = (mcpKindFilter === 'all' || mcpKindFilter === 'mcp')
     && (!mcpSearch || t('mcp.builtin.tileTitle').toLowerCase().includes(mcpSearch.toLowerCase()));
 
   useEffect(() => {
-    const query = mcpSearch.trim().toLocaleLowerCase();
-    const selectedConfig = visibleConfigs.find(config => config.id === selectedConfigId);
-    const selectedMatchesQuery = selectedConfig && (!query || `${selectedConfig.label} ${selectedConfig.server_name} ${selectedConfig.project_names.join(' ')}`.toLocaleLowerCase().includes(query));
+    const selectedMatchesQuery = matchingConfigs.some(config => config.id === selectedConfigId);
     if (selectedConfigId && !selectedMatchesQuery) {
       setSelectedConfigId(null);
     }
-  }, [mcpSearch, selectedConfigId, visibleConfigs]);
+  }, [matchingConfigs, selectedConfigId]);
 
   return {
     editingLabelId, setEditingLabelId, editingLabelText, setEditingLabelText, handleSaveLabel,
@@ -398,10 +483,12 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     mcpKindFilter, setMcpKindFilter, mcpSearchPanel, setMcpSearchPanel,
     sidebarOpen, setSidebarOpen, collapsedMcpGroups, setCollapsedMcpGroups,
     selectedConfigIds, setSelectedConfigIds, favoriteConfigIds, toggleConfigFavorite,
-    selectedConfigId, setSelectedConfigId,
-    syncing, setSyncing, portabilityMode, setPortabilityMode,
+    selectedConfigId, setSelectedConfigId, selectedProjectId, setSelectedProjectId,
+    syncing, setSyncing, testingProjectId, rescanPreview, setRescanPreview,
+    handleTestProject, handlePreviewRescan, handleApplyRescan,
+    portabilityMode, setPortabilityMode,
 
-    driftBySlug, probeByConfig, probingConfigId, handleProbeConfig, handleSetPreferredInterface,
+    driftBySlug, probeByConfig, probeTestedAtByConfig, probingConfigId, handleProbeConfig, handleSetPreferredInterface,
 
     handleDeleteMcpConfig, handleDeleteSelectedMcpConfigs,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleSetHostSync, handleToggleConfigProject,
@@ -412,6 +499,6 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     contextEditor, setContextEditor, contextSaving, handleOpenContext, handleSaveContext,
 
     servers, configs, totalConfigs, globalConfigs, isBuiltinConfig, builtinConfig, builtinMatchesList,
-    visibleConfigs,
+    visibleConfigs, matchingConfigs, pluginSearchLabel,
   };
 }

@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import {
   Puzzle, Pencil, X, Trash2, Upload, Info, Plug, Check, Minus, RefreshCw,
-  Sparkles, Key, Terminal, ExternalLink, Save, Eye, FileText,
+  Sparkles, Key, Terminal, ExternalLink, Save, Eye, FileText, Download,
 } from 'lucide-react';
 import type { McpConfigDisplay, McpServer, PluginInterface } from '../../types/generated';
 import { linkify } from '../../lib/linkify';
@@ -8,6 +9,8 @@ import { pluginCredentialKeys } from '../../lib/pluginCredentials';
 import { CustomApiForm } from './CustomApiForm';
 import { PluginScopeEditor } from './PluginScopeEditor';
 import { slugify } from './mcpPageHelpers';
+import { accessHealth, diagnosticLabel } from './pluginHealth';
+import { PluginHealthBadge } from './PluginHealthBadge';
 import type { McpPageState } from './useMcpPageState';
 
 /**
@@ -21,6 +24,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
   const {
     t, projects, mcpOverview, mcpRegistry,
     probeByConfig, probingConfigId, handleProbeConfig,
+    probeTestedAtByConfig, driftBySlug,
     handleSetPreferredInterface,
     editingLabelId, editingLabelText, setEditingLabelId, setEditingLabelText, handleSaveLabel,
     editingCustomServerId,
@@ -28,12 +32,14 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     setCustomName, setCustomBaseUrl, setCustomDescription, setCustomDocsUrl,
     setCustomFields, setReplacingFields, setCustomEndpoints, setCustomAuth,
     setAddMcpGlobal, setAddMcpIncludeGeneral, setAddMcpProjectIds,
-    handleExportCustomPlugin, handleDeleteMcpConfig, setSelectedConfigId, resetAddMcp,
+    handleExportCustomPlugin, handleDeleteMcpConfig, setSelectedConfigId, resetAddMcp, setPortabilityMode,
     editingEnvId, setEditingEnvId, editingEnv, setEditingEnv, editingEnvLoading, editingEnvError, visibleFields, setVisibleFields,
     handleStartEditSecrets, handleSaveSecrets, toggleFieldVisibility,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleToggleConfigProject, handleSetHostSync,
     handleOpenContext,
   } = state;
+  const [activeTab, setActiveTab] = useState<'status' | 'access' | 'credentials' | 'advanced'>('status');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   // KT-828 — `effective_kind` is computed once server-side so it can't
   // drift from what the agent actually uses; hides host-sync UI on
@@ -61,6 +67,14 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
   // available_plugin_interfaces` / the `preferred_interface` clamp).
   const availableInterfaces: PluginInterface[] = cfg.interfaces;
   const effectivePreferredInterface = cfg.effective_preferred_interface;
+  const incompleteConfig = mcpOverview.incomplete_configs.find(item => item.config_id === cfg.id);
+  const endpointDrifts = driftBySlug[cfg.server_id] ?? [];
+  const accessHealthContext = {
+    liveProbe: probeResult,
+    liveTestedAt: probeTestedAtByConfig[cfg.id],
+    incomplete: incompleteConfig,
+    hasEndpointDrift: endpointDrifts.length > 0,
+  };
 
   // 0.8.6 (#29) — open the edit form pre-filled with the
   // current Custom plugin's spec. Shared between the Edit
@@ -178,20 +192,28 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
                   <Upload size={12} /> {t('mcp.custom.copyAsJson')}
                 </button>
               )}
-              <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(var(--kr-error-rgb), 0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
             </>
           )}
           <button className="mcp-icon-btn" onClick={closePluginModal} aria-label={t('common.close')}><X size={14} /></button>
         </div>
       </div>
-      <div className="mcp-detail-body">
+      {!isEditingThisCustom && <div className="mcp-detail-tabs" role="tablist" aria-label={t('mcp.detailTabs')}>
+        {(['status', 'access', 'credentials', 'advanced'] as const).map(tab => <button
+          type="button"
+          role="tab"
+          key={tab}
+          aria-selected={activeTab === tab}
+          onClick={() => setActiveTab(tab)}
+        >{t(`mcp.tab.${tab}`)}</button>)}
+      </div>}
+      <div className="mcp-detail-body" data-active-tab={activeTab}>
         {/* Refonte 2b — EDIT mode renders the hoisted custom
             form IN PLACE of the view body. ISO with MCP env
             editing: everything happens here, no jump to the
             top Add panel, no scroll. */}
         {isEditingThisCustom ? <CustomApiForm state={state} /> : (<>
         {cfg.registry_drift && (
-          <div className="mcp-registry-drift" role="status" data-testid="mcp-registry-drift">
+          <div className="mcp-registry-drift" role="status" data-testid="mcp-registry-drift" data-detail-tab="status">
             <Info size={16} aria-hidden="true" />
             <div>
               <strong>
@@ -216,7 +238,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             </div>
           </div>
         )}
-        <section className="mcp-detail-section mcp-interface-section">
+        <section className="mcp-detail-section mcp-interface-section" data-detail-tab="access">
           <h3 className="mcp-detail-section-title">
             <Plug size={12} /> {t('mcp.interfaces')}
           </h3>
@@ -259,8 +281,29 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
           <p className="mcp-interface-rule">
             {t('mcp.preferredInterfaceRule', t(`mcp.interface.${effectivePreferredInterface}`))}
           </p>
+          {availableInterfaces.includes('cli') && <div className="mcp-cli-prerequisites">
+            <h3 className="mcp-detail-section-title"><Terminal size={12} />{t('mcp.cliPrerequisites')}</h3>
+            <p>{t('mcp.cliPrerequisitesHint')}</p>
+            <PluginHealthBadge health={accessHealth(cfg, 'cli', accessHealthContext)} t={t} />
+          </div>}
         </section>
-        <section className="mcp-detail-section mcp-probe-section" data-testid="mcp-plugin-probe">
+        <section className="mcp-detail-section mcp-access-health-section" data-detail-tab="status" data-testid="mcp-access-health">
+          <h3 className="mcp-detail-section-title"><RefreshCw size={12} />{t('mcp.healthByAccess')}</h3>
+          <div className="mcp-access-health-list">
+            {availableInterfaces.map(pluginInterface => <div className="mcp-access-health-row" key={pluginInterface} data-access={pluginInterface}>
+              <span className="mcp-access-label">{t(`mcp.interface.${pluginInterface}`)}</span>
+              <PluginHealthBadge health={accessHealth(cfg, pluginInterface, accessHealthContext)} t={t} />
+              <button type="button" className="mcp-btn-action" onClick={() => handleProbeConfig(cfg.id)} disabled={isProbing}>
+                <RefreshCw size={12} className={isProbing ? 'spin' : undefined} />{t(isProbing ? 'mcp.probing' : 'mcp.runProbe')}
+              </button>
+            </div>)}
+          </div>
+          {endpointDrifts.map(drift => <div className="mcp-registry-drift" role="status" key={`${drift.endpoint_path}-${drift.http_status}`}>
+            <Info size={16} aria-hidden="true" />
+            <div><strong>{t('mcp.drift.short')}</strong><p>{t(drift.successes > 0 ? 'mcp.drift.sometimes' : 'mcp.drift.never', drift.failures, drift.endpoint_path, `HTTP ${drift.http_status}`)}</p></div>
+          </div>)}
+        </section>
+        <section className="mcp-detail-section mcp-probe-section" data-testid="mcp-plugin-probe" data-detail-tab="status">
           <div className="mcp-probe-heading">
             <div>
               <h3 className="mcp-detail-section-title">
@@ -310,7 +353,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
                         {translatedLabel === labelKey ? check.label : translatedLabel}
                         {!check.required && <small>{t('mcp.optional')}</small>}
                       </strong>
-                      <span>{check.detail}</span>
+                      <span>{diagnosticLabel(t, check.code)}</span>
                     </div>
                   </div>
                 );
@@ -325,7 +368,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             wired to fetch the docs_url + propose endpoints
             via KRONN:APPLY. */}
         {isLegacyCustomNoEndpoints && (
-          <div className="mcp-autodiscovery-banner" data-testid="mcp-autodiscovery-banner">
+          <div className="mcp-autodiscovery-banner" data-testid="mcp-autodiscovery-banner" data-detail-tab="access">
             <Info size={14} className="mcp-autodiscovery-banner-icon" />
             <div className="mcp-autodiscovery-banner-body">
               <strong>{t('mcp.custom.autodiscoveryTitle')}</strong>
@@ -340,6 +383,19 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             </button>
           </div>
         )}
+        <section className="mcp-detail-section mcp-credential-origin" data-detail-tab="credentials">
+          <h3 className="mcp-detail-section-title"><Key size={12} />{t('mcp.credentialOrigin')}</h3>
+          {availableInterfaces.map(pluginInterface => <div className="mcp-credential-origin-row" key={pluginInterface}>
+            <span className="mcp-access-label">{t(`mcp.interface.${pluginInterface}`)}</span>
+            <span>{t(cfg.credential_source === 'stored'
+              ? 'mcp.credentialOrigin.stored'
+              : cfg.credential_source === 'cli_token'
+                ? 'mcp.credentialOrigin.cliToken'
+                : pluginInterface === 'cli'
+                  ? 'mcp.credentialOrigin.cliOwn'
+                  : 'mcp.credentialOrigin.none')}</span>
+          </div>)}
+        </section>
         {(() => {
           // 0.8.6 — for Custom plugins, the SPEC's config_keys is
           // the forward-looking source of truth (follows rename via
@@ -361,7 +417,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
           if (isCustom) {
             if (cfg.env_keys.length === 0) return null;
             return (
-              <div className="mcp-detail-section">
+              <div className="mcp-detail-section" data-detail-tab="credentials">
                 <h3 className="mcp-detail-section-title">
                   <Key size={12} /> {t('mcp.envVars')}
                 </h3>
@@ -409,7 +465,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
           const displayEnvKeys = pluginCredentialKeys(def, cfg.env_keys);
           const hasAnything = displayEnvKeys.length > 0 || def?.token_help;
           return hasAnything ? (
-          <div className="mcp-detail-section mcp-credential-fields" data-kind={credentialKind}>
+          <div className="mcp-detail-section mcp-credential-fields" data-kind={credentialKind} data-detail-tab="credentials">
             <h3 className="mcp-detail-section-title">
               {credentialKind === 'cli' ? <Terminal size={12} /> : <Key size={12} />}
               {t(credentialKind === 'cli' ? 'mcp.credentials.cliTitle' : 'mcp.credentials.apiTitle')}
@@ -461,6 +517,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             bundle-import. API-only plugins get the "no CLI sync" note
             instead of the checkbox; hybrid plugins keep the checkbox
             with a note that it only affects the MCP side. */}
+        <div data-detail-tab="access">
         <PluginScopeEditor
           t={t}
           projects={projects}
@@ -492,6 +549,42 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             );
           }}
         />
+        </div>
+        <section className="mcp-detail-section mcp-advanced-section" data-detail-tab="advanced">
+          <div className="mcp-advanced-block">
+            <h3 className="mcp-detail-section-title"><FileText size={12} />{t('mcp.contextForAgent')}</h3>
+            <p>{t('mcp.contextForAgentHint')}</p>
+            <div className="mcp-advanced-actions">
+              {cfg.project_ids.map(projectId => {
+                const project = projects.find(item => item.id === projectId);
+                return project ? <button type="button" className="mcp-btn-action" key={projectId} onClick={() => handleOpenContext(projectId, project.name, cfg.label)}>{t('mcp.editContext', cfg.label, project.name)}</button> : null;
+              })}
+              {cfg.project_ids.length === 0 && <span className="mcp-meta">{t('mcp.noProjectContext')}</span>}
+            </div>
+          </div>
+          <div className="mcp-advanced-block">
+            <h3 className="mcp-detail-section-title"><Download size={12} />{t('mcp.sharePlugin')}</h3>
+            <div className="mcp-advanced-actions">
+              <button type="button" className="mcp-btn-action" onClick={() => setPortabilityMode('export')}><Download size={12} />{t('mcp.portability.export')}</button>
+              {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && <button type="button" className="mcp-btn-action" onClick={() => handleExportCustomPlugin(cfgServer as McpServer)}><Upload size={12} />{t('mcp.custom.copyAsJson')}</button>}
+            </div>
+          </div>
+          <div className="mcp-danger-zone">
+            <h3>{t('mcp.dangerZone')}</h3>
+            {!confirmingDelete ? <>
+              <p>{t('mcp.deleteDangerHint')}</p>
+              <button type="button" className="mcp-btn-action mcp-btn-danger" onClick={() => setConfirmingDelete(true)}><Trash2 size={12} />{t('mcp.deleteConfig')}</button>
+            </> : <>
+              <p>{t('mcp.deleteConfigConfirm', cfg.label)}</p>
+              <div className="mcp-advanced-actions">
+                <button type="button" className="mcp-btn-action mcp-btn-danger" onClick={async () => {
+                  if (await handleDeleteMcpConfig(cfg.id, true)) setSelectedConfigId(null);
+                }}>{t('mcp.deleteDefinitely')}</button>
+                <button type="button" className="mcp-btn-action" onClick={() => setConfirmingDelete(false)}>{t('mcp.cancel')}</button>
+              </div>
+            </>}
+          </div>
+        </section>
         </>)}
       </div>
     </aside>

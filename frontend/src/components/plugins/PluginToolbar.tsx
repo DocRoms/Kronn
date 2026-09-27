@@ -1,5 +1,4 @@
 import { Filter, ArrowUpDown, Download, Upload, RefreshCw } from 'lucide-react';
-import { mcps as mcpsApi } from '../../lib/api';
 import { ListControls } from '../ListControls';
 import type { McpPageState } from './useMcpPageState';
 
@@ -12,7 +11,7 @@ export function PluginToolbarPanel({ state }: { state: McpPageState }) {
     mcpKindFilter, setMcpKindFilter,
     mcpSort, setMcpSort, mcpSortReversed, setMcpSortReversed,
     servers, globalConfigs,
-    setPortabilityMode, syncing, setSyncing, refetchMcps,
+    setPortabilityMode, syncing, handlePreviewRescan, setSelectedConfigId,
   } = state;
 
   return (
@@ -62,7 +61,7 @@ export function PluginToolbarPanel({ state }: { state: McpPageState }) {
         <div className="mcp-collection-toolbar-actions">
           {totalConfigs > 0 && <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('export')} aria-label={t('mcp.portability.export')} title={t('mcp.portability.exportTitle')}><Download size={14} /></button>}
           <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('import')} aria-label={t('mcp.portability.import')} title={t('mcp.portability.importTitle')}><Upload size={14} /></button>
-          <button type="button" className="collection-shell-icon" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} aria-label={t('mcp.detect')} title={t('mcp.detect')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
+          <button type="button" className="collection-shell-icon" disabled={syncing} onClick={() => { setSelectedConfigId(null); void handlePreviewRescan(); }} aria-label={t('mcp.detect')} title={t('mcp.detect')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
         </div>
       </div>
     </>

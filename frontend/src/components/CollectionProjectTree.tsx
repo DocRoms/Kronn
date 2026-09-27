@@ -21,6 +21,8 @@ export interface CollectionProjectTreeProps<TItem> {
    *  zero, renders no pastille. Keys: `noProjectGroupKey`, `org::<name>`,
    *  and each project's id. */
   unseenByGroup?: ReadonlyMap<string, number>;
+  /** Optional semantic status marker rendered beside a group count. */
+  renderGroupStatus?: (groupKey: string) => ReactNode;
   /** Renders the rows for one group — `project` is `null` for the
    *  "no project" bucket. */
   renderGroup: (context: { project: Project | null; items: TItem[] }) => ReactNode;
@@ -35,6 +37,13 @@ export interface CollectionProjectTreeProps<TItem> {
   /** Group key for the "no project" bucket — callers keep their own
    *  collapse-state convention (Discussions reuses `'__global__'`). */
   noProjectGroupKey?: string;
+  /** Collection pages may keep empty project folders visible as navigation
+   * targets even before an item is assigned. Discussions keeps the default. */
+  showEmptyProjects?: boolean;
+  showEmptyNoProject?: boolean;
+  /** Optional project selection layered onto the shared collapse behavior. */
+  selectedProjectId?: string | null;
+  onSelectProject?: (projectId: string | null) => void;
 }
 
 const DEFAULT_NO_PROJECT_KEY = '__global__';
@@ -49,7 +58,8 @@ const DEFAULT_NO_PROJECT_KEY = '__global__';
  */
 export function CollectionProjectTree<TItem>({
   projects, items, getProjectId, isItemActive, collapsedGroups, onToggleGroup,
-  unseenByGroup, renderGroup, labels, noProjectIcon, noProjectGroupKey = DEFAULT_NO_PROJECT_KEY,
+  unseenByGroup, renderGroupStatus, renderGroup, labels, noProjectIcon, noProjectGroupKey = DEFAULT_NO_PROJECT_KEY,
+  showEmptyProjects = false, showEmptyNoProject = false, selectedProjectId, onSelectProject,
 }: CollectionProjectTreeProps<TItem>) {
   const itemsByProjectId = useMemo(() => {
     const map = new Map<string | null, TItem[]>();
@@ -64,8 +74,10 @@ export function CollectionProjectTree<TItem>({
 
   const noProjectItems = itemsByProjectId.get(null) ?? [];
   const visibleProjects = useMemo(
-    () => projects.filter(project => (itemsByProjectId.get(project.id) ?? []).length > 0),
-    [projects, itemsByProjectId],
+    () => showEmptyProjects
+      ? projects
+      : projects.filter(project => (itemsByProjectId.get(project.id) ?? []).length > 0),
+    [projects, itemsByProjectId, showEmptyProjects],
   );
 
   const localLabel = labels.local;
@@ -88,18 +100,24 @@ export function CollectionProjectTree<TItem>({
 
   return (
     <>
-      {noProjectItems.length > 0 && (
+      {(showEmptyNoProject || noProjectItems.length > 0) && (
         <div>
           <button
             type="button"
             className="disc-group-btn"
             data-no-border="true"
-            onClick={() => onToggleGroup(noProjectGroupKey)}
+            data-selected={selectedProjectId === null}
+            aria-current={selectedProjectId === null ? 'page' : undefined}
+            onClick={() => {
+              onSelectProject?.(null);
+              onToggleGroup(noProjectGroupKey);
+            }}
             aria-expanded={!collapsedGroups.has(noProjectGroupKey)}
           >
             <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedGroups.has(noProjectGroupKey)} />
             {noProjectIcon} {labels.noProject}
             <span className="disc-group-count">{noProjectItems.length}</span>
+            {renderGroupStatus?.(noProjectGroupKey)}
             {unseenFor(noProjectGroupKey) > 0 && (
               <span className="disc-group-unseen">{unseenFor(noProjectGroupKey)}</span>
             )}
@@ -126,6 +144,7 @@ export function CollectionProjectTree<TItem>({
                 <ChevronRight size={9} className="disc-chevron" data-expanded={!isOrgCollapsed} />
                 {orgName}
                 <span className="disc-group-count">{orgCount}</span>
+                {renderGroupStatus?.(orgKey)}
                 {unseenFor(orgKey) > 0 && <span className="disc-group-unseen">{unseenFor(orgKey)}</span>}
               </button>
             )}
@@ -137,12 +156,18 @@ export function CollectionProjectTree<TItem>({
                 <div key={project.id}>
                   <button
                     className="disc-group-btn"
-                    onClick={() => onToggleGroup(project.id)}
+                    data-selected={selectedProjectId === project.id}
+                    aria-current={selectedProjectId === project.id ? 'page' : undefined}
+                    onClick={() => {
+                      onSelectProject?.(project.id);
+                      onToggleGroup(project.id);
+                    }}
                     aria-expanded={!isCollapsed}
                   >
                     <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
                     <Folder size={10} /> {project.name}
                     <span className="disc-group-count">{projectItems.length}</span>
+                    {renderGroupStatus?.(project.id)}
                     {unseenFor(project.id) > 0 && <span className="disc-group-unseen">{unseenFor(project.id)}</span>}
                   </button>
                   {!isCollapsed && renderGroup({ project, items: projectItems })}
