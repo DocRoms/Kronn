@@ -36,6 +36,13 @@ pub(super) fn line_has_real_todo_marker(line: &str) -> bool {
         .any(|(i, _)| !line[..i].ends_with('`'))
 }
 
+/// A markdown table separator row (`|---|:---:|`), not a content row — the
+/// "filled" detector must count real table rows as content but still skip
+/// these so a doc that's just header + separator doesn't look non-empty.
+fn is_table_separator_line(trimmed: &str) -> bool {
+    trimmed.starts_with('|') && trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
 pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
     let project_path = scanner::resolve_host_path(project_path_str);
     let docs_dir = scanner::detect_docs_dir(&project_path);
@@ -69,18 +76,19 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
             let is_empty = content
                 .lines()
                 .filter(|l| {
-                    !l.trim().is_empty()
-                        && !l.starts_with('#')
-                        && !l.starts_with('>')
-                        && !l.starts_with("---")
-                        && !l.starts_with('|')
+                    let t = l.trim();
+                    !t.is_empty()
+                        && !t.starts_with('#')
+                        && !t.starts_with('>')
+                        && !t.starts_with("---")
+                        && !is_table_separator_line(t)
                 })
                 .count()
                 < 3;
 
             files.push(AuditFileInfo {
                 path: rel_str.clone(),
-                filled: !is_empty && !content.contains("{{"),
+                filled: !is_empty && !scanner::has_unfilled_placeholder(&content),
             });
 
             for (line_num, line) in content.lines().enumerate() {
@@ -107,8 +115,8 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
             let trimmed = line.trim();
             if !trimmed.starts_with('|')
                 || trimmed.starts_with("| ID")
-                || trimmed.starts_with("|--")
-                || trimmed.contains("{{")
+                || is_table_separator_line(trimmed)
+                || scanner::has_unfilled_placeholder(trimmed)
             {
                 continue;
             }
@@ -1060,6 +1068,71 @@ mod compute_audit_info_tests {
 
         let info = compute_audit_info_sync(dir.path().to_str().unwrap());
         assert_eq!(info.tech_debt_items.len(), 2);
+    }
+
+    // ── "filled" detector — no false negative on Twig / `${{ }}` / table-only docs ──
+
+    fn filled_flag_for(dir: &std::path::Path, filename: &str, content: &str) -> bool {
+        let docs = dir.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        fs::write(docs.join(filename), content).unwrap();
+        let info = compute_audit_info_sync(dir.to_str().unwrap());
+        info.files
+            .iter()
+            .find(|f| f.path.ends_with(filename))
+            .unwrap_or_else(|| panic!("{filename} not found in {:?}", info.files))
+            .filled
+    }
+
+    #[test]
+    fn filled_detector_ignores_twig_style_double_braces() {
+        let dir = tempdir().unwrap();
+        let content = "# Deployment\n\n\
+             This project renders `{{ user.name }}` in its Twig templates.\n\
+             It also documents `{{ some.other.expr }}` as an example.\n\
+             See `templates/base.html.twig` for the full layout.\n";
+        assert!(
+            filled_flag_for(dir.path(), "AGENTS.md", content),
+            "Twig-style `{{ expr }}` (lowercase/dotted) must not look like an unfilled placeholder"
+        );
+    }
+
+    #[test]
+    fn filled_detector_ignores_github_actions_secrets_interpolation() {
+        let dir = tempdir().unwrap();
+        let content = "# CI\n\n\
+             The workflow reads `${{ secrets.DEPLOY_TOKEN }}` from the environment.\n\
+             Another step uses `${{ steps.build.outputs.artifact }}` as input.\n\
+             The pipeline runs on every push to `main`.\n";
+        assert!(
+            filled_flag_for(dir.path(), "AGENTS.md", content),
+            "GitHub Actions `${{ secrets.FOO }}` interpolation must not look like an unfilled placeholder"
+        );
+    }
+
+    #[test]
+    fn filled_detector_still_flags_real_unfilled_placeholder() {
+        let dir = tempdir().unwrap();
+        let content = "# Overview\n\nProject: {{PROJECT_NAME}}\nOwner: {{OWNER_TEAM}}\n";
+        assert!(
+            !filled_flag_for(dir.path(), "AGENTS.md", content),
+            "a real `{{PROJECT_NAME}}`-shaped placeholder must still be caught"
+        );
+    }
+
+    #[test]
+    fn filled_detector_counts_a_doc_made_of_tables_as_filled() {
+        let dir = tempdir().unwrap();
+        let content = "# Endpoints\n\n\
+             | Route | Method | Description |\n\
+             |-------|--------|-------------|\n\
+             | /users | GET | List users |\n\
+             | /users/:id | GET | Fetch one user |\n\
+             | /orders | POST | Create an order |\n";
+        assert!(
+            filled_flag_for(dir.path(), "AGENTS.md", content),
+            "a doc whose real content lives in table rows must not be flagged empty"
+        );
     }
 
     // ── detect_project_skills — language + domain detection contract ──
