@@ -97,27 +97,9 @@ pub(crate) struct AnalysisStep {
 pub(crate) const ANTI_HALLU_SECTION_BODY: &str = "\
 ## 0. Anti-Hallucination Protocol\n\
 \n\
-You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:\n\
+Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.\n\
 \n\
-1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.\n\
-2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.\n\
-3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.\n\
-4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.\n\
-5. **NEVER ASSERT WITHOUT PROOF** — \"I don't know yet, let me check\" beats a fabrication every time.\n\
-\n\
-### Citation grammar (verified mechanically by Kronn when present)\n\
-\n\
-Attach a structured citation to every non-trivial assertion:\n\
-\n\
-- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`\n\
-- `[src: file: <path>:<start-end>]` — line range\n\
-- `[src: url: <url>]` — external doc\n\
-- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)\n\
-- `[src: commit: <sha>]` — git commit\n\
-\n\
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.\n\
-\n\
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.\n\
+Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).\n\
 ";
 
 /// 0.8.7 — Audit STEP 0 doctrine (used by the `apply_anti_hallu_section`
@@ -152,27 +134,9 @@ This is the FIRST step of the audit. Your job is to ensure `docs/AGENTS.md` carr
 <!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"<TODAY YYYY-MM-DD>\" -->\n\
 ## 0. Anti-Hallucination Protocol\n\
 \n\
-You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:\n\
+Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.\n\
 \n\
-1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.\n\
-2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.\n\
-3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.\n\
-4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.\n\
-5. **NEVER ASSERT WITHOUT PROOF** — \"I don't know yet, let me check\" beats a fabrication every time.\n\
-\n\
-### Citation grammar (verified mechanically by Kronn when present)\n\
-\n\
-Attach a structured citation to every non-trivial assertion:\n\
-\n\
-- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`\n\
-- `[src: file: <path>:<start-end>]` — line range\n\
-- `[src: url: <url>]` — external doc\n\
-- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)\n\
-- `[src: commit: <sha>]` — git commit\n\
-\n\
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.\n\
-\n\
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.\n\
+Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).\n\
 <!-- kronn:section:end -->\n\
 ```\n\
 \n\

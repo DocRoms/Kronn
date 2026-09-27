@@ -1718,8 +1718,12 @@ pub async fn full_audit(
 
         // ── Phase 2.6: Documentary optimization ──
         // Deterministic and token-free. It runs after generation/reconciliation
-        // and before validation so an oversized or broken mandatory context can
-        // never earn a completed audit or spawn a validation discussion.
+        // and before validation. Only an invented path (a link or citation to
+        // something that doesn't exist) is worth losing the whole run over —
+        // that's the one thing `blocking_diagnostics()` can still contain
+        // (KT-840). Volume, orphans, citation ranges and "obsolete" markers
+        // are surfaced as warnings on the SAME event and never gate
+        // completion.
         if run_is_complete && should_optimize_documents(kind) {
             let pp = project_path.clone();
             let optimization = tokio::task::spawn_blocking(move || {

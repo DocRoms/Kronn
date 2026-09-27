@@ -21,27 +21,9 @@
 <!-- kronn:section name="anti-hallu" curated="ai" audit="{{DATE}}" -->
 ## 0. Anti-Hallucination Protocol
 
-You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:
+Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.
 
-1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.
-2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.
-3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.
-4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.
-5. **NEVER ASSERT WITHOUT PROOF** — "I don't know yet, let me check" beats a fabrication every time.
-
-### Citation grammar (verified mechanically by Kronn when present)
-
-Attach a structured citation to every non-trivial assertion:
-
-- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`
-- `[src: file: <path>:<start-end>]` — line range
-- `[src: url: <url>]` — external doc
-- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)
-- `[src: commit: <sha>]` — git commit
-
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.
-
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
+Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).
 <!-- kronn:section:end -->
 
 ---

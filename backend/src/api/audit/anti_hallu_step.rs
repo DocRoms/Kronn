@@ -254,16 +254,23 @@ mod tests {
 
     /// The canonical body must always start with the H2 and end with the
     /// last sentence — no stray leading/trailing newlines that would break
-    /// the `<!-- kronn:section:end -->` placement.
+    /// the `<!-- kronn:section:end -->` placement. Kept to 2 lines plus a
+    /// link to the full spec (KT-840): the doctrine itself lives in
+    /// `docs/conventions/agents-md-format-v1.md`, not duplicated here.
     #[test]
     fn canonical_body_shape() {
         assert!(ANTI_HALLU_SECTION_BODY
             .trim_start()
             .starts_with("## 0. Anti-Hallucination Protocol"));
-        assert!(ANTI_HALLU_SECTION_BODY.contains("**READ THE CODE**"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("[src: file:"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("[src: url:"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("rejected as fabricated"));
+        assert!(ANTI_HALLU_SECTION_BODY.contains("conventions/agents-md-format-v1.md"));
+        let word_count = ANTI_HALLU_SECTION_BODY.split_whitespace().count();
+        assert!(
+            word_count < 90,
+            "body ballooned to {word_count} words — it must stay a short pointer to the full spec"
+        );
     }
 
     #[test]
