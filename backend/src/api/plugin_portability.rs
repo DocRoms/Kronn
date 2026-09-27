@@ -711,6 +711,8 @@ fn import_payload(
                 include_general: portable.include_general,
                 config_hash: String::new(),
                 project_ids: Vec::new(),
+                // Throwaway config, only used to compute value descriptors
+                // below — never inserted, so `host_sync` here is inert.
                 host_sync: HostSyncMode::None,
             },
         );
@@ -766,7 +768,12 @@ fn import_payload(
             env_keys,
             env_encrypted: encrypted,
             args_override: portable.args_override,
-            // Never broaden project/host exposure during import.
+            // Never broaden project/host exposure during import: `is_global`
+            // is reset above, and `host_sync` below is the documented
+            // default — `PortablePluginConfig` never carries a host_sync
+            // value (it's host-machine-specific, not portable across
+            // machines), so an import always starts unsynced regardless of
+            // what the source config's own host_sync was.
             is_global: false,
             include_general: portable.include_general,
             config_hash: hash,

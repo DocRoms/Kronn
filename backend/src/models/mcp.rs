@@ -346,6 +346,40 @@ pub enum PluginInterface {
     Cli,
 }
 
+/// Canonical classification of a plugin's invocation surface — the badge
+/// shown on its config card, computed once server-side (`registry::
+/// effective_plugin_kind`) from `transport` + `api_spec` + the registry's
+/// `cli` tag. Mirrors the bucketing order previously duplicated in the
+/// frontend: a CLI wrapper is `Cli` even when it also exposes MCP/API,
+/// because the CLI prerequisite is what the user needs to satisfy first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PluginKind {
+    #[default]
+    Mcp,
+    Api,
+    Hybrid,
+    Cli,
+}
+
+/// Where a plugin's outbound API credential actually comes from, computed
+/// once server-side (`registry::credential_source`) from `ApiAuthKind`.
+/// Independent of the registry's `cli` tag: Microsoft 365 uses `CliToken`
+/// (no stored env keys at all) but has no `cli` tag, so the old
+/// tag-based frontend guess mislabelled it as "credentials used by the
+/// API" (KT-821) — this field lets the badge say "no token stored"
+/// whenever the auth kind is actually `CliToken`, Fastly included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CredentialSource {
+    #[default]
+    Stored,
+    CliToken,
+    None,
+}
+
 /// Display-safe version of McpConfig (secrets masked)
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -377,6 +411,30 @@ pub struct McpConfigDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub registry_drift: Option<McpConfigRegistryDrift>,
+    /// Interfaces this plugin's server actually exposes (`registry::
+    /// available_plugin_interfaces`). Empty when the server row is missing
+    /// (orphaned config). The frontend reads this instead of rebuilding the
+    /// list from transport/api_spec/tags itself.
+    #[serde(default)]
+    pub interfaces: Vec<PluginInterface>,
+    /// Canonical badge classification — see `PluginKind`.
+    #[serde(default)]
+    pub effective_kind: PluginKind,
+    /// `preferred_interface` clamped to `interfaces`: falls back to the
+    /// first available interface (or `Mcp`) when a registry change made the
+    /// stored preference stale. What the agent will actually use.
+    #[serde(default)]
+    pub effective_preferred_interface: PluginInterface,
+    /// See `CredentialSource`.
+    #[serde(default)]
+    pub credential_source: CredentialSource,
+    /// Set to the pre-existing config's id when this response is the result
+    /// of re-adding an identical plugin: creation merged project scope into
+    /// that config instead of silently dropping the new request's label,
+    /// scope and CLI-exposure choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub merged_into_existing: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
