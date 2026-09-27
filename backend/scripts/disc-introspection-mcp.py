@@ -1623,9 +1623,10 @@ TOOLS = [
             "never guessing: plugin/config ids with `mcp_list`, bindings with "
             "their list tools, Quick APIs with `qa_list`, Quick Execs with "
             "`qe_list`, Pages with `page_list`. `step_type` is a tagged object, "
-            "closed set is: **Agent · ApiCall · BatchApiCall · "
-            "BatchQuickPrompt · Exec · Gate · Notify · JsonData · "
-            "CollectApiData · TransformData · PublishPageData · SubWorkflow**. "
+            "closed set is: **Agent, ApiCall, BatchApiCall, "
+            "BatchQuickPrompt, Exec, Gate, Notify, JsonData, "
+            "CollectApiData, TransformData, PublishPageData, SubWorkflow, "
+            "TriggerWorkflow**. "
             "Call `workflow_step_schema` before composing steps. Prefer adapting a real "
             "workflow via `workflow_get`/`workflow_clone`. Full authoring contract: "
             "`tool_manual({tool: \"workflow_create_draft\"})`. Returns the created JSON."
@@ -5575,6 +5576,56 @@ def _room_agent_context(tool_name):
     return {field: value[field].strip() for field in fields}
 
 
+_WORKFLOW_STEP_CONTEXT_ENV = "KRONN_WORKFLOW_STEP_CONTEXT"
+_WORKFLOW_STEP_MEMBERSHIP = {"state": None}
+
+
+def _workflow_step_context():
+    """A workflow Agent step's room capability, injected by the runner (KT-793).
+
+    Never in an input schema. Absent means no step room; malformed fails closed.
+    """
+    raw = os.environ.get(_WORKFLOW_STEP_CONTEXT_ENV)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("workflow step context is invalid") from error
+    fields = ("discussion_id", "run_id", "step_key", "capability")
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in fields
+    ):
+        raise RuntimeError("workflow step context is incomplete")
+    return {field: value[field].strip() for field in fields}
+
+
+def _ensure_workflow_step_membership():
+    """Join the step's room once, before its first Kronn tool runs, so the agent
+    is a member and principal there without an invite token. After an explicit
+    `disc_leave` it stays out."""
+    if _WORKFLOW_STEP_MEMBERSHIP["state"] is not None or _spawned_task_worker_mode():
+        return None
+    context = _workflow_step_context()
+    if context is None:
+        return None
+    agent_type = _agent_type_for_session()
+    session_id = _session_id_for_caller()
+    if not agent_type or agent_type == "Unknown" or not session_id:
+        raise RuntimeError("workflow step room: this bridge has no resolved agent identity")
+    result = _unwrap(_http("POST", "/api/discussions/workflow-step-join", {
+        "workflow_step": context,
+        "agent_type": agent_type,
+        "session_id": session_id,
+    }))
+    disc_id = result.get("disc_id") if isinstance(result, dict) else None
+    if disc_id != context["discussion_id"]:
+        raise RuntimeError("workflow step room: the backend joined another room")
+    _set_current_disc_id(disc_id)
+    _WORKFLOW_STEP_MEMBERSHIP["state"] = "joined"
+    return {"disc_id": disc_id, "self_alias": result.get("self_alias")}
+
+
 def _task_exec_principal(tool_name):
     """Principal identity fields for prepare/launch: the room's native agent
     when Kronn launched this bridge for it, otherwise the joined CLI session."""
@@ -6778,6 +6829,7 @@ def call_disc_leave(_args):
     # 0.9.0 — a deliberate leave drops the resume capability: the next
     # session must join explicitly, not silently reclaim this row.
     _clear_binding()
+    _WORKFLOW_STEP_MEMBERSHIP["state"] = "left"
     return result
 
 
@@ -8118,8 +8170,8 @@ def call_workflow_update(args):
         raise RuntimeError("workflow_update: missing required 'workflow_id'")
     patchable = (
         "name", "project_id", "trigger", "steps", "actions", "safety",
-        "workspace_config", "concurrency_limit", "guards", "artifacts",
-        "on_failure", "exec_allowlist", "variables", "enabled",
+        "workspace_config", "concurrency_limit", "concurrency_key", "guards",
+        "artifacts", "on_failure", "exec_allowlist", "variables", "enabled",
     )
     body = {k: args[k] for k in patchable if k in args}
     if not body:
@@ -9766,6 +9818,11 @@ TOOL_MANUALS = {
         "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
         "and 1-20 steps; optional project, variables, guards, failure chain, allowlist, "
         "artifacts, concurrency, safety, actions and workspace config.\n\n"
+        "`concurrency_key` (e.g. `\"{{ticketKey}}\"`, also accepted by `workflow_update`, "
+        "null clears it) makes `concurrency_limit` count runs per key rendered at launch: "
+        "runs with different keys overlap, a launch whose key is already at the limit is "
+        "refused. It needs `concurrency_limit` and may read only `user_input` variables, "
+        "never a `project_env`/`kronn_context` one, because the key is stored in clear.\n\n"
         "Each PromptVariable is `{name,label?,placeholder?,description?,required?,pattern?,"
         "source?,source_ref?,allow_manual_override?,control?}`. Omitted source means "
         "`user_input`. Use `project_env` with a declarative `<env.NAME>` reference only "
@@ -9777,6 +9834,11 @@ TOOL_MANUALS = {
         "format use tagged objects. `workflow_step_schema` is the canonical on-demand source "
         "for every field, example, output-piping rule and template namespace. In particular, "
         "SubWorkflow foreach uses `current_task.*` while batch fan-out uses `batch.item.*`. "
+        "SubWorkflow waits for its child in the same worktree and forbids cycles; "
+        "TriggerWorkflow launches an independent run (its own worktree, limit and "
+        "lifecycle) and continues at once, so loops between workflows are possible. Both "
+        "pass `sub_workflow_variables: {childVariable: template}`; a child's required "
+        "variables must be mapped. "
         "Every referenced plugin, binding, Quick API, Quick Exec and Page must come from its "
         "current list tool; unresolved bindings require asking the user, never guessing."
     ),
@@ -11162,6 +11224,7 @@ def _handle(req):
             if name == "disc_wait_for_peer":
                 preempted = None
             try:
+                joined_room = _ensure_workflow_step_membership()
                 data = fn(args)
             finally:
                 _CURRENT_RPC_SEQUENCE = previous_rpc_sequence
@@ -11183,6 +11246,8 @@ def _handle(req):
                 room = _room_peek_for_tool_result(name)
                 if room:
                     data["kronn_room"] = room
+            if joined_room and isinstance(data, dict):
+                data["kronn_room_joined"] = joined_room
             return _with_wait_preempted({
                 "jsonrpc": "2.0",
                 "id": rid,

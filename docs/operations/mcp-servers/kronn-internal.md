@@ -376,6 +376,21 @@ native agent during its turn. For the latter Kronn injects
 into the bridge environment; the backend accepts it only while that dispatch
 runs in the room, for the same provider, and never for a delegated worker's
 dispatch.
+A Claude Code or Codex workflow Agent step with a `room_id` (a template
+rendering to a discussion id) is principal of that room without a `kr-join`
+token; other providers have no bridge to carry it, so the step is refused. On
+every launch and every resume the runner injects `KRONN_WORKFLOW_STEP_CONTEXT`
+(room, run, step, capability); before the first Kronn tool, the bridge
+exchanges it at
+`POST /api/discussions/workflow-step-join` for an ordinary membership of its own
+CLI session. No tool schema carries it. The backend accepts it only while that
+step of that run is running in this process, for that room: another step, a
+finished run, another run or a restarted backend holds nothing it accepts. The
+membership ends with the step and at backend boot. Being a joined CLI, the step
+is pinned by `task_exec_launch` like any principal, so deliveries wake it, and
+a replayed step takes over the live executions its interrupted session steered.
+`[src: file: backend/src/workflows/step_room.rs]`
+`[src: file: backend/src/db/workflow_step_rooms.rs]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery

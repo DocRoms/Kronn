@@ -440,6 +440,26 @@ describe('WorkflowDetail — focused steps pipeline', () => {
     expect(container.querySelectorAll('.wf-step-card')).toHaveLength(2);
   });
 
+  it('shows a TriggerWorkflow step as a launch of its target with the mapped variables (KT-796)', async () => {
+    const target = { ...mkWorkflow([mkStep({ name: 'review' })]), id: 'phase-3', name: 'Phase 3' };
+    vi.mocked(workflowsApi.get).mockResolvedValueOnce(target);
+    renderDetail([
+      mkStep({
+        name: 'rework',
+        step_type: { type: 'TriggerWorkflow' },
+        sub_workflow_id: 'phase-3',
+        sub_workflow_variables: { ticketKey: '{{ticketKey}}' },
+      }),
+    ]);
+
+    // Without a provider, t() returns the key: the target's name shows in the badge.
+    expect(await screen.findByText('Phase 3')).toBeInTheDocument();
+    expect(screen.getByText('wf.triggerWorkflowLaunches')).toBeInTheDocument();
+    expect(screen.getAllByText('wiz.stepTypeTriggerWorkflow').length).toBeGreaterThan(0);
+    expect(screen.getByText('{{ticketKey}}')).toBeInTheDocument();
+    expect(screen.queryByTitle('wiz.testStep')).not.toBeInTheDocument();
+  });
+
   it('switches an Agent step directly from the compact pipeline', async () => {
     const onChangeStepAgent = vi.fn().mockResolvedValue(undefined);
     const { container } = renderDetail(mixedSteps, {

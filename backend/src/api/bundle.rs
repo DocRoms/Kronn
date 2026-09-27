@@ -257,6 +257,9 @@ pub async fn create_bundle(
         }),
         workspace_config: req.workflow.workspace_config.clone(),
         concurrency_limit: req.workflow.concurrency_limit,
+        concurrency_key: crate::workflows::concurrency::normalize_key(
+            req.workflow.concurrency_key.clone(),
+        ),
         guards: req.workflow.guards.clone(),
         artifacts: req.workflow.artifacts.clone(),
         on_failure: req.workflow.on_failure.clone(),
@@ -314,6 +317,9 @@ pub async fn create_bundle(
             }),
             workspace_config: creq.workspace_config.clone(),
             concurrency_limit: creq.concurrency_limit,
+            concurrency_key: crate::workflows::concurrency::normalize_key(
+                creq.concurrency_key.clone(),
+            ),
             guards: creq.guards.clone(),
             artifacts: creq.artifacts.clone(),
             on_failure: creq.on_failure.clone(),

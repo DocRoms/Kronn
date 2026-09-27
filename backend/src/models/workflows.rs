@@ -23,6 +23,10 @@ pub struct Workflow {
     pub safety: WorkflowSafety,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    /// Template rendered at launch from non-secret launch variables
+    /// (`{{ticketKey}}`): `concurrency_limit` then counts runs per rendered key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_key: Option<String>,
     /// Execution limits (timeout, LLM calls cap, loop detection). 0.7.0 —
     /// Phase 1 of the Auto-Dev workflow expansion. `None` = use the soft
     /// backend defaults (120 min wall-clock, 100 LLM calls, 10 revisits
@@ -663,6 +667,13 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_workflow_foreach_file: Option<String>,
 
+    /// For `SubWorkflow` and `TriggerWorkflow`: child launch variable name →
+    /// template rendered in this run. The child's snapshot is prepared from
+    /// these values like a manual launch's.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    #[ts(type = "Record<string, string>")]
+    pub sub_workflow_variables: std::collections::HashMap<String, String>,
+
     /// 2026-06-13 — "Multi-agent review" advanced option on an Agent step.
     /// When set, the step runs its own agent normally, THEN opens a shared
     /// Kronn discussion and invites a SECOND agent (a different model family,
@@ -673,6 +684,12 @@ pub struct WorkflowStep {
     /// back-and-forth rather than a file relay. `None` = plain Agent step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_review: Option<MultiAgentReviewConfig>,
+
+    /// KT-793 — Agent steps only: a template rendering to a discussion id. The
+    /// step's agent joins that room as its principal without an invite token,
+    /// on every launch and every resume of the step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
 }
 
 /// Config for the "Multi-agent review" option on an Agent step (see
@@ -930,6 +947,11 @@ pub enum StepType {
     /// step's status (→ the parent's `on_result` can branch on it), and its
     /// run id is recorded on the `StepResult.child_run_id` for drill-down.
     SubWorkflow,
+    /// Launch another workflow (`sub_workflow_id`) as an independent run and
+    /// continue at once. The child is created like a manual launch (variables
+    /// from `sub_workflow_variables`, its own concurrency limit) and records
+    /// this run as `triggered_by_run_id`; cycles between workflows are allowed.
+    TriggerWorkflow,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -1195,6 +1217,11 @@ pub struct WorkspaceConfig {
     /// non-isolated runs skip the per-project exclusivity lock.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub main_tree_read_only: bool,
+    /// Commit a fresh run's worktree starts from (`origin/main`, a tag, a SHA)
+    /// instead of the checkout's HEAD. A `<remote>/<branch>` value is fetched
+    /// first and a failed fetch refuses the run. Setting it requests a worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1295,6 +1322,13 @@ pub struct WorkflowRun {
     /// blocked, no auth, network down, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced_branches: Vec<ProducedBranch>,
+    /// The workflow's `concurrency_key` as rendered for this run at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_key: Option<String>,
+    /// The run whose `TriggerWorkflow` step launched this one. Unlike
+    /// `parent_run_id`, the two runs have independent lifecycles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggered_by_run_id: Option<String>,
     /// Provenance enrichment (DERIVED, not persisted). When this run is a
     /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
     /// workflow id + name + tick time so the UI can render
@@ -1588,6 +1622,8 @@ pub struct CreateWorkflowRequest {
     #[serde(default)]
     pub concurrency_limit: Option<u32>,
     #[serde(default)]
+    pub concurrency_key: Option<String>,
+    #[serde(default)]
     pub guards: Option<WorkflowGuards>,
     #[serde(default)]
     #[ts(type = "Record<string, ArtifactSpec>")]
@@ -1622,6 +1658,9 @@ pub struct UpdateWorkflowRequest {
     pub safety: Option<WorkflowSafety>,
     pub workspace_config: Option<WorkspaceConfig>,
     pub concurrency_limit: Option<u32>,
+    /// `null` clears the key; omitted keeps it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    pub concurrency_key: Option<Option<String>>,
     pub guards: Option<WorkflowGuards>,
     /// Replace the artifact map entirely when present. To clear all
     /// declarations, send `Some({})`. Omit the field to leave existing
@@ -1873,6 +1912,14 @@ mod step_deserialization_tests {
             serde_json::to_value(&legacy).unwrap(),
             serde_json::json!({"hooks": {}, "require_isolation": false}),
             "an unset flag is not serialized"
+        );
+        assert_eq!(legacy.base_ref, None, "no starting point by default");
+        let based: WorkspaceConfig =
+            serde_json::from_str(r#"{"hooks":{},"base_ref":"origin/main"}"#).unwrap();
+        assert_eq!(based.base_ref.as_deref(), Some("origin/main"));
+        assert_eq!(
+            serde_json::to_value(&based).unwrap()["base_ref"],
+            "origin/main"
         );
     }
 

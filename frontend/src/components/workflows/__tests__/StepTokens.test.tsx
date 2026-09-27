@@ -19,7 +19,7 @@ const result = (overrides: Partial<StepResult>): StepResult => ({
 describe('StepTokensBadge', () => {
   it('shows a measured count', () => {
     render(<StepTokensBadge sr={result({ tokens_used: 48213 })} t={t} className="x" />);
-    expect(screen.getByText(/48[,.  ]?213 wf\.stepTokensSuffix/)).toBeInTheDocument();
+    expect(screen.getByText(/48[,. \u202f]?213 wf\.stepTokensSuffix/)).toBeInTheDocument();
   });
 
   it('shows unknown instead of zero when the runtime reported no usage', () => {
