@@ -1260,8 +1260,12 @@ pub fn resolve_local_branch(repo_path: &Path, rev: &str) -> Result<String, Strin
     Ok(branch.to_string())
 }
 
-/// Resolve the checkout to mutate, not merely the repository containing its ref.
-pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<PathBuf, String> {
+/// Every worktree that has the local branch `target` checked out, with the
+/// resolved branch name. Integration needs exactly one of them.
+pub fn target_branch_checkouts(
+    repo_path: &Path,
+    target: &str,
+) -> Result<(String, Vec<PathBuf>), String> {
     let branch = resolve_local_branch(repo_path, target)?;
     let branch_field = format!("branch refs/heads/{branch}");
     let output = sync_cmd("git")
@@ -1287,6 +1291,12 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
             current_path = None;
         }
     }
+    Ok((branch, matches))
+}
+
+/// Resolve the checkout to mutate, not merely the repository containing its ref.
+pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<PathBuf, String> {
+    let (branch, matches) = target_branch_checkouts(repo_path, target)?;
     let [path] = matches.as_slice() else {
         return Err(format!(
             "integration target '{branch}' must have exactly one checked-out worktree (found {})",
@@ -1444,6 +1454,25 @@ pub fn fast_forward_target_to(
         return Err("integration target worktree became dirty before fast-forward".into());
     }
     fast_forward_to(&checkout, candidate_sha)
+}
+
+/// Whether `ancestor` is reachable from `descendant` (`git merge-base --is-ancestor`).
+pub fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    reject_option_like_rev(ancestor)?;
+    reject_option_like_rev(descendant)?;
+    let out = sync_cmd("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git merge-base failed: {e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "cannot compare {ancestor} with {descendant}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
 }
 
 /// Confirm a worktree's HEAD is exactly `expected_sha`.

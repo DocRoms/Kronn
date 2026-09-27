@@ -70,6 +70,38 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- In `kronn start-dev`, a build that writes generated sources under a
+  `target/` directory (another checkout's Cargo build, for example) no longer
+  restarts the backend and cuts the agents it is running. The file watcher now
+  ignores `target/`, and a watched build restarts the backend only when it
+  actually changed the binary.
+- The document exporter (`kronn-docs`) no longer outlives a backend that is
+  killed outright (crash, SIGKILL, a hot-reload restart that times out). It
+  now exits as soon as the backend's end of its stdin pipe closes, instead of
+  piling up orphaned processes across restarts. Development setups that use
+  the desktop bundle need `make docs-bundle` once to pick this up.
+- `kronn start-dev` no longer moves `/opt/homebrew/bin` and `~/.cargo/bin`
+  ahead of your own PATH; it adds them at the end, and only when missing. With a
+  second, older agent CLI installed through Homebrew/npm, Kronn used to run that
+  copy: an old Claude Code served `opus` as Opus 4.8 while the up-to-date CLI
+  serves Opus 5.5. The Agents settings now warn when another copy of a CLI with
+  a different version is on PATH, naming the path and version of each.
+- A long discussion left open no longer freezes the page every few seconds.
+  Unrelated refreshes (room links, the dashboard, background status) re-rendered
+  every message; the transcript is now reused while nothing it shows changed.
+  On a 2,000-message room at rest: from about 0.9 s pauses every 5 s to short
+  ones (production build: 0.9 s of long tasks per 20 s down to 0.35 s).
+- An approved task whose integration cannot start no longer sits silently in
+  `Approved`. When the target branch is checked out in no worktree (or in
+  several), or another precondition fails, the execution records why and the
+  principal room gets a notice naming the fix, for example
+  `git worktree add <path> <branch>`. The approval stays valid: once fixed,
+  resuming the execution or approving again starts the integration.
+- An execution interrupted while its merge was being applied can be resumed
+  again. If the merge had already landed, even with more commits on the target
+  since, resuming now closes it as done instead of staying `Interrupted`; if it
+  had not, resuming replays the apply safely. The recovery action Kronn
+  proposes is always one that resume accepts.
 - The Automations list no longer waits on a scan of every workflow run to find
   each workflow's latest one. A `(workflow_id, started_at)` index answers it
   directly: on a 7 GB database, from 0.85–3.7 s to 19 ms.

@@ -218,9 +218,10 @@ cmd_start_dev() {
     # from the shell rc — frequently it isn't), and Homebrew into /opt/homebrew/bin.
     # Make those resolvable for BOTH the preflight checks below AND the `make`
     # children we spawn, so `kronn start-dev` works without requiring the user to
-    # have wired their rc. We prepend only if the dir exists; harmless elsewhere.
-    [[ -d "$HOME/.cargo/bin" ]] && PATH="$HOME/.cargo/bin:$PATH"
-    [[ -d "/opt/homebrew/bin" ]] && PATH="/opt/homebrew/bin:$PATH"
+    # have wired their rc. Appended only when missing: the user's order decides
+    # which agent CLI the backend runs when several copies are installed.
+    [[ -d "$HOME/.cargo/bin" ]] && PATH="$(path_append_missing "$PATH" "$HOME/.cargo/bin")"
+    [[ -d "/opt/homebrew/bin" ]] && PATH="$(path_append_missing "$PATH" "/opt/homebrew/bin")"
     export PATH
 
     # Preflight: native mode needs Rust (cargo) + Node + pnpm on the host. The

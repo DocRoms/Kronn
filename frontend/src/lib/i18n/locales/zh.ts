@@ -2729,6 +2729,7 @@ const zh: TranslationDict = {
   "liteLlm.catalogueUnavailableDesc": "LiteLLM 可以访问，但 Kronn 无法加载模型列表。",
   "agentRuntimeWarning.vibe.sdk_fallback": "Vibe SDK 不兼容 — Kronn 回退到直接使用 Mistral API（约快 4 秒，但无本地工具：bash、文件、MCP）。升级 `mistral-vibe` 或忽略。",
   "agentRuntimeWarning.vibe.project_config_untrusted": "Vibe 工作区信任已撤销（Kronn 管理的 `.vibe` 文件夹）— Vibe 即使配置文件存在也不会加载其 MCP 服务器。请在项目中运行 `vibe` 并接受信任提示，或从 `~/.vibe/trusted_folders.toml` 的 `untrusted` 中删除该路径。",
+  "agentRuntimeWarning.shadowedInstall": "Kronn 运行的是 `{0}`（{1}），但系统中还安装了 `{2}`（{3}）。模型别名（`opus`、`sonnet` 等）由 CLI 自行解析，因此 Kronn 运行的版本决定实际使用的模型。请删除或更新多余的副本，或调整 PATH 顺序，然后重启 Kronn。",
   "app.updateAvailable": "Kronn {0} → {1} 可用",
   "app.updateOpenRelease": "查看发布",
   "app.updateDismiss": "直到下一个版本",

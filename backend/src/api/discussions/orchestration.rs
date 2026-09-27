@@ -1962,6 +1962,7 @@ mod orchestrate_validation_tests {
             rtk_available: false,
             rtk_hook_configured: false,
             runtime_warning: None,
+            shadowed_installs: None,
         }
     }
 
