@@ -13,7 +13,7 @@ export function McpPage(props: McpPageProps) {
     exportPayload, exportCopyState, exportTextareaRef,
     closeExportModal, handleExportRetryCopy, handleExportDownloadFile,
     portabilityMode, setPortabilityMode, configs, projects, refetchMcps,
-    mcpOverview, setSelectedConfigId,
+    mcpOverview, mcpRegistry, setSelectedConfigId,
     contextEditor, setContextEditor, contextSaving, handleSaveContext,
   } = state;
 
@@ -103,6 +103,7 @@ export function McpPage(props: McpPageProps) {
         <PluginPortabilityModal
           mode={portabilityMode}
           configs={configs}
+          registry={mcpRegistry}
           projects={projects}
           onClose={() => setPortabilityMode(null)}
           onImported={() => {

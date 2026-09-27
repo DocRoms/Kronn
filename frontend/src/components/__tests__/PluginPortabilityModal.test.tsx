@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
-import type { McpConfigDisplay, PluginBundlePreview, Project } from '../../types/generated';
+import type { McpConfigDisplay, McpDefinition, PluginBundlePreview, Project } from '../../types/generated';
 
 const mocks = vi.hoisted(() => ({
   previewBundle: vi.fn(),
@@ -78,13 +78,28 @@ const preview: PluginBundlePreview = {
 const project = {
   id: 'project-1',
   name: 'Website',
+  path: '/repos/website',
 } as Project;
+
+const registry: McpDefinition[] = [{
+  id: 'mcp-fastly',
+  name: 'Fastly',
+  description: 'Fastly MCP',
+  transport: { Stdio: { command: 'fastly-mcp', args: [] } },
+  env_keys: [],
+  tags: [],
+  token_url: null,
+  token_help: null,
+  publisher: 'Fastly',
+  official: true,
+}];
 
 const renderModal = (mode: 'export' | 'import') => render(
   <I18nProvider>
     <PluginPortabilityModal
       mode={mode}
       configs={[config]}
+      registry={registry}
       projects={[project]}
       onClose={vi.fn()}
       onImported={vi.fn()}
@@ -195,9 +210,9 @@ describe('PluginPortabilityModal', () => {
       content: expect.stringContaining('"kind":"kronn.plugins"'),
       passphrase: 'long-passphrase',
     }));
-    expect(screen.getByRole('checkbox', {
-      name: /Global — tous les projets/,
-    })).toBeChecked();
+    expect(screen.getByRole('button', {
+      name: 'Tous les projets',
+    })).toHaveClass('mcp-project-toggle-on');
     expect(mocks.updateConfig).not.toHaveBeenCalled();
   });
 
@@ -241,13 +256,65 @@ describe('PluginPortabilityModal', () => {
     expect(mocks.updateConfig).not.toHaveBeenCalled();
     fireEvent.click(finish);
 
+    // `configs` (unchanged in this test) never carries `imported-1`, so
+    // `includeGeneral` falls back to `false` — the safe "don't guess a
+    // broader visibility than what's on screen" default (KT-831).
     await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith(
       'imported-1',
-      { is_global: true },
+      { is_global: true, include_general: false, host_sync: 'None' },
     ));
     expect(mocks.setConfigProjects).toHaveBeenCalledWith('imported-1', {
       project_ids: [],
     });
+  });
+
+  it('closing the import before "Appliquer la portée" still applies the displayed default scope (no orphan config, KT-352)', async () => {
+    mocks.importBundle.mockResolvedValue({
+      bundle_id: 'bundle-3',
+      already_imported: false,
+      imported_config_ids: ['imported-3'],
+      imported_configs: [{
+        config_id: 'imported-3',
+        server_id: 'api-fastly',
+        label: 'Fastly preprod',
+        server_name: 'Fastly',
+      }],
+      skipped_plugins: 0,
+      includes_values: false,
+      warnings: [],
+      conflicts: [],
+    });
+    mocks.updateConfig.mockResolvedValue(config);
+    mocks.setConfigProjects.mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    render(
+      <I18nProvider>
+        <PluginPortabilityModal mode="import" configs={[config]} registry={registry} projects={[project]} onClose={onClose} onImported={vi.fn()} />
+      </I18nProvider>,
+    );
+    const bundle = new File(
+      [JSON.stringify({ kind: 'kronn.plugins', encrypted: false, plugin_labels: ['Fastly preprod'] })],
+      'fastly.kronn-plugins.json',
+      { type: 'application/json' },
+    );
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [bundle] },
+    });
+    await screen.findByRole('button', { name: 'Importer le bundle' });
+    fireEvent.click(screen.getByRole('button', { name: 'Importer le bundle' }));
+    await screen.findByRole('button', { name: /Appliquer la portée et terminer/ });
+
+    // Close via the header X — the operator never clicked "Appliquer".
+    fireEvent.click(screen.getByLabelText('Fermer'));
+
+    await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith(
+      'imported-3',
+      { is_global: true, include_general: false, host_sync: 'None' },
+    ));
+    expect(mocks.setConfigProjects).toHaveBeenCalledWith('imported-3', {
+      project_ids: [],
+    });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
   it('can replace the default global scope with selected projects', async () => {
@@ -278,17 +345,94 @@ describe('PluginPortabilityModal', () => {
       target: { files: [bundle] },
     });
     fireEvent.click(await screen.findByRole('button', { name: 'Importer le bundle' }));
-    const global = await screen.findByRole('checkbox', { name: /Global — tous les projets/ });
+    const global = await screen.findByRole('button', { name: 'Tous les projets' });
     fireEvent.click(global);
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Website' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Website' }));
     fireEvent.click(screen.getByRole('button', { name: /Appliquer la portée et terminer/ }));
 
     await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith(
       'imported-2',
-      { is_global: false },
+      { is_global: false, include_general: false, host_sync: 'None' },
     ));
     expect(mocks.setConfigProjects).toHaveBeenCalledWith('imported-2', {
       project_ids: ['project-1'],
     });
+  });
+
+  it('lets an imported MCP opt into local CLIs and persists that choice', async () => {
+    mocks.importBundle.mockResolvedValue({
+      bundle_id: 'bundle-mcp',
+      already_imported: false,
+      imported_config_ids: ['imported-mcp'],
+      imported_configs: [{
+        config_id: 'imported-mcp',
+        server_id: 'mcp-fastly',
+        label: 'Fastly MCP',
+        server_name: 'Fastly',
+      }],
+      skipped_plugins: 0,
+      includes_values: false,
+      warnings: [],
+      conflicts: [],
+    });
+    mocks.updateConfig.mockResolvedValue(config);
+    mocks.setConfigProjects.mockResolvedValue(undefined);
+    renderModal('import');
+    const bundle = new File(
+      [JSON.stringify({ kind: 'kronn.plugins', encrypted: false, plugin_labels: ['Fastly MCP'] })],
+      'fastly-mcp.kronn-plugins.json',
+      { type: 'application/json' },
+    );
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [bundle] },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Importer le bundle' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Aussi disponible dans mes CLIs locaux' }));
+    expect(screen.getByText(/~\/\.claude\.json/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /Appliquer la portée et terminer/ }));
+
+    await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith(
+      'imported-mcp',
+      { is_global: true, include_general: false, host_sync: 'GlobalOnly' },
+    ));
+  });
+
+  it('keeps the import open when close cannot persist the displayed scope', async () => {
+    mocks.importBundle.mockResolvedValue({
+      bundle_id: 'bundle-failure',
+      already_imported: false,
+      imported_config_ids: ['imported-failure'],
+      imported_configs: [{
+        config_id: 'imported-failure',
+        server_id: 'api-fastly',
+        label: 'Fastly failure',
+        server_name: 'Fastly',
+      }],
+      skipped_plugins: 0,
+      includes_values: false,
+      warnings: [],
+      conflicts: [],
+    });
+    mocks.updateConfig.mockRejectedValueOnce(new Error('scope write failed'));
+    const onClose = vi.fn();
+    render(
+      <I18nProvider>
+        <PluginPortabilityModal mode="import" configs={[config]} registry={registry} projects={[project]} onClose={onClose} onImported={vi.fn()} />
+      </I18nProvider>,
+    );
+    const bundle = new File(
+      [JSON.stringify({ kind: 'kronn.plugins', encrypted: false, plugin_labels: ['Fastly failure'] })],
+      'fastly-failure.kronn-plugins.json',
+      { type: 'application/json' },
+    );
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [bundle] },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Importer le bundle' }));
+    await screen.findByRole('button', { name: /Appliquer la portée et terminer/ });
+    fireEvent.click(screen.getByLabelText('Fermer'));
+
+    expect(await screen.findByText('scope write failed')).toBeVisible();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

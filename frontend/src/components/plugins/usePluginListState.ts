@@ -122,9 +122,6 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     },
   );
 
-  // "Show more" for project toggles per config
-  const [expandedProjectLists, setExpandedProjectLists] = useState<Set<string>>(new Set());
-
   const handleSaveLabel = async (configId: string) => {
     if (!editingLabelText.trim()) return;
     try {
@@ -405,8 +402,6 @@ export function usePluginListState({ mcpOverview, mcpRegistry, refetchMcps, favo
     syncing, setSyncing, portabilityMode, setPortabilityMode,
 
     driftBySlug, probeByConfig, probingConfigId, handleProbeConfig, handleSetPreferredInterface,
-
-    expandedProjectLists, setExpandedProjectLists,
 
     handleDeleteMcpConfig, handleDeleteSelectedMcpConfigs,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleSetHostSync, handleToggleConfigProject,

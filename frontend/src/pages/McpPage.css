@@ -1125,6 +1125,7 @@
 
 .mcp-toggle-label {
   font-size: var(--kr-fs-sm);
+  font-family: inherit;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;

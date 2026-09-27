@@ -84,12 +84,12 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
 
   const {
     setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv,
-    setAddMcpGlobal, setAddMcpHostSync, setAddMcpSearch, addMcpRef,
+    setAddMcpGlobal, setAddMcpProjectIds, setAddMcpIncludeGeneral, setAddMcpHostSync, setAddMcpSearch, addMcpRef,
   } = addRegistry;
   const {
     setCustomName, setCustomBaseUrl, setCustomDescription, setCustomDocsUrl,
     setCustomFields, setCustomEndpoints, setEditingCustomServerId,
-    setEditingCustomConfigId, setCustomAuth, setReplacingFields,
+    setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
   } = customForm;
   const { setImportJsonText, setImportJsonError } = portability;
 
@@ -99,6 +99,8 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     setAddMcpLabel('');
     setAddMcpEnv({});
     setAddMcpGlobal(false);
+    setAddMcpProjectIds([]);
+    setAddMcpIncludeGeneral(true);
     setAddMcpHostSync(false);
     setAddMcpSearch('');
     setCustomName('');
@@ -109,15 +111,17 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     setCustomEndpoints([]);
     setEditingCustomServerId(null);
     setEditingCustomConfigId(null);
+    setEditingCustomOriginalScope(null);
     setCustomAuth('None');
     setReplacingFields(new Set());
     setImportJsonText('');
     setImportJsonError(null);
   }, [
-    setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv, setAddMcpGlobal,
-    setAddMcpHostSync, setAddMcpSearch, setCustomName, setCustomBaseUrl, setCustomDescription,
+    setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv, setAddMcpGlobal, setAddMcpProjectIds,
+    setAddMcpIncludeGeneral, setAddMcpHostSync, setAddMcpSearch, setCustomName, setCustomBaseUrl, setCustomDescription,
     setCustomDocsUrl, setCustomFields, setCustomEndpoints, setEditingCustomServerId,
-    setEditingCustomConfigId, setCustomAuth, setReplacingFields, setImportJsonText, setImportJsonError,
+    setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
+    setImportJsonText, setImportJsonError,
   ]);
   // Portability handlers are built before `resetAddMcp` exists; they reach it through this ref.
   useEffect(() => {
@@ -146,9 +150,32 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     }
   };
 
+  // KT-831 — "open the fiche of what I just added". `refetchMcps` isn't
+  // awaitable (`() => void`) and the freshly created config isn't in
+  // `mcpOverview.configs` on the render right after `createConfig`
+  // resolves — selecting it immediately would race the existing
+  // search/no-longer-in-list deselect guard in `usePluginListState`
+  // (empty selectedConfig lookup ⇒ instant `setSelectedConfigId(null)`).
+  // Defer the selection until the id actually shows up post-refetch.
+  const pendingSelectConfigIdRef = useRef<string | null>(null);
+  const { selectedConfigId, setSelectedConfigId, setMcpSearch, setMcpKindFilter } = list;
+  useEffect(() => {
+    const pendingId = pendingSelectConfigIdRef.current;
+    if (!pendingId || !mcpOverview.configs.some(c => c.id === pendingId)) return;
+    pendingSelectConfigIdRef.current = null;
+    queueMicrotask(() => {
+      setMcpSearch('');
+      setMcpKindFilter('all');
+      setSelectedConfigId(pendingId);
+    });
+  }, [mcpOverview.configs, setMcpKindFilter, setMcpSearch, setSelectedConfigId]);
+
   const handleAddMcpFromRegistry = async () => {
-    const { addMcpSelected, addMcpLabel, addMcpEnv, addMcpGlobal, addMcpHostSync } = addRegistry;
-    const { customName, customBaseUrl, customDescription, customDocsUrl, customFields, customEndpoints, customAuth, editingCustomServerId, editingCustomConfigId } = customForm;
+    const { addMcpSelected, addMcpLabel, addMcpEnv, addMcpGlobal, addMcpProjectIds, addMcpHostSync } = addRegistry;
+    const {
+      customName, customBaseUrl, customDescription, customDocsUrl, customFields, customEndpoints, customAuth,
+      editingCustomServerId, editingCustomConfigId, editingCustomOriginalScope,
+    } = customForm;
     // Refonte 2b (2026-06-10) — the EDIT path no longer rides on the Add
     // panel (`addMcpSelected` stays null while editing in the plugin
     // modal), so route on `editingCustomServerId` as well.
@@ -229,6 +256,35 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
               }
             }
           }
+          // KT-831 — the scope block (Global / Général / projets) now lives
+          // in this same form when editing a Custom API. It used to be
+          // silently dropped here: `addMcpGlobal` was never initialized
+          // from `cfg.is_global` on open (always read back as `false`) and
+          // never sent on save (`updateCustomSpec` has no scope fields).
+          // Only PATCH when something actually changed from the values the
+          // form opened with — an untouched scope must stay a no-op, same
+          // contract as the env PATCH above.
+          if (editingCustomConfigId && editingCustomOriginalScope) {
+            const scopeChanged = editingCustomOriginalScope.isGlobal !== addMcpGlobal
+              || editingCustomOriginalScope.includeGeneral !== addRegistry.addMcpIncludeGeneral
+              || editingCustomOriginalScope.projectIds.length !== addMcpProjectIds.length
+              || editingCustomOriginalScope.projectIds.some(id => !addMcpProjectIds.includes(id));
+            if (scopeChanged) {
+              try {
+                await mcpsApi.updateConfig(editingCustomConfigId, {
+                  is_global: addMcpGlobal,
+                  include_general: addRegistry.addMcpIncludeGeneral,
+                });
+                await mcpsApi.setConfigProjects(editingCustomConfigId, { project_ids: addMcpProjectIds });
+              } catch (scopeErr) {
+                console.warn('Spec saved but scope PATCH failed:', scopeErr);
+                toast(t('common.actionFailed', userError(scopeErr)), 'error');
+                resetAddMcp();
+                refetchMcps();
+                return;
+              }
+            }
+          }
           toast(t('mcp.custom.updated', savedName), 'success');
           // 0.8.6 (#60) — surface orphan-env warning AFTER the success
           // toast so the success path stays visible. The cleanup button
@@ -263,13 +319,13 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
         return;
       }
       try {
-        await mcpsApi.createConfig({
+        const display = await mcpsApi.createConfig({
           server_id: 'api-custom',
           label: addMcpLabel || customName,
           env: {},
           args_override: null,
           is_global: addMcpGlobal,
-          project_ids: [],
+          project_ids: addMcpProjectIds,
           host_sync: 'None',
           custom_spec: {
             name: customName.trim(),
@@ -287,8 +343,18 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
           },
         });
         resetAddMcp();
+        pendingSelectConfigIdRef.current = display.id;
         refetchMcps();
-        toast(t('mcp.custom.created', customName.trim()), 'success');
+        // KT-831 — the backend merges into an identical pre-existing
+        // config instead of creating a duplicate (`merged_into_existing`);
+        // say so instead of silently reporting "created" for a config
+        // whose label/scope choice from THIS request was actually dropped.
+        toast(
+          display.merged_into_existing
+            ? t('mcp.addMerged', display.label)
+            : t('mcp.custom.created', customName.trim()),
+          display.merged_into_existing ? 'warning' : 'success',
+        );
       } catch (e) {
         console.warn('Failed to add Custom API:', e);
         toast(t('mcp.custom.error', userError(e)), 'error');
@@ -300,7 +366,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     // `string | null` for TS (the compound guard at the top can't).
     if (!addMcpSelected) return;
     try {
-      await mcpsApi.createConfig({
+      const display = await mcpsApi.createConfig({
         server_id: addMcpSelected,
         label: addMcpLabel || mcpRegistry.find(m => m.id === addMcpSelected)?.name || 'New MCP',
         env: compactPluginCredentials(
@@ -309,11 +375,18 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
         ),
         args_override: null,
         is_global: addMcpGlobal,
-        project_ids: [],
+        project_ids: addMcpProjectIds,
         host_sync: addMcpHostSync ? 'GlobalOnly' : 'None',
       });
       resetAddMcp();
+      pendingSelectConfigIdRef.current = display.id;
       refetchMcps();
+      if (display.merged_into_existing) {
+        toast(t('mcp.addMerged', display.label), 'warning');
+      }
+      // KT-831 — open the fiche of the config that now carries this
+      // request (freshly created, or the pre-existing one it merged
+      // into) instead of leaving the operator back at an empty grid.
     } catch (e) {
       console.warn('Failed to add MCP config:', e);
       toast(t('mcp.custom.error', userError(e)), 'error');
@@ -324,7 +397,6 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
   // while editing, first Esc cancels the edit (back to the view body);
   // a second Esc (or X) closes the panel.
   // resetAddMcp only invokes stable setters, so the captured closure is safe.
-  const { selectedConfigId, setSelectedConfigId } = list;
   useEffect(() => {
     if (!selectedConfigId) return;
     const onKey = (e: KeyboardEvent) => {

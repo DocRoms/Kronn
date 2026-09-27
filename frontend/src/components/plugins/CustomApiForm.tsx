@@ -3,7 +3,8 @@ import type { ApiAuthKind, ApiEndpoint, CustomApiPayload } from '../../types/gen
 import { CustomApiAiHelper } from '../CustomApiAiHelper';
 import { Dropdown } from '../Dropdown';
 import { SecretField } from '../SecretField';
-import { Trash2, Plus, X, Check, CheckSquare, Square } from 'lucide-react';
+import { Trash2, Plus, X, Check } from 'lucide-react';
+import { PluginScopeEditor } from './PluginScopeEditor';
 import type { McpPageState } from './useMcpPageState';
 
 /**
@@ -27,10 +28,15 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
     replacingFields, setReplacingFields,
     customAuth, setCustomAuth,
     authKindOf, setAuthKindBy, slugEnvKey,
-    addMcpGlobal, setAddMcpGlobal,
+    addMcpGlobal, setAddMcpGlobal, addMcpProjectIds, setAddMcpProjectIds,
+    addMcpIncludeGeneral, setAddMcpIncludeGeneral,
     handleAddMcpFromRegistry, resetAddMcp, setAddMcpSelected,
-    installedAgentTypes, configLanguage,
+    installedAgentTypes, configLanguage, projects,
   } = state;
+  // KT-831 — "Général" (discussions sans projet) can only be toggled once
+  // the config exists: creation always starts it at the backend default
+  // (`true`), there is nothing to PATCH before the row is even inserted.
+  const isEditing = !!editingCustomServerId;
 
   return (
     <>
@@ -363,11 +369,27 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
           </p>
         )}
       </div>
-      <div className="flex-row gap-4 mb-6">
-        <button className={`mcp-project-toggle ${addMcpGlobal ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
-          {addMcpGlobal ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
-          {t('mcp.globalAll')}
-        </button>
+      {/* Single reusable scope editor (KT-831) — same component as the
+          registry add flow, the fiche and bundle import. Custom API
+          plugins are always API-only, so no CLI-sync section (the
+          component shows the "no CLI sync" note instead). "Général" is
+          only wired once the config exists (edit mode) — see `isEditing`. */}
+      <div className="mb-6">
+        <PluginScopeEditor
+          t={t}
+          projects={projects}
+          isGlobal={addMcpGlobal}
+          onToggleGlobal={() => setAddMcpGlobal(!addMcpGlobal)}
+          includeGeneral={isEditing ? addMcpIncludeGeneral : undefined}
+          onToggleGeneral={isEditing ? () => setAddMcpIncludeGeneral(!addMcpIncludeGeneral) : undefined}
+          projectIds={addMcpProjectIds}
+          onToggleProject={(projectId, isLinked) => setAddMcpProjectIds(
+            isLinked ? addMcpProjectIds.filter(id => id !== projectId) : [...addMcpProjectIds, projectId],
+          )}
+          supportsHostSync={false}
+          hostSync="None"
+          testIdPrefix="mcp-custom-scope"
+        />
       </div>
       <div className="flex-row gap-4">
         <button

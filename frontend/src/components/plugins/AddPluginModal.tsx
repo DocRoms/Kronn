@@ -1,10 +1,11 @@
 import {
   Puzzle, Plus, Check, X, Key, ExternalLink, Plug, Globe, Upload, Download,
-  Terminal, Eye, CheckSquare, Square,
+  Terminal, Eye,
 } from 'lucide-react';
 import { pluginKind } from '../../lib/pluginKind';
 import { pluginCredentialKeys, pluginCredentialKind } from '../../lib/pluginCredentials';
 import { CustomApiForm } from './CustomApiForm';
+import { PluginScopeEditor } from './PluginScopeEditor';
 import type { McpPageState } from './useMcpPageState';
 
 /** Placeholder hints for common MCP env vars — helps non-dev users understand what to enter */
@@ -93,9 +94,10 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
     addMcpSearch, setAddMcpSearch,
     selectedCategory, setSelectedCategory,
     availableRegistry, customApiVisible, configuredServerIds, configs,
-    addMcpEnv, setAddMcpEnv, addMcpGlobal, setAddMcpGlobal, addMcpHostSync, setAddMcpHostSync,
+    addMcpEnv, setAddMcpEnv, addMcpGlobal, setAddMcpGlobal, addMcpProjectIds, setAddMcpProjectIds,
+    addMcpHostSync, setAddMcpHostSync,
     addVisibleFields, setAddVisibleFields,
-    selectedDef, mcpOverview,
+    selectedDef, mcpOverview, projects,
     importJsonText, setImportJsonText, importJsonError, setImportJsonError, importJsonLoading,
     handlePasteImportJson, handleImportFromFile, handleImportCustomPlugin,
     handleAddMcpFromRegistry,
@@ -542,22 +544,28 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
               })}
             </div>
           ) : null; })()}
-          {/* Global toggle */}
-          <div className="flex-row gap-4 mb-6">
-            <button className={`mcp-project-toggle ${addMcpGlobal ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
-              {addMcpGlobal ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
-              {t('mcp.globalAll')}
-            </button>
-            {selectedDef && pluginKind(selectedDef) !== 'api' && (
-              <button
-                className={`mcp-project-toggle ${addMcpHostSync ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`}
-                onClick={() => setAddMcpHostSync(!addMcpHostSync)}
-                title={t('mcp.createHostScopeHint')}
-              >
-                {addMcpHostSync ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
-                <Globe size={11} /> {t('mcp.createHostScope')}
-              </button>
-            )}
+          {/* Single reusable scope editor (KT-831) — proposes projects
+              AND CLI sync at add time, same component as the fiche and
+              bundle import. "Général" isn't offered here: the backend
+              always starts a new config at `include_general: true`,
+              there's nothing to toggle before the fiche (opened right
+              after creation) exists. */}
+          <div className="mb-6">
+            <PluginScopeEditor
+              t={t}
+              projects={projects}
+              isGlobal={addMcpGlobal}
+              onToggleGlobal={() => setAddMcpGlobal(!addMcpGlobal)}
+              projectIds={addMcpProjectIds}
+              onToggleProject={(projectId, isLinked) => setAddMcpProjectIds(
+                isLinked ? addMcpProjectIds.filter(id => id !== projectId) : [...addMcpProjectIds, projectId],
+              )}
+              supportsHostSync={!!selectedDef && pluginKind(selectedDef) !== 'api'}
+              hostSync={addMcpHostSync ? 'GlobalOnly' : 'None'}
+              onSetHostSync={(mode) => setAddMcpHostSync(mode !== 'None')}
+              hostSyncHint={t('mcp.createHostScopeHint')}
+              testIdPrefix="mcp-add-scope"
+            />
           </div>
           {/* Actions */}
           <div className="flex-row gap-4">

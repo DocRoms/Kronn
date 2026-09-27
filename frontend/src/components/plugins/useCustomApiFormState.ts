@@ -41,6 +41,17 @@ export function useCustomApiFormState() {
   // The id of the config whose encrypted env the "Modifier le plugin"
   // (single edit surface) save patches. Read in the submit handler.
   const [editingCustomConfigId, setEditingCustomConfigId] = useState<string | null>(null);
+  // KT-831 — the scope this config had when "Modifier le plugin" opened.
+  // Diffed against the shared `addMcpGlobal`/`addMcpIncludeGeneral`/
+  // `addMcpProjectIds` fields on save so an untouched scope never fires an
+  // extra PATCH (the two pre-existing "no scope change → no updateConfig
+  // call" tests stay green), while an actual change is now sent — it used
+  // to be silently dropped (never sent at all).
+  const [editingCustomOriginalScope, setEditingCustomOriginalScope] = useState<{
+    isGlobal: boolean;
+    includeGeneral: boolean;
+    projectIds: string[];
+  } | null>(null);
   // 0.8.6 — `editingStoredEnvKeys` removed 2026-05-20 when the edit
   // form's value column was replaced by a static "→ Édite via Éditer
   // les secrets" passive text. The per-field "•••• stocké" placeholder
@@ -114,6 +125,7 @@ export function useCustomApiFormState() {
     customDescription, setCustomDescription, customDocsUrl, setCustomDocsUrl,
     customFields, setCustomFields, customEndpoints, setCustomEndpoints,
     editingCustomServerId, setEditingCustomServerId, editingCustomConfigId, setEditingCustomConfigId,
+    editingCustomOriginalScope, setEditingCustomOriginalScope,
     replacingFields, setReplacingFields, customAuth, setCustomAuth,
     authKindOf, setAuthKindBy, slugEnvKey,
   };

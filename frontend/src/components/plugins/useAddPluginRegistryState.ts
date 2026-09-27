@@ -28,6 +28,17 @@ export function useAddPluginRegistryState({ mcpOverview, mcpRegistry }: UseAddPl
   const [addMcpLabel, setAddMcpLabel] = useState('');
   const [addMcpEnv, setAddMcpEnv] = useState<Record<string, string>>({});
   const [addMcpGlobal, setAddMcpGlobal] = useState(false);
+  // KT-831 — the add flow now proposes specific projects too (not just the
+  // all-projects/nothing binary). Keep the selection while all-projects is
+  // enabled so switching modes never mutates a hidden project list.
+  const [addMcpProjectIds, setAddMcpProjectIds] = useState<string[]>([]);
+  // KT-831 — "Général" (discussions without a project) can't be set at
+  // creation time (the backend always starts a new config at `true`), so
+  // this only becomes editable once `PluginScopeEditor` is driving an
+  // EXISTING config (the fiche, or the Custom API edit form). Defaults to
+  // `true` to mirror that backend default so an untouched edit stays a
+  // no-op instead of silently narrowing the scope.
+  const [addMcpIncludeGeneral, setAddMcpIncludeGeneral] = useState(true);
   const [addMcpHostSync, setAddMcpHostSync] = useState(false);
   const [addVisibleFields, setAddVisibleFields] = useState<Set<string>>(new Set());
   const addMcpRef = useRef<HTMLDivElement>(null);
@@ -79,6 +90,8 @@ export function useAddPluginRegistryState({ mcpOverview, mcpRegistry }: UseAddPl
     addMcpKindFilter, setAddMcpKindFilter, selectedCategory, setSelectedCategory,
     addMcpSelected, setAddMcpSelected, addMcpLabel, setAddMcpLabel,
     addMcpEnv, setAddMcpEnv, addMcpGlobal, setAddMcpGlobal,
+    addMcpProjectIds, setAddMcpProjectIds,
+    addMcpIncludeGeneral, setAddMcpIncludeGeneral,
     addMcpHostSync, setAddMcpHostSync, addVisibleFields, setAddVisibleFields,
     addMcpRef, addMcpTriggerRef,
 

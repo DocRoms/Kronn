@@ -879,7 +879,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Global badge should be rendered on the card
-    expect(container.textContent).toContain('Global');
+    expect(container.textContent).toContain('Tous les projets');
   });
 
   it('flags an orphan config and repairs it by enabling General scope', async () => {
@@ -1541,6 +1541,123 @@ describe('McpPage', () => {
     expect(payload.custom_spec.fields).toEqual([{ label: 'My Token', value: 'secret123' }]);
   });
 
+  // ─── KT-831 — single scope editor at add time, opened fiche, merge ──
+
+  it('Add flow: the scope editor proposes specific projects, and the created fiche opens once it appears', async () => {
+    const project = makeProject('p1', 'Website');
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom',
+      name: 'Custom API',
+      description: 'Define your own API.',
+      transport: 'ApiOnly',
+      env_keys: [],
+      tags: ['custom', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'You',
+      official: false,
+    };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
+    const created = makeConfig('new-cfg-1', 'custom-myapi-abc', 'MyAPI', { label: 'MyAPI', project_ids: ['p1'] });
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValue(created);
+
+    const view = wrap(<McpPage projects={[project]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
+
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement);
+    fireEvent.change(screen.getByPlaceholderText(/Salesforce Sales API/), { target: { value: 'MyAPI' } });
+    fireEvent.change(screen.getByPlaceholderText(/my-org\.salesforce\.com/), { target: { value: 'https://my.example.com' } });
+
+    // Pick a specific project; the pre-KT-831 add form only offered an
+    // all-projects on/off toggle and could never populate `project_ids`.
+    fireEvent.click(screen.getByRole('button', { name: 'Website' }));
+    fireEvent.click(screen.getByText('Enregistrer'));
+    await act(async () => { await Promise.resolve(); });
+
+    const payload = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.is_global).toBe(false);
+    expect(payload.project_ids).toEqual(['p1']);
+
+    // The fiche can't select a config `mcpOverview` doesn't know about yet —
+    // simulate `refetchMcps()` landing by re-rendering with the created
+    // config now present, then it should open on its own.
+    view.rerender(
+      <I18nProvider>
+        <McpPage projects={[project]} mcpOverview={{ ...overview, configs: [created] }} mcpRegistry={[customApi]} refetchMcps={noop} />
+      </I18nProvider>,
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId('mcp-plugin-detail')).toHaveTextContent('MyAPI');
+  });
+
+  it('Add flow: an MCP can select both projects and local CLI sync before creation', async () => {
+    const project = makeProject('p1', 'Website');
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const definition: McpDefinition = {
+      id: 'test-mcp',
+      name: 'Test MCP',
+      description: 'A test server',
+      transport: { Stdio: { command: 'node', args: [] } },
+      env_keys: [],
+      tags: ['core'],
+      token_url: null,
+      token_help: null,
+      publisher: 'Anthropic',
+      official: false,
+    };
+    const created = makeConfig('new-mcp-1', definition.id, definition.name, {
+      project_ids: [project.id],
+      host_sync: 'GlobalOnly',
+    });
+    vi.mocked(mcpsApi.createConfig).mockClear();
+    vi.mocked(mcpsApi.createConfig).mockResolvedValue(created);
+    wrap(<McpPage projects={[project]} mcpOverview={overview} mcpRegistry={[definition]} refetchMcps={noop} />);
+
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(screen.getByText('Test MCP'));
+    const scope = screen.getByTestId('mcp-add-scope');
+    fireEvent.click(within(scope).getByRole('button', { name: 'Website' }));
+    fireEvent.click(within(scope).getByRole('checkbox', { name: 'Aussi disponible dans mes CLIs locaux' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Configurer Test MCP' })).getByRole('button', { name: 'Ajouter' }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(mcpsApi.createConfig).toHaveBeenCalledWith(expect.objectContaining({
+      project_ids: ['p1'],
+      host_sync: 'GlobalOnly',
+    }));
+  });
+
+  it('Add flow: merging into an existing identical config is announced, not silently reported as "created"', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom',
+      name: 'Custom API',
+      description: 'Define your own API.',
+      transport: 'ApiOnly',
+      env_keys: [],
+      tags: ['custom', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'You',
+      official: false,
+    };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
+    const merged: McpConfigDisplay = { ...makeConfig('existing-1', 'custom-myapi-abc', 'MyAPI', { label: 'MyAPI', is_global: true }), merged_into_existing: 'existing-1' };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValue(merged);
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
+
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement);
+    fireEvent.change(screen.getByPlaceholderText(/Salesforce Sales API/), { target: { value: 'MyAPI' } });
+    fireEvent.change(screen.getByPlaceholderText(/my-org\.salesforce\.com/), { target: { value: 'https://my.example.com' } });
+    fireEvent.click(screen.getByText('Enregistrer'));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByText(/existait déjà avec les mêmes identifiants/)).toBeTruthy();
+  });
+
   // ─── 0.8.6 — Unified Custom plugin edit form ─────────────────────────
   //
   // Regression guards for the live Didomi debug 2026-05-19/20:
@@ -1719,6 +1836,40 @@ describe('McpPage', () => {
     expect(mcpsApi.updateCustomSpec).toHaveBeenCalledTimes(1);
     // Stored key untouched → env never patched.
     expect(mcpsApi.updateConfig).not.toHaveBeenCalled();
+  });
+
+  // ─── KT-831 — the scope block inside "Modifier le plugin" ───────────
+
+  it('Modifier le plugin: the Global toggle reflects the real config (not always unchecked) and PATCHes on change', async () => {
+    // Pre-KT-831 bug: the Global checkbox was never seeded from `cfg.is_global`
+    // (always opened unchecked) and `updateCustomSpec` has no scope fields, so
+    // toggling it silently did nothing on save.
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.setConfigProjects as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mcpsApi.setConfigProjects as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-3');
+
+    const globalToggle = screen.getByRole('button', { name: 'Tous les projets' });
+    expect(globalToggle).toHaveClass('mcp-project-toggle-off');
+    fireEvent.click(globalToggle);
+
+    const saveBtn = screen.getByText(/Enregistrer les modifications/);
+    fireEvent.click(saveBtn);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mcpsApi.updateConfig).toHaveBeenCalledWith('cfg-example-3', {
+      is_global: true,
+      include_general: true,
+    });
+    expect(mcpsApi.setConfigProjects).toHaveBeenCalledWith('cfg-example-3', { project_ids: [] });
   });
 
   // ─── 0.8.6 (#60) Orphan env warning ──────────────────────────────────

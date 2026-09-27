@@ -1,18 +1,14 @@
 import {
   Puzzle, Pencil, X, Trash2, Upload, Info, Plug, Check, Minus, RefreshCw,
-  Sparkles, Key, Terminal, ExternalLink, Save, Eye, AlertTriangle,
-  CheckSquare, Square, FileText, Globe,
+  Sparkles, Key, Terminal, ExternalLink, Save, Eye, FileText,
 } from 'lucide-react';
 import type { McpConfigDisplay, McpServer, PluginInterface } from '../../types/generated';
 import { linkify } from '../../lib/linkify';
-import { isHiddenPath } from '../../lib/constants';
 import { pluginCredentialKeys } from '../../lib/pluginCredentials';
-import { HostSyncPreview } from '../HostSyncPreview';
 import { CustomApiForm } from './CustomApiForm';
-import { hasAgentScope, slugify } from './mcpPageHelpers';
+import { PluginScopeEditor } from './PluginScopeEditor';
+import { slugify } from './mcpPageHelpers';
 import type { McpPageState } from './useMcpPageState';
-
-const PROJECT_TOGGLE_LIMIT = 10;
 
 /**
  * Plugin detail/edit side panel — the "fiche" for one installed config.
@@ -28,14 +24,15 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     handleSetPreferredInterface,
     editingLabelId, editingLabelText, setEditingLabelId, setEditingLabelText, handleSaveLabel,
     editingCustomServerId,
-    setEditingCustomServerId, setEditingCustomConfigId,
+    setEditingCustomServerId, setEditingCustomConfigId, setEditingCustomOriginalScope,
     setCustomName, setCustomBaseUrl, setCustomDescription, setCustomDocsUrl,
     setCustomFields, setReplacingFields, setCustomEndpoints, setCustomAuth,
+    setAddMcpGlobal, setAddMcpIncludeGeneral, setAddMcpProjectIds,
     handleExportCustomPlugin, handleDeleteMcpConfig, setSelectedConfigId, resetAddMcp,
     editingEnvId, setEditingEnvId, editingEnv, setEditingEnv, editingEnvLoading, editingEnvError, visibleFields, setVisibleFields,
     handleStartEditSecrets, handleSaveSecrets, toggleFieldVisibility,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleToggleConfigProject, handleSetHostSync,
-    expandedProjectLists, setExpandedProjectLists, handleOpenContext,
+    handleOpenContext,
   } = state;
 
   // KT-828 — `effective_kind` is computed once server-side so it can't
@@ -45,11 +42,6 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
   const cfgServer = mcpOverview.servers.find(s => s.id === cfg.server_id);
   const cfgKind = cfg.effective_kind;
   const supportsHostSync = cfgKind !== 'api';
-  const hasVisibleScope = hasAgentScope(
-    cfg.is_global,
-    cfg.include_general,
-    cfg.project_ids,
-  );
 
   const def = mcpRegistry.find(m => m.id === cfg.server_id);
   const isEditingLabel = editingLabelId === cfg.id;
@@ -79,6 +71,20 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     const spec = cfgServer.api_spec;
     setEditingCustomServerId(cfg.server_id);
     setEditingCustomConfigId(cfg.id);
+    // KT-831 — the scope block used to live outside this form and stayed
+    // untouched while editing; now it's part of the same form, so it must
+    // be seeded from the actual config instead of the Add flow's `false`/
+    // `[]` defaults (that was the "ni initialisée ni envoyée" bug: the
+    // Global checkbox always opened unchecked regardless of the real
+    // scope, and toggling it did nothing on save).
+    setAddMcpGlobal(cfg.is_global);
+    setAddMcpIncludeGeneral(cfg.include_general);
+    setAddMcpProjectIds(cfg.project_ids);
+    setEditingCustomOriginalScope({
+      isGlobal: cfg.is_global,
+      includeGeneral: cfg.include_general,
+      projectIds: cfg.project_ids,
+    });
     setCustomName(cfgServer.name);
     setCustomBaseUrl(spec.base_url);
     setCustomDescription(cfgServer.description);
@@ -449,114 +455,43 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
           </div>
           ) : null;
         })()}
-        <div className="mcp-detail-section">
-          <h3 className="mcp-detail-section-title">{t('mcp.scope')}</h3>
-          {!hasVisibleScope && (
-            <div className="mcp-scope-orphan-warning" role="alert">
-              <AlertTriangle size={16} aria-hidden="true" />
-              <span>
-                <strong>{t('mcp.scopeOrphanTitle')}</strong>
-                <small>{t('mcp.scopeOrphanBody')}</small>
-              </span>
-              <button
-                type="button"
-                onClick={() => void handleToggleConfigGeneral(cfg)}
-              >
-                {t('mcp.scopeRepairGeneral')}
-              </button>
-            </div>
-          )}
-          <div className="mcp-toggle-row">
-            <span className={`mcp-toggle-label mcp-toggle-global${cfg.is_global ? ' mcp-toggle-global-active' : ''}`} onClick={() => handleToggleConfigGlobal(cfg)} title={cfg.is_global ? t('mcp.disableGlobal') : t('mcp.enableGlobal')}>{t('mcp.scope.globalBadge')}</span>
-            <span className={`mcp-toggle-label mcp-toggle-general${cfg.include_general ? ' mcp-toggle-general-active' : ''}`} onClick={() => void handleToggleConfigGeneral(cfg)} title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}>{t('mcp.general')}</span>
-          </div>
-          <div className="mcp-toggle-row">
-            {(() => {
-              const sorted = projects.filter(p => !isHiddenPath(p.path)).sort((a, b) => {
-                const aL = (cfg.is_global || cfg.project_ids.includes(a.id)) ? 0 : 1;
-                const bL = (cfg.is_global || cfg.project_ids.includes(b.id)) ? 0 : 1;
-                return aL - bL || a.name.localeCompare(b.name);
-              });
-              const showAll = expandedProjectLists.has(cfg.id);
-              const visible = showAll ? sorted : sorted.slice(0, PROJECT_TOGGLE_LIMIT);
-              const hiddenCount = sorted.length - visible.length;
-              return (<>
-                {visible.map(proj => {
-                  const isLinked = cfg.is_global || cfg.project_ids.includes(proj.id);
-                  const projMcpCount = mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(proj.id)).length;
-                  const loadClass = projMcpCount <= 5 ? 'mcp-load-ok' : projMcpCount <= 10 ? 'mcp-load-warn' : 'mcp-load-danger';
-                  const loadTitle = projMcpCount <= 5 ? t('mcp.mcpLoadOk') : projMcpCount <= 10 ? t('mcp.mcpLoadWarn') : t('mcp.mcpLoadDanger');
-                  return (
-                    <span key={proj.id} className="flex-row">
-                      <button className={`mcp-project-toggle ${isLinked ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => handleToggleConfigProject(cfg.id, proj.id, isLinked)}>
-                        {isLinked ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
-                        {proj.name}
-                        <span className={`mcp-load-badge ${loadClass}`} title={loadTitle}>{projMcpCount}</span>
-                      </button>
-                      {isLinked && (() => {
-                        const slug = slugify(cfg.label);
-                        const isCustom = mcpOverview.customized_contexts.includes(`${slug}:${proj.id}`);
-                        return <button className="mcp-icon-btn mcp-context-btn" onClick={() => handleOpenContext(proj.id, proj.name, cfg.label)} title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustom ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}><FileText size={10} style={{ color: isCustom ? 'var(--kr-accent)' : 'var(--kr-text-ghost)' }} /></button>;
-                      })()}
-                    </span>
-                  );
-                })}
-                {hiddenCount > 0 && <button className="mcp-more-projects-btn" onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.add(cfg.id); return n; })}>{t('mcp.moreProjects', hiddenCount)}</button>}
-                {showAll && sorted.length > PROJECT_TOGGLE_LIMIT && <button className="mcp-less-projects-btn" onClick={() => setExpandedProjectLists(prev => { const n = new Set(prev); n.delete(cfg.id); return n; })}>{t('mcp.lessProjects')}</button>}
-              </>);
-            })()}
-          </div>
-        </div>
-        {/* ── Sync CLIs locaux (Phase-3 refactor — checkbox dans Scope) ──
-            Hidden entirely for API-only plugins: those don't have
-            an MCP transport to write to `.mcp.json` / Codex / Gemini
-            / Copilot, they only exist as a `## REST APIs available`
-            block in the agent's system prompt. Showing a "Sync CLI"
-            toggle on them was misleading — the user reported the
-            confusion. Hybrid plugins keep the toggle but get a
-            note that it only affects the MCP side. */}
-        {supportsHostSync && (
-        <div
-          className="mcp-host-sync-block"
-          style={{ marginTop: 12, paddingTop: 12, borderTop: '1px dashed var(--kr-border, #e5e7eb)', position: 'relative' }}
-        >
-          <label
-            style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.95em', fontWeight: 500 }}
-          >
-            <input
-              type="checkbox"
-              checked={cfg.host_sync !== 'None'}
-              onChange={(e) => handleSetHostSync(cfg.id, e.target.checked ? 'GlobalOnly' : 'None')}
-            />
-            <Globe size={13} />
-            {t('mcp.hostSync.localCliLabel')}
-          </label>
-          {cfgKind === 'hybrid' && (
-            <p className="text-muted" style={{ fontSize: '0.8em', margin: '4px 0 0 22px', fontStyle: 'italic' }}>
-              {t('mcp.hostSync.hybridNote')}
-            </p>
-          )}
-          {cfg.host_sync !== 'None' && (
-            <HostSyncPreview
-              isGlobal={cfg.is_global}
-              projectIds={cfg.project_ids}
-              projects={projects}
-            />
-          )}
-        </div>
-        )}
-        {/* For API-only plugins: tell the user explicitly that
-            the toggle they would expect here doesn't apply. */}
-        {!supportsHostSync && (
-          <div
-            style={{ marginTop: 12, paddingTop: 12, borderTop: '1px dashed var(--kr-border, #e5e7eb)' }}
-          >
-            <p className="text-muted" style={{ fontSize: '0.85em', margin: 0 }}>
-              <Globe size={11} style={{ verticalAlign: 'text-bottom', marginRight: 4 }} />
-              {t('mcp.hostSync.apiOnlyNote')}
-            </p>
-          </div>
-        )}
+        {/* Single reusable scope editor (KT-831) — separates Kronn-side
+            visibility (Global / Général / projets) from local-CLI sync
+            (host_sync), the same component used at add-time and at
+            bundle-import. API-only plugins get the "no CLI sync" note
+            instead of the checkbox; hybrid plugins keep the checkbox
+            with a note that it only affects the MCP side. */}
+        <PluginScopeEditor
+          t={t}
+          projects={projects}
+          isGlobal={cfg.is_global}
+          includeGeneral={cfg.include_general}
+          projectIds={cfg.project_ids}
+          onToggleGlobal={() => handleToggleConfigGlobal(cfg)}
+          onToggleGeneral={() => void handleToggleConfigGeneral(cfg)}
+          onToggleProject={(projectId, isLinked) => handleToggleConfigProject(cfg.id, projectId, isLinked)}
+          supportsHostSync={supportsHostSync}
+          hostSync={cfg.host_sync}
+          onSetHostSync={(mode) => handleSetHostSync(cfg.id, mode)}
+          hostSyncNote={cfgKind === 'hybrid' ? 'hybrid' : undefined}
+          onRepairOrphan={() => void handleToggleConfigGeneral(cfg)}
+          renderProjectExtra={(projectId, isLinked) => {
+            const projMcpCount = mcpOverview.configs.filter(c => c.is_global || c.project_ids.includes(projectId)).length;
+            const loadClass = projMcpCount <= 5 ? 'mcp-load-ok' : projMcpCount <= 10 ? 'mcp-load-warn' : 'mcp-load-danger';
+            const loadTitle = projMcpCount <= 5 ? t('mcp.mcpLoadOk') : projMcpCount <= 10 ? t('mcp.mcpLoadWarn') : t('mcp.mcpLoadDanger');
+            const proj = projects.find(p => p.id === projectId);
+            return (
+              <>
+                <span className={`mcp-load-badge ${loadClass}`} title={loadTitle} style={{ marginLeft: 4 }}>{projMcpCount}</span>
+                {isLinked && proj && (() => {
+                  const slug = slugify(cfg.label);
+                  const isCustom = mcpOverview.customized_contexts.includes(`${slug}:${projectId}`);
+                  return <button className="mcp-icon-btn mcp-context-btn" onClick={() => handleOpenContext(projectId, proj.name, cfg.label)} title={`${t('mcp.editContext', cfg.label, proj.name)}${isCustom ? ' ' + t('mcp.customized') : ' ' + t('mcp.default')}`}><FileText size={10} style={{ color: isCustom ? 'var(--kr-accent)' : 'var(--kr-text-ghost)' }} /></button>;
+                })()}
+              </>
+            );
+          }}
+        />
         </>)}
       </div>
     </aside>
