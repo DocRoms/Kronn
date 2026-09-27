@@ -2003,6 +2003,7 @@ const zh: TranslationDict = {
   "disc.action.state.failed": "失败",
   "disc.action.state.cancelled": "已取消",
   "disc.action.state.preflight_failed": "预检失败",
+  "pages.action.previousLaunch": "上次启动：{0} — 查看",
   "disc.action.launch": "启动",
   "disc.action.openDiscussion": "打开讨论",
   "disc.action.relaunch": "再次启动",

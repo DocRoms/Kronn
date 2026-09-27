@@ -109,13 +109,13 @@ function ExtractedFromDetails({ file, source, t, onOpenSource }: {
   );
 }
 
-function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant, onNavigateMessage }: {
+function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareMedia, variant, onNavigateMessage }: {
   file: ContextFile;
   url?: string;
   failed: boolean;
   t: T;
   onOpen: () => void;
-  onPrepareVideo?: () => void;
+  onPrepareMedia?: () => void;
   variant: 'message' | 'library';
   onNavigateMessage?: (messageId: string) => void;
 }) {
@@ -124,6 +124,7 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant
   const meta = `${file.filename} (${formatKb(file.original_size)})`;
   const messageId = file.message_id;
   const videoThumbRef = useRef<HTMLButtonElement | null>(null);
+  const imageThumbRef = useRef<HTMLButtonElement | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadFailed, setDownloadFailed] = useState(false);
 
@@ -131,20 +132,38 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant
   // library card enters the viewport; message rows keep the cheap badge and
   // fetch only after the user opens the clip.
   useEffect(() => {
-    if (!isVideo || variant !== 'library' || url || failed || !onPrepareVideo) return;
+    if (!isVideo || variant !== 'library' || url || failed || !onPrepareMedia) return;
     const node = videoThumbRef.current;
     if (!node || typeof IntersectionObserver === 'undefined') {
-      onPrepareVideo();
+      onPrepareMedia();
       return;
     }
     const observer = new IntersectionObserver(entries => {
       if (!entries.some(entry => entry.isIntersecting)) return;
       observer.disconnect();
-      onPrepareVideo();
+      onPrepareMedia();
     }, { rootMargin: '160px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [failed, isVideo, onPrepareVideo, url, variant]);
+  }, [failed, isVideo, onPrepareMedia, url, variant]);
+
+  // An image thumbnail is the whole file: download it only as it nears the
+  // viewport, not for every image of a long transcript at once.
+  useEffect(() => {
+    if (!isImage || url || failed || !onPrepareMedia) return;
+    const node = imageThumbRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      onPrepareMedia();
+      return;
+    }
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting)) return;
+      observer.disconnect();
+      onPrepareMedia();
+    }, { rootMargin: '600px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [failed, isImage, onPrepareMedia, url]);
 
   const downloadFile = async () => {
     if (downloading || !file.disk_path) return;
@@ -162,6 +181,7 @@ function AttachmentThumb({ file, url, failed, t, onOpen, onPrepareVideo, variant
 
   const previewContent = isImage && !failed ? (
       <button
+        ref={imageThumbRef}
         type="button"
         className="disc-attach-thumb"
         onClick={onOpen}
@@ -309,7 +329,6 @@ export function MessageAttachments({
   generationConnections?: ExternalApiConnectionView[];
   onGenerateFromImage?: (request: ImageGenerationRequest) => void;
 }) {
-  const imageFiles = useMemo(() => files.filter(isImageFile), [files]);
   // Membership is decided on METADATA, not on a loaded blob: filtering on
   // `urls` excluded a video nobody had downloaded yet, and an image still in
   // flight, so the carousel silently skipped entries.
@@ -481,11 +500,6 @@ export function MessageAttachments({
       });
   }, [discussionId]);
 
-  useEffect(() => {
-    for (const file of imageFiles) {
-      loadMediaUrl(file);
-    }
-  }, [imageFiles, loadMediaUrl]);
 
 
 
@@ -586,7 +600,7 @@ export function MessageAttachments({
             failed={failedIds.has(file.id)}
             t={t}
             onOpen={() => setSelectedId(file.id)}
-            onPrepareVideo={() => loadMediaUrl(file)}
+            onPrepareMedia={() => loadMediaUrl(file)}
             variant={variant}
             onNavigateMessage={onNavigateMessage}
           />

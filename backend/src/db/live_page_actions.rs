@@ -1937,6 +1937,73 @@ mod tests {
         assert_eq!(variables["service"], "Add feature");
     }
 
+    #[test]
+    fn a_launch_whose_run_was_interrupted_at_boot_frees_its_row() {
+        let conn = connection();
+        insert_target(&conn);
+        let html = action_block(
+            "implem",
+            r#"{"kind":"quick_exec","target_id":"qe-1","values":[{"name":"service","provenance":"dynamic_binding","source_ref":"<page.dataset.tickets.find(key).key>"}]}"#,
+        );
+        insert_page(&conn, "page-autocode", "rev-1", &html);
+        insert_dataset(
+            &conn,
+            "page-autocode",
+            "tickets",
+            "collection",
+            r#"[{"key":"EW-7633"}]"#,
+        );
+        ingest_page_actions(&conn, "page-autocode", "rev-1", &html).unwrap();
+        crate::db::workflows::insert_workflow(
+            &conn,
+            &crate::db::tests::sample_workflow("w-implem"),
+        )
+        .unwrap();
+        let mut run = crate::db::tests::sample_run("run-implem", "w-implem");
+        run.status = crate::models::RunStatus::Running;
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+        let click = || {
+            claim_launch(
+                &conn,
+                "page-action:page-autocode:implem",
+                &HashMap::new(),
+                &HashMap::from([("service".into(), "EW-7633".into())]),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let LivePageActionClaimOutcome::Claimed { action: first, .. } = click() else {
+            panic!("the first click launches");
+        };
+        complete(
+            &conn,
+            &first.id,
+            kronn_action_engine::ActionCompletion {
+                state: DiscussionActionState::Running,
+                shared_run_id: Some("run-implem".into()),
+                result_discussion_id: None,
+                deep_link: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(click(), LivePageActionClaimOutcome::Existing(ref running) if running.id == first.id)
+        );
+
+        // A backend restart interrupts the run.
+        crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
+
+        let LivePageActionClaimOutcome::Claimed { action: second, .. } = click() else {
+            panic!("an interrupted run must not block its row");
+        };
+        assert_ne!(second.id, first.id);
+        let settled = get(kronn_action_engine::Reconcile::Persisted, &conn, &first.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.state, DiscussionActionState::Failed);
+    }
+
     /// The reported shape: one "Framer" block over a list of tickets, one
     /// button per row. Clicking a second ticket after the first succeeded used
     /// to answer with the first ticket's success, and nothing ran.

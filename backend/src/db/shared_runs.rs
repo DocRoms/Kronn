@@ -236,6 +236,25 @@ fn steps_without_outputs(steps: &[crate::models::StepResult]) -> Vec<serde_json:
         .collect()
 }
 
+/// Re-project finished workflow runs whose shared row still says queued or
+/// running, left behind by interruptions that never synced it.
+pub fn repair_stale_workflow_projections(conn: &Connection) -> Result<usize> {
+    let ids: Vec<String> = conn
+        .prepare(
+            "SELECT s.id FROM shared_runs s JOIN workflow_runs r ON r.id = s.id
+             WHERE s.kind = 'workflow' AND s.status IN ('queued', 'running')
+               AND r.status NOT IN ('Pending', 'Running', 'WaitingApproval')",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in &ids {
+        if let Some(run) = crate::db::workflows::get_run(conn, id)? {
+            sync_workflow(conn, &run)?;
+        }
+    }
+    Ok(ids.len())
+}
+
 pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Result<()> {
     let project_id: Option<String> = conn
         .query_row(

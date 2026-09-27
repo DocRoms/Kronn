@@ -21,6 +21,9 @@ import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import './StandaloneLivePage.css';
 
+// Same cadence as the embedded Pages view.
+const REFRESH_MS = 30_000;
+
 function channelId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `standalone-page-${Date.now()}-${Math.random()}`;
 }
@@ -56,6 +59,27 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
       setError(userError(cause));
     });
     return () => { active = false; };
+  }, [pageId, reloadPageActions]);
+
+  // Keep reading the Page while the tab is open. New data reaches the frame by
+  // postMessage; the document is only rebuilt when the Page's HTML changes, so
+  // scroll and open rows survive a refresh.
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
+      Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
+        if (active) setDetail(page);
+      }).catch(() => { /* keep the last view; the next tick retries */ });
+    };
+    const timer = window.setInterval(refresh, REFRESH_MS);
+    const onVisibility = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [pageId, reloadPageActions]);
 
   useEffect(() => {
