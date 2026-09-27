@@ -5907,6 +5907,8 @@ def call_task_exec_status(args):
     status = execution.get("status")
     blocked_from = execution.get("blocked_from_status")
     interrupted_from = execution.get("interrupted_from_status")
+    recovery = result.get("recovery") or {}
+    reason = None
     if (
         (status == "Blocked" and blocked_from == "Applying")
         or (
@@ -5915,12 +5917,28 @@ def call_task_exec_status(args):
             and blocked_from == "Applying"
         )
     ):
+        reason = "Applying-origin hold can be retried once its cause is fixed"
+    elif (
+        status == "Interrupted"
+        and recovery.get("pending")
+        and recovery.get("recovery_action") in _INTEGRATION_RECOVERY_ACTIONS
+    ):
+        reason = "integration checkpoint has a pending recovery decision"
+    elif status == "Approved" and execution.get("blocked_reason_code"):
+        reason = "held approved integration can be retried once its cause is fixed"
+    if reason:
         result["next_action"] = {
             "tool": "task_exec_resume",
             "task_execution_id": execution_id,
-            "reason": "Applying-origin checkpoint can be retried after cleaning the parent",
+            "reason": reason,
         }
     return result
+
+
+# Recovery decisions `task_exec_resume` applies to an interrupted integration.
+_INTEGRATION_RECOVERY_ACTIONS = frozenset({
+    "rebuild_candidate", "run_validations", "apply_fast_forward", "idempotent_close",
+})
 
 
 def call_task_exec_resume(args):

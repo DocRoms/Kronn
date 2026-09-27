@@ -4299,6 +4299,8 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wiz.workflowIsolation': 'Isolation du workflow',
   'wiz.workflowIsolationHint': 'Crée un worktree git dédié au run et refuse de retomber sur le dépôt principal si sa création échoue.',
   'wiz.workflowIsolationNoProject': 'Lie d’abord un projet Git pour pouvoir isoler les runs.',
+  'wiz.mainTreeReadOnly': 'N’écrit pas dans le dépôt du projet',
+  'wiz.mainTreeReadOnlyHint': 'Ses runs dans le dépôt principal ne prennent pas le verrou d’exclusivité du projet et peuvent tourner en même temps qu’un autre run. Réservé aux workflows qui lisent le dépôt ou travaillent par chemins absolus.',
   'wiz.workspaceModeIsolated': 'Worktree dédié',
   'wiz.workspaceModeMain': 'Dépôt principal',
   'wiz.worktreeIconTooltip': 'Worktree git : copie isolée du dépôt créée pour la durée du run, sous .kronn/worktrees/.',

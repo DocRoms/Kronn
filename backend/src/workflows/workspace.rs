@@ -10,46 +10,203 @@ use std::path::{Path, PathBuf};
 use crate::core::cmd::async_cmd;
 use crate::models::WorkspaceHooks;
 
-/// An active workspace (git worktree) for a workflow run.
 /// TD-20260709 (A) — exclusivity of a project's MAIN checkout across
 /// non-isolated runs: two of them cross-contaminate `.kronn/` machine files
 /// and each other's edits. Isolated (worktree) runs never take this lock.
 pub struct MainTreeGuard {
     key: String,
+    ticket: u64,
 }
 
-fn main_tree_locks() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-        std::sync::OnceLock::new();
-    LOCKS.get_or_init(Default::default)
+/// Owner of one checkout plus the runs queued behind it, in arrival order.
+struct MainTreeSlot {
+    holder_ticket: u64,
+    holder_run: String,
+    waiters: std::collections::VecDeque<MainTreeWaiter>,
+}
+
+struct MainTreeWaiter {
+    ticket: u64,
+    run_id: String,
+    wake: tokio::sync::oneshot::Sender<()>,
+}
+
+/// Why a run did not get the main checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MainTreeRefusal {
+    /// `holder` still owned the checkout when the bounded wait ran out.
+    Busy {
+        holder: String,
+        waited: std::time::Duration,
+    },
+    /// An ancestor run holds it and is waiting on this run: waiting cannot help.
+    HeldByAncestor {
+        holder: String,
+    },
+    Cancelled,
+}
+
+/// Seconds a non-isolated run waits for the main checkout before refusing.
+pub const MAIN_TREE_WAIT_ENV: &str = "KRONN_MAIN_TREE_WAIT_SECS";
+pub const DEFAULT_MAIN_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub fn main_tree_wait_from(raw: Option<&str>) -> std::time::Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_MAIN_TREE_WAIT)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Per-test wait: the env var is process-wide and tests run in parallel.
+    pub(crate) static MAIN_TREE_WAIT_FOR_TESTS: std::time::Duration;
+}
+
+pub fn main_tree_wait() -> std::time::Duration {
+    #[cfg(test)]
+    if let Ok(wait) = MAIN_TREE_WAIT_FOR_TESTS.try_with(|wait| *wait) {
+        return wait;
+    }
+    main_tree_wait_from(std::env::var(MAIN_TREE_WAIT_ENV).ok().as_deref())
+}
+
+type MainTreeLocks = std::sync::Mutex<std::collections::HashMap<String, MainTreeSlot>>;
+
+fn main_tree_locks(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, MainTreeSlot>> {
+    static LOCKS: std::sync::OnceLock<MainTreeLocks> = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Canonical key: two spellings of the same checkout (symlink, relative)
+/// must not bypass the lock.
+fn main_tree_key(project_path: &str) -> String {
+    std::fs::canonicalize(project_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| project_path.to_string())
+}
+
+fn next_main_tree_ticket() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl MainTreeGuard {
-    /// `None` = another run already owns this project's main tree; the
-    /// caller must refuse to run (holder's run id is returned for the error).
-    pub fn acquire(project_path: &str, run_id: &str) -> Result<Self, String> {
-        // Canonical key: two spellings of the same checkout (symlink,
-        // relative) must not bypass the mutex.
-        let key = std::fs::canonicalize(project_path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| project_path.to_string());
-        let mut locks = main_tree_locks().lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(holder) = locks.get(&key) {
-            return Err(holder.clone());
+    fn claim_free(
+        locks: &mut std::collections::HashMap<String, MainTreeSlot>,
+        key: String,
+        run_id: &str,
+    ) -> Self {
+        let ticket = next_main_tree_ticket();
+        locks.insert(
+            key.clone(),
+            MainTreeSlot {
+                holder_ticket: ticket,
+                holder_run: run_id.to_string(),
+                waiters: Default::default(),
+            },
+        );
+        Self { key, ticket }
+    }
+
+    /// Immediate attempt: `Err(holder run id)` when the checkout is taken.
+    pub fn try_acquire(project_path: &str, run_id: &str) -> Result<Self, String> {
+        let key = main_tree_key(project_path);
+        let mut locks = main_tree_locks();
+        if let Some(slot) = locks.get(&key) {
+            return Err(slot.holder_run.clone());
         }
-        locks.insert(key.clone(), run_id.to_string());
-        Ok(Self { key })
+        Ok(Self::claim_free(&mut locks, key, run_id))
+    }
+
+    /// Queues behind the current holder (FIFO per checkout) for at most
+    /// `wait`; the release hands the checkout straight to the next waiter.
+    pub async fn acquire(
+        project_path: &str,
+        run_id: &str,
+        ancestors: &[String],
+        wait: std::time::Duration,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Self, MainTreeRefusal> {
+        let key = main_tree_key(project_path);
+        let ticket = next_main_tree_ticket();
+        let mut woken = {
+            let mut locks = main_tree_locks();
+            let Some(slot) = locks.get_mut(&key) else {
+                return Ok(Self::claim_free(&mut locks, key, run_id));
+            };
+            if ancestors.contains(&slot.holder_run) {
+                return Err(MainTreeRefusal::HeldByAncestor {
+                    holder: slot.holder_run.clone(),
+                });
+            }
+            let (wake, woken) = tokio::sync::oneshot::channel();
+            slot.waiters.push_back(MainTreeWaiter {
+                ticket,
+                run_id: run_id.to_string(),
+                wake,
+            });
+            woken
+        };
+        let cancelled = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => true,
+            _ = &mut woken => false,
+            _ = tokio::time::sleep(wait) => false,
+        };
+        // Settle under the lock: a hand-off may have raced the timeout or
+        // the cancellation, in which case this run already owns the tree.
+        let mut locks = main_tree_locks();
+        match locks.get_mut(&key) {
+            Some(slot) if slot.holder_ticket == ticket => {}
+            Some(slot) => {
+                slot.waiters.retain(|waiter| waiter.ticket != ticket);
+                if cancelled {
+                    return Err(MainTreeRefusal::Cancelled);
+                }
+                return Err(MainTreeRefusal::Busy {
+                    holder: slot.holder_run.clone(),
+                    waited: wait,
+                });
+            }
+            None if cancelled => return Err(MainTreeRefusal::Cancelled),
+            None => return Ok(Self::claim_free(&mut locks, key, run_id)),
+        }
+        drop(locks);
+        let guard = Self { key, ticket };
+        if cancelled {
+            drop(guard);
+            return Err(MainTreeRefusal::Cancelled);
+        }
+        Ok(guard)
     }
 }
 
 impl Drop for MainTreeGuard {
     fn drop(&mut self) {
-        if let Ok(mut locks) = main_tree_locks().lock() {
-            locks.remove(&self.key);
+        let mut locks = main_tree_locks();
+        let Some(slot) = locks.get_mut(&self.key) else {
+            return;
+        };
+        if slot.holder_ticket != self.ticket {
+            return;
         }
+        // A waiter that gave up has dropped its receiver: skip it.
+        while let Some(next) = slot.waiters.pop_front() {
+            slot.holder_ticket = next.ticket;
+            slot.holder_run = next.run_id;
+            if next.wake.send(()).is_ok() {
+                return;
+            }
+        }
+        locks.remove(&self.key);
     }
 }
 
+/// An active workspace (git worktree) for a workflow run.
 pub struct Workspace {
     /// Path to the worktree directory
     pub path: PathBuf,
@@ -434,7 +591,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::MainTreeGuard;
+    use super::{main_tree_wait_from, MainTreeGuard, MainTreeRefusal};
+    use std::time::Duration;
 
     #[test]
     fn main_tree_guard_is_exclusive_per_project_and_released_on_drop() {
@@ -442,17 +600,156 @@ mod tests {
         let dir_b = tempfile::TempDir::new().unwrap();
         let a = dir_a.path().to_string_lossy().to_string();
         let b = dir_b.path().to_string_lossy().to_string();
-        let g1 = MainTreeGuard::acquire(&a, "run-1").expect("first acquire");
-        let denied = MainTreeGuard::acquire(&a, "run-2");
+        let g1 = MainTreeGuard::try_acquire(&a, "run-1").expect("first acquire");
+        let denied = MainTreeGuard::try_acquire(&a, "run-2");
         assert_eq!(
             denied.err().as_deref(),
             Some("run-1"),
             "second run must be refused, naming the holder"
         );
         // A different project is unaffected.
-        let _other = MainTreeGuard::acquire(&b, "run-3").expect("other project free");
+        let _other = MainTreeGuard::try_acquire(&b, "run-3").expect("other project free");
         drop(g1);
-        let _g2 = MainTreeGuard::acquire(&a, "run-2").expect("released on drop");
+        let _g2 = MainTreeGuard::try_acquire(&a, "run-2").expect("released on drop");
+    }
+
+    fn fresh_tree() -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn main_tree_waiters_are_served_in_arrival_order() {
+        let (_dir, tree) = fresh_tree();
+        let never = tokio_util::sync::CancellationToken::new();
+        let holder = MainTreeGuard::try_acquire(&tree, "run-holder").unwrap();
+        let (order_tx, mut order_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+        for run in ["run-a", "run-b", "run-c"] {
+            let (tree, never, order_tx) = (tree.clone(), never.clone(), order_tx.clone());
+            tasks.push(tokio::spawn(async move {
+                let guard =
+                    MainTreeGuard::acquire(&tree, run, &[], Duration::from_secs(10), &never)
+                        .await
+                        .expect("served before the deadline");
+                order_tx.send(run).unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                drop(guard);
+            }));
+            // Let this waiter enqueue before the next one arrives.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(holder);
+        for task in tasks {
+            task.await.unwrap();
+        }
+        drop(order_tx);
+        let mut order = Vec::new();
+        while let Some(run) = order_rx.recv().await {
+            order.push(run);
+        }
+        assert_eq!(order, ["run-a", "run-b", "run-c"]);
+        assert!(
+            MainTreeGuard::try_acquire(&tree, "run-after").is_ok(),
+            "fully released"
+        );
+    }
+
+    #[tokio::test]
+    async fn main_tree_wait_times_out_naming_the_holder() {
+        let (_dir, tree) = fresh_tree();
+        let never = tokio_util::sync::CancellationToken::new();
+        let _holder = MainTreeGuard::try_acquire(&tree, "run-holder").unwrap();
+        let started = std::time::Instant::now();
+        let refusal =
+            MainTreeGuard::acquire(&tree, "run-late", &[], Duration::from_millis(150), &never)
+                .await
+                .err()
+                .expect("the holder never releases");
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "it waited first"
+        );
+        assert_eq!(
+            refusal,
+            MainTreeRefusal::Busy {
+                holder: "run-holder".into(),
+                waited: Duration::from_millis(150),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_waiter_leaves_the_queue() {
+        let (_dir, tree) = fresh_tree();
+        let never = tokio_util::sync::CancellationToken::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let holder = MainTreeGuard::try_acquire(&tree, "run-holder").unwrap();
+        let waiter = {
+            let (tree, cancel) = (tree.clone(), cancel.clone());
+            tokio::spawn(async move {
+                MainTreeGuard::acquire(
+                    &tree,
+                    "run-cancelled",
+                    &[],
+                    Duration::from_secs(30),
+                    &cancel,
+                )
+                .await
+                .err()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.cancel();
+        assert_eq!(waiter.await.unwrap(), Some(MainTreeRefusal::Cancelled));
+        let next = {
+            let (tree, never) = (tree.clone(), never.clone());
+            tokio::spawn(async move {
+                MainTreeGuard::acquire(&tree, "run-next", &[], Duration::from_secs(10), &never)
+                    .await
+                    .is_ok()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(holder);
+        assert!(
+            next.await.unwrap(),
+            "the release skips the cancelled waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_held_up_by_its_own_ancestor_is_refused_at_once() {
+        let (_dir, tree) = fresh_tree();
+        let never = tokio_util::sync::CancellationToken::new();
+        let _parent = MainTreeGuard::try_acquire(&tree, "run-parent").unwrap();
+        let refusal = MainTreeGuard::acquire(
+            &tree,
+            "run-child",
+            &["run-parent".to_string()],
+            Duration::from_secs(30),
+            &never,
+        )
+        .await
+        .err();
+        assert_eq!(
+            refusal,
+            Some(MainTreeRefusal::HeldByAncestor {
+                holder: "run-parent".into()
+            })
+        );
+    }
+
+    #[test]
+    fn main_tree_wait_defaults_to_sixty_seconds_and_reads_the_override() {
+        assert_eq!(main_tree_wait_from(None), Duration::from_secs(60));
+        assert_eq!(
+            main_tree_wait_from(Some("not a number")),
+            Duration::from_secs(60)
+        );
+        assert_eq!(main_tree_wait_from(Some(" 5 ")), Duration::from_secs(5));
+        assert_eq!(main_tree_wait_from(Some("0")), Duration::ZERO);
     }
 
     use super::*;

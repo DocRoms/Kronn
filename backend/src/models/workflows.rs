@@ -1165,6 +1165,11 @@ pub struct WorkspaceConfig {
     /// request a worktree so those hooks do not silently stop running.
     #[serde(default)]
     pub require_isolation: bool,
+    /// Declares that the workflow never writes the project's checkout (it
+    /// reads it, or works through absolute paths / page data), so its
+    /// non-isolated runs skip the per-project exclusivity lock.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub main_tree_read_only: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1780,6 +1785,19 @@ mod step_deserialization_tests {
         let modern: WorkspaceConfig =
             serde_json::from_str(r#"{"hooks":{},"require_isolation":true}"#).unwrap();
         assert!(modern.require_isolation);
+        assert!(
+            !modern.main_tree_read_only,
+            "writing the tree stays the default"
+        );
+
+        let read_only: WorkspaceConfig =
+            serde_json::from_str(r#"{"hooks":{},"main_tree_read_only":true}"#).unwrap();
+        assert!(read_only.main_tree_read_only);
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"hooks": {}, "require_isolation": false}),
+            "an unset flag is not serialized"
+        );
     }
 
     /// 0.8.5 dogfooding regression test — JIRA helper case.
