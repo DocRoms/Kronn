@@ -8069,7 +8069,7 @@ def call_workflow_run_get(args):
                 "step_agent": s.get("step_agent"),
                 "output": out,
             }
-            for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "agent_provenance"]:
+            for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "agent_provenance", "cached_prompt_tokens", "cache_write_prompt_tokens", "last_activity"]:
                 val = s.get(field)
                 if val is not None:
                     step_dict[field] = val
@@ -9528,6 +9528,8 @@ _PAGE_ACTION_CONTRACT = (
     "source_ref such as `<page.title>`, `<page.dataset.summary.owner>` or "
     "`<page.dataset.tickets.find(key).id>`. For the last form, "
     "`data-kronn-bindings` carries only a JSON selector map keyed by variable name. "
+    "A `user_input` value with such a source_ref starts from that row's value and "
+    "stays editable; its selector is the one keyed by its name, or the click's only one. "
     "Never put secrets or resolved environment values in HTML. The sandbox emits "
     "an intention; only the native card's explicit human launch can execute it."
     "\n\nOne block serves every row: give each row's button its own "

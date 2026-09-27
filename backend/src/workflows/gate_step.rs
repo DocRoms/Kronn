@@ -66,6 +66,9 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
                     child_run_id: None,
                     agent_provenance: None,
                     native_tool_calls: Box::default(),
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
+                    last_activity: None,
                 },
                 condition_action: None,
             };
@@ -91,6 +94,9 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }
@@ -142,6 +148,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: message.map(|s| s.to_string()),
             gate_request_changes_target: None,
             gate_notify_url: None,

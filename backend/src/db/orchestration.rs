@@ -1718,6 +1718,34 @@ pub fn get_execution_for_dispatch(
         .map(Option::flatten)
 }
 
+/// Record the model the worker's runtime reported serving. Only the
+/// execution's current dispatch may write it, so a stale run cannot relabel a
+/// reassigned worker. Returns whether it landed.
+pub fn record_worker_served_model(
+    conn: &Connection,
+    execution_id: &str,
+    dispatch_job_id: &str,
+    model: &str,
+) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE task_executions SET worker_served_model = ?3 \
+         WHERE id = ?1 AND dispatch_job_id = ?2",
+        params![execution_id, dispatch_job_id, model],
+    )?;
+    Ok(affected > 0)
+}
+
+pub fn get_worker_served_model(conn: &Connection, execution_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT worker_served_model FROM task_executions WHERE id = ?1",
+            [execution_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// Persist one bounded, payload-free HTTP provider trace for a native worker
 /// dispatch. Re-finalizing the same dispatch replaces its trace; a later
 /// rework has a different dispatch id and therefore remains a separate journal
@@ -5240,7 +5268,7 @@ pub fn reassign_execution_worker(
             "UPDATE task_executions SET worker_target_kind = ?2, worker_cli_session_id = ?3, \
                     worker_agent_type = ?4, worker_model = ?5, worker_model_tier = ?6, \
                     worker_profile_id = ?7, dispatch_job_id = NULL, updated_at = ?8, \
-                    worker_connection_id = ?9 \
+                    worker_connection_id = ?9, worker_served_model = NULL \
              WHERE id = ?1",
             params![
                 exec_id,

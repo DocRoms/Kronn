@@ -8,6 +8,8 @@ export interface LivePageActionCardProps {
   /** The offer this card was opened from, to launch the same row again. */
   offer?: LivePageAction | null;
   bindings?: Record<string, string>;
+  /** Starting values drawn from the Page's data for the clicked row. */
+  prefill?: Record<string, string>;
   onChanged: (action: LivePageAction) => void;
   onOpenDiscussion: (discussionId: string) => void;
 }
@@ -16,6 +18,7 @@ export function LivePageActionCard({
   action,
   offer,
   bindings,
+  prefill,
   onChanged,
   onOpenDiscussion,
 }: LivePageActionCardProps) {
@@ -37,6 +40,7 @@ export function LivePageActionCard({
       action={action}
       operations={operations}
       bindings={stableBindings}
+      prefill={prefill}
       onChanged={onChanged}
       onOpenDiscussion={onOpenDiscussion}
       initiallyExpanded

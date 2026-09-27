@@ -174,7 +174,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--kr-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   background: var(--kr-accent);
   border-color: var(--kr-accent) !important;
 }

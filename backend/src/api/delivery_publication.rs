@@ -42,8 +42,13 @@ impl ExecutionFacts {
     /// A missing field becomes `unknown` instead of an empty string: the
     /// contract refuses empty identity, and failing the whole publication
     /// because a runtime never reported its tier would hide an accepted
-    /// delivery behind an unrelated defect.
-    pub fn from_execution(execution: &TaskExecution, duration_ms: u64) -> Self {
+    /// delivery behind an unrelated defect. The model is the one the runtime
+    /// reported serving; the requested one stands in only when none was.
+    pub fn from_execution(
+        execution: &TaskExecution,
+        served_model: Option<&str>,
+        duration_ms: u64,
+    ) -> Self {
         const UNKNOWN: &str = "unknown";
         Self {
             agent: non_empty(execution.worker_agent_type.as_deref(), UNKNOWN),
@@ -52,7 +57,12 @@ impl ExecutionFacts {
                 .map(runtime_label)
                 .unwrap_or_else(|| UNKNOWN.to_owned()),
             tier: non_empty(execution.worker_model_tier.as_deref(), UNKNOWN),
-            model: non_empty(execution.worker_model.as_deref(), UNKNOWN),
+            model: non_empty(
+                served_model
+                    .filter(|model| !model.trim().is_empty())
+                    .or(execution.worker_model.as_deref()),
+                UNKNOWN,
+            ),
             branch: non_empty(execution.child_branch.as_deref(), UNKNOWN),
             duration_ms,
             tokens: None,
@@ -227,6 +237,90 @@ pub fn summary_from_manifest(
     )
 }
 
+/// Persists the model a worker launch's runtime reports serving, so an
+/// accepted delivery names it. Polls the launch's provenance capture: the
+/// delivery can be accepted while the worker's turn is still running.
+pub(crate) struct ServedModelRecorder {
+    capture: crate::agents::provenance::AgentProvenanceCapture,
+    stop: tokio_util::sync::DropGuard,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ServedModelRecorder {
+    const POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+    pub(crate) fn start(
+        db: std::sync::Arc<crate::db::Database>,
+        execution_id: String,
+        dispatch_job_id: String,
+    ) -> Self {
+        let capture = crate::agents::provenance::AgentProvenanceCapture::default();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn({
+            let capture = capture.clone();
+            let stop = stop.clone();
+            async move {
+                let mut recorded: Option<String> = None;
+                loop {
+                    let stopping = tokio::select! {
+                        _ = stop.cancelled() => true,
+                        _ = tokio::time::sleep(Self::POLL) => false,
+                    };
+                    let observed = capture
+                        .lock()
+                        .map(|state| state.observed_models.join(" / "))
+                        .unwrap_or_default();
+                    if !observed.is_empty() && recorded.as_deref() != Some(observed.as_str()) {
+                        let (execution_id, dispatch_job_id, model) = (
+                            execution_id.clone(),
+                            dispatch_job_id.clone(),
+                            observed.clone(),
+                        );
+                        match db
+                            .with_conn(move |conn| {
+                                crate::db::orchestration::record_worker_served_model(
+                                    conn,
+                                    &execution_id,
+                                    &dispatch_job_id,
+                                    &model,
+                                )
+                            })
+                            .await
+                        {
+                            Ok(true) => recorded = Some(observed),
+                            // The dispatch was replaced: this launch no longer owns the worker.
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!("worker served model not recorded: {error}")
+                            }
+                        }
+                    }
+                    if stopping {
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            capture,
+            stop: stop.drop_guard(),
+            task,
+        }
+    }
+
+    /// The capture to hand to the launch as its `provenance`.
+    pub(crate) fn capture(&self) -> crate::agents::provenance::AgentProvenanceCapture {
+        self.capture.clone()
+    }
+
+    /// Stop polling after a last write. Dropping the recorder does the same
+    /// without waiting for that write.
+    pub(crate) async fn finish(self) {
+        drop(self.stop);
+        let _ = self.task.await;
+    }
+}
+
 /// Publish the accepted delivery's one report into the parent discussion.
 ///
 /// Called on the approve path, and again on a replayed approve: the record is
@@ -245,7 +339,7 @@ pub async fn publish_accepted_delivery(
     let attempt_no = execution.attempt_no;
     let task_id = execution.task_id.clone();
 
-    let (delivery, task, assignment_started_at, review) = db
+    let (delivery, task, assignment_started_at, review, served_model) = db
         .with_conn(move |conn| {
             let delivery =
                 crate::db::worker_deliveries::get_delivery(conn, &execution_id, attempt_no)?;
@@ -260,7 +354,9 @@ pub async fn publish_accepted_delivery(
                 .optional()?;
             let review = crate::db::worker_reviews::get_review(conn, &execution_id, attempt_no)?
                 .map(|row| row.decision_json);
-            Ok((delivery, task, assignment_started_at, review))
+            let served_model =
+                crate::db::orchestration::get_worker_served_model(conn, &execution_id)?;
+            Ok((delivery, task, assignment_started_at, review, served_model))
         })
         .await?;
 
@@ -280,7 +376,7 @@ pub async fn publish_accepted_delivery(
         .unwrap_or(execution.created_at);
     let duration_ms = (delivered_at - started_at).num_milliseconds().max(0) as u64;
 
-    let facts = ExecutionFacts::from_execution(execution, duration_ms);
+    let facts = ExecutionFacts::from_execution(execution, served_model.as_deref(), duration_ms);
     // KT-613 — the review that accepted THIS attempt, and only it. A decision
     // that failed to parse leaves the report without principal evidence rather
     // than without a report: publication is total once a delivery is accepted.
@@ -965,5 +1061,191 @@ mod tests {
         )
         .unwrap();
         assert_eq!(markdown, twin.render_markdown());
+    }
+
+    /// Seed an accepted attempt of a ClaudeCode worker whose launch requested
+    /// `requested_model`, on dispatch `dispatch-795`.
+    async fn seed_claude_worker_delivery(db: &Database, requested_model: Option<&str>) {
+        let manifest_json = serde_json::to_string(&DeliveryManifestV1 {
+            version: "1".into(),
+            task_ref: "KT-795".into(),
+            ..manifest()
+        })
+        .expect("manifest JSON");
+        let requested_model = requested_model.map(str::to_owned);
+        db.with_conn(move |conn| {
+            let now = "2026-09-25T09:00:00Z";
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) \
+                 VALUES ('parent-795', 'Parent', ?1, ?1), ('child-795', 'Worker', ?1, ?1)",
+                [now],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+                 VALUES ('brief-795', 'child-795', 'User', 'brief', ?1, 1)",
+                [now],
+            )?;
+            conn.execute(
+                "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                     trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, available_at, \
+                     created_at, updated_at) VALUES ('dispatch-795', 'child-795', 'brief-795', 1, \
+                     'dedupe-795', '[]', 'Running', ?1, ?1, ?1)",
+                [now],
+            )?;
+            conn.execute(
+                "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at) \
+                 VALUES ('task-795', 795, 'Served model', ?1, ?1)",
+                [now],
+            )?;
+            conn.execute(
+                "INSERT INTO orchestration_runs (id, discussion_id, created_at, updated_at) \
+                 VALUES ('run-795', 'parent-795', ?1, ?1)",
+                [now],
+            )?;
+            conn.execute(
+                "INSERT INTO task_executions (id, orchestration_run_id, task_id, \
+                     parent_discussion_id, sub_discussion_id, dispatch_job_id, child_branch, \
+                     worker_target_kind, worker_agent_type, worker_model, attempt_no, status, \
+                     created_at, updated_at) \
+                 VALUES ('exec-795', 'run-795', 'task-795', 'parent-795', 'child-795', \
+                     'dispatch-795', 'kronn/task/kt-795', 'agent', 'ClaudeCode', ?2, 1, \
+                     'Approved', ?1, ?1)",
+                rusqlite::params![now, requested_model],
+            )?;
+            crate::db::worker_deliveries::upsert_delivery(
+                conn,
+                "exec-795",
+                1,
+                "abc1234",
+                &manifest_json,
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed accepted ClaudeCode delivery");
+    }
+
+    async fn served_model(db: &Database) -> Option<String> {
+        db.with_conn(|conn| crate::db::orchestration::get_worker_served_model(conn, "exec-795"))
+            .await
+            .unwrap()
+    }
+
+    async fn published_report(db: &Database) -> String {
+        let execution = db
+            .with_conn(|conn| crate::db::orchestration::get_task_execution(conn, "exec-795"))
+            .await
+            .unwrap()
+            .expect("execution");
+        publish_accepted_delivery(db, &execution)
+            .await
+            .expect("publish")
+            .expect("a persisted manifest publishes");
+        let message_id = crate::db::delivery_summaries::message_id_for("exec-795", 1);
+        db.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT content FROM messages WHERE id = ?1",
+                [message_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .expect("published report")
+    }
+
+    /// KT-795 — an accepted ClaudeCode delivery names the model its runtime
+    /// reported serving on the production adapter route, not the requested one.
+    #[tokio::test]
+    async fn an_accepted_claude_worker_delivery_names_the_model_its_runtime_served() {
+        for requested in [None, Some("opus")] {
+            let db = std::sync::Arc::new(Database::open_in_memory().expect("in-memory database"));
+            seed_claude_worker_delivery(&db, requested).await;
+
+            let project = tempfile::tempdir().unwrap();
+            let fixture = crate::acp::test_support::write_fixture_script(
+                project.path(),
+                crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+            );
+            let transport: std::sync::Arc<dyn crate::acp::AcpTransport> =
+                std::sync::Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                    fixture.to_string_lossy(),
+                    None,
+                    false,
+                ));
+            let recorder =
+                ServedModelRecorder::start(db.clone(), "exec-795".into(), "dispatch-795".into());
+            let tokens = crate::models::setup::TokensConfig {
+                anthropic: None,
+                openai: None,
+                google: None,
+                keys: Vec::new(),
+                disabled_overrides: Vec::new(),
+            };
+            let mut process = crate::agents::runner::start_agent_with_config(
+                crate::agents::runner::AgentStartConfig {
+                    provenance: Some(recorder.capture()),
+                    test_acp_transport: Some(transport),
+                    ..crate::agents::runner::AgentStartConfig::new(
+                        &crate::models::AgentType::ClaudeCode,
+                        project.path().to_str().unwrap(),
+                        "implement KT-795",
+                        &tokens,
+                    )
+                },
+            )
+            .await
+            .expect("worker launch");
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            recorder.finish().await;
+
+            let report = published_report(&db).await;
+            assert!(
+                report.contains("**Model** claude-opus-5-5-20260915"),
+                "requested {requested:?}: {report}"
+            );
+            assert!(!report.contains("**Model** unknown"), "{report}");
+            assert!(!report.contains("**Model** opus\n"), "{report}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_current_dispatch_records_a_served_model() {
+        let db = Database::open_in_memory().expect("in-memory database");
+        seed_claude_worker_delivery(&db, Some("opus")).await;
+        let stale = db
+            .with_conn(|conn| {
+                crate::db::orchestration::record_worker_served_model(
+                    conn,
+                    "exec-795",
+                    "dispatch-old",
+                    "claude-haiku",
+                )
+            })
+            .await
+            .unwrap();
+        assert!(!stale, "a replaced dispatch cannot relabel the worker");
+        assert_eq!(served_model(&db).await, None);
+        assert!(
+            published_report(&db).await.contains("**Model** opus"),
+            "requested model stands in"
+        );
+
+        assert!(db
+            .with_conn(|conn| {
+                crate::db::orchestration::record_worker_served_model(
+                    conn,
+                    "exec-795",
+                    "dispatch-795",
+                    "claude-opus-5-5-20260915",
+                )
+            })
+            .await
+            .unwrap());
+        assert_eq!(
+            served_model(&db).await.as_deref(),
+            Some("claude-opus-5-5-20260915")
+        );
     }
 }

@@ -34,6 +34,8 @@ interface KronnActionCardProps<T extends KronnAction> {
   onChanged: (action: T) => void;
   onOpenDiscussion: (discussionId: string) => void;
   bindings?: Record<string, string>;
+  /** Starting values for editable fields, drawn from where the card was opened. */
+  prefill?: Record<string, string>;
   initiallyExpanded?: boolean;
   testIdPrefix?: string;
 }
@@ -91,10 +93,10 @@ function promptVariable(
   };
 }
 
-function initialValues(action: KronnAction): Record<string, string> {
+function initialValues(action: KronnAction, prefill?: Record<string, string>): Record<string, string> {
   return Object.fromEntries(action.values
     .filter(isEditableValue)
-    .map(value => [value.name, value.value ?? value.suggested_value ?? '']));
+    .map(value => [value.name, prefill?.[value.name] ?? value.value ?? value.suggested_value ?? '']));
 }
 
 /** The row a Page card is about, as the reader knows it: the selectors the
@@ -141,12 +143,25 @@ export function KronnActionCard<T extends KronnAction>({
   onChanged,
   onOpenDiscussion,
   bindings,
+  prefill,
   initiallyExpanded = false,
   testIdPrefix = 'discussion-action',
 }: KronnActionCardProps<T>) {
   const { t } = useT();
   const current = action;
-  const [values, setValues] = useState<Record<string, string>>(() => initialValues(action));
+  const [values, setValues] = useState<Record<string, string>>(() => initialValues(action, prefill));
+  // Fields the reader has typed in: a prefill that arrives late never overwrites them.
+  const touchedRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!prefill) return;
+    setValues(currentValues => {
+      const next = { ...currentValues };
+      for (const [name, value] of Object.entries(prefill)) {
+        if (name in next && !touchedRef.current.has(name)) next[name] = value;
+      }
+      return next;
+    });
+  }, [prefill]);
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -186,7 +201,10 @@ export function KronnActionCard<T extends KronnAction>({
     try {
       const next = await operation();
       // Back on an offer (a relaunch): the form restarts from its suggestions.
-      if (next.state === 'proposed') setValues(initialValues(next));
+      if (next.state === 'proposed') {
+        touchedRef.current.clear();
+        setValues(initialValues(next, prefill));
+      }
       update(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -264,7 +282,10 @@ export function KronnActionCard<T extends KronnAction>({
                   <PromptVariableInput
                     variable={promptVariable(value, t)}
                     value={values[value.name] ?? ''}
-                    onChange={next => setValues(currentValues => ({ ...currentValues, [value.name]: next }))}
+                    onChange={next => {
+                      touchedRef.current.add(value.name);
+                      setValues(currentValues => ({ ...currentValues, [value.name]: next }));
+                    }}
                     disabled={busy}
                   />
                 ) : (

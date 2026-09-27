@@ -72,6 +72,8 @@ JSONPath extraction examples (RFC 9535, syntax familiar from `jq`):
 - `$.total` — single scalar
 - `$.issues[?(@.priority=='high')].id` — filtered subset
 
+**Images and other files** (e.g. Jira `/rest/api/2/attachment/thumbnail/{id}`): set `"api_response": {"type": "Binary"}` (also on `BatchApiCall`). The data becomes `{content_type, size, base64, data_uri}`; add `"api_extract": {"path": "$.data_uri"}` to keep only the URI a Page `<img>` can show (Pages accept `data:` images only). `accept` defaults to `["image/*"]` (`*/*` refused) and `max_bytes` to 262144 (max 2097152); an undeclared type or a larger body fails the step instead of being truncated. Never fetch such files with `Exec` + credentials: the broker keeps them server-side.
+
 - **Reference a saved `QuickApi`** via `quick_api_id` — the runtime loads the QuickApi from DB and pulls every `api_*` field from it. Per-field overrides on the step still win when set, so you can keep the shared body template but override e.g. `api_extract` for one workflow. Same pattern as `BatchApiCall` — when 3+ workflows would share the same call, define it once as a `QuickApi` and reference it. (0.7+, was 0.6.0 for batch only, extended to single-shot in 0.7+.)
 
 ### 3. `Exec` — direct shell command in the workspace (0 tokens)
@@ -354,7 +356,9 @@ declared `values` contract as a Discussion `kronn-action`. A Page-only
 `dynamic_binding` value requires a declarative `source_ref` such as
 `<page.title>`, `<page.dataset.summary.owner>` or
 `<page.dataset.tickets.find(key).id>`; the CTA's `data-kronn-bindings` contains
-only the row selector keyed by variable name. Never place a resolved value or
+only the row selector keyed by variable name. A `user_input` value with such a
+`source_ref` starts from that row's value (an existing debrief, a draft) and
+stays editable before launch. Never place a resolved value or
 secret in Page HTML. The sandbox proposes an intention only; Kronn renders the
 native preflight card and the human launches it explicitly.
 One block serves every row: give each row's button its own
@@ -389,7 +393,7 @@ Runs an **existing, saved workflow** as a nested child run. Use when a step "IS 
 
 (`agent` and `prompt_template` are required by the schema but ignored — set them to `ClaudeCode` and `""`. The child runs in **its own workspace**; the parent does not share state with it directly — see the data-passing note below.)
 
-**Per-item fan-out (`sub_workflow_foreach_file`).** Set it to a workspace-relative JSON-array file (e.g. `"sub_workflow_foreach_file": ".kronn/tasks.json"`, written by an upstream triage step) → the child runs **once per item, sequentially, in the SHARED parent worktree**. Workflow-level `concurrency_limit` only limits overlapping complete workflow runs (Cron/Tracker); it does **not** parallelize these items. To prevent a silent worker-count trap, values above 1 are rejected when a SubWorkflow foreach is present. Use `BatchQuickPrompt` for parallel agent fan-out. Safe parallel SubWorkflow children would require isolated worktrees plus deterministic merge semantics. Omit the foreach file → a single child run (Phase 1/2 behaviour).
+**Per-item fan-out (`sub_workflow_foreach_file`).** Set it to a workspace-relative JSON-array file (e.g. `"sub_workflow_foreach_file": ".kronn/tasks.json"`, written by an upstream triage step) → the child runs **once per item, sequentially, in the SHARED parent worktree**. Workflow-level `concurrency_limit` only limits overlapping complete workflow runs (Cron/Tracker); it does **not** parallelize these items. Values above 1 are accepted only with `workspace_config.require_isolation: true`, where each run owns its worktree and its own sequential foreach; otherwise they are rejected. Use `BatchQuickPrompt` for parallel agent fan-out. Safe parallel SubWorkflow children would require isolated worktrees plus deterministic merge semantics. Omit the foreach file → a single child run (Phase 1/2 behaviour).
 
 **Accessing the current item in the child (run-breaking — get this right).** The engine exposes each item to the child **two ways**, both keyed `current_task` (fixed name — *not* `{{item.*}}`, *not* derived from the source-file name):
 - **Template vars** `{{current_task.<field>}}` — each top-level field of the item, ready to interpolate in any step. Scalars stringify (`number` → `42`), `null` → empty string, nested arrays/objects render as compact JSON, and the whole item is `{{current_task}}`. Use this for an ApiCall path (`/repos/o/r/pulls/{{current_task.number}}/reviews`), a worktree name (`.kronn/pr-{{current_task.number}}`), a prompt, etc.
@@ -696,6 +700,8 @@ The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
 - `{{failed_step.name}}` / `{{failed_step.output}}` — **only valid inside `on_failure` steps**. The runner injects them when firing the rollback chain
 - `{{<launch_var>}}` — any name declared in `Workflow.variables` resolves at launch time from its declared source (`user_input`, current project `<env.NAME>`, or allowlisted `<context.key>`)
 - `{{issue.title}}` / `{{issue.body}}` / `{{issue.number}}` / `{{issue.url}}` / `{{issue.labels}}` — populated only when trigger is Tracker
+- `{{run.id}}` — id of the current workflow run (a SubWorkflow child run has its own)
+- `{{<path> ?? "text"}}` — the one explicit fallback (`'text'` also works, no escapes). Renders the literal when the path is absent or JSON null; a present empty string stays empty. Use it when a step may not have run on every path, e.g. `{{steps.porte_check.data.stdout ?? ""}}` after a `Goto` that skips `porte_check`, or `{{artifacts.review ?? ""}}` on round 1. Without `??`, an absent reference fails the step before it runs. A guarded reference may name a later step, never an unknown one, and never hides an unsupported filter
 - `{{time.now}}` — one timestamp captured at run start and reused by every step/source, including after a Gate/restart resume. `{{now}}` is a shorthand unless a declared/static variable named `now` exists. Compose vendor-neutral filters: `shift:+1d|-24h|-7d` (fixed durations; units `s,m,h,d,w`), `tz:Europe/Paris` (IANA; UTC default), `floor:minute|hour|day`, and `fmt:rfc3339|local_iso_ms|date|unix|unix_ms`. Example: `{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}`. Shorthand `{{now-24h|floor:hour}}` also works. Never invent plugin formats such as `fmt:adobe`; Adobe's no-zone local ISO shape is the generic `local_iso_ms` preset.
 
 ### StepOutputFormat (Agent steps only)
@@ -1097,7 +1103,7 @@ Do not paraphrase, do not move the disclaimer above the signal line, do not omit
 - The `actions` array supports post-workflow actions like `CreatePr` or `CreateIssue`, but these are advanced and rarely needed.
 - **`Gate` cannot live inside `on_failure`** — the run is already `Failed`, no resume path serves the pause, the wizard rejects it server-side.
 - **`Exec` requires `Workflow.exec_allowlist`** to be populated (otherwise the validator refuses to save). Allowlist matches on the bare binary name only — no `/usr/bin/cargo`, no `bash -c`, no shell metas.
-- **`---STATE:k=v---` blocks are 1-line only** — multi-line values won't parse. The block must be on its own line and close with `---` on the same line.
+- **`---STATE:k=v---` blocks are 1-line only** — multi-line values won't parse. The block must be on its own line and close with `---` on the same line. Exception: an `Exec` step's markers are read from its raw stdout, where a value may span lines up to the first `---`.
 - **`---ARTIFACT:name---...---END_ARTIFACT---`** is multi-line, content captured between the markers (single trailing newline trimmed).
 - **`Goto.max_iterations` is a per-edge cap**, not workflow-wide. Two different Gotos targeting different steps each have their own counter. The workflow-level `loop_detection_max_revisits` guard remains the global safety net.
 - **Launch variables must be declared in `Workflow.variables` to be valid** — referencing `{{some_var}}` in a step prompt without declaring it renders empty at runtime. The wizard surfaces a live warning ("undeclared var") with a 1-click "add to launch variables" button.

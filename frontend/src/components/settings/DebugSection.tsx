@@ -271,7 +271,7 @@ export function DebugSection({
           {debugModeNeedsRestart && (
             <div className="set-warning-callout">
               <AlertTriangle size={12} className="text-warning flex-shrink-0" />
-              <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
+              <span className="text-xs" style={{ color: 'var(--kr-warning-amber)', lineHeight: 1.4 }}>
                 {t('settings.debugModeRestart')}
               </span>
             </div>

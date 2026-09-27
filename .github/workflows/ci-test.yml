@@ -455,6 +455,11 @@ jobs:
       - name: Lint — i18n key parity (fr/en/es/zh)
         run: pnpm lint:i18n
 
+      # Undefined --kr-* tokens, literal white/black text on a token fill, focus
+      # rings removed, and WCAG AA of every text role in every theme.
+      - name: Lint — theme tokens and WCAG contrast
+        run: pnpm lint:theme
+
       - name: Run tests with coverage threshold floor
         # Uses `vitest run --coverage` so the `coverage.thresholds` block
         # in `vite.config.ts` enforces the 2026-05-29 baseline floor.

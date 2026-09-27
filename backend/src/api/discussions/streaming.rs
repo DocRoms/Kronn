@@ -3002,7 +3002,18 @@ async fn make_agent_stream_inner(
             }
         }
 
+        // A delivery names the model the worker's runtime served, not the requested one.
+        let served_model = cli_task_worker_context.as_ref().map(|worker| {
+            crate::api::delivery_publication::ServedModelRecorder::start(
+                state.db.clone(),
+                worker.execution_id.clone(),
+                worker.dispatch_job_id.clone(),
+            )
+        });
         match runner::start_agent_with_config(runner::AgentStartConfig {
+            provenance: served_model
+                .as_ref()
+                .map(crate::api::delivery_publication::ServedModelRecorder::capture),
             work_dir: workspace_path.as_deref(),
             full_access,
             skill_ids: &skill_ids,
@@ -3316,6 +3327,7 @@ async fn make_agent_stream_inner(
                                 input_tokens,
                                 output_tokens,
                                 cost_usd,
+                                ..
                             } => {
                                 stream_json_tokens =
                                     stream_json_tokens.max(input_tokens + output_tokens);
@@ -3496,6 +3508,9 @@ async fn make_agent_stream_inner(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
+                if let Some(recorder) = served_model {
+                    recorder.finish().await;
+                }
                 let validation_redaction_error =
                     validation_redaction_scope
                         .as_ref()

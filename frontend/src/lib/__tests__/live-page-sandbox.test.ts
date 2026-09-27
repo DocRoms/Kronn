@@ -35,6 +35,19 @@ describe('Live Page sandbox', () => {
     expect(LIVE_PAGE_CSP).not.toContain('same-origin');
   });
 
+  it('shows images only from data: or blob: URIs, never from a remote origin', () => {
+    const directives = LIVE_PAGE_CSP.split('; ');
+    expect(directives).toContain('img-src data: blob:');
+    expect(directives).toContain("default-src 'none'");
+    expect(LIVE_PAGE_CSP).not.toMatch(/https?:|\*|'self'/);
+    const thumbnail = 'data:image/png;base64,iVBORw0KGgo=';
+    const data = runtimeData({
+      ...detail,
+      datasets: [{ ...detail.datasets[0], name: 'ticket_images', kind: 'snapshot', current: { '10001': thumbnail }, points: [] }],
+    });
+    expect(data.datasets.ticket_images.current).toEqual({ '10001': thumbnail });
+  });
+
   it('exposes a rendered-DOM export bridge and rasterizes canvas charts', () => {
     const output = buildSandboxDocument('<main>Report</main>', 'channel-1');
     expect(output).toContain("message.type!=='kronn:page-export-request'");

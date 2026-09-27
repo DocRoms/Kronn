@@ -1060,7 +1060,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       (the run did NOT "continue", it's compensating). */}
                   {!sr.condition_result && sr.status === 'Success' && i < run.step_results.length - 1
                     && !sr.is_rollback && !run.step_results[i + 1]?.is_rollback && (
-                    <span className="text-2xs" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>&rarr; {t('wf.nextStepArrow')}</span>
+                    <span className="text-2xs" style={{ color: 'var(--kr-success)' }}>&rarr; {t('wf.nextStepArrow')}</span>
                   )}
                   <span className="flex-1" />
                   {!isExpanded && sr.output && (

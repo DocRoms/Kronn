@@ -878,10 +878,10 @@ export function AgentsSection({
                         {nvidiaStatus === null
                           ? <span className="text-ghost">…</span>
                           : !nvidiaStatus.online
-                            ? <span style={{ color: 'rgba(var(--kr-danger-rgb), 0.7)' }}>{t('config.nvidiaOffline')}</span>
+                            ? <span style={{ color: 'var(--kr-danger)' }}>{t('config.nvidiaOffline')}</span>
                             : !nvidiaStatus.hasKey
-                              ? <span style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)' }}>{t('config.nvidiaKeyMissing')}</span>
-                              : <span style={{ color: 'rgba(var(--kr-success-rgb), 0.6)' }}>
+                              ? <span style={{ color: 'var(--kr-warning-amber)' }}>{t('config.nvidiaKeyMissing')}</span>
+                              : <span style={{ color: 'var(--kr-success)' }}>
                                   {t('liteLlm.online')} — {nvidiaStatus.count} {t('config.nvidiaCatalogueModels')}
                                 </span>}
                       </div>
@@ -892,7 +892,7 @@ export function AgentsSection({
                       </div>
                     )}
                     {!agent.installed && agent.runtime_available && (
-                      <div className="text-xs mt-2" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>
+                      <div className="text-xs mt-2" style={{ color: 'var(--kr-success)' }}>
                         runtime OK <span className="text-ghost">— via npx</span>
                       </div>
                     )}
@@ -1773,7 +1773,7 @@ export function AgentsSection({
 
         {/* Best practices links */}
         <div className="set-best-practices">
-          <div className="flex-row gap-3 text-sm font-semibold mb-4" style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)' }}>
+          <div className="flex-row gap-3 text-sm font-semibold mb-4" style={{ color: 'var(--kr-accent-text)' }}>
             <ExternalLink size={10} /> {t('config.bestPractices')}
           </div>
           <div className="flex-wrap text-xs" style={{ gap: '6px 16px' }}>

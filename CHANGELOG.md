@@ -13,11 +13,47 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A workflow run can carry a plain business label from its launch:
+  `POST /api/workflows/{id}/trigger` accepts `state` beside `variables`, and
+  `GET /api/workflows/{id}/runs?state_key=…&state_value=…` returns the runs
+  holding that entry, newest first. The last run about a ticket now takes one
+  call instead of reading the detail of every recent run.
+- A Page action's `user_input` field can start from the clicked row's data:
+  with a `<page.dataset…>` `source_ref`, Kronn resolves it server-side when the
+  card opens and the reader edits it before launching, instead of retyping a
+  debrief that is already in the dataset.
 - `task_exec_status` can wait for an execution: `wait_for` lists statuses (for
   example `["AwaitingReview", "Done", "Blocked"]`) and the call returns as soon
   as the execution is in one of them, with `wait: {matched, timed_out,
   waited_ms}`, instead of the principal sleeping and re-reading. `timeout_secs`
   bounds it (60 s by default, 170 s at most).
+- A workflow Agent step records the prompt-cache tokens Claude Code reports
+  beside its input and output: `cached_prompt_tokens` (reads) and
+  `cache_write_prompt_tokens` (writes), on the step result and on each attempt.
+  `tokens_used` keeps counting uncached input plus output; an orchestrator step
+  that declared 21 593 tokens had also read 1 554 330 cached tokens and written
+  80 271. While an Agent step runs, its latest tool call (tool, target, time) is
+  stored on the in-flight step result as `last_activity` and returned by
+  `workflow_run_status` as `current_activity`, so every reader sees what the
+  step is doing, not only the client that started the run.
+- Workflow templates accept one explicit fallback, `{{path ?? "text"}}` (or
+  `'text'`, taken verbatim). It renders the literal when the path is absent or
+  JSON null, so a step reading a step that a `Goto` skipped runs instead of
+  failing the run; a present empty value stays empty, and an absent reference
+  without `??` still fails as before. Saving still refuses an unknown step name
+  behind a fallback and now refuses a malformed one; the wizard no longer warns
+  about a guarded reference to a later step. `{{run.id}}` gives the current
+  run's id. See [the template grammar](docs/architecture/overview.md).
+- `ApiCall` and `BatchApiCall` steps can fetch an image or another file through
+  the API broker with `api_response: {"type": "Binary"}`: the credentials stay
+  on the server and the step returns `{content_type, size, base64, data_uri}`
+  instead of failing on JSON parsing. Only the declared media types are
+  accepted (`image/*` by default, `*/*` refused), and a body over `max_bytes`
+  (256 KiB by default, 2 MiB at most) fails the step rather than being
+  truncated. Published as a `data:` URI, a Jira attachment thumbnail shows in a
+  Page without opening its image policy to another domain. Steps without the
+  option parse JSON as before.
+  See [binary responses](docs/operations/deagent-apicall.md#binary-responses-images-and-other-files).
 - A room's native agent can prepare and launch a task execution itself, as
   its principal, without a CLI joining the room. Kronn identifies it from the
   turn it is running, so only that room's agent is accepted.
@@ -41,9 +77,10 @@ Release notes for 0.9.3 and earlier are available in the
   counted separately, so no cache rate is inferred for them.
 - HTTP task execution usage also records the prompt tokens a provider wrote to
   its cache (`cache_creation_input_tokens`), per turn, per phase and in total.
-  Setting `KRONN_LITELLM_PROMPT_CACHE=1` asks LiteLLM to mark Anthropic cache
-  breakpoints on the system prompt and the last message of Claude requests.
-  The switch is off by default.
+  Kronn asks LiteLLM to mark Anthropic cache breakpoints on the system prompt
+  and the last message of Claude requests, which brought the input cost of a
+  replayed Sonnet task to about a quarter of its uncached price.
+  `KRONN_LITELLM_PROMPT_CACHE=0` turns it off.
 - Open 2–12 selected discussions in a separate mosaic tab, with Artifact-style
   layouts, plan progress, recent messages and saved response checkpoints.
   Each tile scrolls independently and links to its full discussion. The bounded
@@ -80,6 +117,46 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An arbitration card lets the reader take a checked option back, and offers
+  a Comment action: the text reaches the agent that asked, marked as not a
+  decision, and the question stays pending. Before, a checked radio button
+  could not be unchecked and a written reply always settled the question.
+- A workflow with `require_isolation` and a SubWorkflow foreach accepts a
+  `concurrency_limit` above 1: each run owns its worktree, so two runs overlap
+  while each foreach stays sequential. In such a fresh worktree the foreach no
+  longer skips every item on `No such file or directory`: it creates the
+  untracked `.kronn/` folder before writing `current_task.json`.
+- Kronn no longer deletes a repository's own skills and agent files. At every
+  startup the native sync removed any `.claude/skills`, `.agents/skills` or
+  `.gemini/skills` folder (and any agent file) it had not just written, and
+  appended a whole-folder ignore rule such as `.agents/` that cancelled the
+  repository's `!.agents/skills/`. It now records what it writes in
+  `.kronn/native-files.json` and only removes an unmodified, untracked file
+  of its own; it ignores only what it wrote, and drops a whole-folder rule an
+  earlier sync appended over a re-included folder.
+- A kronn-action block removed from a Page's HTML is no longer listed among
+  its actions after the next publication; its launches stay in the history.
+- The dark themes pass WCAG AA: axe, plus a re-measure of the text it leaves
+  undecided behind gradients, now finds no contrast failure on Projects,
+  Discussions, Planning, Plugins, Workflows, Pages, Settings or an open action
+  card in `dark`, `gotham` or `matrix`, where it found 23, 404 and 395. Gotham
+  and matrix low-emphasis text (`--kr-text-muted` down to `--kr-text-ghost`) and
+  a few status colours were lightened, keeping their hue, to at least 4.5:1;
+  sakura and euronews ghost text reaches 3:1. Settings' debug switches no
+  longer show a light-grey browser button, unavailable models are muted
+  instead of faded, and agent names blend their brand colour with the text
+  colour. Thirteen `:focus-visible` rules no longer hide the focus ring.
+  `pnpm lint:theme` (also in CI) measures every theme and refuses undefined
+  custom properties, white or black text pinned on a token fill and removed
+  focus rings; `e2e/specs/a11y-dark-themes.spec.ts` scans the rendered screens.
+- The "▶ Launch" button of a native action card, the project git switcher's
+  button and the current-branch marker no longer print white text on the
+  accent: they use `--kr-text-on-accent`, which reads at 15.97:1 on the default
+  lime, 13.58:1 on the gotham yellow and 15.38:1 on the matrix green, where
+  white was 1.18, 1.43 and 1.37. The discussion weight panel and the prompt
+  variable editor no longer open white in dark themes. The token guard now
+  refuses any `var(--kr-*)` that `tokens.css` does not define, even behind a
+  fallback, and white text pinned on an accent fill.
 - A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is
   refused before it reaches disk when it leaves an orphan delimiter or an
   unclosed Twig block, or when an `edit_lines` replacement shifts the
@@ -88,12 +165,22 @@ Release notes for 0.9.3 and earlier are available in the
   Local models got bounded edits with indented edges wrong on every measured
   case. The prelocalized worker brief no longer carries the human-arbitration
   and parent-milestone sections.
+- An `Exec` step's `---STATE:k=v---` and `---ARTIFACT:name---` markers are read
+  from the command's raw stdout instead of the JSON-escaped copy in its
+  envelope. A multi-line value or artifact now reaches later steps and the run
+  state with real line breaks rather than literal `\n`, and quotes and
+  backslashes are no longer escaped. Only stdout is read; there a `STATE` value
+  may span lines up to its closing `---`.
 - A Kronn action card opened from a Live Page no longer closes every 30 s
   when the Page refreshes, and keeps what was typed in it; it now follows its
   row when new data makes the Page redraw. Each row's state carries its launch
   id (`data-kronn-action-launch`), so a Page tells a new attempt from the
   previous one. A field's placeholder reads as an example (`e.g. ollama`)
   instead of passing for the value an empty field would send.
+- An accepted delivery from a Claude Code worker names the model its runtime
+  reported serving (from the `assistant` event of its stream) instead of
+  "Model unknown". A requested model is shown only when none was reported, and
+  reassigning the worker clears the previous one (migration 192).
 - A restart in the middle of a task execution's integration no longer keeps the
   backend from answering while the interrupted validations are replayed, which
   could outlast the 300 health probes `kronn start-dev` waits for. Boot still

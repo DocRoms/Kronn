@@ -55,6 +55,7 @@ Run from the repository root unless a working directory is shown.
 | Frontend ESLint | `cd frontend && pnpm lint` | Zero errors; CI's pinned warning budget must not increase |
 | Frontend fast lint | `cd frontend && pnpm lint:fast` | Zero warnings |
 | i18n | `cd frontend && pnpm lint:i18n` | `fr`, `en`, `es` and `zh` have matching, valid keys |
+| Theme tokens | `cd frontend && pnpm lint:theme` | Every text role meets its WCAG floor in every theme; no undefined `--kr-*`, literal white/black text on a token fill, or removed `:focus-visible` ring |
 | Frontend unit/integration | `make test-frontend` | Entire Vitest suite passes |
 | Frontend production build | `cd frontend && pnpm build` | TypeScript and Vite build succeed |
 | Browser E2E | `make test-e2e` | Entire Playwright suite passes against the expected backend fixture |
@@ -222,6 +223,17 @@ The Settings axe scan supplies a populated, typed usage report at the external
 collector boundary and waits for its cost and filter controls before scanning.
 It tests the rendered usage UI, not the `ccusage` process or private operator
 history; collector timeout behavior needs separate backend coverage.
+
+`pnpm lint:theme` measures tokens statically: in the dark themes every text
+role and status colour needs 4.5:1 on the surface ramp, text roles also on a
+hover chip over elevated; elsewhere faint/dim/ghost need 3:1. A fallback does
+not excuse an undefined `--kr-*`; component-scoped properties drop the prefix.
+`a11y-dark-themes.spec.ts` renders the main screens and a native action card in
+`dark`, `gotham` and `matrix`, re-measures the text axe leaves undecided behind
+gradients or pseudo-elements, and walks keyboard focus. It answers every non-GET
+with 503 and stubs the WebSocket, so it may run read-only against a live backend.
+`[src: file: frontend/src/styles/themeAudit.ts:1-60]`
+`[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:1-60]`
 
 When a disposable backend runs in a container, run browser specs with local
 provider stubs in the same network namespace. Their loopback callbacks then

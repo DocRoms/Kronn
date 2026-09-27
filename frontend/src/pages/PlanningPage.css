@@ -288,7 +288,7 @@
   border: 1px solid transparent;
   border-radius: var(--kr-r-md);
   background: var(--kr-accent);
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   font: inherit;
   font-weight: 650;
   cursor: pointer;
@@ -296,7 +296,7 @@
 
 .planning-create-modal-submit:hover:not(:disabled),
 .planning-create-modal-submit:focus-visible {
-  background: var(--kr-accent-hover, var(--kr-accent));
+  background: var(--kr-accent);
 }
 
 .planning-create-modal-submit:disabled {

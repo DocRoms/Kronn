@@ -230,6 +230,7 @@ import type {
   ImportantCategory,
   ImportantMessageList,
   AnswerDiscussionQuestionRequest,
+  CommentDiscussionQuestionRequest,
   DeclineDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
@@ -1890,6 +1891,18 @@ export const discussions = {
     request,
   ),
 
+  /** Say something about a question without deciding it: the asker receives it
+   *  like an answer and the question stays pending. Same idempotency contract. */
+  commentQuestion: (
+    id: string,
+    questionId: string,
+    request: CommentDiscussionQuestionRequest,
+  ) => api<DiscussionQuestion>(
+    'POST',
+    `/discussions/${encodeURIComponent(id)}/questions/${encodeURIComponent(questionId)}/comment`,
+    request,
+  ),
+
   /** Remove one message payload while preserving its timeline tombstone. */
   deleteMessage: (id: string, messageId: string) => api<void>(
     'DELETE',
@@ -2491,6 +2504,8 @@ export const pages = {
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/cancel`, {}),
   launchAction: (actionId: string, request: LaunchLivePageActionRequest) =>
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/launch`, request),
+  actionPrefill: (actionId: string, bindings: Record<string, string>) =>
+    api<Record<string, string>>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/prefill`, { bindings }),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

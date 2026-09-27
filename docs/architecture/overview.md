@@ -305,6 +305,8 @@ All three axes are available in:
 - Profiles → agent files in `.claude/agents/`, `.gemini/agents/`, `.codex/agents/` — agents discover them as sub-agents
 - Vibe/Kiro: fallback to prompt injection (Vibe uses custom runner, Kiro headless unconfirmed)
 - Sync: additive per discussion (no cleanup), full cleanup at startup + project config change
+- Ownership: every file Kronn writes is recorded with its digest in the project's `.kronn/native-files.json`. Cleanup only removes a recorded file that still holds those bytes, is not a symlink and is not tracked by git; a repository's own skills and agent files are never touched, and a tracked file named like a Kronn skill is never overwritten.
+- Ignore rules: a skill folder Kronn writes carries its own `.gitignore` (`*`), and an agent file is ignored by its exact path. The sync never adds a whole-folder rule (`.agents/`, `.claude/`), and removes one an earlier sync appended when the repository re-includes something under that folder (e.g. `!.agents/skills/`). `.gemini/` and `.kiro/` stay ignored for their MCP settings.
 - Module: `core/native_files.rs`
 
 ### Workflow engine
@@ -326,7 +328,7 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   project workflows. Scope is enforced server-side and persisted receipts keep
   only tool names and outcomes, never arguments or credentials.
 - Steps can use `mode: debate` for multi-agent discussion at any point.
-- Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`. It is not Liquid and supports no filters; runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible.
+- Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid; its only filters are the run-anchored `time.now` grammar. Runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible. `{{path ?? "text"}}` (or `'text'`) is the one explicit fallback: it renders the literal when the path is absent or JSON null, such as a step a `Goto` skipped. An `Exec` step's `---STATE:` and `---ARTIFACT:` markers are read from its raw stdout, where a `STATE` value may span lines. `[src: file: backend/src/workflows/template.rs:527]`
 - Deterministic Page pipelines can fan out over saved Quick APIs and
   shell-free, allowlisted CLI collectors with `CollectApiData`, reshape typed JSON with a bounded JSONPath recipe in
   `TransformData`, then atomically publish datasets with `PublishPageData`.

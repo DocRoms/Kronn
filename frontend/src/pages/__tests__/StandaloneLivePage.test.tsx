@@ -47,6 +47,7 @@ vi.mock('../../components/RunStatusCard', () => ({
 }));
 
 import { pages as pagesApi } from '../../lib/api';
+import { LIVE_PAGE_CSP } from '../../lib/live-page-sandbox';
 import { StandaloneLivePage } from '../StandaloneLivePage';
 
 function pageAction(overrides: Partial<LivePageAction> = {}): LivePageAction {
@@ -100,6 +101,41 @@ describe('StandaloneLivePage', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('delivers a data: image published in a dataset without widening the frame CSP', async () => {
+    const thumbnail = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    vi.mocked(pagesApi.get).mockResolvedValue({
+      ...detail,
+      revision: { ...detail.revision, html: '<img id="thumb" alt="">' },
+      datasets: [{
+        id: 'data-images', page_id: 'page-1', name: 'ticket_images', kind: 'snapshot',
+        current: [{ input: { id: '10001' }, status: 'OK', response: thumbnail }],
+        schema: null, max_points: 100, max_age_days: null, data_size_bytes: thumbnail.length,
+        updated_at: '2026-08-26T10:00:00Z', points: [],
+      }],
+    });
+    render(<StandaloneLivePage pageId="page-1" />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+
+    fireEvent.load(frame);
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'kronn:page-data',
+        data: expect.objectContaining({
+          datasets: { ticket_images: expect.objectContaining({
+            current: [{ input: { id: '10001' }, status: 'OK', response: thumbnail }],
+          }) },
+        }),
+      }),
+      '*',
+    ));
+    const csp = frame.getAttribute('srcdoc')!.match(/Content-Security-Policy" content="([^"]+)"/)![1];
+    expect(csp).toBe(LIVE_PAGE_CSP);
+    expect(csp.split('; ').filter(directive => directive.startsWith('img-src'))).toEqual(['img-src data: blob:']);
+    expect(csp).not.toMatch(/https?:|\*|'self'/);
   });
 
   it('renders the requested Page full-screen inside the opaque sandbox', async () => {

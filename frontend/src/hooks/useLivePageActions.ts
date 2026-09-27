@@ -22,6 +22,8 @@ export interface LivePageActiveActionState {
   card?: LivePageAction;
   /** The row's finished launch, reachable from a fresh offer. */
   previous?: LivePageAction;
+  /** Starting values the Page draws from its data for this row's fields. */
+  prefill?: Record<string, string>;
 }
 
 export interface UseLivePageActionsResult {
@@ -44,6 +46,12 @@ const IN_FLIGHT = new Set<LivePageAction['state']>(['launching', 'running']);
 // A decline is not a run: it never marks a button nor stands for its row.
 const NOT_A_RUN = new Set<LivePageAction['state']>(['proposed', 'cancelled']);
 const LAUNCH_REFRESH_MS = 3_000;
+
+/** An editable field the Page fills from its own data for the clicked row. */
+function prefillsFromPage(action: LivePageAction): boolean {
+  return action.values.some(value =>
+    value.provenance === 'user_input' && (value.source_ref ?? '').trim().startsWith('<page.'));
+}
 
 function launchKey(actionRef: string, bindingKey: string): string {
   return `${actionRef}\n${bindingKey}`;
@@ -145,12 +153,22 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
       launch.action_ref === intent.actionRef && launch.binding_key === bindingKey);
     const running = latest && IN_FLIGHT.has(latest.state) ? latest : undefined;
     activationRef.current += 1;
+    const activation = activationRef.current;
     setActiveAction({
       ...intent,
-      activation: activationRef.current,
+      activation,
       card: running,
       previous: running ? undefined : latest,
     });
+    const offer = actionsRef.current.find(action => action.action_ref === intent.actionRef);
+    if (running || !offer || !prefillsFromPage(offer)) return;
+    // The card opens at once; its fields fill when the row's values arrive.
+    void pagesApi.actionPrefill(offer.id, intent.bindings)
+      .then(prefill => {
+        const current = activeActionRef.current;
+        if (current?.activation === activation) setActiveAction({ ...current, prefill });
+      })
+      .catch(() => { /* the reader types the value, as without a prefill */ });
   }, [setActiveAction]);
 
   // Keyed on the activation, not the block: a launch that answers after the

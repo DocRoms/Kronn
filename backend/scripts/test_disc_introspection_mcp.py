@@ -6754,6 +6754,23 @@ class WorkflowRunHistoryTests(unittest.TestCase):
         http.assert_called_once_with("GET", "/api/workflows/wf/runs/r")
         self.assertEqual(run["step_results"][0]["output"], "x" * 5000)
 
+    def test_workflow_run_get_keeps_cache_usage_and_live_activity(self):
+        activity = {"tool": "Read", "target": "src/lib.rs", "at": "2026-09-25T10:00:00Z"}
+        run = {"id": "r", "step_results": [
+            {"step_name": "orchestrateur", "status": "Running", "tokens_used": None,
+             "cached_prompt_tokens": 1554330, "cache_write_prompt_tokens": 80271,
+             "last_activity": activity},
+            {"step_name": "legacy", "status": "Success"},
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)):
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+        live, legacy = out["step_results"]
+        self.assertEqual(live["cached_prompt_tokens"], 1554330)
+        self.assertEqual(live["cache_write_prompt_tokens"], 80271)
+        self.assertEqual(live["last_activity"], activity)
+        for field in ["cached_prompt_tokens", "cache_write_prompt_tokens", "last_activity"]:
+            self.assertNotIn(field, legacy)
+
     def test_workflow_run_get_requires_both_ids(self):
         with self.assertRaises(RuntimeError):
             self.mod.call_workflow_run_get({"workflow_id": "wf"})

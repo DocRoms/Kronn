@@ -55,6 +55,35 @@ pub async fn latest_launches_for_live_page(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct PrefillLivePageActionRequest {
+    /// The click's row selectors, as for a launch.
+    #[serde(default)]
+    pub bindings: HashMap<String, String>,
+}
+
+/// The starting values a Page draws from its data for the clicked row's
+/// editable fields. Reads only; the launch still takes what the reader sends.
+pub async fn prefill(
+    State(state): State<AppState>,
+    Path(action_id): Path<String>,
+    Json(request): Json<PrefillLivePageActionRequest>,
+) -> Json<ApiResponse<HashMap<String, String>>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::live_page_actions::prefill_values(conn, &action_id, &request.bindings)
+        })
+        .await;
+    match result {
+        Ok(values) => Json(ApiResponse::ok(values)),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to prefill Page action: {error}"),
+        )),
+    }
+}
+
 pub async fn get(
     State(state): State<AppState>,
     Path(action_id): Path<String>,
@@ -340,6 +369,7 @@ async fn execute_claimed_action(
                 &state,
                 &action.target_id,
                 variables,
+                Default::default(),
                 None,
                 launch.clone(),
             )
