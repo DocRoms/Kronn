@@ -1,4 +1,15 @@
-# Live Pages architecture (v0.10.0)
+# Artifacts architecture (formerly Live Pages)
+
+## Product naming and compatibility
+
+The UI calls this library **Artifacts**. Existing `page_*` MCP tools,
+`/api/pages` endpoints, `#page/…` and `#pages/mosaic?…` URLs, `PublishPageData`
+workflow steps, stored IDs and sandbox event names keep their established
+contracts. An Artifact is the same persisted resource; renaming its product
+label does not migrate or duplicate it. Historical code and documentation use
+“Page” for that domain model.
+[src: file: frontend/src/lib/i18n/locales/en.ts:55]
+[src: file: frontend/src/lib/live-page-navigation.ts:1]
 
 ## Status
 
@@ -284,6 +295,15 @@ HTML template and dataset contract, then remaps every `PublishPageData.page_id`
 on import. Retained values and publication/run history are excluded to avoid
 silently leaking production observations through a Workflow definition file;
 the imported Page is populated by its next run.
+
+A Workflow import commits its entire bundle in one SQLite transaction: Pages,
+revisions, datasets, capability activation, Quick Prompts and their versions,
+Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
+failure rolls everything back and preserves existing resources. The Page
+creation helper accepts the caller's transaction; starting and committing a
+separate Page transaction inside an import would break this guarantee.
+[src: file: backend/src/api/workflows.rs:2277]
+[src: file: backend/src/db/live_pages.rs:126]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload

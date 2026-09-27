@@ -91,6 +91,48 @@ pub struct DiscussionDetail {
     pub default_targets: Vec<MessageTarget>,
 }
 
+/// A bounded read-only view for monitoring several rooms without loading their
+/// full transcripts. Missing or unreadable discussions fail independently.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionMonitorItem {
+    pub id: String,
+    pub preview: Option<DiscussionMonitorPreview>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionMonitorPreview {
+    pub plan: super::PlanningPlanStats,
+    pub title: String,
+    pub shared_id: Option<String>,
+    pub agent: Option<AgentType>,
+    pub connection_name: Option<String>,
+    pub awaiting_agent: bool,
+    pub agent_running: bool,
+    pub progress_phase: Option<String>,
+    pub pending_question_count: u32,
+    pub updated_at: String,
+    pub messages: Vec<DiscussionMonitorMessage>,
+    pub partial_response: Option<DiscussionMonitorMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionMonitorMessage {
+    pub id: String,
+    pub role: String,
+    pub channel: String,
+    pub content: String,
+    pub truncated: bool,
+    pub agent_type: Option<AgentType>,
+    pub model: Option<String>,
+    pub author_pseudo: Option<String>,
+    pub author_cli_ordinal: Option<i64>,
+    pub timestamp: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Discussion {

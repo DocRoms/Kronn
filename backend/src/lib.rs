@@ -1728,6 +1728,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/discussions/running",
             get(api::discussions::running_discussions),
         )
+        .route(
+            "/api/discussions/monitor",
+            get(api::discussions::monitor::get),
+        )
         .route("/api/discussions/{id}", get(api::discussions::get))
         .route(
             "/api/discussions/{id}/native-agent",

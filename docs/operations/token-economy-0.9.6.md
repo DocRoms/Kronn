@@ -44,7 +44,11 @@ Kronn had no counter for a CLI it did not spawn. That single reading is why:
 - `TelemetryCoveragePanel` renders coverage and deliberately no total;
 - an agent-context total in the audit is `None` when any one file is unreadable,
   because a partial sum presented as a total is wrong by an unknown amount;
-- `compactTokens` renders a small real cost as `<1k` rather than rounding to `0`.
+- `compactTokens` renders a small real cost as `<1k` rather than rounding to `0`;
+- an HTTP task execution keeps a turn's `cached_prompt_tokens` absent when its
+  provider did not report one. Totals sum only over `cache_reported_turns`, so a
+  cache rate or an invoice is never derived from them: the unreported turns may
+  have been cached or not.
 
 ## 3. What shipped
 

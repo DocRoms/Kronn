@@ -7,12 +7,14 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
 import { KronnMark } from './components/KronnMark';
 import { standaloneLivePageId, standaloneLivePageMosaic } from './lib/live-page-navigation';
+import { discussionMosaicRoute } from './lib/discussion-mosaic-navigation';
 import './App.css';
 
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
 const StandaloneLivePage = lazy(() => import('./pages/StandaloneLivePage').then(m => ({ default: m.StandaloneLivePage })));
 const StandaloneLivePageMosaic = lazy(() => import('./pages/StandaloneLivePageMosaic').then(m => ({ default: m.StandaloneLivePageMosaic })));
+const StandaloneDiscussionMosaic = lazy(() => import('./pages/StandaloneDiscussionMosaic').then(m => ({ default: m.StandaloneDiscussionMosaic })));
 
 export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
@@ -129,6 +131,17 @@ export function App() {
               setupApi.getStatus().then(setSetupStatus).catch(e => console.warn('Setup status refresh failed:', e));
             }}
           />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
+
+  const discussionMosaic = discussionMosaicRoute(window.location.hash);
+  if (discussionMosaic) {
+    return (
+      <ErrorBoundary>
+        <Suspense fallback={<LoadingScreen />}>
+          <StandaloneDiscussionMosaic {...discussionMosaic} />
         </Suspense>
       </ErrorBoundary>
     );

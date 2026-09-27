@@ -317,34 +317,39 @@ impl AcpTransport for ClaudeAcpAdapter {
         let mut failure: Option<String> = None;
         loop {
             match lines.next_line().await {
-                Ok(Some(line)) => match parse_claude_stream_line(&line) {
-                    StreamJsonEvent::Text(text) => {
-                        let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
+                Ok(Some(line)) => {
+                    if let Some(model) = crate::agents::provenance::claude_observed_model(&line) {
+                        let _ = events.send(AcpSessionEvent::ModelObserved(model)).await;
                     }
-                    StreamJsonEvent::Usage {
-                        input_tokens,
-                        output_tokens,
-                        ..
-                    } => {
-                        let _ = events
-                            .send(AcpSessionEvent::Usage {
-                                input_tokens,
-                                output_tokens,
-                            })
-                            .await;
+                    match parse_claude_stream_line(&line) {
+                        StreamJsonEvent::Text(text) => {
+                            let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
+                        }
+                        StreamJsonEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            ..
+                        } => {
+                            let _ = events
+                                .send(AcpSessionEvent::Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                })
+                                .await;
+                        }
+                        StreamJsonEvent::ToolStart(name) => {
+                            let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
+                        }
+                        StreamJsonEvent::TerminalError(terminal_failure) => {
+                            failure = Some(terminal_failure.user_message());
+                        }
+                        // The adapter carries its own ACP session identity.
+                        StreamJsonEvent::ToolInputDelta(_)
+                        | StreamJsonEvent::ToolEnd
+                        | StreamJsonEvent::SessionId(_)
+                        | StreamJsonEvent::Skip => {}
                     }
-                    StreamJsonEvent::ToolStart(name) => {
-                        let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
-                    }
-                    StreamJsonEvent::TerminalError(terminal_failure) => {
-                        failure = Some(terminal_failure.user_message());
-                    }
-                    // The adapter carries its own ACP session identity.
-                    StreamJsonEvent::ToolInputDelta(_)
-                    | StreamJsonEvent::ToolEnd
-                    | StreamJsonEvent::SessionId(_)
-                    | StreamJsonEvent::Skip => {}
-                },
+                }
                 Ok(None) => break,
                 Err(error) => {
                     return Err(AcpError::Transport(format!("read claude stdout: {error}")));
@@ -399,6 +404,7 @@ mod tests {
         # Match the CLI's stdin contract before emitting a completed response.
         # Exiting early races the adapter's write, especially under coverage.
         cat >/dev/null
+        printf '%s\n' '{"type":"assistant","message":{"model":"fixture-claude-model","content":[]}}'
         case "$*" in
           *--resume*)
             printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"resumed"}}}'
@@ -461,6 +467,9 @@ mod tests {
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("created".into())));
         assert!(events.contains(&AcpSessionEvent::Completed));
+        assert!(events.contains(&AcpSessionEvent::ModelObserved(
+            "fixture-claude-model".into()
+        )));
 
         // Second turn: has_run_before is now true, so `--resume` is used.
         let (tx, rx) = mpsc::channel(16);

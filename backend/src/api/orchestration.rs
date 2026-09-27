@@ -6444,6 +6444,8 @@ fn summarize_http_turn_usage(
     >::new();
     let mut turns = 0u32;
     let mut prompt_tokens = 0u64;
+    let mut cached_prompt_tokens = 0u64;
+    let mut cache_reported_turns = 0u32;
     let mut eval_tokens = 0u64;
     let mut duration_ms = 0u64;
     let mut peak_context_tokens = 0u64;
@@ -6469,6 +6471,10 @@ fn summarize_http_turn_usage(
             turn.dispatch_id.clone_from(&event.actor_session_id);
             turns = turns.saturating_add(1);
             prompt_tokens = prompt_tokens.saturating_add(turn.prompt_tokens);
+            if let Some(cached) = turn.cached_prompt_tokens {
+                cached_prompt_tokens = cached_prompt_tokens.saturating_add(cached);
+                cache_reported_turns = cache_reported_turns.saturating_add(1);
+            }
             eval_tokens = eval_tokens.saturating_add(turn.eval_tokens);
             duration_ms = duration_ms.saturating_add(turn.duration_ms);
             peak_context_tokens = peak_context_tokens.max(turn.prompt_tokens);
@@ -6478,11 +6484,17 @@ fn summarize_http_turn_usage(
                     phase: turn.phase,
                     turns: 0,
                     prompt_tokens: 0,
+                    cached_prompt_tokens: 0,
+                    cache_reported_turns: 0,
                     eval_tokens: 0,
                     duration_ms: 0,
                 });
             phase.turns = phase.turns.saturating_add(1);
             phase.prompt_tokens = phase.prompt_tokens.saturating_add(turn.prompt_tokens);
+            if let Some(cached) = turn.cached_prompt_tokens {
+                phase.cached_prompt_tokens = phase.cached_prompt_tokens.saturating_add(cached);
+                phase.cache_reported_turns = phase.cache_reported_turns.saturating_add(1);
+            }
             phase.eval_tokens = phase.eval_tokens.saturating_add(turn.eval_tokens);
             phase.duration_ms = phase.duration_ms.saturating_add(turn.duration_ms);
         }
@@ -6497,6 +6509,8 @@ fn summarize_http_turn_usage(
     Some(crate::models::TaskExecutionHttpUsage {
         turns,
         prompt_tokens,
+        cached_prompt_tokens,
+        cache_reported_turns,
         eval_tokens,
         traffic_tokens: prompt_tokens.saturating_add(eval_tokens),
         peak_context_tokens,
@@ -11282,6 +11296,52 @@ mod tests {
             usage.recent_turns[2].dispatch_id.as_deref(),
             Some("dispatch-2")
         );
+        assert_eq!(
+            (usage.cached_prompt_tokens, usage.cache_reported_turns),
+            (0, 0),
+            "legacy turns read as not reported"
+        );
+    }
+
+    #[test]
+    fn http_turn_usage_sums_cached_prompt_tokens_next_to_legacy_turns() {
+        let events = vec![crate::models::TaskExecutionEvent {
+            id: "e1".into(),
+            task_execution_id: "exec-1".into(),
+            action: "http_turn_telemetry".into(),
+            from_status: None,
+            to_status: None,
+            actor_kind: crate::models::PlanningActorKind::Backend,
+            actor_id: Some("http-agent-runner".into()),
+            actor_session_id: Some("dispatch-1".into()),
+            changes: serde_json::json!({"version": 1, "turns": [
+                {"turn": 1, "provider": "litellm", "phase": "exploration",
+                 "prompt_tokens": 1_000, "cached_prompt_tokens": 800, "eval_tokens": 10,
+                 "duration_ms": 1, "provider_ok": true, "requested_tools": [], "executed_tools": []},
+                {"turn": 2, "provider": "litellm", "phase": "exploration",
+                 "prompt_tokens": 1_200, "eval_tokens": 10,
+                 "duration_ms": 1, "provider_ok": true, "requested_tools": [], "executed_tools": []}
+            ]}),
+            source_message_id: None,
+            created_at: chrono::Utc::now(),
+        }];
+        let usage = summarize_http_turn_usage(&events).unwrap();
+        assert_eq!(
+            (usage.prompt_tokens, usage.cached_prompt_tokens),
+            (2_200, 800)
+        );
+        assert_eq!(
+            usage.cache_reported_turns, 1,
+            "the unreported turn is not counted as uncached"
+        );
+        assert_eq!(
+            (
+                usage.phases[0].cached_prompt_tokens,
+                usage.phases[0].cache_reported_turns
+            ),
+            (800, 1)
+        );
+        assert_eq!(usage.recent_turns[1].cached_prompt_tokens, None);
     }
 
     // ── HTTP mapping (KT-328 tranche 2, commit 3) — pure, no AppState needed. ──

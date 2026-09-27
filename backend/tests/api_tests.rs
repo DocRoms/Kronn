@@ -25,6 +25,121 @@ use futures::{SinkExt, StreamExt};
 use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
+#[tokio::test]
+async fn discussion_monitor_is_bounded_read_only_and_isolates_missing_rooms() {
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, agent) in [("monitor-a", "Codex"), ("monitor-b", "ClaudeCode"), ("monitor-bad", "unknown-agent")] {
+            conn.execute("INSERT INTO discussions (id, title, agent, created_at, updated_at) VALUES (?1, ?1, ?2, ?3, ?3)", rusqlite::params![id, agent, now])?;
+        }
+        // Exercise every status, placement and blocker state. A finished task
+        // stays done even with an active blocker; archived tasks disappear.
+        let mut number = 0;
+        for placement in ["active", "later"] {
+            for status in ["idea", "todo", "in_progress", "blocked", "done", "archived"] {
+                for blocker in ["idea", "todo", "done", "archived"] {
+                    number += 1;
+                    let id = format!("monitor-task-{number}");
+                    let blocker_id = format!("monitor-blocker-{number}");
+                    for (task_id, task_number, task_status) in [(&id, number, status), (&blocker_id, number + 100, blocker)] {
+                        conn.execute("INSERT INTO planning_tasks (id, task_number, title, status, created_at, updated_at) VALUES (?1, ?2, ?1, ?3, ?4, ?4)", rusqlite::params![task_id, task_number, task_status, now])?;
+                    }
+                    conn.execute("INSERT INTO planning_task_discussions (task_id, discussion_id, placement, created_at) VALUES (?1, 'monitor-a', ?2, ?3)", rusqlite::params![id, placement, now])?;
+                    conn.execute("INSERT INTO planning_task_blockers (task_id, blocker_task_id, created_at) VALUES (?1, ?2, ?3)", rusqlite::params![id, blocker_id, now])?;
+                }
+            }
+        }
+        for index in 0..12 {
+            conn.execute("INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order, agent_type, model) VALUES (?1, 'monitor-a', 'Agent', ?2, ?3, ?4, 'Codex', 'served-model')",
+                rusqlite::params![format!("monitor-message-{index}"), "é🙂".repeat(5000), now, index])?;
+        }
+        conn.execute("UPDATE discussions SET awaiting_agent = 1, partial_response = ?1, partial_response_message_id = 'partial-id', partial_response_agent_type = 'Codex', partial_response_model = 'live-model', partial_response_started_at = ?2 WHERE id = 'monitor-a'",
+            rusqlite::params![format!("{}終", "é🙂".repeat(5000)), now])?;
+        conn.execute("INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key, status, agent_started_at, progress_phase, available_at, created_at, updated_at) VALUES ('monitor-job', 'monitor-a', 'monitor-message-0', 0, 'monitor-job', 'Running', ?1, 'tool_activity', ?1, ?1, ?1)", [&now])?;
+        Ok(())
+    }).await.unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, body) = get_json(
+        app.clone(),
+        "/api/discussions/monitor?ids=monitor-a,missing,monitor-b,monitor-bad,monitor-a",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    let items = body["data"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "selection is deduplicated in order");
+    let preview = &items[0]["preview"];
+    let expected_plan = state
+        .db
+        .with_read_conn(|conn| {
+            Ok(serde_json::to_value(
+                kronn::db::planning::get_discussion_plan(conn, "monitor-a")?.stats,
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview["plan"], expected_plan);
+    assert_eq!(
+        preview["plan"],
+        serde_json::json!({"ready":2,"blocked":10,"in_progress":2,"ideas":2,"done":4,"later":20})
+    );
+    assert_eq!(
+        items[2]["preview"]["plan"],
+        serde_json::json!({"ready":0,"blocked":0,"in_progress":0,"ideas":0,"done":0,"later":0})
+    );
+    assert_eq!(preview["agent_running"], true);
+    assert_eq!(preview["progress_phase"], "tool_activity");
+    let messages = preview["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 8);
+    assert_eq!(messages[0]["id"], "monitor-message-4");
+    assert_eq!(messages[7]["id"], "monitor-message-11");
+    assert_eq!(
+        messages[0]["content"].as_str().unwrap().chars().count(),
+        2048
+    );
+    assert_eq!(messages[0]["truncated"], true);
+    assert_eq!(messages[0]["model"], "served-model");
+    let partial = &preview["partial_response"];
+    assert_eq!(partial["content"].as_str().unwrap().chars().count(), 4096);
+    assert!(partial["content"].as_str().unwrap().ends_with('終'));
+    assert_eq!(partial["truncated"], true);
+    assert_eq!(partial["model"], "live-model");
+    assert_eq!(items[1]["error"], "not_found");
+    assert_eq!(items[2]["preview"]["title"], "monitor-b");
+    assert_eq!(items[3]["error"], "unavailable");
+    assert!(items[3]["preview"].is_null());
+    state.db.with_conn(|conn| {
+        let unchanged: (u32, u32, u32) = conn.query_row("SELECT (SELECT COUNT(*) FROM messages), (SELECT COUNT(*) FROM agent_dispatch_jobs), length(partial_response) FROM discussions WHERE id = 'monitor-a'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        assert_eq!(unchanged, (12, 1, 10001), "monitoring does not mutate, dispatch, or recover");
+        conn.execute("DELETE FROM discussions WHERE id = 'monitor-b'", [])?;
+        Ok(())
+    }).await.unwrap();
+    let (_, body) = get_json(app, "/api/discussions/monitor?ids=monitor-a,monitor-b").await;
+    assert!(body["data"][0]["preview"].is_object());
+    assert_eq!(body["data"][1]["error"], "not_found");
+}
+
+#[tokio::test]
+async fn discussion_monitor_rejects_unbounded_selections() {
+    let app = test_app();
+    for uri in [
+        "/api/discussions/monitor".into(),
+        format!(
+            "/api/discussions/monitor?ids={}",
+            (0..13)
+                .map(|i| format!("room-{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        format!("/api/discussions/monitor?ids={}", "x".repeat(129)),
+    ] {
+        let (status, body) = get_json(app.clone(), &uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["success"], false);
+    }
+}
+
 fn sha256_lower_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -1495,8 +1610,7 @@ async fn live_page_workflows_returns_configured_publishers() {
     assert_eq!(missing["error_code"], "not_found");
 }
 
-#[tokio::test]
-async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
+async fn workflow_portability_fixture() -> (AppState, Value) {
     let state = test_state();
     let now = chrono::Utc::now();
     state
@@ -1696,6 +1810,13 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
         .get("current")
         .is_none());
 
+    (state, exported)
+}
+
+#[tokio::test]
+async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
+    let (state, exported) = workflow_portability_fixture().await;
+    let app = build_router_with_auth(state.clone(), false);
     let (import_status, imported) = post_json(
         app.clone(),
         "/api/workflows/import",
@@ -1748,6 +1869,196 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
         imported_page_body["data"]["datasets"][0]["current"],
         Value::Null
     );
+}
+
+// Snapshot complete persisted rows, including existing resources and the
+// capability latch, so rollback cannot pass by deleting/recreating old data.
+async fn workflow_import_database_snapshot(state: &AppState) -> Vec<(String, Vec<String>)> {
+    state
+        .db
+        .with_conn(|conn| {
+            let mut snapshot = Vec::new();
+            for table in [
+                "live_pages",
+                "live_page_revisions",
+                "live_page_datasets",
+                "live_page_dataset_points",
+                "live_pages_capability",
+                "live_page_actions",
+                "live_page_discussion_links",
+                "quick_prompts",
+                "quick_prompt_versions",
+                "quick_apis",
+                "quick_execs",
+                "workflows",
+            ] {
+                let mut statement =
+                    conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))?;
+                let columns = statement.column_count();
+                let rows = statement
+                    .query_map([], |row| {
+                        let values = (0..columns)
+                            .map(|column| row.get_ref(column).map(|value| format!("{value:?}")))
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        Ok(format!("{values:?}"))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                snapshot.push((table.to_owned(), rows));
+            }
+            Ok(snapshot)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn workflow_import_legacy_formats_keep_existing_unbundled_references() {
+    let (state, exported) = workflow_portability_fixture().await;
+    let app = build_router_with_auth(state.clone(), false);
+    let before = workflow_import_database_snapshot(&state).await;
+    for version in [1, 2] {
+        let legacy = serde_json::json!({
+            "kind": exported["kind"], "version": version, "exported_at": exported["exported_at"],
+            "workflow": exported["workflow"]
+        });
+        let (_, imported) = post_json(
+            app.clone(),
+            "/api/workflows/import",
+            serde_json::json!({
+                "content": serde_json::to_string(&legacy).unwrap(), "project_id": null
+            }),
+        )
+        .await;
+        assert_eq!(imported["success"], true, "v{version}: {imported}");
+        assert_ne!(imported["data"]["id"], exported["workflow"]["id"]);
+        assert_eq!(
+            imported["data"]["steps"][0]["quick_prompt_id"],
+            "qp-portable"
+        );
+        assert_eq!(
+            imported["data"]["steps"][1]["collect_api_data"]["sources"][0]["quick_api_id"],
+            "qa-portable"
+        );
+        assert_eq!(
+            imported["data"]["steps"][2]["page_publish"]["page_id"],
+            "page-portable"
+        );
+    }
+    let after = workflow_import_database_snapshot(&state).await;
+    for ((table, before_rows), (_, after_rows)) in before.iter().zip(after.iter()) {
+        if table == "workflows" {
+            assert_eq!(after_rows.len(), before_rows.len() + 2);
+        } else {
+            assert_eq!(after_rows, before_rows, "{table}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn workflow_import_rolls_back_first_page_when_later_dataset_is_invalid() {
+    let (_, mut exported) = workflow_portability_fixture().await;
+    let mut invalid_page = exported["referenced_pages"][0].clone();
+    invalid_page["id"] = serde_json::json!("invalid-page");
+    invalid_page["slug"] = serde_json::json!("invalid-page");
+    invalid_page["datasets"][0]["name"] = serde_json::json!("invalid dataset name");
+    exported["referenced_pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(invalid_page);
+    let state = test_state();
+    let before = workflow_import_database_snapshot(&state).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, body) = post_json(
+        app,
+        "/api/workflows/import",
+        serde_json::json!({
+            "content": serde_json::to_string(&exported).unwrap(), "project_id": null
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("Dataset"),
+        "{body}"
+    );
+    assert_eq!(
+        workflow_import_database_snapshot(&state).await,
+        before,
+        "a failed import must leave no page, revision, dataset or activated capability"
+    );
+}
+
+#[tokio::test]
+async fn workflow_import_rolls_back_all_dependencies_and_root_on_late_insert_failure() {
+    let (state, mut exported) = workflow_portability_fixture().await;
+    let mut child = exported["workflow"].clone();
+    child["id"] = serde_json::json!("child-late-failure");
+    child["name"] = serde_json::json!("Fail after root");
+    exported["referenced_workflows"] = serde_json::json!([child]);
+    state.db.with_conn(|conn| {
+        conn.execute_batch("CREATE TRIGGER fail_late_workflow BEFORE INSERT ON workflows
+            WHEN NEW.name = 'Fail after root' BEGIN SELECT RAISE(ABORT, 'late import failure'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let before = workflow_import_database_snapshot(&state).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, body) = post_json(
+        app.clone(),
+        "/api/workflows/import",
+        serde_json::json!({
+            "content": serde_json::to_string(&exported).unwrap(), "project_id": null
+        }),
+    )
+    .await;
+    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("late import failure"),
+        "{body}"
+    );
+    assert_eq!(
+        workflow_import_database_snapshot(&state).await,
+        before,
+        "the root and every dependency must roll back without changing existing rows"
+    );
+
+    // A failed import must release its transaction and leave the connection
+    // usable: exactly the same valid bundle succeeds once the injected error goes.
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute_batch("DROP TRIGGER fail_late_workflow")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, imported) = post_json(
+        app,
+        "/api/workflows/import",
+        serde_json::json!({
+            "content": serde_json::to_string(&exported).unwrap(), "project_id": null
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let after = workflow_import_database_snapshot(&state).await;
+    for ((table, before_rows), (_, after_rows)) in before.iter().zip(after.iter()) {
+        let added = match table.as_str() {
+            "live_pages"
+            | "live_page_revisions"
+            | "live_page_datasets"
+            | "quick_prompts"
+            | "quick_prompt_versions"
+            | "quick_apis"
+            | "quick_execs" => 1,
+            "workflows" => 2,
+            _ => 0,
+        };
+        assert_eq!(after_rows.len(), before_rows.len() + added, "{table}");
+    }
 }
 
 #[tokio::test]
@@ -17744,6 +18055,7 @@ mod cold_api_handlers_tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: None,
             native_tool_calls: Box::default(),
         };
         let run_for_update = run_id.clone();

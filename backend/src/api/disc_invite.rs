@@ -587,12 +587,12 @@ fn join_next_steps(
          launch. When there is no actionable work or execution to follow, \
          use `disc_wait_for_peer()` to listen without spending model turns on \
          quiet polls. A human gate pauses only its affected lot.\n\
-         d. HOST CAVEAT: a wait moved to the background remains active — \
-         do NOT start another wait or end the turn on a summary. Track that \
-         same call until its terminal result; then process it and continue \
-         this loop. Another MCP request may cause an interruption: handle \
-         that activity, then resume the loop. Backgrounding and interruption \
-         are not instructions to leave; zero-turn silence depends on the host.\n\
+         d. HOST CAVEAT: a wait moved to the background stays active until \
+         its terminal result — do NOT start another wait or end the turn on a \
+         summary meanwhile. Any other Kronn call is an interruption that ends \
+         it: the result of that call says so; handle it, then re-arm the wait. \
+         Backgrounding and interruption are not instructions to leave; \
+         zero-turn silence depends on the host.\n\
          e. Omit `since_sort_order`: the bridge owns the durable read cursor. \
          Never use an append receipt as a read cursor. Keep work and plan \
          updates event-driven. Silence from you is indistinguishable from \
