@@ -3797,7 +3797,19 @@ credential_source: CredentialSource,
  * that config instead of silently dropping the new request's label,
  * scope and CLI-exposure choice.
  */
-merged_into_existing?: string, };
+merged_into_existing?: string,
+/**
+ * KT-829 — the last persisted probe result for each access this config
+ * exposes (`"api"` / `"mcp"` / `"cli"`), so the list can show health
+ * without re-running a probe on every page load. Empty when this
+ * config was never tested.
+ */
+last_probes: Array<McpLastProbe>, };
+
+/**
+ * KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
+ */
+export type McpConfigProbeResult = { config_id: string, probe: McpProbeResponse, };
 
 export type McpConfigRegistryDrift = {
 /**
@@ -3887,6 +3899,21 @@ missing_keys: Array<string>,
  */
 reason: string, };
 
+/**
+ * One access's last recorded probe result for a config — KT-829. Persisted
+ * so the config list can show health without re-running the probe on every
+ * page load.
+ */
+export type McpLastProbe = {
+/**
+ * Matches `McpProbeCheck.id` — `"api"`, `"mcp"` or `"cli"`.
+ */
+access: string, ok: boolean, code: ProbeDiagnosticCode, summary: string,
+/**
+ * RFC3339 timestamp of the probe that produced this result.
+ */
+tested_at: string, };
+
 export type McpOverview = { servers: Array<McpServer>, configs: Array<McpConfigDisplay>,
 /**
  * Set of "slug:projectId" pairs where the context file has been customized (not default template).
@@ -3912,13 +3939,51 @@ export type McpProbeCheck = { id: string, label: string, ok: boolean,
  * path. Optional capabilities remain visible without making the whole
  * plugin appear broken.
  */
-required: boolean, detail: string, };
+required: boolean, detail: string,
+/**
+ * KT-829 — stable machine-readable classification of `detail`, so the
+ * frontend can translate it instead of showing raw English.
+ */
+code: ProbeDiagnosticCode, };
 
 /**
  * Result of a real plugin readiness probe. Checks are deliberately
  * display-safe: command stdout/stderr and credentials never cross the API.
  */
 export type McpProbeResponse = { server_id: string, ready: boolean, checks: Array<McpProbeCheck>, };
+
+/**
+ * KT-829 — typed outcome of a `POST /api/mcps/refresh` rescan, so the
+ * caller can see (and, with `dry_run`, preview) exactly what changed
+ * instead of only getting back the post-scan `McpOverview`.
+ */
+export type McpRescanReport = {
+/**
+ * Echoes the request. `true` means every count below reflects what
+ * WOULD have happened — the transaction was rolled back and nothing
+ * was written to disk or to the database.
+ */
+dry_run: boolean,
+/**
+ * Brand-new `McpConfig` rows created from a `.mcp.json` entry that
+ * matched no existing config.
+ */
+configs_created: number,
+/**
+ * Existing configs found by hash and linked to a newly-scanned project
+ * instead of being duplicated.
+ */
+configs_merged: number,
+/**
+ * Duplicate config rows removed by deduplication.
+ */
+configs_deleted: number,
+/**
+ * Projects whose `.mcp.json` (or equivalent host file) was actually
+ * rewritten. `None` for a `dry_run` — it never touches the filesystem,
+ * so this count cannot be established without side effects.
+ */
+projects_rewritten?: number, overview: McpOverview, };
 
 /**
  * An MCP server type (e.g. "GitHub", "Atlassian", "Context7").
@@ -3937,6 +4002,12 @@ export type McpServer = { id: string, name: string, description: string, transpo
 api_spec?: ApiSpec | null, };
 
 export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
+
+/**
+ * KT-829 — `POST /api/mcps/test-all` response: every visible config probed
+ * with a bounded concurrency, one result each.
+ */
+export type McpTestAllResponse = { results: Array<McpConfigProbeResult>, };
 
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
@@ -4916,6 +4987,14 @@ export type PreviewTransformDataResponse = { value: JsonValue | null, error: str
  * instead of an opaque loop hidden behind an "active" badge.
  */
 export type PrincipalAttention = { active_executions: number, cli_executions: number, awaiting_review: number, awaiting_human: number, ready_tasks: number, actions: Array<string>, };
+
+/**
+ * KT-829 — stable diagnostic bucket for a failed (or passing) probe check,
+ * shared by the API-call probe, the MCP handshake probe and the CLI access
+ * probe. Stable across releases so the frontend can translate it instead of
+ * pattern-matching `detail` (free English text meant for logs, not i18n).
+ */
+export type ProbeDiagnosticCode = "ok" | "unauthorized" | "forbidden" | "not_found" | "invalid_header" | "unexpected_output" | "network" | "cli_missing" | "cli_version_too_old" | "cli_not_authenticated" | "other";
 
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`

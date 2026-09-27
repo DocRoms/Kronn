@@ -3,6 +3,7 @@ pub mod audit_detectors;
 pub mod audit_mcp_filter;
 pub mod backup;
 pub mod checksums;
+pub mod cli_access_probe;
 pub mod cmd;
 pub mod config;
 pub mod context_audit;

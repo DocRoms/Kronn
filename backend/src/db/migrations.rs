@@ -755,6 +755,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "196_resource_identities",
         include_str!("sql/196_resource_identities.sql"),
     ),
+    (
+        "197_mcp_probe_results",
+        include_str!("sql/197_mcp_probe_results.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

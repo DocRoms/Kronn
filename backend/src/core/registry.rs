@@ -62,6 +62,42 @@ pub fn api_readiness_probe(server_id: &str) -> Option<ApiReadinessProbe> {
     Some(probe)
 }
 
+/// KT-829 — a CLI access probe declared per plugin: binary presence,
+/// version, and active authentication, checked without ever storing or
+/// logging the CLI's own credential. `binary` MUST be present in
+/// `quick_exec::ALLOWED_BINARIES` — the probe runs through that engine
+/// (no shell, no caller-supplied argv).
+pub struct CliAccessProbe {
+    pub binary: &'static str,
+    pub version_args: &'static [&'static str],
+    /// Minimum accepted version (`major.minor.patch`). `None` = no floor —
+    /// neither Fastly nor GitLab's CLI declares one today, but a future
+    /// plugin that depends on a specific fixed CLI bug can set one.
+    pub min_version: Option<&'static str>,
+    /// Exits 0 only when the CLI is actively authenticated (not merely
+    /// installed) — e.g. `fastly whoami`, `glab auth status`.
+    pub auth_check_args: &'static [&'static str],
+}
+
+pub fn cli_access_probe(server_id: &str) -> Option<CliAccessProbe> {
+    let probe = match server_id {
+        "mcp-fastly" => CliAccessProbe {
+            binary: "fastly",
+            version_args: &["version"],
+            min_version: None,
+            auth_check_args: &["whoami"],
+        },
+        "mcp-gitlab" => CliAccessProbe {
+            binary: "glab",
+            version_args: &["--version"],
+            min_version: None,
+            auth_check_args: &["auth", "status"],
+        },
+        _ => return None,
+    };
+    Some(probe)
+}
+
 /// Return the built-in MCP registry — official servers only
 pub fn builtin_registry() -> Vec<McpDefinition> {
     vec![

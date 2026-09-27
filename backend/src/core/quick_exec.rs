@@ -58,6 +58,9 @@ pub const ALLOWED_BINARIES: &[&str] = &[
     "git", "gh",  // Token accounting.
     "rtk", // Probes.
     "echo", "true", "false", "sleep",
+    // KT-829 — plugin CLI access probes (`registry::cli_access_probe`).
+    // Presence/version/auth checks only, never a mutating subcommand.
+    "fastly", "glab",
 ];
 
 /// Names that are refused even if they appear in the allowlist.

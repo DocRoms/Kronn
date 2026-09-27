@@ -435,6 +435,12 @@ pub struct McpConfigDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub merged_into_existing: Option<String>,
+    /// KT-829 — the last persisted probe result for each access this config
+    /// exposes (`"api"` / `"mcp"` / `"cli"`), so the list can show health
+    /// without re-running a probe on every page load. Empty when this
+    /// config was never tested.
+    #[serde(default)]
+    pub last_probes: Vec<McpLastProbe>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -475,6 +481,60 @@ pub struct McpProbeCheck {
     /// plugin appear broken.
     pub required: bool,
     pub detail: String,
+    /// KT-829 — stable machine-readable classification of `detail`, so the
+    /// frontend can translate it instead of showing raw English.
+    pub code: ProbeDiagnosticCode,
+}
+
+/// KT-829 — stable diagnostic bucket for a failed (or passing) probe check,
+/// shared by the API-call probe, the MCP handshake probe and the CLI access
+/// probe. Stable across releases so the frontend can translate it instead of
+/// pattern-matching `detail` (free English text meant for logs, not i18n).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ProbeDiagnosticCode {
+    Ok,
+    /// HTTP 401 — credentials rejected outright.
+    Unauthorized,
+    /// HTTP 403 — credentials accepted but scope/permission refused.
+    Forbidden,
+    /// HTTP 404 — the declared endpoint does not exist (server-side or a
+    /// registry drift, not a credentials problem).
+    NotFound,
+    /// A header name/value built from the config could not be sent as-is
+    /// (malformed auth value, non-ASCII header name, …).
+    InvalidHeader,
+    /// A local CLI produced output Kronn could not parse as the credential
+    /// or version it expected (banner text mixed with the token, unexpected
+    /// format, non-UTF-8 bytes, …).
+    UnexpectedOutput,
+    /// Connection/DNS/timeout failure — never reached the server.
+    Network,
+    /// The declared CLI binary is not present on this host.
+    CliMissing,
+    /// The CLI binary is present but below the version this plugin requires.
+    CliVersionTooOld,
+    /// The CLI binary is present and current, but not logged in.
+    CliNotAuthenticated,
+    /// Anything else — a 5xx, an unclassified failure, or no probe declared.
+    #[default]
+    Other,
+}
+
+/// One access's last recorded probe result for a config — KT-829. Persisted
+/// so the config list can show health without re-running the probe on every
+/// page load.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpLastProbe {
+    /// Matches `McpProbeCheck.id` — `"api"`, `"mcp"` or `"cli"`.
+    pub access: String,
+    pub ok: bool,
+    pub code: ProbeDiagnosticCode,
+    pub summary: String,
+    /// RFC3339 timestamp of the probe that produced this result.
+    pub tested_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -628,7 +688,7 @@ pub struct LinkMcpConfigRequest {
     pub project_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct McpOverview {
     pub servers: Vec<McpServer>,
@@ -684,4 +744,46 @@ pub struct McpIncompleteConfig {
     /// Free-form reason — `missing_keys` for a key-by-key gap, or a
     /// short error message for decryption failures.
     pub reason: String,
+}
+
+/// KT-829 — typed outcome of a `POST /api/mcps/refresh` rescan, so the
+/// caller can see (and, with `dry_run`, preview) exactly what changed
+/// instead of only getting back the post-scan `McpOverview`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpRescanReport {
+    /// Echoes the request. `true` means every count below reflects what
+    /// WOULD have happened — the transaction was rolled back and nothing
+    /// was written to disk or to the database.
+    pub dry_run: bool,
+    /// Brand-new `McpConfig` rows created from a `.mcp.json` entry that
+    /// matched no existing config.
+    pub configs_created: usize,
+    /// Existing configs found by hash and linked to a newly-scanned project
+    /// instead of being duplicated.
+    pub configs_merged: usize,
+    /// Duplicate config rows removed by deduplication.
+    pub configs_deleted: usize,
+    /// Projects whose `.mcp.json` (or equivalent host file) was actually
+    /// rewritten. `None` for a `dry_run` — it never touches the filesystem,
+    /// so this count cannot be established without side effects.
+    #[ts(optional)]
+    pub projects_rewritten: Option<usize>,
+    pub overview: McpOverview,
+}
+
+/// KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpConfigProbeResult {
+    pub config_id: String,
+    pub probe: McpProbeResponse,
+}
+
+/// KT-829 — `POST /api/mcps/test-all` response: every visible config probed
+/// with a bounded concurrency, one result each.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpTestAllResponse {
+    pub results: Vec<McpConfigProbeResult>,
 }

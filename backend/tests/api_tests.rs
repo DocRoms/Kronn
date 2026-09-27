@@ -14385,8 +14385,12 @@ async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
     let (status, refreshed) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "refresh failed: {refreshed:?}");
     assert_eq!(refreshed["success"], true, "{refreshed:?}");
+    assert_eq!(
+        refreshed["data"]["dry_run"], false,
+        "a real (non-dry-run) refresh must say so"
+    );
 
-    let configs = refreshed["data"]["configs"]
+    let configs = refreshed["data"]["overview"]["configs"]
         .as_array()
         .expect("configs array");
     let detected = configs
@@ -14397,6 +14401,117 @@ async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
         detected["host_sync"], "None",
         "a config detected from a project's own .mcp.json must not be opted into host sync"
     );
+}
+
+#[tokio::test]
+async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates_it() {
+    // KT-829 — `?dry_run=true` must report exactly what a real scan would do
+    // (via the returned counts + preview overview) while leaving the
+    // database and the filesystem untouched; only a subsequent real run
+    // may actually create anything.
+    let state = test_state();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
+
+    let mut mcp_servers = std::collections::HashMap::new();
+    mcp_servers.insert(
+        "github".to_string(),
+        kronn::core::mcp_scanner::McpServerEntry {
+            command: Some("npx".to_string()),
+            args: Some(vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ]),
+            url: None,
+            env: std::collections::HashMap::new(),
+        },
+    );
+    kronn::core::mcp_scanner::write_mcp_json(
+        &project_path,
+        &kronn::core::mcp_scanner::McpJsonFile { mcp_servers },
+    )
+    .unwrap();
+
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "dry-run-test-proj".to_string(),
+        name: "Dry Run Test".to_string(),
+        path: project_path,
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, dry) = post_json(app, "/api/mcps/refresh?dry_run=true", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "dry-run refresh failed: {dry:?}");
+    assert_eq!(dry["success"], true, "{dry:?}");
+    assert_eq!(dry["data"]["dry_run"], true);
+    assert_eq!(dry["data"]["configs_created"], 1, "{dry:?}");
+    assert!(
+        dry["data"]["projects_rewritten"].is_null(),
+        "a dry run never touches the filesystem, so this cannot be established: {dry:?}"
+    );
+    let preview_configs = dry["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(
+        preview_configs
+            .iter()
+            .any(|c| c["server_id"] == "mcp-github"),
+        "the preview must show what a real run WOULD create: {dry:?}"
+    );
+
+    // The rollback is real: a plain read afterwards sees nothing new.
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, overview_after_dry) = get_json(app, "/api/mcps").await;
+    assert_eq!(status, StatusCode::OK);
+    let configs_after_dry = overview_after_dry["data"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(
+        configs_after_dry.is_empty(),
+        "a dry run must not persist anything: {overview_after_dry:?}"
+    );
+
+    // A real run performs exactly what the preview showed.
+    let app = build_router_with_auth(state, false);
+    let (status, real) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "real refresh failed: {real:?}");
+    assert_eq!(real["data"]["dry_run"], false);
+    assert_eq!(real["data"]["configs_created"], 1, "{real:?}");
+    assert!(
+        real["data"]["projects_rewritten"].is_number(),
+        "a real run always establishes how many projects were rewritten: {real:?}"
+    );
+    let configs_after_real = real["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(configs_after_real
+        .iter()
+        .any(|c| c["server_id"] == "mcp-github"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

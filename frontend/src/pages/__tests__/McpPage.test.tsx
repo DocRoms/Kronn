@@ -89,6 +89,7 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   effective_kind: opts?.effective_kind ?? 'mcp',
   effective_preferred_interface: opts?.effective_preferred_interface ?? opts?.preferred_interface ?? 'mcp',
   credential_source: opts?.credential_source ?? 'stored',
+  last_probes: opts?.last_probes ?? [],
 });
 
 const makeProject = (id: string, name: string): Project => ({
@@ -441,9 +442,9 @@ describe('McpPage', () => {
       server_id: 'mcp-fastly',
       ready: true,
       checks: [
-        { id: 'cli', label: 'Fastly CLI', ok: true, required: true, detail: 'Fastly CLI version 15.4.0' },
-        { id: 'api', label: 'Fastly API', ok: true, required: true, detail: 'Authenticated API request succeeded' },
-        { id: 'mcp', label: 'Fastly MCP', ok: false, required: false, detail: 'Optional exploratory MCP is unavailable' },
+        { id: 'cli', label: 'Fastly CLI', ok: true, required: true, detail: 'Fastly CLI version 15.4.0', code: 'ok' },
+        { id: 'api', label: 'Fastly API', ok: true, required: true, detail: 'Authenticated API request succeeded', code: 'ok' },
+        { id: 'mcp', label: 'Fastly MCP', ok: false, required: false, detail: 'Optional exploratory MCP is unavailable', code: 'cli_missing' },
       ],
     };
     let resolveProbe!: (response: McpProbeResponse) => void;

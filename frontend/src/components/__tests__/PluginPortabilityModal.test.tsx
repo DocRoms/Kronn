@@ -54,6 +54,7 @@ const config: McpConfigDisplay = {
   effective_kind: 'cli',
   effective_preferred_interface: 'api',
   credential_source: 'cli_token',
+  last_probes: [],
 };
 
 const preview: PluginBundlePreview = {

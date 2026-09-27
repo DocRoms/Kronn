@@ -21,6 +21,8 @@ import type {
   McpOverview,
   McpConfigDisplay,
   McpProbeResponse,
+  McpRescanReport,
+  McpTestAllResponse,
   InviteResponse,
   MessageSearchHit,
   DiscLinkRequest,
@@ -1382,7 +1384,9 @@ export const mcps = {
   projectEnvironmentNames: (projectId: string) =>
     api<string[]>('GET', `/mcps/project-environment-names/${encodeURIComponent(projectId)}`),
   registry: (q?: string) => api<McpDefinition[]>('GET', `/mcps/registry${q ? `?q=${encodeURIComponent(q)}` : ''}`),
-  refresh: () => api<McpOverview>('POST', '/mcps/refresh'),
+  refresh: (dryRun = false) =>
+    api<McpRescanReport>('POST', `/mcps/refresh${dryRun ? '?dry_run=true' : ''}`),
+  testAll: () => api<McpTestAllResponse>('POST', '/mcps/test-all'),
   previewBundle: (request: PluginBundleSelectionRequest) =>
     api<PluginBundlePreview>('POST', '/mcps/bundles/preview', request),
   exportBundle: async (

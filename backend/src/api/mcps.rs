@@ -6,13 +6,17 @@ use axum::{
 };
 use rusqlite::{params, Connection};
 use serde::Deserialize;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    sync::Semaphore,
     time::{timeout, Duration},
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::core::{mcp_scanner, registry};
+use crate::core::{cli_access_probe, mcp_scanner, registry};
 use crate::db;
 use crate::models::*;
 use crate::AppState;
@@ -20,6 +24,14 @@ use crate::AppState;
 #[derive(Deserialize)]
 pub struct SearchQuery {
     pub q: Option<String>,
+}
+
+/// KT-829 — `?dry_run=true` on `POST /api/mcps/refresh` previews the scan's
+/// effect (counts only) without writing to the database or the filesystem.
+#[derive(Deserialize)]
+pub struct RescanQuery {
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// GET /api/mcps/registry?q=search
@@ -127,17 +139,57 @@ pub async fn probe_config(
             let env = db::mcps::decrypt_env(&config.env_encrypted, &secret)
                 .map_err(|error| anyhow::anyhow!("Cannot decrypt plugin configuration: {error}"))?;
             let preference = db::mcps::get_config_preference(conn, &id)?;
-            Ok((server, config, env, preference))
+            let roots = cli_probe_roots(conn)?;
+            Ok((server, config, env, preference, roots))
         })
         .await;
 
-    let (server, config, env, preference) = match target {
+    let (server, config, env, preference, roots) = match target {
         Ok(target) => target,
         Err(error) => return Json(ApiResponse::err(error.to_string())),
     };
 
-    let result = probe_plugin(&state, &server, &config, &env, preference).await;
+    let result = probe_plugin(&state, &server, &config, &env, preference, &roots).await;
+    persist_probe_checks(&state, &config.id, &result.checks).await;
     Json(ApiResponse::ok(result))
+}
+
+/// Any project directory Quick Exec can declare as a root for the CLI access
+/// probe — `fastly`/`glab` report on their own login state, not on a
+/// project's code, so which one is picked doesn't matter, only that one
+/// exists (mirrors `api::rtk_state`'s rule for the same reason).
+fn cli_probe_roots(conn: &Connection) -> anyhow::Result<Vec<PathBuf>> {
+    Ok(db::projects::list_projects(conn)?
+        .into_iter()
+        .map(|project| PathBuf::from(project.path))
+        .collect())
+}
+
+/// Write every check from a probe run to `mcp_probe_results`, keyed by
+/// (config, access) — KT-829. Best-effort: a persistence failure must not
+/// turn a successful probe response into an error for the caller.
+async fn persist_probe_checks(state: &AppState, config_id: &str, checks: &[McpProbeCheck]) {
+    let config_id = config_id.to_string();
+    let checks = checks.to_vec();
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            for check in &checks {
+                db::mcps::upsert_probe_result(
+                    conn,
+                    &config_id,
+                    &check.id,
+                    check.ok,
+                    check.code,
+                    &check.detail,
+                )?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+    if let Err(error) = result {
+        tracing::warn!("Failed to persist MCP probe results: {error}");
+    }
 }
 
 async fn probe_plugin(
@@ -146,6 +198,7 @@ async fn probe_plugin(
     config: &McpConfig,
     env: &std::collections::HashMap<String, String>,
     preference: PluginInterface,
+    cli_roots: &[PathBuf],
 ) -> McpProbeResponse {
     let available = registry::available_plugin_interfaces(server);
     let only_interface = available.len() == 1;
@@ -177,7 +230,7 @@ async fn probe_plugin(
     if available.contains(&PluginInterface::Cli) {
         // CLI-wrapper authentication remains a runtime prerequisite when its
         // tools are surfaced through MCP (`glab mcp serve`, `fastly-mcp`).
-        checks.push(probe_cli(server, env, true).await);
+        checks.push(probe_cli(server, cli_roots, true).await);
     }
 
     build_probe_response(&server.id, checks)
@@ -214,6 +267,7 @@ async fn probe_api_with_policy(
             "api",
             "Authenticated API",
             required,
+            ProbeDiagnosticCode::Other,
             "No side-effect-free authentication probe is declared for this plugin",
         );
     };
@@ -224,6 +278,7 @@ async fn probe_api_with_policy(
                 "api",
                 "Authenticated API",
                 required,
+                ProbeDiagnosticCode::Other,
                 &format!("Missing required probe parameter `{env_key}`"),
             );
         };
@@ -245,31 +300,108 @@ async fn probe_api_with_policy(
         &step, server, &config.id, env, state, &context, policy,
     );
     match timeout(Duration::from_secs(15), execution).await {
-        Ok(outcome) if outcome.result.status == RunStatus::Success => McpProbeCheck {
-            id: "api".into(),
-            label: "Authenticated API".into(),
-            ok: true,
+        Ok(outcome) if outcome.result.status == RunStatus::Success => passed_probe(
+            "api",
+            "Authenticated API",
             required,
-            detail: format!("GET {} authenticated successfully", definition.path),
-        },
+            &format!("GET {} authenticated successfully", definition.path),
+        ),
         Ok(outcome) => {
-            let detail = api_probe_failure_detail(&outcome.result.output);
-            failed_probe("api", "Authenticated API", required, &detail)
+            let code = classify_probe_failure(&outcome.result.output);
+            let detail = api_probe_failure_detail(&outcome.result.output, code);
+            failed_probe("api", "Authenticated API", required, code, &detail)
         }
         Err(_) => failed_probe(
             "api",
             "Authenticated API",
             required,
+            ProbeDiagnosticCode::Network,
             "The safe authentication request timed out after 15 seconds",
         ),
     }
 }
 
-fn api_probe_failure_detail(output: &str) -> String {
+fn api_probe_failure_detail(output: &str, code: ProbeDiagnosticCode) -> String {
     if output.contains("Azure CLI `az`") {
         return output.to_string();
     }
-    "The safe authentication request failed; check credentials and plugin scope".into()
+    match code {
+        ProbeDiagnosticCode::Unauthorized => {
+            "The safe authentication request was rejected (401) — credentials are invalid or expired".into()
+        }
+        ProbeDiagnosticCode::Forbidden => {
+            "The safe authentication request was refused (403) — credentials are valid but lack the required scope".into()
+        }
+        ProbeDiagnosticCode::NotFound => {
+            "The safe authentication request hit a 404 — the declared endpoint may no longer exist".into()
+        }
+        ProbeDiagnosticCode::InvalidHeader => {
+            "A header built from this config's values could not be sent as-is".into()
+        }
+        ProbeDiagnosticCode::UnexpectedOutput => {
+            "A local CLI credential could not be resolved into a usable token".into()
+        }
+        ProbeDiagnosticCode::Network => {
+            "The safe authentication request could not reach the server".into()
+        }
+        _ => "The safe authentication request failed; check credentials and plugin scope".into(),
+    }
+}
+
+/// KT-829 — classify a probe failure's free-text detail into a stable code
+/// shared by every access (API, MCP, CLI-wrapper). Order matters: the
+/// specific patterns below are checked before the generic fallback.
+fn classify_probe_failure(detail: &str) -> ProbeDiagnosticCode {
+    if let Some(status) = extract_http_status(detail) {
+        return match status {
+            401 => ProbeDiagnosticCode::Unauthorized,
+            403 => ProbeDiagnosticCode::Forbidden,
+            404 => ProbeDiagnosticCode::NotFound,
+            _ => ProbeDiagnosticCode::Other,
+        };
+    }
+    if detail.contains("Invalid auth header")
+        || detail.contains("Invalid value resolved for auth header")
+        || detail.contains("Invalid value for request header")
+        || detail.contains("Invalid request header name")
+    {
+        return ProbeDiagnosticCode::InvalidHeader;
+    }
+    if detail.contains("CLI token unavailable")
+        || detail.contains("non-UTF-8 output")
+        || detail.contains("returned an empty token")
+    {
+        return ProbeDiagnosticCode::UnexpectedOutput;
+    }
+    // A stdio MCP transport that fails to spawn (`` `command` is unavailable ``)
+    // IS a missing CLI in the Fastly/GitLab-wrapper sense, so it reuses the
+    // same stable code rather than a fourth "binary missing" bucket.
+    if detail.contains("is unavailable") {
+        return ProbeDiagnosticCode::CliMissing;
+    }
+    if detail.contains("HTTP request failed after")
+        || detail.contains("Could not connect")
+        || detail.contains("timed out")
+    {
+        return ProbeDiagnosticCode::Network;
+    }
+    ProbeDiagnosticCode::Other
+}
+
+/// Extract an HTTP status from either shape a probe failure message uses:
+/// `"HTTP 404 on GET https://…"` (api_call_executor) or `"… (HTTP 404)"`
+/// (the MCP SSE/streamable probes below).
+fn extract_http_status(text: &str) -> Option<u16> {
+    if let Some(rest) = text.strip_prefix("HTTP ") {
+        if let Some(token) = rest.split_whitespace().next() {
+            if let Ok(code) = token.parse::<u16>() {
+                return Some(code);
+            }
+        }
+    }
+    let regex = regex_lite::Regex::new(r"\(HTTP (\d{3})\)").ok()?;
+    let captures = regex.captures(text)?;
+    captures.get(1)?.as_str().parse().ok()
 }
 
 async fn probe_mcp(
@@ -290,59 +422,68 @@ async fn probe_mcp(
                 "mcp",
                 "MCP handshake",
                 required,
+                ProbeDiagnosticCode::Other,
                 "This plugin has no MCP transport",
             )
         }
     };
     match result {
-        Ok(()) => McpProbeCheck {
-            id: "mcp".into(),
-            label: "MCP handshake".into(),
-            ok: true,
+        Ok(()) => passed_probe(
+            "mcp",
+            "MCP handshake",
             required,
-            detail: "MCP initialize handshake succeeded".into(),
-        },
-        Err(detail) => failed_probe("mcp", "MCP handshake", required, &detail),
+            "MCP initialize handshake succeeded",
+        ),
+        Err(detail) => {
+            let code = classify_probe_failure(&detail);
+            failed_probe("mcp", "MCP handshake", required, code, &detail)
+        }
     }
 }
 
-async fn probe_cli(
-    server: &McpServer,
-    env: &std::collections::HashMap<String, String>,
-    required: bool,
-) -> McpProbeCheck {
-    let result = match server.id.as_str() {
-        "mcp-fastly" => run_probe_command(
-            "fastly",
-            &["auth", "token", "--quiet", "--non-interactive"],
-            env,
-        )
-        .await
-        .map(|_| ()),
-        "mcp-gitlab" => run_probe_command("glab", &["auth", "status"], env)
-            .await
-            .map(|_| ()),
-        _ => Err("No authenticated CLI probe is declared for this plugin".into()),
+async fn probe_cli(server: &McpServer, roots: &[PathBuf], required: bool) -> McpProbeCheck {
+    let Some(declared) = registry::cli_access_probe(&server.id) else {
+        return failed_probe(
+            "cli",
+            "Authenticated CLI",
+            required,
+            ProbeDiagnosticCode::Other,
+            "No CLI access probe is declared for this plugin",
+        );
     };
-    match result {
-        Ok(()) => McpProbeCheck {
-            id: "cli".into(),
-            label: "Authenticated CLI".into(),
-            ok: true,
-            required,
-            detail: "Local CLI authentication succeeded".into(),
-        },
-        Err(detail) => failed_probe("cli", "Authenticated CLI", required, &detail),
+    let result = cli_access_probe::probe(&declared, roots, &CancellationToken::new()).await;
+    if result.code == ProbeDiagnosticCode::Ok {
+        passed_probe("cli", "Authenticated CLI", required, &result.detail)
+    } else {
+        failed_probe("cli", "Authenticated CLI", required, result.code, &result.detail)
     }
 }
 
-fn failed_probe(id: &str, label: &str, required: bool, detail: &str) -> McpProbeCheck {
+fn passed_probe(id: &str, label: &str, required: bool, detail: &str) -> McpProbeCheck {
+    McpProbeCheck {
+        id: id.into(),
+        label: label.into(),
+        ok: true,
+        required,
+        detail: detail.into(),
+        code: ProbeDiagnosticCode::Ok,
+    }
+}
+
+fn failed_probe(
+    id: &str,
+    label: &str,
+    required: bool,
+    code: ProbeDiagnosticCode,
+    detail: &str,
+) -> McpProbeCheck {
     McpProbeCheck {
         id: id.into(),
         label: label.into(),
         ok: false,
         required,
         detail: detail.into(),
+        code,
     }
 }
 
@@ -510,28 +651,6 @@ async fn probe_mcp_streamable(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_probe_command(
-    command: &str,
-    args: &[&str],
-    env: &std::collections::HashMap<String, String>,
-) -> Result<Vec<u8>, String> {
-    let mut process = crate::core::cmd::async_cmd(command);
-    process
-        .args(args)
-        .envs(env.iter().filter(|(_, value)| !value.trim().is_empty()));
-    process.kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(8), process.output())
-        .await
-        .map_err(|_| format!("`{command}` timed out after 8 seconds"))?
-        .map_err(|_| format!("`{command}` is unavailable"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "`{command}` failed (exit {})",
-            output.status.code().unwrap_or(-1)
-        ));
-    }
-    Ok(output.stdout)
-}
 
 /// POST /api/mcps/configs — create a new MCP config
 /// server_id can be an existing DB server ID or a registry ID (auto-creates server)
@@ -1352,7 +1471,10 @@ pub async fn reveal_secrets(
 }
 
 /// POST /api/mcps/refresh — scan all projects for MCP configs, upsert to new system
-pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverview>> {
+pub async fn refresh(
+    State(state): State<AppState>,
+    Query(query): Query<RescanQuery>,
+) -> Json<ApiResponse<McpRescanReport>> {
     let config_read = state.config.read().await;
     let secret = match &config_read.encryption_secret {
         Some(s) => s.clone(),
@@ -1361,12 +1483,19 @@ pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverv
     drop(config_read);
 
     let reg = registry::builtin_registry();
+    let dry_run = query.dry_run;
 
     let result = state
         .db
         .with_conn(move |conn| {
+            // KT-829 — the whole scan runs inside one transaction so a
+            // `dry_run` can compute every count below for real, then roll
+            // back instead of committing. `unchecked_transaction` because
+            // this closure is the sole owner of `conn` for its duration.
+            let tx = conn.unchecked_transaction()?;
+
             // Migrate old detected:* servers to registry IDs where possible
-            migrate_detected_to_registry(conn, &reg)?;
+            migrate_detected_to_registry(&tx, &reg)?;
 
             // Update registry servers' transport/description from current registry
             // (handles package renames, description changes, etc.)
@@ -1380,17 +1509,27 @@ pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverv
                     api_spec: def.api_spec.clone(),
                 };
                 // Only upsert if server already exists in DB
-                let exists = db::mcps::list_servers(conn)?.iter().any(|s| s.id == def.id);
+                let exists = db::mcps::list_servers(&tx)?.iter().any(|s| s.id == def.id);
                 if exists {
-                    db::mcps::upsert_server(conn, &server)?;
+                    db::mcps::upsert_server(&tx, &server)?;
                 }
             }
 
             // Rehash existing configs to match updated server transports
             // (prevents duplicates when registry transport changes slightly)
-            rehash_configs(conn, &secret)?;
+            rehash_configs(&tx, &secret)?;
 
-            let projects = db::projects::list_projects(conn)?;
+            let projects = db::projects::list_projects(&tx)?;
+
+            // KT-829 — counts for the typed report. `configs_created`: a
+            // brand-new row for a `.mcp.json` entry that matched nothing.
+            // `configs_merged`: an existing config found by hash below and
+            // linked to the newly-scanned project instead of being
+            // duplicated. `configs_deleted` (further down) is dedup's own
+            // count of literal duplicate rows it removed — a distinct event
+            // from a merge, which never removes a row.
+            let mut configs_created = 0usize;
+            let mut configs_merged = 0usize;
 
             for project in &projects {
                 let parsed = match mcp_scanner::read_mcp_json(&project.path) {
@@ -1473,16 +1612,17 @@ pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverv
                         source,
                         api_spec: None,
                     };
-                    db::mcps::upsert_server(conn, &server)?;
+                    db::mcps::upsert_server(&tx, &server)?;
 
                     // Compute config hash
                     let hash = db::mcps::compute_config_hash(&server, &entry.env, None);
 
                     // Check if config with this hash already exists
-                    if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
+                    if let Some(existing) = db::mcps::find_config_by_hash(&tx, &hash)? {
                         // Just link project if not already linked
                         if !existing.project_ids.contains(&project.id) {
-                            db::mcps::link_config_project(conn, &existing.id, &project.id)?;
+                            db::mcps::link_config_project(&tx, &existing.id, &project.id)?;
+                            configs_merged += 1;
                         }
                     } else {
                         // Create new config
@@ -1508,41 +1648,75 @@ pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverv
                             // for, so rescan never opts a config into sync.
                             host_sync: HostSyncMode::None,
                         };
-                        db::mcps::insert_config(conn, &config)?;
+                        db::mcps::insert_config(&tx, &config)?;
+                        configs_created += 1;
                     }
                 }
             }
 
             // Deduplicate configs with the same hash (merge project linkages, keep oldest)
-            dedup_configs(conn)?;
+            let configs_deleted = dedup_configs(&tx)?;
 
             // Clean up orphan servers (no configs pointing to them)
-            conn.execute_batch(
+            tx.execute_batch(
             "DELETE FROM mcp_servers WHERE id NOT IN (SELECT DISTINCT server_id FROM mcp_configs)"
         )?;
 
-            // Sync all .mcp.json files to disk (picks up transport updates)
-            mcp_scanner::sync_all_projects(conn, &secret);
+            // A dry run never touches the filesystem: writing `.mcp.json`
+            // (or a host CLI's config file) is exactly the side effect the
+            // preview exists to let the operator confirm before it happens.
+            let projects_rewritten = if dry_run {
+                None
+            } else {
+                mcp_scanner::sync_all_projects(&tx, &secret);
+                let rewritten = db::projects::list_projects(&tx)?
+                    .into_iter()
+                    .filter(|project| {
+                        matches!(
+                            project.mcp_sync_report.as_ref().map(|report| &report.status),
+                            Some(ProjectMcpSyncStatus::Written)
+                        )
+                    })
+                    .count();
+                Some(rewritten)
+            };
 
             // Return updated overview
-            let servers = db::mcps::list_servers(conn)?;
-            let configs = db::mcps::list_configs_display(conn, None)?;
-            let projects = db::projects::list_projects(conn)?;
+            let servers = db::mcps::list_servers(&tx)?;
+            let configs = db::mcps::list_configs_display(&tx, None)?;
+            let projects = db::projects::list_projects(&tx)?;
             let customized_contexts = build_customized_contexts(&configs, &projects);
             let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
 
-            let raw_configs = db::mcps::list_configs(conn)?;
+            let raw_configs = db::mcps::list_configs(&tx)?;
             let server_map: std::collections::HashMap<String, &crate::models::McpServer> =
                 servers.iter().map(|s| (s.id.clone(), s)).collect();
             let incomplete_configs =
                 mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, &secret);
 
-            Ok(McpOverview {
+            let overview = McpOverview {
                 servers,
                 configs,
                 customized_contexts,
                 incompatibilities,
                 incomplete_configs,
+            };
+
+            if dry_run {
+                // Explicit rollback rather than relying on drop: makes the
+                // "nothing was written" guarantee visible at the call site.
+                tx.rollback()?;
+            } else {
+                tx.commit()?;
+            }
+
+            Ok(McpRescanReport {
+                dry_run,
+                configs_created,
+                configs_merged,
+                configs_deleted,
+                projects_rewritten,
+                overview,
             })
         })
         .await;
@@ -1551,6 +1725,74 @@ pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverv
         Ok(data) => Json(ApiResponse::ok(data)),
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
     }
+}
+
+/// KT-829 — bounded concurrency for `POST /api/mcps/test-all`. Each probe
+/// itself already spawns processes / makes an HTTP call with its own
+/// timeout; this just caps how many run at once so testing a large plugin
+/// list doesn't fork dozens of CLIs simultaneously.
+const TEST_ALL_CONCURRENCY: usize = 4;
+
+/// POST /api/mcps/test-all — probe every visible config, per access, with a
+/// bounded concurrency. Persists the same way a single `probe_config` call
+/// does, so the list view reflects this run immediately afterwards.
+pub async fn test_all_configs(State(state): State<AppState>) -> Json<ApiResponse<McpTestAllResponse>> {
+    let secret = match state.config.read().await.encryption_secret.clone() {
+        Some(secret) => secret,
+        None => return Json(ApiResponse::err("No encryption secret configured")),
+    };
+
+    let targets = state
+        .db
+        .with_conn(move |conn| {
+            let configs = db::mcps::list_configs(conn)?;
+            let servers = db::mcps::list_servers(conn)?;
+            let server_map: std::collections::HashMap<String, McpServer> =
+                servers.into_iter().map(|s| (s.id.clone(), s)).collect();
+            let roots = cli_probe_roots(conn)?;
+
+            let mut targets = Vec::with_capacity(configs.len());
+            for config in configs {
+                let Some(server) = server_map.get(&config.server_id).cloned() else {
+                    continue; // orphaned config — no server row to probe against
+                };
+                let env = db::mcps::decrypt_env(&config.env_encrypted, &secret).unwrap_or_default();
+                let preference = db::mcps::get_config_preference(conn, &config.id)?;
+                targets.push((server, config, env, preference));
+            }
+            Ok::<_, anyhow::Error>((targets, roots))
+        })
+        .await;
+
+    let (targets, roots) = match targets {
+        Ok(t) => t,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let semaphore = Arc::new(Semaphore::new(TEST_ALL_CONCURRENCY));
+    let mut handles = Vec::with_capacity(targets.len());
+    for (server, config, env, preference) in targets {
+        let state = state.clone();
+        let roots = roots.clone();
+        let semaphore = semaphore.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await;
+            let probe = probe_plugin(&state, &server, &config, &env, preference, &roots).await;
+            persist_probe_checks(&state, &config.id, &probe.checks).await;
+            McpConfigProbeResult {
+                config_id: config.id,
+                probe,
+            }
+        }));
+    }
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        if let Ok(result) = handle.await {
+            results.push(result);
+        }
+    }
+    Json(ApiResponse::ok(McpTestAllResponse { results }))
 }
 
 // ─── MCP Context Files ──────────────────────────────────────────────────────
@@ -1914,7 +2156,9 @@ fn build_customized_contexts(
 /// Merge duplicate configs — deduplicates by config_hash AND by label+server_id
 /// (catches detected:X vs mcp-X pointing to the same MCP).
 /// Keeps the first (or the registry-backed one), merges project linkages, deletes the rest.
-fn dedup_configs(conn: &Connection) -> anyhow::Result<()> {
+/// Returns how many duplicate rows were removed — the rescan report's
+/// `configs_deleted` count.
+fn dedup_configs(conn: &Connection) -> anyhow::Result<usize> {
     let configs = db::mcps::list_configs(conn)?;
     let mut to_delete: Vec<(String, String)> = vec![]; // (dup_id, keeper_id)
 
@@ -2004,7 +2248,7 @@ fn dedup_configs(conn: &Connection) -> anyhow::Result<()> {
         tracing::info!("Deduped MCP config {} (merged into {})", dup_id, keeper_id);
     }
 
-    Ok(())
+    Ok(to_delete.len())
 }
 
 /// Recalculate config hashes using current server transports.
@@ -2720,6 +2964,63 @@ mod tests {
         }
     }
 
+    /// KT-829 — `dedup_configs` reports how many duplicate rows it removed;
+    /// the rescan report's `configs_deleted` count is that value verbatim.
+    #[tokio::test]
+    async fn dedup_configs_removes_hash_duplicates_and_reports_the_count() {
+        let database =
+            std::sync::Arc::new(crate::db::Database::open_in_memory().expect("test database"));
+        let server = McpServer {
+            id: "dedup-srv".into(),
+            name: "Dedup fixture".into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+            },
+            source: McpSource::Manual,
+            api_spec: None,
+        };
+        database
+            .with_conn(move |conn| db::mcps::upsert_server(conn, &server))
+            .await
+            .expect("seed server");
+
+        for id in ["dup-a", "dup-b", "dup-c"] {
+            let config = McpConfig {
+                id: id.into(),
+                server_id: "dedup-srv".into(),
+                label: format!("Label {id}"),
+                env_keys: vec![],
+                env_encrypted: String::new(),
+                args_override: None,
+                is_global: false,
+                // Same hash on purpose: pass-1 (exact hash duplicate) keeps
+                // the first-seen row and marks the rest for removal.
+                config_hash: "same-hash".into(),
+                project_ids: vec![],
+                host_sync: HostSyncMode::None,
+                include_general: true,
+            };
+            database
+                .with_conn(move |conn| db::mcps::insert_config(conn, &config))
+                .await
+                .expect("seed config");
+        }
+
+        let deleted = database
+            .with_conn(dedup_configs)
+            .await
+            .expect("dedup");
+        assert_eq!(deleted, 2, "two of the three identical configs must go");
+
+        let remaining = database
+            .with_conn(db::mcps::list_configs)
+            .await
+            .expect("list configs");
+        assert_eq!(remaining.len(), 1, "exactly one survivor per hash");
+    }
+
     #[test]
     fn project_environment_names_are_sorted_unique_and_do_not_read_values() {
         let names = project_environment_names_from_configs(&[
@@ -2741,6 +3042,7 @@ mod tests {
                     ok: true,
                     required: true,
                     detail: "ok".into(),
+                    code: ProbeDiagnosticCode::Ok,
                 },
                 McpProbeCheck {
                     id: "api".into(),
@@ -2748,6 +3050,7 @@ mod tests {
                     ok: true,
                     required: true,
                     detail: "ok".into(),
+                    code: ProbeDiagnosticCode::Ok,
                 },
                 McpProbeCheck {
                     id: "mcp".into(),
@@ -2755,6 +3058,7 @@ mod tests {
                     ok: false,
                     required: false,
                     detail: "optional capability missing".into(),
+                    code: ProbeDiagnosticCode::Other,
                 },
             ],
         );
@@ -2768,6 +3072,7 @@ mod tests {
                 ok: false,
                 required: true,
                 detail: "missing".into(),
+                code: ProbeDiagnosticCode::Other,
             }],
         );
         assert!(!unavailable.ready);
@@ -3003,13 +3308,177 @@ mod tests {
         assert!(check.detail.contains("No side-effect-free"));
     }
 
+    /// KT-829 — `/mcps/test-all` probes every visible config, one result
+    /// each, without exceeding `TEST_ALL_CONCURRENCY` at once. Uses a stdio
+    /// MCP transport spawning `sleep` (no allowlist, no network, no real
+    /// plugin CLI needed) so the wall-clock proof is deterministic on any
+    /// machine: `TEST_ALL_CONCURRENCY` batches of ~1s each must add up to at
+    /// least two batches — an unbounded fan-out of independent sleeps would
+    /// instead finish in ~1s regardless of how many there are.
+    #[tokio::test]
+    async fn test_all_probes_every_config_with_bounded_concurrency() {
+        let database =
+            std::sync::Arc::new(crate::db::Database::open_in_memory().expect("test database"));
+        let secret = crate::core::crypto::generate_secret();
+        let mut app_config = crate::core::config::default_config();
+        app_config.encryption_secret = Some(secret.clone());
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(app_config)),
+            database.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        const COUNT: usize = TEST_ALL_CONCURRENCY * 2;
+        for i in 0..COUNT {
+            let server = McpServer {
+                id: format!("test-all-slow-{i}"),
+                name: format!("Slow probe {i}"),
+                description: String::new(),
+                transport: McpTransport::Stdio {
+                    command: "sleep".into(),
+                    args: vec!["1".into()],
+                },
+                source: McpSource::Manual,
+                api_spec: None,
+            };
+            let config = McpConfig {
+                id: format!("cfg-test-all-{i}"),
+                server_id: server.id.clone(),
+                label: format!("Config {i}"),
+                env_keys: vec![],
+                env_encrypted: String::new(),
+                args_override: None,
+                is_global: true,
+                include_general: false,
+                config_hash: format!("hash-test-all-{i}"),
+                project_ids: vec![],
+                host_sync: HostSyncMode::None,
+            };
+            database
+                .with_conn(move |conn| {
+                    db::mcps::upsert_server(conn, &server)?;
+                    db::mcps::insert_config(conn, &config)
+                })
+                .await
+                .expect("seed test-all config");
+        }
+
+        let started = std::time::Instant::now();
+        let response = test_all_configs(State(state)).await.0;
+        let elapsed = started.elapsed();
+
+        assert!(response.success, "{:?}", response.error);
+        let results = response.data.expect("results").results;
+        assert_eq!(
+            results.len(),
+            COUNT,
+            "every visible config must get exactly one result"
+        );
+        for result in &results {
+            assert_eq!(result.probe.checks.len(), 1, "one check — the mcp access");
+        }
+
+        assert!(
+            elapsed >= std::time::Duration::from_millis(1_800),
+            "expected at least two ~1s batches under a concurrency bound of {TEST_ALL_CONCURRENCY}, took {elapsed:?}"
+        );
+    }
+
     #[test]
     fn api_probe_preserves_actionable_azure_cli_diagnostic_but_not_remote_body() {
         let azure = "Azure CLI `az` could not resolve a Microsoft Graph credential (exit 1). Run `az login` on the host; Conditional Access may require SSO/broker";
-        assert_eq!(api_probe_failure_detail(azure), azure);
         assert_eq!(
-            api_probe_failure_detail("HTTP 401 — upstream body with private details"),
+            api_probe_failure_detail(azure, ProbeDiagnosticCode::Network),
+            azure
+        );
+        assert_eq!(
+            api_probe_failure_detail(
+                "HTTP 500 — upstream body with private details",
+                ProbeDiagnosticCode::Other
+            ),
             "The safe authentication request failed; check credentials and plugin scope"
+        );
+    }
+
+    // ── KT-829: stable diagnostic classification, one case each ─────────
+
+    #[test]
+    fn classify_probe_failure_distinguishes_401_403_404() {
+        assert_eq!(
+            classify_probe_failure("HTTP 401 on GET https://example.test/me — {}"),
+            ProbeDiagnosticCode::Unauthorized
+        );
+        assert_eq!(
+            classify_probe_failure("HTTP 403 on GET https://example.test/me — {}"),
+            ProbeDiagnosticCode::Forbidden
+        );
+        assert_eq!(
+            classify_probe_failure("HTTP 404 on GET https://example.test/me — {}"),
+            ProbeDiagnosticCode::NotFound
+        );
+        assert_eq!(
+            classify_probe_failure("Remote MCP initialize was rejected (HTTP 401)"),
+            ProbeDiagnosticCode::Unauthorized
+        );
+    }
+
+    #[test]
+    fn classify_probe_failure_recognizes_invalid_header() {
+        for detail in [
+            "Invalid value resolved for auth header `Authorization`",
+            "Invalid auth header name `x api key`",
+            "Invalid value for request header `X-Extra`",
+            "Invalid request header name `bad name`",
+        ] {
+            assert_eq!(
+                classify_probe_failure(detail),
+                ProbeDiagnosticCode::InvalidHeader,
+                "{detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_probe_failure_recognizes_unexpected_cli_output() {
+        assert_eq!(
+            classify_probe_failure("CLI token unavailable: credential CLI was not resolved"),
+            ProbeDiagnosticCode::UnexpectedOutput
+        );
+        assert_eq!(
+            classify_probe_failure("Credential CLI `fastly` returned non-UTF-8 output"),
+            ProbeDiagnosticCode::UnexpectedOutput
+        );
+    }
+
+    #[test]
+    fn classify_probe_failure_recognizes_network_and_missing_binary() {
+        assert_eq!(
+            classify_probe_failure("HTTP request failed after 2 retries: connection reset"),
+            ProbeDiagnosticCode::Network
+        );
+        assert_eq!(
+            classify_probe_failure("Could not connect to the remote MCP endpoint"),
+            ProbeDiagnosticCode::Network
+        );
+        assert_eq!(
+            classify_probe_failure("MCP initialize handshake timed out"),
+            ProbeDiagnosticCode::Network
+        );
+        assert_eq!(
+            classify_probe_failure("`glab` is unavailable"),
+            ProbeDiagnosticCode::CliMissing
+        );
+    }
+
+    #[test]
+    fn classify_probe_failure_falls_back_to_other() {
+        assert_eq!(
+            classify_probe_failure("MCP server rejected the initialize handshake"),
+            ProbeDiagnosticCode::Other
+        );
+        assert_eq!(
+            classify_probe_failure("HTTP 500 on GET https://example.test — internal error"),
+            ProbeDiagnosticCode::Other
         );
     }
 
@@ -3623,6 +4092,7 @@ mod tests {
             effective_preferred_interface: PluginInterface::Mcp,
             credential_source: CredentialSource::Stored,
             merged_into_existing: None,
+            last_probes: vec![],
         }
     }
 
