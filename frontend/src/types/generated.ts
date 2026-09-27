@@ -984,7 +984,7 @@ export type BudgetVerdict = "ok" | "warn" | "rotate" | "unknown";
  * `[TRIAGE]` addendum apply inside the child run — see
  * `docs/design/decomposed-autopilot-presets.md` INV-3).
  */
-export type BundleChildWorkflow = { bundle_id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety | null, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null, guards: WorkflowGuards | null, artifacts: Record<string, ArtifactSpec>, on_failure: Array<WorkflowStep>, exec_allowlist: Array<string>, variables: Array<PromptVariable>,
+export type BundleChildWorkflow = { bundle_id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety | null, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null, concurrency_key: string | null, guards: WorkflowGuards | null, artifacts: Record<string, ArtifactSpec>, on_failure: Array<WorkflowStep>, exec_allowlist: Array<string>, variables: Array<PromptVariable>,
 /**
  * 0.8.5 — optional initial state. Default `true` for back-compat
  * (every UI-driven create stays enabled by default). The MCP
@@ -1553,7 +1553,7 @@ export type CreateQuickPromptRequest = { name: string, icon?: string | null, pro
 
 export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null, };
 
-export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
+export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, concurrency_key?: string | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
 /**
  * 0.8.5 — optional initial state. Default `true` for back-compat
  * (every UI-driven create stays enabled by default). The MCP
@@ -5936,6 +5936,11 @@ run_retention_days: number,
  */
 execution_variable_retention_days: number,
 /**
+ * Days after which boot reclaims the clean worktree of an `Interrupted`
+ * run nobody resumed; its commits stay on a preserved branch. `0` = never.
+ */
+interrupted_worktree_ttl_days: number,
+/**
  * KT-373 — refuse to provision a worktree below this much free disk, in
  * GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
  * holding its own Rust `target/`; provisioning kept going until nothing
@@ -6528,7 +6533,7 @@ cache_write_prompt_tokens?: number | null,
  */
 last_activity?: AgentActivity | null, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -7169,7 +7174,11 @@ export type UpdatePlanningTaskRequest = { title?: string | null, description?: s
  */
 export type UpdateQuickFavoriteRequest = { pinned: boolean, };
 
-export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null,
+export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null,
+/**
+ * `null` clears the key; omitted keeps it.
+ */
+concurrency_key?: string | null | null, guards?: WorkflowGuards | null,
 /**
  * Replace the artifact map entirely when present. To clear all
  * declarations, send `Some({})`. Omit the field to leave existing
@@ -7456,6 +7465,11 @@ export type WorkerOfferStatus = "pending" | "accepting" | "accepted" | "declined
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
+ * Template rendered at launch from non-secret launch variables
+ * (`{{ticketKey}}`): `concurrency_limit` then counts runs per rendered key.
+ */
+concurrency_key?: string | null,
+/**
  * Execution limits (timeout, LLM calls cap, loop detection). 0.7.0 —
  * Phase 1 of the Auto-Dev workflow expansion. `None` = use the soft
  * backend defaults (120 min wall-clock, 100 LLM calls, 10 revisits
@@ -7701,6 +7715,15 @@ state?: Record<string, string>,
  * blocked, no auth, network down, …).
  */
 produced_branches?: Array<ProducedBranch>,
+/**
+ * The workflow's `concurrency_key` as rendered for this run at launch.
+ */
+concurrency_key?: string | null,
+/**
+ * The run whose `TriggerWorkflow` step launched this one. Unlike
+ * `parent_run_id`, the two runs have independent lifecycles.
+ */
+triggered_by_run_id?: string | null,
 /**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's
@@ -8045,6 +8068,12 @@ sub_workflow_id?: string | null,
  */
 sub_workflow_foreach_file?: string | null,
 /**
+ * For `SubWorkflow` and `TriggerWorkflow`: child launch variable name →
+ * template rendered in this run. The child's snapshot is prepared from
+ * these values like a manual launch's.
+ */
+sub_workflow_variables?: Record<string, string>,
+/**
  * 2026-06-13 — "Multi-agent review" advanced option on an Agent step.
  * When set, the step runs its own agent normally, THEN opens a shared
  * Kronn discussion and invites a SECOND agent (a different model family,
@@ -8054,7 +8083,13 @@ sub_workflow_foreach_file?: string | null,
  * reads the artifact once, then only the conversation delta) and a real
  * back-and-forth rather than a file relay. `None` = plain Agent step.
  */
-multi_agent_review?: MultiAgentReviewConfig | null, };
+multi_agent_review?: MultiAgentReviewConfig | null,
+/**
+ * KT-793 — Agent steps only: a template rendering to a discussion id. The
+ * step's agent joins that room as its principal without an invite token,
+ * on every launch and every resume of the step.
+ */
+room_id?: string | null, };
 
 export type WorkflowSuggestion = { id: string, title: string, description: string, reason: string, required_mcps: Array<string>, audience: string, complexity: string, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, };
 
@@ -8089,7 +8124,13 @@ require_isolation: boolean,
  * reads it, or works through absolute paths / page data), so its
  * non-isolated runs skip the per-project exclusivity lock.
  */
-main_tree_read_only?: boolean, };
+main_tree_read_only?: boolean,
+/**
+ * Commit a fresh run's worktree starts from (`origin/main`, a tag, a SHA)
+ * instead of the checkout's HEAD. A `<remote>/<branch>` value is fetched
+ * first and a failed fetch refuses the run. Setting it requests a worktree.
+ */
+base_ref?: string | null, };
 
 export type WorkspaceHistoryLease = { id: string, disc_id: string, session_pk: number, session_agent_type: string, session_id: string | null, canonical_path: string, branch: string, backup_ref: string, head_sha: string, acquired_at: string, expires_at: string, };
 

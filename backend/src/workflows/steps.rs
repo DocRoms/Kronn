@@ -173,12 +173,13 @@ pub async fn execute_step(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     catalog_db: Option<&crate::db::Database>,
+    // KT-793 — the step's room capability; only its own agent attempts carry it.
+    room: Option<&runner::WorkflowStepBridgeContext>,
     // ADR-005 slice 1 (KT-847) — `Some(WorkflowRun.id)` pins the
     // skills/directives/profiles every agent spawn in this call resolves,
     // so a later step of the SAME run isn't affected by an edit or
     // deletion made mid-run (see `RunSnapshotCache`). `None` for ad-hoc,
-    // non-persisted invocations (e.g. the workflow "Test step" preview),
-    // which keep the previous always-fresh resolution.
+    // non-persisted invocations (e.g. the workflow "Test step" preview).
     run_id: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
@@ -413,6 +414,7 @@ pub async fn execute_step(
             &mut provenance,
             WorkflowAgentAttemptRole::Initial,
             attempt + 1,
+            room,
             run_id,
         )
         .await
@@ -511,6 +513,7 @@ pub async fn execute_step(
                             &mut provenance,
                             WorkflowAgentAttemptRole::Repair,
                             attempt + 1,
+                            room,
                             run_id,
                         )
                         .await;
@@ -614,6 +617,7 @@ pub async fn execute_step(
                                 &mut provenance,
                                 WorkflowAgentAttemptRole::Escalation,
                                 attempt + 1,
+                                room,
                                 run_id,
                             )
                             .await;
@@ -1104,6 +1108,7 @@ async fn run_agent_with_timeout(
     provenance: &mut WorkflowAgentProvenance,
     role: WorkflowAgentAttemptRole,
     retry: u32,
+    room: Option<&runner::WorkflowStepBridgeContext>,
     // See `execute_step`'s `run_id` doc — forwarded unchanged.
     run_id: Option<&str>,
 ) -> Result<AgentOutput> {
@@ -1166,6 +1171,9 @@ async fn run_agent_with_timeout(
             external_http,
             run_snapshot_id: run_id,
             tools: native_tools,
+            // The bridge's discussion is the room the capability names.
+            discussion_id: room.map(|room| room.discussion_id.as_str()),
+            workflow_step_context: room,
             ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
         })
         .await
@@ -1637,6 +1645,7 @@ async fn run_multi_agent_debate(
             provenance,
             WorkflowAgentAttemptRole::Review,
             retry,
+            None,
             run_id,
         )
         .await?;
@@ -1701,6 +1710,7 @@ async fn run_multi_agent_debate(
             provenance,
             WorkflowAgentAttemptRole::Author,
             retry,
+            None,
             run_id,
         )
         .await?;
@@ -2259,6 +2269,8 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+            room_id: None,
+            sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
 
@@ -3039,6 +3051,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
             Some("test-run"),
         )
         .await;
@@ -3096,6 +3109,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
             Some("test-run"),
         )
         .await;
@@ -3150,6 +3164,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
             Some("test-run"),
         )
         .await;
@@ -3202,6 +3217,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            None,
             Some("test-run"),
         )
         .await;
@@ -3282,6 +3298,7 @@ mod http_native_tool_step_tests {
             }),
             None,
             Some(tools),
+            None,
             None,
             Some("test-run"),
         )
@@ -3373,6 +3390,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&overrides),
             Some(tools),
+            None,
             None,
             Some("test-run"),
         )

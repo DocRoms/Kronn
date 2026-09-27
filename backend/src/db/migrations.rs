@@ -739,6 +739,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "192_task_execution_served_model",
         include_str!("sql/192_task_execution_served_model.sql"),
     ),
+    (
+        "193_workflow_concurrency_key",
+        include_str!("sql/193_workflow_concurrency_key.sql"),
+    ),
+    (
+        "194_workflow_step_room_sessions",
+        include_str!("sql/194_workflow_step_room_sessions.sql"),
+    ),
+    (
+        "195_workflow_run_triggered_by",
+        include_str!("sql/195_workflow_run_triggered_by.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

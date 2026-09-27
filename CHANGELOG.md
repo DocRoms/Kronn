@@ -11,8 +11,54 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-26
+
 ### Added
 
+- A Claude Code or Codex workflow Agent step can name its room: `room_id` (a
+  template, for example `{{steps.jeton.data.room_id}}`) makes the step's agent
+  a member and the principal of that discussion without a `kr-join` token. The runner hands the
+  agent's bridge a capability through the environment on every launch and every
+  resume, the bridge joins with it before the first Kronn tool, and the backend
+  accepts it only while that very step of that run is running, for that room.
+  The membership ends with the step, a replayed step takes over the executions
+  its interrupted session steered (their deliveries wake it), and
+  `task_exec_prepare` works again after `/resume` of an interrupted run.
+- An isolated workflow run can start from a chosen commit instead of the
+  project checkout's HEAD: `workspace_config.base_ref` (`origin/main`, a tag, a
+  SHA; "Start from" in the workflow editor). A remote branch is fetched first,
+  within 60 s and one fetch at a time per repository, so parallel foreach items
+  do not refuse each other on the ref lock. A failed fetch or an unknown ref
+  refuses the run with a message naming what to check, rather than starting
+  from a stale copy or the main checkout. The worktree of a run left
+  `Interrupted` and not resumed within `server.interrupted_worktree_ttl_days`
+  (default 7, `0` = never) is reclaimed at boot, except a dirty or detached
+  one; commits no base holds stay on a branch listed on the run.
+- A workflow step can launch another workflow without waiting for it:
+  `TriggerWorkflow` creates the child run through the same path as a manual
+  launch (its variables mapped from templates, its snapshot prepared, its own
+  concurrency limit and key applied), then continues at once. The child run
+  records `triggered_by_run_id` and shows the launching workflow as its origin;
+  the step keeps `child_run_id`. Loops between workflows are allowed (a chain of
+  more than 20 runs launching one another is refused), and a refused launch
+  ends the step with `TRIGGER_REFUSED`, which `on_result` can branch on. A
+  phase no longer needs an Exec calling `POST …/trigger` and hanging up after
+  `run_start`. Migration 194 adds the column to runs.
+- `SubWorkflow` passes values to its child: `sub_workflow_variables` maps the
+  child's launch variables to templates rendered in the parent run (in a
+  foreach, `{{current_task.*}}` too), and the child's variable snapshot is
+  prepared like a manual launch's. A child that declares variables used to fail
+  for want of a snapshot. Mapped names must be declared by the child, and a
+  parent variable resolved from the project environment or the Kronn context
+  is never forwarded.
+- A workflow's `concurrency_limit` can be counted per business object:
+  `concurrency_key` (for example `"{{ticketKey}}"`) is rendered at each launch
+  from the run's launch variables and stored on the run. Runs with different
+  keys run side by side; a launch whose key is already at the limit is refused
+  with `Concurrency limit reached for key …`, as the per-workflow limit already
+  was. The key may read only `user_input` variables: one resolved from the
+  project environment or the Kronn context is refused at save, since the key
+  is stored in clear. Migration 193 adds the column to workflows and runs.
 - A workflow run can carry a plain business label from its launch:
   `POST /api/workflows/{id}/trigger` accepts `state` beside `variables`, and
   `GET /api/workflows/{id}/runs?state_key=…&state_value=…` returns the runs
@@ -117,6 +163,22 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A workflow whose Agent step uses LiteLLM starts when the LiteLLM proxy is
+  declared in Settings (`agents.lite_llm.base_url`), even with no local
+  `litellm` binary. The pre-flight check refused it as "not installed",
+  although that proxy can run on another machine.
+- The "RTK not installed" badge of an agent card reads at 4.5:1 in the matrix
+  theme: its tinted background took the low-emphasis text to 4.41:1.
+- Text typed the instant a discussion's input appears is kept and saved as
+  its draft. The input bound its discussion only after the first paint, so
+  such text was neither saved nor kept when the discussion finished loading.
+- `scripts/check-app-icons.mjs` requires the desktop icons to be 8-bit RGBA,
+  which Tauri needs to build the app, and compares them with a fresh render on
+  exact pixels. A lossless re-encode no longer fails it; a resample or a
+  retouch still does. The shipped icons are unchanged from 0.14.0.
+- The boot purge of finished workflow runs no longer removes a worktree that a
+  finished sub-workflow shares with its parent while that parent is still
+  running, paused at a gate or resumable after an interruption.
 - An arbitration card lets the reader take a checked option back, and offers
   a Comment action: the text reaches the agent that asked, marked as not a
   decision, and the question stays pending. Before, a checked radio button
@@ -147,8 +209,10 @@ Release notes for 0.9.3 and earlier are available in the
   instead of faded, and agent names blend their brand colour with the text
   colour. Thirteen `:focus-visible` rules no longer hide the focus ring.
   `pnpm lint:theme` (also in CI) measures every theme and refuses undefined
-  custom properties, white or black text pinned on a token fill and removed
-  focus rings; `e2e/specs/a11y-dark-themes.spec.ts` scans the rendered screens.
+  custom properties, white or black text pinned on a token fill (in a
+  stylesheet or an inline `style={{ }}` object) and removed focus rings;
+  `e2e/specs/a11y-dark-themes.spec.ts` scans the rendered screens. The Plugins
+  page's scope tip no longer prints white text on the accent.
 - The "▶ Launch" button of a native action card, the project git switcher's
   button and the current-branch marker no longer print white text on the
   accent: they use `--kr-text-on-accent`, which reads at 15.97:1 on the default
@@ -260,9 +324,6 @@ Release notes for 0.9.3 and earlier are available in the
   the detail only if it changed, and a burst of events collapses into one
   request. On a 2,000-message room with a workflow running: opening it went
   from 66 MB to 27 MB, and 20 s at rest from up to 27 MB to 1.9 MB.
-- The desktop application icons are back to the exact bytes of their
-  canonical render. An unrelated change had re-encoded them without changing a
-  pixel, which made `scripts/check-app-icons.mjs` fail.
 - In `kronn start-dev`, a build that writes generated sources under a
   `target/` directory (another checkout's Cargo build, for example) no longer
   restarts the backend and cuts the agents it is running. The file watcher now

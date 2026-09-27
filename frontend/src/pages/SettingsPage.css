@@ -4090,9 +4090,12 @@
   color: var(--kr-warning);
 }
 
+/* No tint: a tint of the text colour behind low-emphasis text took matrix
+ * under 4.5:1 (4.41). The outline keeps the pill shape. */
 .set-agent-rtk-badge[data-state="not-installed"] {
-  background: rgba(var(--kr-text-ghost-rgb, 140, 140, 140), 0.1);
-  color: var(--kr-text-ghost);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--kr-border-subtle);
+  color: var(--kr-text-muted);
 }
 
 /* Inline runtime-degradation warning under an agent row in Settings →

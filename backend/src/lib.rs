@@ -249,6 +249,8 @@ pub struct AppState {
     /// Production-only data-directory lock. Spawned Git commits inherit a
     /// duplicate of this handle so a replacement backend waits for Git/hooks.
     pub data_dir_lock: Option<Arc<std::fs::File>>,
+    /// Workflow Agent steps running with a room capability (KT-793).
+    pub workflow_step_rooms: Arc<crate::workflows::step_room::WorkflowStepRooms>,
 }
 
 impl AppState {
@@ -287,6 +289,7 @@ impl AppState {
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
             ollama_base_url_override: None,
             data_dir_lock: None,
+            workflow_step_rooms: Arc::default(),
         }
     }
 
@@ -1870,6 +1873,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/peer-join",
             post(api::disc_invite::peer_join),
+        )
+        .route(
+            "/api/discussions/workflow-step-join",
+            post(api::disc_invite::workflow_step_join),
         )
         .route(
             "/api/discussions/peer-resume",

@@ -16,6 +16,8 @@ pub struct LaunchContext {
     pub discussion_id: Option<String>,
     pub project_id: Option<String>,
     pub context: HashMap<String, String>,
+    /// The workflow run whose `TriggerWorkflow` step is launching this one.
+    pub triggered_by_run_id: Option<String>,
 }
 
 impl LaunchContext {
@@ -24,6 +26,7 @@ impl LaunchContext {
             discussion_id: Some(discussion_id),
             project_id,
             context: HashMap::new(),
+            triggered_by_run_id: None,
         }
     }
 
@@ -35,6 +38,7 @@ impl LaunchContext {
             discussion_id: None,
             project_id,
             context: HashMap::new(),
+            triggered_by_run_id: None,
         }
     }
 
