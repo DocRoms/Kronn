@@ -552,7 +552,11 @@ describe('McpPage', () => {
       servers: [githubServer, chartbeatServer],
       configs: [
         makeConfig('github-config', 'github', 'GitHub'),
-        makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat'),
+        makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat', {
+          interfaces: ['api'],
+          effective_kind: 'api',
+          effective_preferred_interface: 'api',
+        }),
       ],
       customized_contexts: [],
       incompatibilities: [],
