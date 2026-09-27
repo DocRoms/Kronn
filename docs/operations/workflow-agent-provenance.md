@@ -35,9 +35,17 @@ An invalid repair or rejected debate output preserves the earlier selection.
 Historical rows without provenance keep their stored metadata and remain
 without an attempt history; changing configuration does not reconstruct it.
 
+Each attempt also keeps the prompt-cache reads and writes its runtime
+reported (`cached_prompt_tokens`, `cache_write_prompt_tokens`); the step result
+sums them over the attempts that reported one. `tokens_used` excludes them.
+
 This records execution metadata on the completed step row. It is not an
 independent transaction journal of every in-flight provider request; abrupt
 process termination before the step result is saved may leave no provenance.
+While an Agent step runs, its in-flight result carries `last_activity` (tool,
+target, time of the latest tool call), which `workflow_run_status` returns as
+`current_activity`. The terminal result replaces that row, so only an
+interrupted step keeps it.
 The run detail shows each attempt and marks the retained one.
 When an attempt has a saved connection ID, it displays a compact, copyable ID;
 the tooltip and clipboard expose the full ID. Connection names are not

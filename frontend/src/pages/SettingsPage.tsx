@@ -552,7 +552,7 @@ export function SettingsPage({
               {serverGlobalTimeout > 30 && (
                 <div className="set-warning-callout">
                   <AlertTriangle size={12} className="text-warning flex-shrink-0" />
-                  <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
+                  <span className="text-xs" style={{ color: 'var(--kr-warning-amber)', lineHeight: 1.4 }}>
                     {t('settings.globalTimeoutWarning')}
                   </span>
                 </div>
@@ -606,7 +606,7 @@ export function SettingsPage({
               {serverStallTimeout > serverGlobalTimeout && (
                 <div className="set-warning-callout">
                   <AlertTriangle size={12} className="text-warning flex-shrink-0" />
-                  <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
+                  <span className="text-xs" style={{ color: 'var(--kr-warning-amber)', lineHeight: 1.4 }}>
                     {t('settings.timeoutMismatchWarning')}
                   </span>
                 </div>
@@ -614,7 +614,7 @@ export function SettingsPage({
               {serverStallTimeout > 10 && (
                 <div className="set-warning-callout">
                   <AlertTriangle size={12} className="text-warning flex-shrink-0" />
-                  <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
+                  <span className="text-xs" style={{ color: 'var(--kr-warning-amber)', lineHeight: 1.4 }}>
                     {t('settings.stallTimeoutWarning')}
                   </span>
                 </div>
@@ -1092,7 +1092,7 @@ export function SettingsPage({
                   </a>
                 )}
                 {(directive.conflicts ?? []).length > 0 && (
-                  <div className="text-2xs mb-2" style={{ color: 'rgba(var(--kr-error-rgb), 0.6)' }}>
+                  <div className="text-2xs mb-2" style={{ color: 'var(--kr-error)' }}>
                     ⚠ {t('directives.conflicts')}: {(directive.conflicts ?? []).join(', ')}
                   </div>
                 )}

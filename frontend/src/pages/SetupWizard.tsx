@@ -287,7 +287,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                         </div>
                       ) : agent.runtime_available ? (
                         <div className="setup-agent-meta">
-                          <span style={{ color: 'rgba(var(--kr-success-rgb), 0.7)' }}>runtime OK</span>
+                          <span style={{ color: 'var(--kr-success)' }}>runtime OK</span>
                           <span className="text-ghost text-xs"> — via npx</span>
                         </div>
                       ) : (

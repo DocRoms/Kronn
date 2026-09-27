@@ -271,7 +271,7 @@
   border-radius: var(--kr-r-sm);
   border: 1px solid var(--kr-accent);
   background: var(--kr-accent);
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   font-size: var(--kr-fs-2xs);
   font-weight: 600;
   cursor: pointer;
@@ -476,7 +476,7 @@
   border-radius: var(--kr-r-sm);
   border: 1px solid var(--kr-accent);
   background: var(--kr-accent);
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   cursor: pointer;
 }
 
@@ -501,7 +501,7 @@
   border-radius: 50%;
   border: 1px solid var(--kr-accent);
   background: var(--kr-accent);
-  color: var(--kr-text-on-accent, #fff);
+  color: var(--kr-text-on-accent);
   cursor: pointer;
   display: inline-flex;
   align-items: center;

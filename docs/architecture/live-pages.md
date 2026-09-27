@@ -234,6 +234,12 @@ The frontend renders a Page in an iframe with `sandbox="allow-scripts"` and no
 credentials. It cannot fetch APIs: the authenticated parent loads datasets from
 Kronn, then posts a versioned, validated snapshot into the frame.
 
+Images load only from `data:` and `blob:` URIs. An image behind authentication,
+such as a Jira attachment thumbnail, is fetched by an `ApiCall` with
+`api_response: Binary` and published as a data URI; see
+[binary responses](../operations/deagent-apicall.md#binary-responses-images-and-other-files).
+[src: file: frontend/src/lib/live-page-sandbox.ts:5]
+
 PDF and DOCX export starts from the materialized iframe DOM, not from the stored
 HTML template. A request/response `postMessage` bridge keeps the opaque-origin
 boundary intact while capturing the current dataset-driven document. The same
@@ -328,6 +334,17 @@ opens a fresh offer, which launches a new attempt of that row, with the
 previous launch one click away; a Discussion card never relaunches, since a
 fence carries one intention.
 [src: file: frontend/src/hooks/useLivePageActions.ts]
+
+A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
+opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
+the clicked row (the selector keyed by the field's name, or the click's only
+selector) and the field starts from that value, still editable; a missing row
+or a null field leaves it empty, and a value the reader already typed is never
+overwritten. The launch runs what the reader sends. `GET /api/pages/{id}/actions`
+lists only the blocks of the current revision: a block removed from the
+published HTML keeps its row for the launches that reference it, but is no
+longer offered, and its old id refuses a launch.
+[src: file: backend/src/db/live_page_actions.rs]
 
 The periodic refresh of a Page (every 30 s, in the Pages view and in its own
 tab) keeps an open card, and what was typed in it, while the Page still offers

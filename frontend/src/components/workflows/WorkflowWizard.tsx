@@ -2453,6 +2453,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     installedAgents={installedAgentTypes}
                     configLanguage={configLanguage}
                     availableQuickApis={availableQuickApis}
+                    allowBinaryResponse
                     t={t}
                   />
                 ) : step.step_type?.type === 'Notify' ? (
@@ -2833,6 +2834,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       projectId={projectId || null}
                       installedAgents={installedAgentTypes}
                       configLanguage={configLanguage}
+                      allowBinaryResponse
                       t={t}
                     />
                   </div>

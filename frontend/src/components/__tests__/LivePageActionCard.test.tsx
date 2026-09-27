@@ -56,6 +56,51 @@ function action(overrides: Partial<LivePageAction> = {}): LivePageAction {
 describe('LivePageActionCard', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('starts an editable field from the row\'s prefill and launches what the reader edits', async () => {
+    mocks.launchAction.mockResolvedValue(action({ state: 'launching' }));
+    const debrief = action({ values: [{
+      name: 'debrief', label: 'Debrief', placeholder: '', description: null,
+      required: false, allow_manual_override: false, provenance: 'user_input',
+      source_ref: '<page.dataset.framing.find(key).debrief>',
+    }] });
+    const { rerender } = render(
+      <LivePageActionCard action={debrief} bindings={{ debrief: 'EW-1' }}
+        onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />,
+    );
+    const field = screen.getByRole('textbox', { name: 'Debrief' });
+    expect(field).toHaveValue('');
+    // The row's values arrive after the card opened.
+    rerender(
+      <LivePageActionCard action={debrief} bindings={{ debrief: 'EW-1' }} prefill={{ debrief: 'Déjà saisi' }}
+        onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />,
+    );
+    expect(field).toHaveValue('Déjà saisi');
+    fireEvent.change(field, { target: { value: 'Déjà saisi, complété' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.action\.launch/ }));
+    await waitFor(() => expect(mocks.launchAction).toHaveBeenCalledWith(debrief.id, {
+      variables: { debrief: 'Déjà saisi, complété' },
+      bindings: { debrief: 'EW-1' },
+    }));
+  });
+
+  it('never overwrites what the reader already typed with a late prefill', () => {
+    const debrief = action({ values: [{
+      name: 'debrief', label: 'Debrief', placeholder: '', description: null,
+      required: false, allow_manual_override: false, provenance: 'user_input',
+      source_ref: '<page.dataset.framing.find(key).debrief>',
+    }] });
+    const { rerender } = render(
+      <LivePageActionCard action={debrief} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />,
+    );
+    const field = screen.getByRole('textbox', { name: 'Debrief' });
+    fireEvent.change(field, { target: { value: 'Mon texte' } });
+    rerender(
+      <LivePageActionCard action={debrief} prefill={{ debrief: 'Ancien debrief' }}
+        onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />,
+    );
+    expect(field).toHaveValue('Mon texte');
+  });
+
   it('uses the shared native form and forwards only the dataset row selector', async () => {
     mocks.launchAction.mockResolvedValue(action({ state: 'launching' }));
     render(

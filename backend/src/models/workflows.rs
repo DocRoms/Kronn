@@ -496,6 +496,11 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_output_var: Option<String>,
 
+    /// How a 2xx body is decoded. Absent = JSON, exactly as before; `Binary`
+    /// returns an allowed media type as base64 instead of parsing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_response: Option<ApiResponseMode>,
+
     // ─── Gate fields (0.7.0 Phase 4 — human-in-the-loop) ─────────────
     // Only meaningful when `step_type == Gate`. The runner stops the
     // run with `RunStatus::WaitingApproval`; a human decides via the
@@ -725,6 +730,26 @@ pub struct ExtractSpec {
 /// serde default for `ExtractSpec::fail_on_empty` (2026-06-10).
 fn default_true() -> bool {
     true
+}
+
+/// Response decoding for `ApiCall` / `BatchApiCall`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum ApiResponseMode {
+    /// Parse the body as JSON (the behaviour when `api_response` is absent).
+    Json,
+    /// Return the body as `{content_type, size, base64, data_uri}`. Only the
+    /// declared media types are accepted, so the broker cannot proxy arbitrary
+    /// files, and a body over the cap is refused rather than truncated.
+    Binary {
+        /// Exact types (`image/png`) or a family (`image/*`). Empty = `image/*`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        accept: Vec<String>,
+        /// Largest accepted body in bytes. Default 256 KiB, at most 2 MiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
+    },
 }
 
 /// Pagination strategy for an `ApiCall` step. `Auto` covers the three most
@@ -1399,6 +1424,40 @@ pub struct WorkflowAgentAttempt {
     pub started_at: DateTime<Utc>,
     pub duration_ms: u64,
     pub succeeded: bool,
+    /// Prompt tokens read from the provider's prompt cache, on top of the
+    /// uncached input counted in `tokens_used`. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt tokens written to the provider's prompt cache. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
+}
+
+impl WorkflowAgentProvenance {
+    /// Cache reads and writes summed over the attempts that reported them.
+    pub fn prompt_cache_totals(&self) -> (Option<u64>, Option<u64>) {
+        fn sum(values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
+            values.flatten().fold(None, |total: Option<u64>, value| {
+                Some(total.unwrap_or(0).saturating_add(value))
+            })
+        }
+        (
+            sum(self.attempts.iter().map(|a| a.cached_prompt_tokens)),
+            sum(self.attempts.iter().map(|a| a.cache_write_prompt_tokens)),
+        )
+    }
+}
+
+/// The latest tool call an agent started, as its runtime reported it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentActivity {
+    pub tool: String,
+    /// The call's most informative input (file, command, pattern or URL),
+    /// truncated. `None` until the input is complete or when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1494,6 +1553,17 @@ pub struct StepResult {
     /// stay in the provider round-trip and can never leak into run history.
     #[serde(default, skip_serializing_if = "is_empty_tool_call_log")]
     pub native_tool_calls: Box<[NativeToolCallLog]>,
+    /// Prompt-cache reads of this step's agent attempts. `tokens_used` counts
+    /// only uncached input and output, so this is additional. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
+    /// Prompt-cache writes of this step's agent attempts. `None` when not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_prompt_tokens: Option<u64>,
+    /// Latest tool call of an Agent step while it runs. The terminal result
+    /// replaces the in-flight row, so it survives only an interrupted step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<AgentActivity>,
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {
@@ -1683,6 +1753,12 @@ pub struct TriggerWorkflowRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: ::std::collections::HashMap<String, String>,
+    /// Non-secret entries seeded into the run's `state` at creation, e.g. the
+    /// ticket a run is about, so the run list can be filtered on them even if
+    /// the run fails before any step writes its state.
+    #[serde(default)]
+    #[ts(type = "Record<string, string>")]
+    pub state: ::std::collections::HashMap<String, String>,
 }
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.

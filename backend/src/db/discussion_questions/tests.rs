@@ -550,3 +550,65 @@ fn a_refused_question_cannot_then_be_answered() {
         Err(AnswerError::Conflict)
     ));
 }
+
+#[test]
+fn a_comment_reaches_the_asker_and_leaves_the_question_waiting() {
+    let conn = database();
+    insert(&conn, "m", payload());
+    let remark = CommentDiscussionQuestionRequest {
+        idempotency_key: "comment-1".into(),
+        text: "Quel est le problème de ce ticket ?".into(),
+    };
+
+    let q = comment(&conn, "d", "question:m:0", &remark, "Romu", None).unwrap();
+    assert_eq!(
+        q.state,
+        DiscussionQuestionState::Pending,
+        "a comment is not a decision"
+    );
+    assert!(q.answer.is_none());
+    assert_eq!(list(&conn, "d").unwrap().pending_count, 1);
+
+    let message_id = "question-comment:question:m:0:comment-1";
+    let (content, reply_to): (String, Option<String>) = conn
+        .query_row(
+            "SELECT content, reply_to_message_id FROM messages WHERE id=?1",
+            [message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        content.contains("Quel est le problème de ce ticket ?"),
+        "{content}"
+    );
+    assert!(
+        content.contains("la question reste en attente"),
+        "{content}"
+    );
+    assert_eq!(reply_to.as_deref(), Some("m"));
+    // Delivered like an answer: the asker is woken.
+    let targets = crate::db::discussions::list_message_targets(&conn, message_id).unwrap();
+    assert_eq!(targets[0].agent_type, crate::models::AgentType::Codex);
+    let jobs = |conn: &Connection| {
+        conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(jobs(&conn), 1);
+
+    // A retry with the same key posts nothing more; the question can still be decided.
+    comment(&conn, "d", "question:m:0", &remark, "Romu", None).unwrap();
+    assert_eq!(jobs(&conn), 1);
+    let decided = answer(&conn, "d", "question:m:0", &request(), "Romu", None).unwrap();
+    assert_eq!(decided.state, DiscussionQuestionState::Answered);
+    // Once decided, a comment is refused rather than reopening it.
+    let late = CommentDiscussionQuestionRequest {
+        idempotency_key: "comment-2".into(),
+        text: "trop tard".into(),
+    };
+    assert!(matches!(
+        comment(&conn, "d", "question:m:0", &late, "Romu", None),
+        Err(AnswerError::Conflict)
+    ));
+}

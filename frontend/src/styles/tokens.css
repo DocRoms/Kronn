@@ -60,8 +60,10 @@
   /* ── Semantic colors ──────────────────────────────────────────────────── */
   --kr-success: #34d399;
   --kr-success-rgb: 52, 211, 153;
-  --kr-error: #ff1ba8;
-  --kr-error-rgb: 255, 27, 168;
+  /* Status colours are small text on every surface: each keeps its hue and is
+     lightened just enough for 4.5:1 on the whole ramp (scripts/theme-audit.mjs). */
+  --kr-error: #ff48b9;
+  --kr-error-rgb: 255, 72, 185;
   --kr-error-soft: #ff5bbc;
   --kr-warning: #ffc800;
   --kr-warning-rgb: 255, 200, 0;
@@ -71,8 +73,8 @@
   --kr-info-rgb: 96, 165, 250;
   --kr-cyan: #00d4ff;
   --kr-cyan-rgb: 0, 212, 255;
-  --kr-purple: #8b5cf6;
-  --kr-purple-rgb: 139, 92, 246;
+  --kr-purple: #a37ef8;
+  --kr-purple-rgb: 163, 126, 248;
   --kr-purple-soft: #c8a0ff;
   --kr-purple-soft-rgb: 200, 160, 255;
   --kr-pink: #ff5bbc;
@@ -81,7 +83,7 @@
      reserved for small text on dark surfaces (11:1 on --kr-bg-surface). */
   --kr-agent-nvidia-text: #a8df55;
   --kr-warning-amber-rgb: 245, 158, 11;
-  --kr-cancelled: rgba(255, 255, 255, 0.45);
+  --kr-cancelled: rgba(255, 255, 255, 0.51);
   --kr-text-on-accent: #111;
   --kr-text-on-dark: #fff;
 
@@ -434,16 +436,19 @@
   --kr-text-primary: #39ff14;
   --kr-text-secondary: rgba(57, 255, 20, 0.75);
   --kr-text-tertiary: rgba(57, 255, 20, 0.60);
-  --kr-text-muted: rgba(57, 255, 20, 0.50);
-  --kr-text-faint: rgba(57, 255, 20, 0.40);
-  --kr-text-dim: rgba(57, 255, 20, 0.45);
-  --kr-text-ghost: rgba(57, 255, 20, 0.30);
+  /* Every role is used as small text: each clears 4.5:1 on the surface ramp
+     and on a hover chip over elevated (scripts/theme-audit.mjs). Only the
+     alpha moved, never the hue. */
+  --kr-text-muted: rgba(57, 255, 20, 0.58);
+  --kr-text-faint: rgba(57, 255, 20, 0.56);
+  --kr-text-dim: rgba(57, 255, 20, 0.57);
+  --kr-text-ghost: rgba(57, 255, 20, 0.56);
 
   --kr-success: #00ff41;
   --kr-success-rgb: 0, 255, 65;
   --kr-error: #ff3860;
   --kr-error-rgb: 255, 56, 96;
-  --kr-error-soft: rgba(255, 56, 96, 0.7);
+  --kr-error-soft: rgba(255, 56, 96, 0.95);
   --kr-warning: #ffcc00;
   --kr-warning-rgb: 255, 204, 0;
   --kr-warning-soft: #ffcc00;
@@ -459,7 +464,7 @@
   --kr-purple-soft-rgb: 179, 136, 255;
   --kr-pink: #ff39a0;
   --kr-pink-rgb: 255, 57, 160;
-  --kr-cancelled: rgba(57, 255, 20, 0.35);
+  --kr-cancelled: rgba(57, 255, 20, 0.55);
   --kr-text-on-accent: #000;
   --kr-text-on-dark: #39ff14;
 
@@ -532,10 +537,13 @@
   --kr-text-primary: #e8ebf0;
   --kr-text-secondary: rgba(232, 235, 240, 0.72);
   --kr-text-tertiary: rgba(232, 235, 240, 0.58);
-  --kr-text-muted: rgba(232, 235, 240, 0.48);
-  --kr-text-faint: rgba(232, 235, 240, 0.40);
-  --kr-text-dim: rgba(232, 235, 240, 0.45);
-  --kr-text-ghost: rgba(232, 235, 240, 0.32);
+  /* Every role is used as small text: each clears 4.5:1 on the surface ramp
+     and on a hover chip over elevated (scripts/theme-audit.mjs). Only the
+     alpha moved, never the hue. */
+  --kr-text-muted: rgba(232, 235, 240, 0.57);
+  --kr-text-faint: rgba(232, 235, 240, 0.56);
+  --kr-text-dim: rgba(232, 235, 240, 0.57);
+  --kr-text-ghost: rgba(232, 235, 240, 0.56);
 
   --kr-success: #34d399;
   --kr-success-rgb: 52, 211, 153;
@@ -551,13 +559,13 @@
   --kr-info-rgb: 96, 165, 250;
   --kr-cyan: #00d4ff;
   --kr-cyan-rgb: 0, 212, 255;
-  --kr-purple: #8b5cf6;
-  --kr-purple-rgb: 139, 92, 246;
+  --kr-purple: #a079f8;
+  --kr-purple-rgb: 160, 121, 248;
   --kr-purple-soft: #a78bfa;
   --kr-purple-soft-rgb: 167, 139, 250;
-  --kr-pink: #ec4899;
-  --kr-pink-rgb: 236, 72, 153;
-  --kr-cancelled: rgba(232, 235, 240, 0.45);
+  --kr-pink: #ee58a2;
+  --kr-pink-rgb: 238, 88, 162;
+  --kr-cancelled: rgba(232, 235, 240, 0.54);
   --kr-text-on-accent: #0a0d14;
   --kr-text-on-dark: #ffd400;
 
@@ -632,7 +640,7 @@
   --kr-text-muted: #8a4f8a;
   --kr-text-faint: #a56aa5;
   --kr-text-dim: #a56aa5;
-  --kr-text-ghost: #b785b7;
+  --kr-text-ghost: #ad74ad;     /* 3.1:1 on raised — large text / non-text only */
 
   --kr-success: #16a34a;
   --kr-success-rgb: 22, 163, 74;
@@ -724,12 +732,12 @@
   --kr-text-muted: #566880;
   --kr-text-faint: #7789a0;
   --kr-text-dim: #7789a0;
-  --kr-text-ghost: #98a8bc;
+  --kr-text-ghost: #768ba6;     /* 3.0:1 on raised — large text / non-text only */
   /* RGB companions used by rgba(var(--…-rgb), alpha) overlays. Without
      light-theme overrides these inherit the dark palette's white triples. */
   --kr-text-rgb: 10, 20, 32;
   --kr-text-faint-rgb: 119, 137, 160;
-  --kr-text-ghost-rgb: 152, 168, 188;
+  --kr-text-ghost-rgb: 118, 139, 166;
 
   --kr-success: #0a8f4a;
   --kr-success-rgb: 10, 143, 74;

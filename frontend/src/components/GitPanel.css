@@ -47,7 +47,7 @@
   margin: 0 10px 8px;
   padding: 9px 10px;
   border: 1px solid var(--kr-border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--kr-r-sm);
   background: var(--kr-bg-surface);
   color: var(--kr-text-dim);
   font-size: 11px;
@@ -149,7 +149,6 @@
 .git-load-more-commits:focus-visible {
   border-color: var(--kr-accent-border);
   color: var(--kr-accent);
-  outline: none;
 }
 
 .git-load-more-commits:disabled {

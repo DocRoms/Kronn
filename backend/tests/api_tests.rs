@@ -3701,6 +3701,392 @@ async fn workflow_http_optional_input_does_not_hide_unknown_template_variables()
     );
 }
 
+/// A reference guarded by `??` survives a Goto that skips its step, and an
+/// Exec's multi-line markers and `{{run.id}}` reach the next step as printed.
+#[cfg(unix)]
+#[tokio::test]
+async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
+    use kronn::models::{ConditionAction, RunStatus, StepConditionRule, StepType, WorkflowStep};
+    let state = test_state();
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().to_string_lossy().into_owned();
+    let now = chrono::Utc::now();
+    let workflow = kronn::models::Workflow {
+        id: "goto-fallback-workflow".into(),
+        name: "Goto fallback".into(),
+        project_id: Some("goto-fallback-project".into()),
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps: vec![
+            WorkflowStep {
+                name: "sortie".into(),
+                step_type: StepType::Exec,
+                exec_command: Some("cat".into()),
+                // Prints stdin, then fails on the missing file: exit 1.
+                exec_args: vec!["-".into(), "missing-file".into()],
+                exec_stdin: Some(
+                    "log\n---STATE:plan=first line\nsecond line---\n\
+                     ---ARTIFACT:notes---\nline A\nline B\n---END_ARTIFACT---\n"
+                        .into(),
+                ),
+                on_result: vec![StepConditionRule {
+                    contains: "exit_1".into(),
+                    action: ConditionAction::Goto {
+                        step_name: "enchaine".into(),
+                        max_iterations: None,
+                    },
+                }],
+                ..Default::default()
+            },
+            WorkflowStep {
+                name: "porte_check".into(),
+                step_type: StepType::Exec,
+                exec_command: Some("cat".into()),
+                exec_stdin: Some("must not run".into()),
+                ..Default::default()
+            },
+            WorkflowStep {
+                name: "enchaine".into(),
+                step_type: StepType::Gate,
+                gate_message: Some(
+                    r#"check=[{{steps.porte_check.data.stdout ?? ""}}] run={{run.id}} plan=[{{state.plan}}] notes=[{{artifacts.notes}}]"#
+                        .into(),
+                ),
+                ..Default::default()
+            },
+        ],
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        guards: None,
+        artifacts: HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec!["cat".into()],
+        variables: vec![],
+        enabled: true,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.with_conn(move |conn| {
+        conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('goto-fallback-project','Goto fallback',?1,?2,?2)", rusqlite::params![project_path, now.to_rfc3339()])?;
+        kronn::db::workflows::insert_workflow(conn, &workflow)
+    }).await.unwrap();
+    let response = build_router_with_auth(state.clone(), false)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflows/goto-fallback-workflow/trigger")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"variables": {}}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("workflow SSE must terminate")
+    .unwrap()
+    .to_bytes();
+    let events = String::from_utf8(bytes.to_vec()).unwrap();
+    let run_id = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("missing run_start: {events}"));
+    let run = state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::get_run(conn, &run_id))
+        .await
+        .unwrap()
+        .expect("persisted run");
+
+    assert_eq!(
+        run.status,
+        RunStatus::WaitingApproval,
+        "{:?}",
+        run.step_results
+    );
+    let executed: Vec<&str> = run
+        .step_results
+        .iter()
+        .map(|result| result.step_name.as_str())
+        .collect();
+    assert_eq!(executed, ["sortie", "enchaine"], "porte_check is skipped");
+    assert_eq!(run.step_results[0].status, RunStatus::Failed);
+    assert_eq!(
+        run.step_results[1].output,
+        format!(
+            "check=[] run={} plan=[first line\nsecond line] notes=[line A\nline B]",
+            run.id
+        )
+    );
+    assert_eq!(
+        run.state.get("plan").map(String::as_str),
+        Some("first line\nsecond line")
+    );
+}
+
+/// KT-808: a launcher labels a run with its business object, and the run list
+/// finds the last run about it in one call, without reading any step output.
+#[tokio::test]
+async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let now = chrono::Utc::now();
+    let workflow = kronn::models::Workflow {
+        id: "labelled-workflow".into(),
+        name: "Labelled".into(),
+        project_id: None,
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps: vec![kronn::models::WorkflowStep {
+            name: "Review".into(),
+            step_type: kronn::models::StepType::Gate,
+            gate_message: Some("Review".into()),
+            ..Default::default()
+        }],
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        guards: None,
+        artifacts: HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec![],
+        variables: vec![],
+        enabled: true,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::insert_workflow(conn, &workflow))
+        .await
+        .unwrap();
+    let trigger = |body: Value| {
+        let app = build_router_with_auth(state.clone(), false);
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/workflows/labelled-workflow/trigger")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                response.into_body().collect(),
+            )
+            .await
+            .expect("workflow SSE must terminate")
+            .unwrap()
+            .to_bytes();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+    };
+    let run_id = |events: &str| {
+        events
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| panic!("missing run_start: {events}"))
+    };
+
+    let first = run_id(&trigger(serde_json::json!({"state": {"ticketKey": "EW-7791"}})).await);
+    let _other = run_id(&trigger(serde_json::json!({"state": {"ticketKey": "EW-1"}})).await);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let latest = run_id(&trigger(serde_json::json!({"state": {"ticketKey": "EW-7791"}})).await);
+    assert_ne!(first, latest);
+
+    let (status, body) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows/labelled-workflow/runs?state_key=ticketKey&state_value=EW-7791&limit=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = body["data"].as_array().unwrap();
+    assert_eq!(runs.len(), 1, "{body}");
+    assert_eq!(runs[0]["id"], latest);
+    assert_eq!(runs[0]["state"]["ticketKey"], "EW-7791");
+
+    // The seeded state is shown everywhere and never encrypted: plain labels only.
+    let refused = trigger(serde_json::json!({"state": {"bad key": "x"}})).await;
+    assert!(refused.contains("must be 1-64 letters"), "{refused}");
+    let refused = trigger(serde_json::json!({"state": {"note": "two\nlines"}})).await;
+    assert!(refused.contains("one line"), "{refused}");
+}
+
+/// KT-807: an isolated workflow with a SubWorkflow foreach accepts a
+/// concurrency above one, and two overlapping runs each work in their own
+/// worktree, their foreach still sequential and complete.
+#[cfg(unix)]
+#[tokio::test]
+async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.path().join("tasks.json"),
+        r#"[{"id":"T1"},{"id":"T2"}]"#,
+    )
+    .unwrap();
+    git(&["add", "tasks.json"]);
+    git(&["commit", "-q", "-m", "tasks"]);
+    let project_path = repo.path().to_string_lossy().into_owned();
+    let now = chrono::Utc::now();
+    let child: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
+        "id": "foreach-child", "name": "child", "project_id": null,
+        "trigger": {"type": "Manual"},
+        "steps": [{"name": "note", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}}],
+        "actions": [], "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+        "workspace_config": null, "concurrency_limit": null, "guards": null, "artifacts": {},
+        "on_failure": [], "exec_allowlist": [], "variables": [], "enabled": true, "pinned": false,
+        "created_at": now, "updated_at": now,
+    }))
+    .unwrap();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('foreach-project','Foreach',?1,?2,?2)",
+                rusqlite::params![project_path, now.to_rfc3339()],
+            )?;
+            kronn::db::workflows::insert_workflow(conn, &child)
+        })
+        .await
+        .unwrap();
+
+    let (status, body) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Isolated fan-out",
+            "project_id": "foreach-project",
+            "trigger": {"type": "Manual"},
+            "steps": [{
+                "name": "fanout", "step_type": {"type": "SubWorkflow"},
+                "sub_workflow_id": "foreach-child",
+                "sub_workflow_foreach_file": "tasks.json",
+            }],
+            "workspace_config": {"hooks": {}, "require_isolation": true},
+            "concurrency_limit": 2,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["success"], true,
+        "an isolated foreach accepts a limit above one: {body}"
+    );
+    let workflow_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let trigger = || {
+        let app = build_router_with_auth(state.clone(), false);
+        let uri = format!("/api/workflows/{workflow_id}/trigger");
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                response.into_body().collect(),
+            )
+            .await
+            .expect("workflow SSE must terminate")
+            .unwrap()
+            .to_bytes();
+            let events = String::from_utf8(bytes.to_vec()).unwrap();
+            events
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| panic!("missing run_start: {events}"))
+        }
+    };
+    let (first, second) = tokio::join!(trigger(), trigger());
+    assert_ne!(first, second);
+
+    let mut workspaces = Vec::new();
+    for run_id in [&first, &second] {
+        let run_id = run_id.clone();
+        let (run, children) = state
+            .db
+            .with_conn(move |conn| {
+                let run = kronn::db::workflows::get_run(conn, &run_id)?.expect("run");
+                let children: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = ?1 AND status = 'Success'",
+                    [&run_id],
+                    |row| row.get(0),
+                )?;
+                Ok((run, children))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            run.status,
+            kronn::models::RunStatus::Success,
+            "{:?}",
+            run.step_results
+        );
+        assert_eq!(children, 2, "each run's foreach processes both items once");
+        let workspace = run
+            .workspace_path
+            .clone()
+            .expect("an isolated run records its worktree");
+        assert_ne!(
+            workspace,
+            repo.path().to_string_lossy(),
+            "never the main checkout"
+        );
+        workspaces.push(workspace);
+    }
+    assert_ne!(workspaces[0], workspaces[1], "each run owns its worktree");
+}
+
 /// KT-786: the MCP launcher must prepare the same encrypted snapshot as the
 /// UI route, so a workflow with required variables reaches its first step.
 #[tokio::test]
@@ -19003,6 +19389,9 @@ mod cold_api_handlers_tests {
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         };
         let run_for_update = run_id.clone();
         state

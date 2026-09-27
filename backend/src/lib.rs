@@ -716,6 +716,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/live-page-actions/{id}/launch",
             post(api::live_page_actions::launch),
         )
+        .route(
+            "/api/live-page-actions/{id}/prefill",
+            post(api::live_page_actions::prefill),
+        )
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
         // mounts the spec route automatically). Interactive UI at
@@ -1683,6 +1687,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/questions/{question_id}/decline",
             post(api::discussion_questions::decline),
+        )
+        .route(
+            "/api/discussions/{id}/questions/{question_id}/comment",
+            post(api::discussion_questions::comment),
         )
         .route(
             "/api/discussions/{id}/actions",

@@ -173,6 +173,9 @@ fn succeed(
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -198,6 +201,9 @@ fn fail(step: &WorkflowStep, started: Instant, error: impl std::fmt::Display) ->
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }
@@ -278,6 +284,8 @@ mod tests {
                     started_at: chrono::Utc::now(),
                     duration_ms: 1,
                     succeeded: true,
+                    cached_prompt_tokens: None,
+                    cache_write_prompt_tokens: None,
                 }],
                 selected_attempt: Some(1),
             }),

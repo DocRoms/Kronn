@@ -1206,6 +1206,34 @@ pub fn list_runs_paginated(
     Ok(runs)
 }
 
+/// The runs whose `state` holds `key` (with `value`, when given), newest
+/// first: finds "the last run about this ticket" without reading any output.
+pub fn list_runs_by_state(
+    conn: &Connection,
+    workflow_id: &str,
+    key: &str,
+    value: Option<&str>,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<WorkflowRun>> {
+    let sql = format!(
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
+           AND EXISTS (SELECT 1 FROM json_each(workflow_runs.state)
+                       WHERE json_each.key = ?2 AND (?3 IS NULL OR json_each.value = ?3))
+         ORDER BY started_at DESC LIMIT ?4 OFFSET ?5",
+        workflow_run_cols_without_outputs()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut runs: Vec<WorkflowRun> = stmt
+        .query_map(params![workflow_id, key, value, limit, offset], |row| {
+            Ok(row_to_run(row))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    enrich_parent_provenance(conn, &mut runs)?;
+    Ok(runs)
+}
+
 /// Return at least `minimum` runs, extending the page through the end of the
 /// boundary run's parent group. A workflow invocation that spawned 17 child
 /// runs must not look like a 10-child invocation merely because the UI's
@@ -1876,6 +1904,31 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
     } else if let Some(run) = get_run(conn, &snap.id)? {
         crate::db::shared_runs::sync_workflow(conn, &run)?;
     }
+    Ok(affected > 0)
+}
+
+/// Record the latest activity on the in-flight result at `step_index`.
+///
+/// Written beside the runner's own snapshots, so it lands only while that
+/// result is still the running `step_name`: once the runner stores the
+/// terminal result, a late write matches nothing. Returns whether it landed.
+pub fn set_in_flight_step_activity(
+    conn: &Connection,
+    run_id: &str,
+    step_index: usize,
+    step_name: &str,
+    activity: &AgentActivity,
+) -> Result<bool> {
+    let path = format!("$[{step_index}]");
+    let affected = conn.execute(
+        "UPDATE workflow_runs
+         SET step_results_json = json_set(step_results_json, ?3 || '.last_activity', json(?4))
+         WHERE id = ?1 AND status = 'Running'
+           AND json_valid(step_results_json)
+           AND json_extract(step_results_json, ?3 || '.status') = 'Running'
+           AND json_extract(step_results_json, ?3 || '.step_name') = ?2",
+        params![run_id, step_name, path, serde_json::to_string(activity)?],
+    )?;
     Ok(affected > 0)
 }
 

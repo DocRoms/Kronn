@@ -743,16 +743,21 @@ pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
 }
 
 /// `Workflow.concurrency_limit` limits overlapping *whole runs*. It has never
-/// been a foreach worker count. Refuse the ambiguous combination instead of
-/// accepting a value that looks like per-item parallelism but is ignored by
-/// the shared-worktree SubWorkflow executor.
+/// been a foreach worker count. Without isolation, overlapping runs would share
+/// the main checkout the foreach works in, so a limit above one is refused. An
+/// isolated workflow gives each run its own worktree: runs may overlap while
+/// each foreach stays sequential in its own.
 fn validate_sub_workflow_foreach_concurrency(
     steps: &[WorkflowStep],
     concurrency_limit: Option<u32>,
+    workspace_config: Option<&WorkspaceConfig>,
 ) -> Result<(), String> {
     let Some(limit) = concurrency_limit.filter(|limit| *limit > 1) else {
         return Ok(());
     };
+    if workspace_config.is_some_and(|config| config.require_isolation) {
+        return Ok(());
+    }
     let Some(step) = steps.iter().find(|step| {
         step.step_type == StepType::SubWorkflow
             && step
@@ -764,7 +769,7 @@ fn validate_sub_workflow_foreach_concurrency(
     };
 
     Err(format!(
-        "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; remove the value (or set it to 1) and use BatchQuickPrompt for safe parallel fan-out.",
+        "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; set `workspace_config.require_isolation: true` so each run gets its own worktree, remove the value (or set it to 1), or use BatchQuickPrompt for parallel fan-out.",
         step.name
     ))
 }
@@ -821,6 +826,8 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
             s.name
         ));
     }
+    crate::workflows::api_call_binary::resolve_binary_policy(s)
+        .map_err(|error| format!("Step {} « {} » : {error}", kind, s.name))?;
     Ok(())
 }
 
@@ -1241,7 +1248,11 @@ pub async fn create(
     if let Err(e) = validate_required_fields_per_type(&req.on_failure) {
         return Json(ApiResponse::err(e));
     }
-    if let Err(e) = validate_sub_workflow_foreach_concurrency(&req.steps, req.concurrency_limit) {
+    if let Err(e) = validate_sub_workflow_foreach_concurrency(
+        &req.steps,
+        req.concurrency_limit,
+        req.workspace_config.as_ref(),
+    ) {
         return Json(ApiResponse::err(e));
     }
     // 2026-06-11 Phase 1 — SubWorkflow graph: cycle/depth/dangling/no-gate.
@@ -1540,9 +1551,11 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
-    if let Err(e) =
-        validate_sub_workflow_foreach_concurrency(&updated.steps, updated.concurrency_limit)
-    {
+    if let Err(e) = validate_sub_workflow_foreach_concurrency(
+        &updated.steps,
+        updated.concurrency_limit,
+        updated.workspace_config.as_ref(),
+    ) {
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_saved_quick_exec_refs(
@@ -1947,7 +1960,11 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
     validate_exec_steps(&wf.on_failure, &wf.exec_allowlist)?;
     validate_required_fields_per_type(&wf.steps)?;
     validate_required_fields_per_type(&wf.on_failure)?;
-    validate_sub_workflow_foreach_concurrency(&wf.steps, wf.concurrency_limit)?;
+    validate_sub_workflow_foreach_concurrency(
+        &wf.steps,
+        wf.concurrency_limit,
+        wf.workspace_config.as_ref(),
+    )?;
     Ok(())
 }
 
@@ -2347,10 +2364,12 @@ pub(crate) async fn start_manual_run(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
     event_sender: Option<tokio::sync::mpsc::Sender<crate::workflows::runner::RunEvent>>,
     launch: crate::core::launch_context::LaunchContext,
 ) -> Result<WorkflowRun, String> {
-    let (wf, run) = create_manual_run(state, workflow_id, provided_vars, launch).await?;
+    let (wf, run) =
+        create_manual_run(state, workflow_id, provided_vars, initial_state, launch).await?;
     spawn_manual_run(state, wf, run.clone(), event_sender, false);
     Ok(run)
 }
@@ -2363,8 +2382,10 @@ pub(crate) async fn create_manual_run(
     state: &AppState,
     workflow_id: &str,
     provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
     launch: crate::core::launch_context::LaunchContext,
 ) -> Result<(Workflow, WorkflowRun), String> {
+    validate_initial_run_state(&initial_state)?;
     let lookup_id = workflow_id.to_string();
     let mut wf = state
         .db
@@ -2443,7 +2464,7 @@ pub(crate) async fn create_manual_run(
         batch_no_response: 0,
         batch_name: None,
         parent_run_id: None,
-        state: ::std::collections::HashMap::new(),
+        state: initial_state,
         produced_branches: vec![],
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2467,6 +2488,40 @@ pub(crate) async fn create_manual_run(
         .await
         .map_err(|error| format!("DB error: {error}"))??;
     Ok((wf, run))
+}
+
+const MAX_INITIAL_STATE_ENTRIES: usize = 16;
+const MAX_INITIAL_STATE_VALUE_CHARS: usize = 256;
+
+/// The state a launcher seeds is shown in every run list and never encrypted:
+/// keep it to a few short, plain labels.
+fn validate_initial_run_state(
+    initial_state: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    if initial_state.len() > MAX_INITIAL_STATE_ENTRIES {
+        return Err(format!(
+            "`state` takes at most {MAX_INITIAL_STATE_ENTRIES} entries"
+        ));
+    }
+    for (key, value) in initial_state {
+        let valid_key = (1..=64).contains(&key.len())
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+        if !valid_key {
+            return Err(format!(
+                "`state` key `{key}` must be 1-64 letters, digits, `_`, `-` or `.`"
+            ));
+        }
+        if value.chars().count() > MAX_INITIAL_STATE_VALUE_CHARS
+            || value.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "`state.{key}` must be one line of at most {MAX_INITIAL_STATE_VALUE_CHARS} characters"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Runs a run created by [`create_manual_run`] in the background. An
@@ -2509,12 +2564,15 @@ pub async fn trigger(
     Path(id): Path<String>,
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
-    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    let (provided_vars, initial_state) = body
+        .map(|Json(b)| (b.variables, b.state))
+        .unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
     let run = match start_manual_run(
         &state,
         &id,
         provided_vars,
+        initial_state,
         Some(tx),
         crate::core::launch_context::LaunchContext::default(),
     )
@@ -2980,6 +3038,7 @@ pub async fn test_step(
             &ctx,
             &agent_extra_context,
             Some(progress_tx),
+            None,
             Some(&model_tiers),
             Some(&http_endpoints),
             Some(&ollama_context_overrides),
@@ -3050,6 +3109,10 @@ pub struct ListRunsQuery {
     offset: Option<u32>,
     #[serde(default)]
     complete_group: bool,
+    /// Only the runs whose `state` holds this key, newest first…
+    state_key: Option<String>,
+    /// …with exactly this value, when given.
+    state_value: Option<String>,
 }
 
 pub async fn list_runs(
@@ -3062,6 +3125,20 @@ pub async fn list_runs(
     match state
         .db
         .with_read_conn(move |conn| {
+            if let Some(key) = params.state_key.as_deref() {
+                let limit = params
+                    .limit
+                    .unwrap_or(crate::db::workflows::MAX_RUNS_UNPAGINATED)
+                    .clamp(1, crate::db::workflows::MAX_RUNS_UNPAGINATED);
+                return crate::db::workflows::list_runs_by_state(
+                    conn,
+                    &id,
+                    key,
+                    params.state_value.as_deref(),
+                    limit,
+                    params.offset.unwrap_or(0),
+                );
+            }
             if params.limit.is_some() || params.offset.is_some() {
                 let limit = params
                     .limit
@@ -4272,6 +4349,7 @@ pub async fn suggestions(
                     api_timeout_ms: None,
                     api_max_retries: None,
                     api_output_var: None,
+                    api_response: None,
                     gate_message: None,
                     gate_request_changes_target: None,
                     gate_notify_url: None,
@@ -4633,14 +4711,30 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(
-            validate_sub_workflow_foreach_concurrency(std::slice::from_ref(&foreach), Some(1))
-                .is_ok()
-        );
-        let error = validate_sub_workflow_foreach_concurrency(&[foreach], Some(8))
-            .expect_err("foreach plus a limit above one must not be silently accepted");
+        assert!(validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(1),
+            None
+        )
+        .is_ok());
+        let error = validate_sub_workflow_foreach_concurrency(
+            std::slice::from_ref(&foreach),
+            Some(8),
+            None,
+        )
+        .expect_err("foreach plus a limit above one must not be silently accepted");
         assert!(error.contains("cannot parallelize foreach items"));
+        assert!(error.contains("require_isolation"));
         assert!(error.contains("BatchQuickPrompt"));
+        // Each isolated run owns its worktree, so whole runs may overlap.
+        let isolated = WorkspaceConfig {
+            hooks: Default::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+        };
+        assert!(
+            validate_sub_workflow_foreach_concurrency(&[foreach], Some(3), Some(&isolated)).is_ok()
+        );
     }
 
     #[test]
@@ -5152,6 +5246,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -6423,6 +6518,38 @@ mod tests {
         s.api_plugin_slug = Some("jira".into());
         s.api_endpoint_path = Some("/rest/api/3/issue/{{issue_key}}".into());
         validate_required_fields_per_type(&[s]).expect("complete inline ApiCall should validate");
+    }
+
+    #[test]
+    fn required_fields_binary_response_is_bounded_when_the_workflow_is_saved() {
+        let mut s = mk_step("thumbs", StepType::BatchApiCall);
+        s.api_plugin_slug = Some("mcp-atlassian".into());
+        s.api_endpoint_path = Some("/rest/api/2/attachment/thumbnail/{{batch.item.id}}".into());
+        s.batch_items_from = Some("{{steps.attachments.data}}".into());
+        s.api_response = Some(ApiResponseMode::Binary {
+            accept: vec![],
+            max_bytes: None,
+        });
+        validate_required_fields_per_type(std::slice::from_ref(&s))
+            .expect("default binary contract should validate");
+
+        for (accept, max_bytes, expected) in [
+            (vec!["*/*".to_string()], None, "accept"),
+            (vec![], Some(0), "max_bytes"),
+            (
+                vec![],
+                Some(crate::workflows::api_call_binary::BINARY_MAX_BYTES_CEILING + 1),
+                "max_bytes",
+            ),
+        ] {
+            s.api_response = Some(ApiResponseMode::Binary { accept, max_bytes });
+            let err = validate_required_fields_per_type(std::slice::from_ref(&s))
+                .expect_err("out-of-contract binary response must be refused");
+            assert!(
+                err.contains("thumbs") && err.contains(expected),
+                "got: {err}"
+            );
+        }
     }
 
     #[test]

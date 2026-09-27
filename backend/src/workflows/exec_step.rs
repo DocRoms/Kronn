@@ -541,6 +541,9 @@ pub async fn execute_exec_step_with_output_limit(
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action,
     }
@@ -572,6 +575,9 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             child_run_id: None,
             agent_provenance: None,
             native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
         },
         condition_action: None,
     }
@@ -724,6 +730,7 @@ mod tests {
             api_timeout_ms: None,
             api_max_retries: None,
             api_output_var: None,
+            api_response: None,
             gate_message: None,
             gate_request_changes_target: None,
             gate_notify_url: None,
@@ -1232,6 +1239,48 @@ mod tests {
                 .contains("RENDERED-PAYLOAD-FROM-PREVIOUS-STEP"),
             "exec_stdin must be template-rendered, not piped verbatim: {}",
             outcome.result.output
+        );
+    }
+
+    /// The envelope escapes stdout; markers must still come back as printed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn multi_line_markers_come_back_without_literal_escapes() {
+        let mut step = exec_step("sortie", Some("cat"), vec![], None);
+        step.exec_stdin = Some(
+            "log\n---STATE:plan=first line\nsecond line---\n\
+             ---ARTIFACT:notes---\nline A\nline B\n---END_ARTIFACT---\n"
+                .into(),
+        );
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["cat".into()], "/tmp", &ctx).await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("first line\\nsecond line"),
+            "the envelope itself still carries the escaped stdout"
+        );
+        let (artifacts, state) =
+            crate::workflows::template::extract_step_markers(&outcome.result.output);
+        assert_eq!(
+            state.get("plan").map(String::as_str),
+            Some("first line\nsecond line")
+        );
+        assert_eq!(
+            artifacts.get("notes").map(String::as_str),
+            Some("line A\nline B")
+        );
+        let mut downstream = TemplateContext::new();
+        downstream.set_step_output("sortie", &outcome.result.output);
+        assert_eq!(
+            downstream
+                .render_strict("{{state.plan}}|{{artifacts.notes}}")
+                .unwrap(),
+            "first line\nsecond line|line A\nline B"
         );
     }
 

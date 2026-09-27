@@ -174,6 +174,39 @@ describe('scanUndeclaredVars', () => {
     expect(result[0].name).toBe('leading_space');
   });
 
+  it('accepts {{run.id}}, which the runner injects in every run', () => {
+    expect(scanUndeclaredVars('Run {{run.id}}', baseOpts())).toEqual([]);
+    expect(scanUndeclaredVars('Run {{run.other}}', baseOpts())).toEqual([
+      { name: 'run.other', reason: 'unknown_bare' },
+    ]);
+  });
+
+  it('accepts a fallback-guarded reference to a step a Goto may skip or that runs later', () => {
+    const opts = baseOpts({ allSteps: [mkStep('first'), mkStep('current'), mkStep('porte_check')] });
+    const prompt = 'Check: {{steps.porte_check.data.stdout ?? ""}} {{ steps.current.output??\'none\' }} ' +
+      '{{optional_note ?? "n/a"}} {{custom.path ?? ""}}';
+    expect(scanUndeclaredVars(prompt, opts)).toEqual([]);
+  });
+
+  it('still flags the same forward reference without a fallback', () => {
+    const opts = baseOpts({ allSteps: [mkStep('first'), mkStep('current'), mkStep('porte_check')] });
+    const prompt = '{{steps.porte_check.data.stdout ?? ""}} then {{steps.porte_check.data.stdout}}';
+    expect(scanUndeclaredVars(prompt, opts)).toEqual([
+      { name: 'steps.porte_check.data.stdout', reason: 'unknown_step' },
+    ]);
+  });
+
+  it('never lets a fallback excuse a step name that exists nowhere', () => {
+    const prompt = '{{steps.porte_chek.data ?? ""}} and again {{steps.porte_chek.data}}';
+    expect(scanUndeclaredVars(prompt, baseOpts())).toEqual([
+      { name: 'steps.porte_chek.data', reason: 'unknown_step' },
+    ]);
+  });
+
+  it('skips a malformed fallback, which the backend refuses at save', () => {
+    expect(scanUndeclaredVars('{{ticket ?? none}} {{ticket??none}}', baseOpts())).toEqual([]);
+  });
+
   it('flags dotted unknown paths (not steps.* / state.* / etc.)', () => {
     const prompt = 'Some weird {{custom.path.deep}}.';
     const result = scanUndeclaredVars(prompt, baseOpts());
