@@ -272,6 +272,48 @@ describe('PagesPage', () => {
     await waitFor(() => expect(pagesApi.list).toHaveBeenCalledOnce());
   });
 
+  // KT-736: the mount effect used to depend on `refresh`, whose identity
+  // changes with `selectedId` — so it re-fired (and doubled the GET) on
+  // mount and on every page switch, on top of the 30s auto-refresh timer.
+  it('fetches the Page detail exactly once per 30s auto-refresh cycle', async () => {
+    vi.useFakeTimers();
+    try {
+      // Earlier specs in this file may still have an unresolved fetch chain
+      // recorded on this shared mock; start the count from this render only.
+      vi.mocked(pagesApi.get).mockClear();
+      render(<PagesPage />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+
+      vi.mocked(pagesApi.get).mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+
+      vi.mocked(pagesApi.get).mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetches a newly selected Page detail exactly once, not twice', async () => {
+    const other: LivePage = { ...page, id: 'page-2', title: 'Second' };
+    const otherDetail: LivePageDetail = { ...detail, ...other };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === other.id ? otherDetail : detail);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    vi.mocked(pagesApi.get).mockClear();
+
+    fireEvent.click(getCanonicalPageRow('Second'));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+    // Give a stray re-triggered effect a chance to fire before counting.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    expect(pagesApi.get).toHaveBeenCalledTimes(1);
+  });
+
   it('uses checkbox semantics for transient Page bulk selection', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');

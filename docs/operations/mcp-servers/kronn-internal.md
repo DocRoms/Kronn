@@ -144,7 +144,15 @@ thread again: ask before renaming a room you did not open.
    resume credential/cursor; this one-time upgrade case returns
    `runtime_bound: false` and `rejoin_required: true` and needs one fresh join
    instead of silently claiming that append is safe. `disc_link({})` binds the
-   current session to the bound disc for a room reached another way.
+   current session to the bound disc for a room reached another way — but it
+   only ever writes that durable resume mapping, never the live
+   `discussion_sessions` row `task_exec_prepare`/`task_exec_launch` authorize
+   against. Its response says which state the caller ends up in: an active
+   member on that exact disc already gets `runtime_bound: true`; anyone else
+   gets the same `runtime_bound: false` / `rejoin_required: true` shape as
+   `disc_find_by_session`, plus a `hint` naming the exact remedy
+   (`disc_invite_peer` for a fresh token, then `disc_join({token: "kr-join-..."})`)
+   instead of task_exec calls failing later with no explanation.
    Both refuse to act rather than guess when no durable identity exists, and
    neither ever passes `force_reassign`: a session owned by another discussion
    is reported, never stolen.
@@ -354,6 +362,12 @@ idempotency key after an uncertain response. Native HTTP workers receive a
 narrowed surface: no backlog mutation or execution-status lookup, and
 `task_exec_deliver` accepts only the manifest. They never merge, approve or
 close the task.
+The principal is either a CLI session joined to the room or the room's own
+native agent during its turn. For the latter Kronn injects
+`KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
+into the bridge environment; the backend accepts it only while that dispatch
+runs in the room, for the same provider, and never for a delegated worker's
+dispatch.
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery

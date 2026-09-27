@@ -52,7 +52,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
                     step_name: step.name.clone(),
                     status: RunStatus::Failed,
                     output: format!("Gate template render error: {}", e),
-                    tokens_used: 0,
+                    tokens_used: Some(0),
                     duration_ms: start.elapsed().as_millis() as u64,
                     started_at: Some(started_at),
                     condition_result: None,
@@ -77,7 +77,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
             step_name: step.name.clone(),
             status: RunStatus::WaitingApproval,
             output: rendered,
-            tokens_used: 0,
+            tokens_used: Some(0),
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: Some(started_at),
             condition_result: None,
@@ -205,7 +205,7 @@ mod tests {
             "got: {}",
             outcome.result.output
         );
-        assert_eq!(outcome.result.tokens_used, 0);
+        assert_eq!(outcome.result.tokens_used, Some(0));
         assert!(outcome.condition_action.is_none());
     }
 

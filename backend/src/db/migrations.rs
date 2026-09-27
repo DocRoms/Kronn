@@ -727,6 +727,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "189_artifact_message_origin",
         include_str!("sql/189_artifact_message_origin.sql"),
     ),
+    (
+        "190_workflow_runs_latest_index",
+        include_str!("sql/190_workflow_runs_latest_index.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

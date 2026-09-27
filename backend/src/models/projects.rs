@@ -162,6 +162,18 @@ pub struct LinkedRepo {
     pub description: String,
 }
 
+impl LinkedRepo {
+    /// The trimmed filesystem location, or `None` for a remote URL entry.
+    pub fn local_location(&self) -> Option<&str> {
+        let location = self.location.trim();
+        (!location.is_empty()
+            && !location.starts_with("http://")
+            && !location.starts_with("https://")
+            && !location.starts_with("git@"))
+        .then_some(location)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TokenOverride {

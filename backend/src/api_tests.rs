@@ -4989,9 +4989,11 @@ mod tests {
             .await
             .expect("insert project");
 
+        let companion_path = format!("{project_path}-backend-api");
+        std::fs::create_dir_all(&companion_path).expect("companion dir");
         let body = serde_json::json!([
             { "id": "lr-1", "name": "backend-api", "kind": "api",
-              "location": "/home/priol/Repos/backend-api",
+              "location": companion_path,
               "description": "GraphQL schema for the frontend" },
             { "id": "lr-2", "name": "infra", "kind": "iac",
               "location": "https://github.com/org/infra",
@@ -5031,6 +5033,7 @@ mod tests {
         assert_eq!(linked[0]["kind"], "api");
         assert_eq!(linked[1]["name"], "infra");
         let _ = std::fs::remove_dir_all(&project_path);
+        let _ = std::fs::remove_dir_all(&companion_path);
     }
 
     /// Validation: a linked repo with an unknown `kind` must be

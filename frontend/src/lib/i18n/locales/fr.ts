@@ -3954,6 +3954,8 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wf.tokensTotal': 'tokens (total run)',
   'wf.tokensTotalHint': 'Somme des tokens consommés par tous les steps de ce run depuis son démarrage. Inclus les agents passés, les gates restent à 0.',
   'wf.stepTokensSuffix': 'tk',
+  'wf.stepTokensUnknown': 'tokens inconnus',
+  'wf.stepTokensUnknownHint': 'L\'agent n\'a pas communiqué sa consommation de tokens pour ce step. Elle n\'est pas nulle : elle n\'a simplement pas été mesurée.',
   'wf.stepTokensHint': 'Tokens consommés par ce step. Les gates / Exec / ApiCall / Notify ne brûlent pas de tokens — ils restent à 0. Les agents (Agent / BatchQuickPrompt) en consomment proportionnellement à la longueur du prompt + réponse.',
   'wf.gate.title': 'Décision humaine requise',
   'wf.gate.defaultMessage': 'Validation requise pour continuer.',

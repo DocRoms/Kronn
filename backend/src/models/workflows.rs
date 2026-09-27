@@ -1402,7 +1402,10 @@ pub struct StepResult {
     pub step_name: String,
     pub status: RunStatus,
     pub output: String,
-    pub tokens_used: u64,
+    /// `None` when an agent ran but its runtime reported no usage: a step
+    /// that called a model was not free, so unknown must not read as zero.
+    #[serde(default)]
+    pub tokens_used: Option<u64>,
     pub duration_ms: u64,
     /// 0.8.2 — Wall-clock timestamp at which the step started executing.
     /// Optional for backward compatibility with runs written before this

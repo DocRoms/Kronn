@@ -7994,8 +7994,14 @@ pub struct TaskExecPrepareRequest {
     pub task_reference: String,
     pub parent_discussion_id: String,
     pub worker: MessageTarget,
+    #[serde(default)]
     pub source_agent: String,
+    #[serde(default)]
     pub source_session_id: String,
+    /// The room's own native agent, injected by the bridge from the runner's
+    /// environment. Exclusive with `source_agent`/`source_session_id`.
+    #[serde(default)]
+    pub room_agent: Option<SpawnedAgentCaller>,
     #[serde(default)]
     pub worker_scope_intent: Option<TaskWorkerScopeIntent>,
     #[serde(default)]
@@ -8029,8 +8035,14 @@ pub struct TaskExecLaunchRequest {
     /// Principal-owned mechanical gates persisted on the implicit run.
     #[serde(default)]
     pub validations: Vec<crate::models::ValidationSpec>,
+    #[serde(default)]
     pub source_agent: String,
+    #[serde(default)]
     pub source_session_id: String,
+    /// The room's own native agent, injected by the bridge from the runner's
+    /// environment. Exclusive with `source_agent`/`source_session_id`.
+    #[serde(default)]
+    pub room_agent: Option<SpawnedAgentCaller>,
     #[serde(default)]
     pub worker_scope_intent: Option<TaskWorkerScopeIntent>,
     #[serde(default)]
@@ -8087,6 +8099,85 @@ fn principal_cli_is_authorized(
         crate::db::discussion_sessions::find_active_session(conn, source_agent, source_session_id)?
             .is_some_and(|session| session.disc_id == parent_discussion_id),
     )
+}
+
+/// Who is asking to prepare or launch a task execution from a room.
+enum PrincipalCaller {
+    Cli { agent: String, session_id: String },
+    RoomAgent(SpawnedAgentCaller),
+}
+
+fn principal_caller(
+    source_agent: &str,
+    source_session_id: &str,
+    room_agent: Option<SpawnedAgentCaller>,
+) -> Result<PrincipalCaller, &'static str> {
+    let cli_given = !source_agent.trim().is_empty() || !source_session_id.trim().is_empty();
+    match (room_agent, cli_given) {
+        (Some(_), true) => Err("choose exactly one principal identity mode"),
+        (Some(room), false) => Ok(PrincipalCaller::RoomAgent(room)),
+        (None, _) => caller_fields(source_agent, source_session_id)
+            .map(|(agent, session_id)| PrincipalCaller::Cli { agent, session_id })
+            .ok_or("durable source_agent and source_session_id are required"),
+    }
+}
+
+fn principal_is_authorized(
+    conn: &rusqlite::Connection,
+    parent_discussion_id: &str,
+    caller: &PrincipalCaller,
+) -> Result<bool> {
+    match caller {
+        PrincipalCaller::Cli { agent, session_id } => {
+            principal_cli_is_authorized(conn, parent_discussion_id, agent, session_id)
+        }
+        PrincipalCaller::RoomAgent(room) => {
+            room_agent_is_authorized(conn, parent_discussion_id, room)
+        }
+    }
+}
+
+/// A room's native agent is the principal only while its own turn runs there:
+/// the dispatch job must be running in that room, answer the same trigger,
+/// belong to the same provider and not be a delegated worker's dispatch.
+fn room_agent_is_authorized(
+    conn: &rusqlite::Connection,
+    parent_discussion_id: &str,
+    caller: &SpawnedAgentCaller,
+) -> Result<bool> {
+    let Ok((agent_type, discussion_id, dispatch_job_id, source_message_id)) =
+        spawned_native_caller(caller)
+    else {
+        return Ok(false);
+    };
+    if discussion_id != parent_discussion_id {
+        return Ok(false);
+    }
+    let Some(job) = crate::db::agent_dispatch::get(conn, dispatch_job_id)? else {
+        return Ok(false);
+    };
+    if job.discussion_id != parent_discussion_id
+        || job.trigger_message_id != source_message_id
+        || job.status != crate::db::agent_dispatch::DispatchStatus::Running
+    {
+        return Ok(false);
+    }
+    if crate::db::orchestration::get_execution_for_dispatch(conn, dispatch_job_id)?.is_some() {
+        return Ok(false);
+    }
+    let room_agent: Option<String> = conn
+        .query_row(
+            "SELECT agent FROM discussions WHERE id = ?1",
+            [parent_discussion_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let expected = match (job.agent_override, room_agent) {
+        (Some(agent), _) => agent,
+        (None, Some(agent)) => crate::db::orchestration::agent_type_from_db(&agent)?,
+        (None, None) => return Ok(false),
+    };
+    Ok(expected == agent_type)
 }
 
 fn execution_party_is_authorized(
@@ -8791,15 +8882,15 @@ pub async fn task_worker_catalogue(
 /// the backend before task/project/worker details are returned.
 pub async fn task_exec_prepare(
     State(state): State<AppState>,
-    Json(request): Json<TaskExecPrepareRequest>,
+    Json(mut request): Json<TaskExecPrepareRequest>,
 ) -> Json<ApiResponse<crate::models::TaskExecutionPreparation>> {
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
-        ));
+    let caller = match principal_caller(
+        &request.source_agent,
+        &request.source_session_id,
+        request.room_agent.take(),
+    ) {
+        Ok(caller) => caller,
+        Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
     if let Some(reason) =
         worker_scope_contract_refusal(request.worker_scope_intent, request.worker_scope.as_ref())
@@ -8816,7 +8907,7 @@ pub async fn task_exec_prepare(
     let result = state
         .db
         .with_conn(move |conn| {
-            if !principal_cli_is_authorized(conn, &parent, &agent, &session_id)? {
+            if !principal_is_authorized(conn, &parent, &caller)? {
                 bail!("principal discussion not found or caller is not an active member");
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
@@ -8838,15 +8929,15 @@ pub async fn task_exec_prepare(
 
 pub async fn task_exec_launch(
     State(state): State<AppState>,
-    Json(request): Json<TaskExecLaunchRequest>,
+    Json(mut request): Json<TaskExecLaunchRequest>,
 ) -> Json<ApiResponse<TaskExecution>> {
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
-        ));
+    let caller = match principal_caller(
+        &request.source_agent,
+        &request.source_session_id,
+        request.room_agent.take(),
+    ) {
+        Ok(caller) => caller,
+        Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
     if let Some(reason) =
         worker_scope_contract_refusal(request.worker_scope_intent, request.worker_scope.as_ref())
@@ -8861,7 +8952,7 @@ pub async fn task_exec_launch(
         let parent = parent.clone();
         state
             .db
-            .with_conn(move |conn| principal_cli_is_authorized(conn, &parent, &agent, &session_id))
+            .with_conn(move |conn| principal_is_authorized(conn, &parent, &caller))
             .await
     };
     if !matches!(authorized, Ok(true)) {
@@ -10104,6 +10195,201 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn a_room_native_agent_is_principal_only_for_its_own_running_turn() {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let now = "2026-09-24T00:00:00Z";
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, created_at, updated_at)
+                 VALUES ('d-parent', 'Parent', 'ClaudeCode', ?1, ?1),
+                        ('d-other', 'Other', 'ClaudeCode', ?1, ?1),
+                        ('d-work', 'Work', 'ClaudeCode', ?1, ?1)",
+                [now],
+            )?;
+            for (id, disc) in [
+                ("msg-1", "d-parent"),
+                ("msg-2", "d-other"),
+                ("msg-3", "d-parent"),
+            ] {
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+                     VALUES (?1, ?2, 'User', 'go', ?3, (SELECT COUNT(*) FROM messages))",
+                    rusqlite::params![id, disc, now],
+                )?;
+            }
+            for (id, disc, trigger) in [
+                ("job-1", "d-parent", "msg-1"),
+                ("job-2", "d-other", "msg-2"),
+                ("job-done", "d-parent", "msg-3"),
+            ] {
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id,
+                        discussion_id: disc,
+                        trigger_message_id: trigger,
+                        trigger_sort_order: 1,
+                        dedupe_key: id,
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+                 VALUES ('msg-w', 'd-work', 'User', 'work', ?1, 99)",
+                [now],
+            )?;
+            crate::db::agent_dispatch::enqueue(
+                conn,
+                crate::db::agent_dispatch::NewAgentDispatchJob {
+                    id: "job-worker",
+                    discussion_id: "d-work",
+                    trigger_message_id: "msg-w",
+                    trigger_sort_order: 99,
+                    dedupe_key: "job-worker",
+                    agent_override: None,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            conn.execute(
+                "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at)
+                 VALUES ('t-worker', 1, 'Worker task', ?1, ?1)",
+                [now],
+            )?;
+            let input = crate::models::LaunchSingleTaskInput::new("t-worker", "d-work");
+            let actor = crate::models::OrchestrationActor {
+                kind: crate::models::PlanningActorKind::Backend,
+                id: Some("room-agent-test".into()),
+                session_id: None,
+                source_message_id: None,
+            };
+            let execution =
+                crate::db::orchestration::launch_single_task(conn, &input, &actor)?.execution;
+            crate::db::orchestration::attach_execution_dispatch(conn, &execution.id, "job-worker")?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET status = 'Running'
+                 WHERE id IN ('job-1', 'job-2', 'job-worker')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET status = 'Completed' WHERE id = 'job-done'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let room = |disc: &str, agent: &str, job: &str, msg: &str| SpawnedAgentCaller {
+            discussion_id: disc.into(),
+            agent_type: agent.into(),
+            dispatch_job_id: job.into(),
+            source_message_id: msg.into(),
+        };
+        let cases = [
+            (
+                room("d-parent", "ClaudeCode", "job-1", "msg-1"),
+                true,
+                "own running turn",
+            ),
+            (
+                room("d-other", "ClaudeCode", "job-2", "msg-2"),
+                false,
+                "native agent of another room",
+            ),
+            (
+                room("d-parent", "ClaudeCode", "job-2", "msg-2"),
+                false,
+                "job of another room",
+            ),
+            (
+                room("d-parent", "Codex", "job-1", "msg-1"),
+                false,
+                "another provider",
+            ),
+            (
+                room("d-parent", "ClaudeCode", "job-1", "msg-3"),
+                false,
+                "another trigger",
+            ),
+            (
+                room("d-parent", "ClaudeCode", "job-done", "msg-3"),
+                false,
+                "finished turn",
+            ),
+            (
+                room("d-parent", "ClaudeCode", "missing", "msg-1"),
+                false,
+                "unknown job",
+            ),
+        ];
+        for (caller, expected, label) in cases {
+            let caller = PrincipalCaller::RoomAgent(caller);
+            let authorized = db
+                .with_conn(move |conn| principal_is_authorized(conn, "d-parent", &caller))
+                .await
+                .unwrap();
+            assert_eq!(authorized, expected, "{label}");
+        }
+        // A running job that is a delegated worker's dispatch never makes its
+        // agent the principal of the room it runs in.
+        let worker =
+            PrincipalCaller::RoomAgent(room("d-work", "ClaudeCode", "job-worker", "msg-w"));
+        let authorized = db
+            .with_conn(move |conn| principal_is_authorized(conn, "d-work", &worker))
+            .await
+            .unwrap();
+        assert!(!authorized, "a delegated worker's dispatch");
+        let stranger = PrincipalCaller::Cli {
+            agent: "Codex".into(),
+            session_id: "not-a-member".into(),
+        };
+        let authorized = db
+            .with_conn(move |conn| principal_is_authorized(conn, "d-parent", &stranger))
+            .await
+            .unwrap();
+        assert!(
+            !authorized,
+            "a CLI session that is not a member stays refused"
+        );
+    }
+
+    #[test]
+    fn a_principal_request_names_exactly_one_identity() {
+        let room = || {
+            Some(SpawnedAgentCaller {
+                discussion_id: "d".into(),
+                agent_type: "ClaudeCode".into(),
+                dispatch_job_id: "j".into(),
+                source_message_id: "m".into(),
+            })
+        };
+        assert!(matches!(
+            principal_caller("", "", room()),
+            Ok(PrincipalCaller::RoomAgent(_))
+        ));
+        assert!(matches!(
+            principal_caller("Codex", "s", None),
+            Ok(PrincipalCaller::Cli { .. })
+        ));
+        assert_eq!(
+            principal_caller("Codex", "s", room()).err(),
+            Some("choose exactly one principal identity mode")
+        );
+        assert!(principal_caller("", "", None)
+            .err()
+            .is_some_and(
+                |error| error.contains("source_agent") && error.contains("source_session_id")
+            ));
+    }
 
     #[test]
     fn recovered_apply_must_win_its_durable_claim_before_touching_git() {

@@ -4262,6 +4262,29 @@ def _unwrap(envelope):
     return envelope.get("data")
 
 
+def _reject_unknown_args(tool_name, args, hint=None):
+    """Fail on an argument the tool's own inputSchema does not declare.
+
+    A silently-dropped typo (e.g. `vars` where the schema says `variables`)
+    otherwise reaches the backend as if the field were simply absent, so the
+    caller sees an unrelated "required" error instead of its own mistake.
+    """
+    if not isinstance(args, dict):
+        return
+    schema = next((t["inputSchema"] for t in TOOLS if t["name"] == tool_name), None)
+    allowed = set((schema or {}).get("properties") or {})
+    unknown = sorted(set(args) - allowed)
+    if not unknown:
+        return
+    message = (
+        f"{tool_name}: unknown argument(s) {', '.join(unknown)}; "
+        f"expected one of: {', '.join(sorted(allowed))}."
+    )
+    if hint:
+        message += f" {hint}"
+    raise RuntimeError(message)
+
+
 def _disc_append_attachment_paths(raw_paths):
     """Validate and resolve local files an agent wants to publish in a room.
 
@@ -5405,12 +5428,57 @@ def call_disc_link(args):
         )
     if not source_agent or source_agent == "Unknown":
         raise RuntimeError("disc_link: could not infer source_agent — pass it explicitly")
-    return _unwrap(_http("POST", "/api/disc/link", {
+    _unwrap(_http("POST", "/api/disc/link", {
         "disc_id": disc_id,
         "source_agent": source_agent,
         "source_session_id": source_session_id,
         "force_reassign": bool(args.get("force_reassign", False)),
     }))
+    return _disc_link_runtime_report(disc_id, source_agent)
+
+
+def _disc_link_runtime_report(disc_id, source_agent):
+    """`disc_link` only writes the durable resume mapping, never the live
+    `discussion_sessions` row `task_exec_prepare` authorizes against — say so
+    now, with a read-only status check, instead of a bare success."""
+    live_session_id = _session_id_for_caller()
+    try:
+        qs = urllib.parse.urlencode({
+            "source_agent": source_agent,
+            "source_session_id": live_session_id,
+        })
+        status = _unwrap(_http("GET", f"/api/disc/session-status?{qs}"))
+    except Exception:
+        status = None
+    live = (
+        isinstance(status, dict)
+        and status.get("connected_disc_id") == disc_id
+        and status.get("connection_status") in ("active", "paused")
+    )
+    if live:
+        return {"session_bound": True, "disc_id": disc_id, "runtime_bound": True}
+    try:
+        already_here = _disc_id() == disc_id
+    except RuntimeError:
+        already_here = False
+    get_token = (
+        "disc_invite_peer({}) mints one for THIS room"
+        if already_here
+        else f"get a kr-join token for {disc_id} (its [+ Inviter] button, or "
+        "disc_invite_peer({}) from a bridge already bound there)"
+    )
+    return {
+        "session_bound": True,
+        "disc_id": disc_id,
+        "runtime_bound": False,
+        "rejoin_required": True,
+        "hint": (
+            f"The durable resume link now points to {disc_id}, but this session "
+            "is not an active member of it, so task_exec_prepare/task_exec_launch "
+            f"will still refuse it. {get_token}, then call "
+            'disc_join({token: "kr-join-..."}) to become one.'
+        ),
+    }
 
 
 def call_disc_transfer_session(args):
@@ -5479,6 +5547,38 @@ def _task_exec_identity(tool_name):
 
 
 _TASK_WORKER_CONTEXT_ENV = "KRONN_TASK_WORKER_CONTEXT"
+_ROOM_AGENT_CONTEXT_ENV = "KRONN_ROOM_AGENT_CONTEXT"
+
+
+def _room_agent_context(tool_name):
+    """The room's native agent identity, injected by Kronn for its own turn.
+
+    Like the worker capability it never appears in an input schema. Absent
+    means this bridge is not a room's native agent; malformed fails closed.
+    """
+    raw = os.environ.get(_ROOM_AGENT_CONTEXT_ENV)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(f"{tool_name}: room agent context is invalid") from error
+    fields = ("discussion_id", "agent_type", "dispatch_job_id", "source_message_id")
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in fields
+    ):
+        raise RuntimeError(f"{tool_name}: room agent context is incomplete")
+    return {field: value[field].strip() for field in fields}
+
+
+def _task_exec_principal(tool_name):
+    """Principal identity fields for prepare/launch: the room's native agent
+    when Kronn launched this bridge for it, otherwise the joined CLI session."""
+    room_agent = _room_agent_context(tool_name)
+    if room_agent is not None:
+        return {"room_agent": room_agent}
+    source_agent, source_session_id = _task_exec_identity(tool_name)
+    return {"source_agent": source_agent, "source_session_id": source_session_id}
 
 
 def _spawned_task_worker_context(required=False, tool_name="spawned task worker"):
@@ -5740,14 +5840,12 @@ def call_task_exec_prepare(args):
             f"{_TASK_EXEC_MANUAL_HINT}"
         )
     scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_prepare")
-    source_agent, source_session_id = _task_exec_identity("task_exec_prepare")
     body = {
         "task_reference": task_reference,
         "parent_discussion_id": _disc_id(),
         "worker": worker,
         "worker_scope_intent": scope_intent,
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
+        **_task_exec_principal("task_exec_prepare"),
     }
     if worker_scope is not None:
         body["worker_scope"] = worker_scope
@@ -5764,14 +5862,12 @@ def call_task_exec_launch(args):
             f"{_TASK_EXEC_MANUAL_HINT}"
         )
     scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_launch")
-    source_agent, source_session_id = _task_exec_identity("task_exec_launch")
     body = {
         "task_reference": task_reference,
         "parent_discussion_id": _disc_id(),
         "worker": worker,
         "worker_scope_intent": scope_intent,
-        "source_agent": source_agent,
-        "source_session_id": source_session_id,
+        **_task_exec_principal("task_exec_launch"),
     }
     for optional in ("base_rev", "idempotency_key", "validations"):
         if args.get(optional) is not None:
@@ -8480,6 +8576,12 @@ def call_workflow_trigger(args):
     workflow_id = args.get("workflow_id")
     if not workflow_id:
         raise RuntimeError("workflow_trigger: missing required 'workflow_id'")
+    # An undeclared key (e.g. `vars`) must not be dropped silently: without
+    # this, the backend answers "Variable X is required" instead of naming
+    # the caller's actual mistake.
+    _reject_unknown_args(
+        "workflow_trigger", args, hint="Manual-launch variables go in `variables`."
+    )
     body = {"workflow_id": workflow_id}
     variables = args.get("variables")
     if isinstance(variables, dict):

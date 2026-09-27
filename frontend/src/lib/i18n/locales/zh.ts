@@ -3849,6 +3849,8 @@ const zh: TranslationDict = {
   "wf.tokensTotal": "token（运行总计）",
   "wf.tokensTotalHint": "自运行开始以来，此运行中每个步骤使用的 token 总和。包括代理步骤；Gate 始终贡献 0。",
   "wf.stepTokensSuffix": "tk",
+  "wf.stepTokensUnknown": "token 未知",
+  "wf.stepTokensUnknownHint": "智能体运行时未报告此步骤的 token 用量。它不是 0，只是未被测量。",
   "wf.stepTokensHint": "此步骤消耗的 token。Gate / Exec / ApiCall / Notify 不消耗任何 token — 它们保持为 0。Agent / BatchQuickPrompt 步骤的 token 消耗与提示和响应长度成比例。",
   "wf.gate.title": "需要人工决策",
   "wf.gate.defaultMessage": "继续操作需要审批。",

@@ -1747,6 +1747,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::discussions::monitor::get),
         )
         .route("/api/discussions/{id}", get(api::discussions::get))
+        .route("/api/discussions/{id}/poll", get(api::discussions::poll))
         .route(
             "/api/discussions/{id}/native-agent",
             get(api::discussions::native_agent_mode),

@@ -24,6 +24,7 @@ import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils
 import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import { CopyIdPill } from '../CopyIdPill';
 import { WorkflowWizard } from './WorkflowWizard';
+import { StepTokensBadge } from './StepTokens';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -2247,15 +2248,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                       implement / review are usually the heavies; the
                       "désagentification" pattern moves the cheap mechanical
                       ones to ApiCall / Exec / Notify). */}
-                  {completed && completed.tokens_used > 0 && (
-                    <span
-                      className="text-2xs text-ghost"
-                      title={t('wf.stepTokensHint')}
-                      style={{ color: 'var(--kr-accent-ink)' }}
-                    >
-                      {completed.tokens_used.toLocaleString()} {t('wf.stepTokensSuffix')}
-                    </span>
-                  )}
+                  {completed && <StepTokensBadge sr={completed} t={t} className="text-2xs text-ghost" />}
 
                   {/* Current step indicator + live elapsed */}
                   {isCurrent && (

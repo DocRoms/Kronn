@@ -51,6 +51,7 @@ vi.mock('../../lib/api', () => ({
   discussions: {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
+    poll: vi.fn(),
     create: vi.fn(),
     delete: vi.fn(),
     deleteMessage: vi.fn().mockResolvedValue(undefined),
@@ -225,6 +226,14 @@ beforeEach(() => {
   vi.mocked(discussionsApi.nativeAgentMode).mockReset();
   vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: false });
   vi.mocked(discussionsApi.get).mockReset();
+  // The periodic refresh reads the same detail through `poll`; a fresh revision
+  // each time keeps these tests on the full-detail path they were written for.
+  let pollRevision = 0;
+  vi.mocked(discussionsApi.poll).mockReset();
+  vi.mocked(discussionsApi.poll).mockImplementation(async id => {
+    const detail = await discussionsApi.get(id);
+    return detail ? { revision: `r${++pollRevision}`, detail } as never : null as never;
+  });
   vi.mocked(discussionsApi.searchMessages).mockReset();
   vi.mocked(discussionsApi.searchMessages).mockResolvedValue([]);
   vi.mocked(discussionsApi.listContextFiles).mockReset();
@@ -1338,6 +1347,44 @@ describe('DiscussionsPage', () => {
       expect(discussionsApi.stopDispatch).toHaveBeenCalledWith('d-overlap', 'new-ollama');
     });
     expect(toastFn).toHaveBeenCalledWith('Réponse agent arrêtée', 'success');
+  });
+
+  it('keeps an idle transcript without re-downloading it while its revision is unchanged', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fullDisc: Discussion = {
+        ...makeListDiscussion('d-idle', 1),
+        messages: [
+          { id: 'm1', role: 'User', channel: 'main', content: 'Idle question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        ],
+      };
+      vi.mocked(discussionsApi.poll).mockReset();
+      vi.mocked(discussionsApi.poll)
+        .mockResolvedValueOnce({ revision: 'rev-1', detail: fullDisc } as never)
+        .mockResolvedValue({ revision: 'rev-1', detail: null } as never);
+      await wrap(
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[makeListDiscussion('d-idle', 1)]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={noop}
+          refetchProjects={noop}
+          onNavigate={noop}
+          toast={toastFn}
+          initialActiveDiscussionId="d-idle"
+          {...liftedProps()}
+        />
+      );
+      expect(await screen.findByText('Idle question')).toBeInTheDocument();
+      expect(vi.mocked(discussionsApi.poll)).toHaveBeenCalledWith('d-idle', null);
+      await act(async () => { vi.advanceTimersByTime(5000); });
+      await waitFor(() => expect(vi.mocked(discussionsApi.poll)).toHaveBeenCalledWith('d-idle', 'rev-1'));
+      expect(screen.getByText('Idle question')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('restores active discussion on remount via initialActiveDiscussionId', async () => {
