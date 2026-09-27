@@ -216,6 +216,9 @@ pub struct AppState {
     /// not yet returned. Cancellation registration happens earlier, so it must
     /// not be used as process-liveness evidence.
     pub agent_runtime_registry: Arc<Mutex<HashSet<String>>>,
+    /// Task executions with a `/resume` in flight. Boot resumes run once HTTP is
+    /// served, so a concurrent resume of the same execution is refused.
+    pub execution_resumes: Arc<Mutex<HashSet<String>>>,
     /// OAuth2 access-token cache for API plugins. Keyed by `mcp_configs.id`,
     /// value is the bearer token + its absolute expiry. In-memory only —
     /// on restart, tokens are lost and re-exchanged on first use (one HTTP
@@ -276,6 +279,7 @@ impl AppState {
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
+            execution_resumes: Arc::new(Mutex::new(HashSet::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             git_language_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

@@ -13,6 +13,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- `task_exec_status` can wait for an execution: `wait_for` lists statuses (for
+  example `["AwaitingReview", "Done", "Blocked"]`) and the call returns as soon
+  as the execution is in one of them, with `wait: {matched, timed_out,
+  waited_ms}`, instead of the principal sleeping and re-reading. `timeout_secs`
+  bounds it (60 s by default, 170 s at most).
 - A room's native agent can prepare and launch a task execution itself, as
   its principal, without a CLI joining the room. Kronn identifies it from the
   turn it is running, so only that room's agent is accepted.
@@ -75,6 +80,46 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A shell-less worker's edit to a PHP, Twig, SCSS/CSS, TS/JS or JSON file is
+  refused before it reaches disk when it leaves an orphan delimiter or an
+  unclosed Twig block, or when an `edit_lines` replacement shifts the
+  indentation of the first or last line it replaces; the diagnostic sends the
+  worker into its one strict correction, as a Rust parser error already did.
+  Local models got bounded edits with indented edges wrong on every measured
+  case. The prelocalized worker brief no longer carries the human-arbitration
+  and parent-milestone sections.
+- A Kronn action card opened from a Live Page no longer closes every 30 s
+  when the Page refreshes, and keeps what was typed in it; it now follows its
+  row when new data makes the Page redraw. Each row's state carries its launch
+  id (`data-kronn-action-launch`), so a Page tells a new attempt from the
+  previous one. A field's placeholder reads as an example (`e.g. ollama`)
+  instead of passing for the value an empty field would send.
+- A restart in the middle of a task execution's integration no longer keeps the
+  backend from answering while the interrupted validations are replayed, which
+  could outlast the 300 health probes `kronn start-dev` waits for. Boot still
+  reclassifies every interrupted execution, but replaying validations,
+  rebuilding a candidate, applying and provisioning now start once the server
+  listens, in the background and one execution at a time, each logged as it
+  completes. A resume requested for an execution already being resumed is
+  refused with `a resume of this execution is already running` instead of
+  running twice.
+- A principal following a task execution no longer reads 10 to 17 thousand
+  characters per `task_exec_status` call. `view: "compact"` returns the status,
+  attempt, review rounds, delivered `head_sha`, last error, the latest
+  candidate's validations (command, exit code, duration) and `next_action` in
+  under 1 000 characters. The full view stays the default, for reviews and
+  diagnosis.
+- `task_exec_reassign` is accepted from `AwaitingReview`. The pending delivery
+  is rejected but kept in the attempt history, and the requested worker starts
+  the next attempt on the same task, room and worktree, instead of the
+  principal cancelling and relaunching the task.
+- A worker's delivery now wakes the CLI principal waiting in the parent room.
+  The review request, escalations, integration refusals, campaign pauses, the
+  undelivered-worker notice and the terminal notice were addressed to the
+  room's native agent, so the principal's `disc_wait_for_peer` withheld them
+  and timed out. They now address the joined CLI that launched, reviewed,
+  resumed or reassigned the execution while it remains in that room, and the
+  room's agent otherwise.
 - A prelocalized rework no longer edits the launch line numbers on moved
   content. When a delivery changed the file's line count, `request_changes`
   replayed the same range and a local worker deleted the neighbouring rule.

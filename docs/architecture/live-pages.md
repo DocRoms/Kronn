@@ -317,14 +317,26 @@ The Page reads back how each row went. `GET /api/pages/{id}/action-launches`
 returns the latest launch per row (declines excluded), polled every few seconds
 while any row runs. The parent posts those states to the iframe as
 `kronn:page-action-states`, and the bridge marks every matching
-`[data-kronn-action]` with `data-kronn-action-state` and `aria-busy`, including
-rows a Page script renders later. A zero-specificity default indicator is
-injected; the author's own CSS wins. Clicking a row that is still running
-reopens its run instead of a blank offer, clicking the button of the open card
-closes it, and the card also closes with its × or Escape. A row that has run
-reopens on its latest launch, finished or not, and the card offers to go back
-to the offer and launch the same row again; a Discussion card never does,
-since a fence carries one intention.
+`[data-kronn-action]` with `data-kronn-action-state`, `aria-busy` and
+`data-kronn-action-launch` (the launch id, so a Page tells a new attempt of a
+row from the previous one even when both succeeded), including rows a Page
+script renders later. A zero-specificity default indicator is injected; the
+author's own CSS wins. Clicking a row that is still running reopens its run
+instead of a blank offer, clicking the button of the open card closes it, and
+the card also closes with its × or Escape. A row whose last launch is finished
+opens a fresh offer, which launches a new attempt of that row, with the
+previous launch one click away; a Discussion card never relaunches, since a
+fence carries one intention.
+[src: file: frontend/src/hooks/useLivePageActions.ts]
+
+The periodic refresh of a Page (every 30 s, in the Pages view and in its own
+tab) keeps an open card, and what was typed in it, while the Page still offers
+its action; switching Page closes it. When new data makes the Page redraw its
+rows, the bridge reopens the collapse under the row that now carries the same
+binding and the card follows it. A placeholder is shown as an example
+(`e.g. …`), since an empty field sends nothing, unless its author already
+phrased it as an example or an instruction.
+[src: file: frontend/src/lib/live-page-sandbox.ts]
 
 Once launched, a card tells what the run produced, the same way on a Page and
 in a Discussion. A workflow's steps are listed (name, type, status, duration)

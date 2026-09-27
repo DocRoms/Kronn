@@ -55,6 +55,35 @@ describe('useLivePageActions', () => {
     expect(result.current.selectedAction).toBeNull();
   });
 
+  it('a refresh of the same Page keeps the open card, another Page closes it', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'EW-1' }, anchor }));
+    const opened = result.current.activeAction;
+
+    await act(() => result.current.reload('page-1'));
+    expect(result.current.activeAction).toBe(opened);
+
+    await act(() => result.current.reload('page-2'));
+    expect(result.current.activeAction).toBeNull();
+  });
+
+  it('drops the answer of a Page the reader has already left', async () => {
+    let answerFirst: (value: LivePageAction[]) => void = () => {};
+    vi.mocked(pagesApi.actions)
+      .mockImplementationOnce(() => new Promise(resolve => { answerFirst = resolve; }))
+      .mockResolvedValueOnce([action({ id: 'page-action:page-2:refresh', live_page_id: 'page-2' })]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+
+    let first: Promise<void> = Promise.resolve();
+    act(() => { first = result.current.reload('page-1'); });
+    await act(() => result.current.reload('page-2'));
+    await act(async () => { answerFirst([action()]); await first; });
+
+    expect(result.current.actions.map(entry => entry.live_page_id)).toEqual(['page-2']);
+  });
+
   it('a second click on the same button closes its card, the next one opens a fresh one', async () => {
     vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
     const { result } = renderHook(() => useLivePageActions(vi.fn()));

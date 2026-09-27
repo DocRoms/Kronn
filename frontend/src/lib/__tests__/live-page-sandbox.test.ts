@@ -260,6 +260,38 @@ describe('Live Page sandbox', () => {
     await frame.happyDOM.close();
   });
 
+  it('reopens the collapse under the new row when the Page redraws its rows', async () => {
+    const { Window } = await import('happy-dom');
+    const frame = new Window();
+    const rows = (ticket: string) => `<tr><td>${ticket}</td><td><button data-kronn-action="frame" `
+      + `data-kronn-bindings='{"ticketKey":"${ticket}"}'>go</button></td></tr>`;
+    const page = `<html><head></head><body><table><tbody id="rows">${rows('EW-1')}${rows('EW-2')}</tbody></table></body></html>`;
+    frame.document.write(buildSandboxDocument(page, 'channel-1'));
+    for (const script of Array.from(frame.document.querySelectorAll('script:not([type])'))) {
+      (frame as unknown as { eval: (code: string) => void }).eval(script.textContent ?? '');
+    }
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-action-slot', version: 1, channel_id: 'channel-1',
+      slot: { action_ref: 'frame', binding_key: liveActionBindingKey({ ticketKey: 'EW-2' }), height: 80 },
+    } }));
+    // New data: the Page rebuilds its rows, and the slot went with the old ones.
+    frame.document.querySelector('#rows')!.innerHTML = rows('EW-0') + rows('EW-1') + rows('EW-2');
+    await new Promise(resolve => frame.setTimeout(resolve, 0));
+    const slots = frame.document.querySelectorAll('[data-kronn-action-slot]');
+    expect(slots.length).toBe(1);
+    expect(slots[0].previousElementSibling?.textContent).toContain('EW-2');
+    expect((slots[0].firstElementChild as unknown as HTMLElement).style.height).toBe('80px');
+
+    // Once the host closes the card, a redraw no longer brings it back.
+    frame.dispatchEvent(new frame.MessageEvent('message', { data: {
+      type: 'kronn:page-action-slot', version: 1, channel_id: 'channel-1', slot: null,
+    } }));
+    frame.document.querySelector('#rows')!.innerHTML = rows('EW-2');
+    await new Promise(resolve => frame.setTimeout(resolve, 0));
+    expect(frame.document.querySelectorAll('[data-kronn-action-slot]').length).toBe(0);
+    await frame.happyDOM.close();
+  });
+
   it('opens the collapse inside the block the Page names, right under its CTA', async () => {
     const { Window } = await import('happy-dom');
     const frame = new Window();
@@ -507,19 +539,27 @@ describe('Live Page sandbox', () => {
     // Another channel cannot mark this Page's buttons.
     post('someone-else', [{ action_ref: 'frame', binding_key: 'ticket=EW-3', state: 'succeeded' }]);
     expect(button('EW-3').hasAttribute('data-kronn-action-state')).toBe(false);
+
+    // Two attempts of one row that both succeeded are still told apart.
+    post('chan-states', [{ action_ref: 'frame', binding_key: 'ticket=EW-9', state: 'succeeded', launch_id: 'try-1' }]);
+    expect(button('EW-9').getAttribute('data-kronn-action-launch')).toBe('try-1');
+    post('chan-states', [{ action_ref: 'frame', binding_key: 'ticket=EW-9', state: 'succeeded', launch_id: 'try-2' }]);
+    expect(button('EW-9').getAttribute('data-kronn-action-launch')).toBe('try-2');
+    post('chan-states', []);
+    expect(button('EW-9').hasAttribute('data-kronn-action-launch')).toBe(false);
   });
 
   it('posts the launch states the iframe expects', () => {
     const target = { postMessage: vi.fn() } as unknown as Window;
     postLivePageActionStates(target, 'chan-1', [
-      { action_ref: 'frame', binding_key: 'ticket=EW-1', state: 'running' },
-      { action_ref: 'refresh', binding_key: null, state: 'succeeded' },
+      { id: 'launch-1', action_ref: 'frame', binding_key: 'ticket=EW-1', state: 'running' },
+      { id: 'launch-2', action_ref: 'refresh', binding_key: null, state: 'succeeded' },
     ]);
     expect(target.postMessage).toHaveBeenCalledWith({
       type: 'kronn:page-action-states', version: 1, channel_id: 'chan-1',
       states: [
-        { action_ref: 'frame', binding_key: 'ticket=EW-1', state: 'running' },
-        { action_ref: 'refresh', binding_key: '', state: 'succeeded' },
+        { action_ref: 'frame', binding_key: 'ticket=EW-1', state: 'running', launch_id: 'launch-1' },
+        { action_ref: 'refresh', binding_key: '', state: 'succeeded', launch_id: 'launch-2' },
       ],
     }, '*');
   });

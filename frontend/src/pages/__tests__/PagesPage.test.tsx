@@ -206,6 +206,47 @@ describe('PagesPage', () => {
     expect(screen.getByRole('button', { name: /Refresh report/ })).toHaveAttribute('aria-expanded', 'true');
   });
 
+  it('keeps an open card and what was typed in it across two auto-refreshes', async () => {
+    const pageAction: LivePageAction = {
+      id: 'page-action:page-1:frame', live_page_id: 'page-1', live_page_revision_id: 'rev-2',
+      action_ref: 'frame', kind: 'workflow', target_id: 'wf-1', target_name: 'Frame ticket',
+      project_id: null, project_name: null, state: 'proposed', shared_run_id: null,
+      values: [{
+        name: 'banc', label: 'Banc', placeholder: 'ollama', description: null, required: false,
+        allow_manual_override: false, provenance: 'user_input',
+      }],
+      result_discussion_id: null, deep_link: null, diagnostic: null, launched_at: null,
+      finished_at: null, created_at: page.created_at, updated_at: page.updated_at, stale_source: false, binding_key: null,
+    };
+    vi.mocked(pagesApi.actions).mockResolvedValue([pageAction]);
+    vi.useFakeTimers();
+    try {
+      render(<PagesPage />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      act(() => actionRelay.onAction?.({
+        actionRef: 'frame', bindings: {},
+        anchor: { left: 24, top: 40, width: 120, height: 32 },
+      }));
+      const field = screen.getByPlaceholderText('disc.action.placeholderExample:ollama');
+      fireEvent.change(field, { target: { value: 'litellm' } });
+
+      vi.mocked(pagesApi.actions).mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+      expect(pagesApi.actions).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId(`live-page-action-${pageAction.id}`)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('disc.action.placeholderExample:ollama')).toHaveValue('litellm');
+
+      // A refresh that no longer offers the action closes its card.
+      vi.mocked(pagesApi.actions).mockResolvedValue([]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(screen.queryByTestId(`live-page-action-${pageAction.id}`)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('fails closed on an action removed from the current Page revision', async () => {
     vi.mocked(pagesApi.actions).mockResolvedValue([]);
     render(<PagesPage />);

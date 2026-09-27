@@ -388,6 +388,26 @@ retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/scripts/disc-introspection-mcp.py:921-941]
 [src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
+`task_exec_status({view: "compact"})` returns id, task, status, attempt,
+review rounds, delivered `head_sha`, last error, the latest candidate's
+validations (command, exit code, duration) and a backend-derived
+`next_action`, trimmed to stay under 1 000 characters as the bridge prints it.
+The default `view: "full"` is unchanged: worker briefs and reviews read its
+lineage, attempts and manifests.
+
+`task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
+the execution is in one of the `wait_for` statuses and adds
+`wait: {matched, timed_out, waited_ms}` to the usual response. A status already
+reached returns at once, a terminal execution returns unmatched, and
+`timeout_secs` defaults to 60 s, capped at 170 s below the bridge's HTTP
+timeout. The parent-room notices of an execution (review request, escalation,
+integration refusal, campaign pause, undelivered worker, terminal state)
+address the joined CLI that last launched, reviewed, resumed or reassigned it
+while that session remains in the room, so its `disc_wait_for_peer` wakes on
+them; without such a session they address the room's configured agent.
+`[src: file: backend/src/api/orchestration.rs]`
+`[src: file: backend/src/db/orchestration.rs]`
+
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
 HTTP providers are `discussion_agent` targets, punctual host processes are
@@ -534,7 +554,10 @@ attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `[src: file: backend/scripts/disc-introspection-mcp.py]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
-the replacement worker's handoff message. It is therefore a real recovery
+the replacement worker's handoff message. From `AwaitingReview` it first
+rejects the pending delivery (`AwaitingReview -> ChangesRequested`, journaled
+with `delivery: rejected`); the manifest stays in the attempt history and the
+replacement works on the next attempt. It is therefore a real recovery
 instruction, not an audit-only label. The chosen provider, tier, model and
 profile are synchronised to the durable child discussion in the same database
 transaction: that discussion is what the runtime resolves when it starts the
@@ -940,9 +963,10 @@ contracts; they are not claimed as entries in this first version.
   row. `tool_manual({tool: "page_create"})` and
   `tool_manual({tool: "page_update_html"})` carry the contract: one inert
   `application/kronn-action` block per action, one `data-kronn-bindings`
-  selector per row, `data-kronn-action-state` on each button for its row's live
-  state, and a native card that opens on the row's latest run and what it
-  produced. Keep a block's reference stable across revisions.
+  selector per row, `data-kronn-action-state` and `data-kronn-action-launch` on
+  each button for its row's live state and latest attempt, and a native card
+  that reopens a running row's run or offers a new attempt with the last run one
+  click away. Keep a block's reference stable across revisions.
 
 ## Related
 

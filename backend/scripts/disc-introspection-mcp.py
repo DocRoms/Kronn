@@ -932,15 +932,18 @@ TOOLS = [
     {
         "name": "task_exec_status",
         "description": (
-            "Read a party-visible TaskExecution and its durable evidence/recovery state. "
-            "After reconnect, use its id or task_reference, obey returned `next_action`, "
-            "and never infer execution state from chat."
+            "Read a party-visible TaskExecution by id or task_reference (KT-###); obey its "
+            "`next_action`, never infer state from chat. Poll with `view: compact` (<1 KB); "
+            "`wait_for` blocks until one of those statuses: tool_manual({tool: \"task_exec_status\"})."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_execution_id": {"type": "string"},
-                "task_reference": {"type": "string", "description": "KT-### or task UUID fallback."},
+                "task_reference": {"type": "string"},
+                "view": {"type": "string", "enum": ["compact", "full"]},
+                "wait_for": {"type": "array", "items": {"type": "string"}},
+                "timeout_secs": {"type": "integer"},
             },
             "required": [],
         },
@@ -981,8 +984,8 @@ TOOLS = [
     {
         "name": "task_exec_reassign",
         "description": (
-            "Reassign an interrupted/blocked execution without losing its room or evidence. "
-            "See tool_manual({tool: \"task_exec_reassign\"})."
+            "Reassign an interrupted, blocked or awaiting-review execution (a pending delivery is "
+            "rejected), keeping its room and evidence. See tool_manual({tool: \"task_exec_reassign\"})."
         ),
         "inputSchema": {
             "type": "object",
@@ -1271,7 +1274,8 @@ TOOLS = [
             "`latest_sort_order`, never `last_sort_order` returned by an append. Each item has a "
             "`message_id`; reply with its exact `reply_to_message_id`. A wait moved to the background "
             "lasts to its terminal result or your next Kronn call: DO NOT start another wait; "
-            "re-arm. Quiet or interruption is not departure. Routing: "
+            "re-arm. Quiet or interruption is not departure. To await a worker, use "
+            "`task_exec_status` `wait_for`. Routing: "
             "`tool_manual({tool: \"disc_wait_for_peer\"})`."
         ),
         "inputSchema": {
@@ -1279,15 +1283,15 @@ TOOLS = [
             "properties": {
                 "since_sort_order": {
                     "type": "integer",
-                    "description": "Advanced override: highest sort_order actually read. Normally omit it so the bridge uses its durable read cursor. Never pass an append's last_sort_order.",
+                    "description": "Advanced override; see the tool description.",
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Inner poll window in seconds (default 60, capped at 60 so interruptions stay responsive). The OVERALL wait is governed by max_total_secs, not this.",
+                    "description": "Inner poll window, seconds (default and cap 60); max_total_secs bounds the whole wait.",
                 },
                 "max_total_secs": {
                     "type": "integer",
-                    "description": "Overall wait budget in seconds (env KRONN_WAIT_TOTAL_SECS). Use 20 between real work steps; omit only when idle (unbounded default). A background wait remains active: await its terminal result before another.",
+                    "description": "Overall budget, seconds (env KRONN_WAIT_TOTAL_SECS): 20 between work steps; omit only when idle (unbounded).",
                 },
             },
             "required": [],
@@ -5877,7 +5881,44 @@ def call_task_exec_launch(args):
     return _task_exec_request("/api/orchestration/tool/launch", body)
 
 
+_TASK_EXECUTION_STATUSES = frozenset({
+    "Pending", "Provisioning", "Blocked", "Working", "AwaitingReview", "Approved",
+    "ChangesRequested", "Integrating", "Validating", "Applying", "Escalated",
+    "Interrupted", "Done", "Failed", "Cancelled",
+})
+
+
+def _task_exec_status_options(args):
+    """The compact view (KT-791) and the blocking wait (KT-790), which the
+    backend bounds."""
+    options = {}
+    view = args.get("view")
+    if view is not None:
+        if view not in ("compact", "full"):
+            raise RuntimeError('task_exec_status: view must be "compact" or "full"')
+        options["view"] = view
+    wait_for = args.get("wait_for")
+    if wait_for is not None:
+        if (
+            not isinstance(wait_for, list)
+            or not wait_for
+            or any(status not in _TASK_EXECUTION_STATUSES for status in wait_for)
+        ):
+            raise RuntimeError(
+                "task_exec_status: wait_for must list TaskExecution statuses, one of "
+                + ", ".join(sorted(_TASK_EXECUTION_STATUSES))
+            )
+        options["wait_for"] = wait_for
+    timeout_secs = args.get("timeout_secs")
+    if timeout_secs is not None:
+        if isinstance(timeout_secs, bool) or not isinstance(timeout_secs, int) or timeout_secs < 1:
+            raise RuntimeError("task_exec_status: timeout_secs must be a positive integer")
+        options["timeout_secs"] = timeout_secs
+    return options
+
+
 def call_task_exec_status(args):
+    options = _task_exec_status_options(args)
     if _spawned_task_worker_mode():
         context = _spawned_task_worker_context(
             required=True, tool_name="task_exec_status"
@@ -5892,6 +5933,7 @@ def call_task_exec_status(args):
                     "dispatch_job_id": context["dispatch_job_id"],
                     "source_message_id": context["source_message_id"],
                 },
+                **options,
             },
         ))
     execution_id = (args.get("task_execution_id") or args.get("task_reference") or "").strip()
@@ -5901,8 +5943,11 @@ def call_task_exec_status(args):
     result = _unwrap(_http(
         "POST",
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
-        {"source_agent": source_agent, "source_session_id": source_session_id},
+        {"source_agent": source_agent, "source_session_id": source_session_id, **options},
     ))
+    if options.get("view") == "compact":
+        # The backend already derives `next_action` for this projection.
+        return result
     execution = ((result.get("lineage") or {}).get("execution") or {})
     status = execution.get("status")
     blocked_from = execution.get("blocked_from_status")
@@ -9490,9 +9535,11 @@ _PAGE_ACTION_CONTRACT = (
     "running is never launched twice. Kronn marks each button with "
     "`data-kronn-action-state` (launching, running, succeeded, failed, "
     "preflight_failed) and a default indicator: style that attribute instead of "
-    "tracking launches in Page scripts. A click opens the native card on the offer "
-    "for a row that never ran, on its latest run otherwise: the steps, the "
-    "discussions it opened with the agent's answer, and a way to launch it again. "
+    "tracking launches in Page scripts. `data-kronn-action-launch` holds the id of "
+    "that latest launch, so a new attempt of a row is told from the previous one. "
+    "A click on a running row reopens its run: the steps, the discussions it "
+    "opened with the agent's answer. Any other click opens a fresh offer, which "
+    "launches a new attempt, with the row's last run one click away. "
     "A Quick Prompt counts as succeeded once its agent has answered."
 )
 
@@ -9594,6 +9641,23 @@ TOOL_MANUALS = {
         "If a joined runtime lacks these tools after reconnect, reconnect the Kronn MCP and report "
         "the capability gap instead of fabricating a handoff."
     ),
+    "task_exec_status": (
+        "`view: \"compact\"` returns only id, task, status, attempt, review_rounds, head_sha, "
+        "last_error, the latest candidate's validations (command, exit_code, duration_ms) and "
+        "`next_action`, in under 1 000 characters: use it to poll. The default `view: \"full\"` "
+        "keeps lineage, DoD, every attempt's manifest and review, validation output and usage; "
+        "read it to review a delivery or diagnose a hold.\n\n"
+        "`wait_for: [\"AwaitingReview\", \"Done\", \"Blocked\"]` holds the call until the "
+        "execution is in one of these statuses, then returns the status plus "
+        "`wait: {matched, timed_out, waited_ms}`. A status already reached returns at once; a "
+        "terminal execution returns unmatched; `timeout_secs` defaults to 60, capped at 170. "
+        "Use it instead of sleeping or polling while a worker runs. Statuses: Pending, "
+        "Provisioning, Blocked, Working, AwaitingReview, Approved, ChangesRequested, "
+        "Integrating, Validating, Applying, Escalated, Interrupted, Done, Failed, Cancelled. "
+        "Delivery, escalation, integration and terminal notices address the parent-room CLI "
+        "that launched, reviewed, resumed or reassigned the execution, so its "
+        "`disc_wait_for_peer` wakes on them too."
+    ),
     "task_exec_resume": (
         "Call resume only when `task_exec_status` returns the exact "
         "`next_action.tool: task_exec_resume`. The backend rechecks parent "
@@ -9604,7 +9668,9 @@ TOOL_MANUALS = {
     ),
     "task_exec_reassign": (
         "Reassignment is principal-only and preserves the execution room, "
-        "worktree and evidence. Pass the flat typed MessageTarget copied from "
+        "worktree and evidence. From `AwaitingReview` it rejects the pending "
+        "delivery, which stays in the attempt history, and the new worker starts "
+        "the next attempt. Pass the flat typed MessageTarget copied from "
         "`agent_list` (`kind`, `agent_type`, optional exact `cli_session_id` and "
         "tier), never the internal `{target, model, profile_id}` envelope. A "
         "transport change must change `worker.kind`. Native HTTP targets do not "
