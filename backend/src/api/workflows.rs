@@ -2183,7 +2183,7 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
 /// clone); rebinds a dangling/foreign one to a matching local config; leaves it
 /// untouched when no local config exists (the user then picks in the UI).
 /// Best-effort: a DB hiccup on one step never aborts the import.
-fn rebind_api_configs(
+pub(crate) fn rebind_api_configs(
     conn: &rusqlite::Connection,
     steps: &mut [WorkflowStep],
     project_id: Option<&str>,
@@ -2212,7 +2212,7 @@ fn rebind_api_configs(
     }
 }
 
-fn rebind_quick_api_config(
+pub(crate) fn rebind_quick_api_config(
     conn: &rusqlite::Connection,
     quick_api: &mut QuickApi,
     project_id: Option<&str>,

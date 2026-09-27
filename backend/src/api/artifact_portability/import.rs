@@ -33,6 +33,17 @@ impl Resource {
             value,
         })
     }
+
+    /// The declared, immutable identity used by `resource_identities`
+    /// (ADR-005 slice 3): an Artifact's real `slug`, or the bundle's own `id`
+    /// for the other kinds — none of which expose a separate slug field yet.
+    fn slug(&self) -> &str {
+        if self.kind == ResourceKind::Artifact {
+            self.value["slug"].as_str().unwrap()
+        } else {
+            &self.id
+        }
+    }
 }
 
 struct PlannedResource {
@@ -440,6 +451,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
     {
         bail!("The imported root Artifact must be a new resource");
     }
+    let project_key = crate::db::resource_identities::project_key(conn, request.project_id.as_deref())?;
     let mut planned = Vec::new();
     let mut observations = Vec::new();
     for source in resources {
@@ -447,14 +459,18 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         let choice = choices.get(&key);
         let is_root = key == root_key;
         if is_root {
-            // The root is always new. Observe only its import generation for
-            // stale-preview protection, never hydrate every previous copy.
-            let generation: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM artifact_import_origins WHERE kind = ?1 AND source_id = ?2",
-                rusqlite::params![kind_key(source.kind), source.id],
-                |row| row.get(0),
+            // The root is always new (a fresh copy per import, never reused —
+            // see `artifact_roundtrip_preserves_null_points_and_reuses_previous_import_identities`).
+            // Observe the identity this slug currently maps to, so committing
+            // a DIFFERENT mapping between preview and commit invalidates the
+            // stale preview, without hydrating every previous copy.
+            let prior_identity = crate::db::resource_identities::lookup(
+                conn,
+                &project_key,
+                &kind_key(source.kind),
+                source.slug(),
             )?;
-            observations.push(json!({"kind":source.kind,"id":source.id,"generation":generation}));
+            observations.push(json!({"kind":source.kind,"id":source.id,"prior_identity":prior_identity}));
             planned.push(PlannedResource {
                 target_id: Uuid::new_v4().to_string(),
                 entry: ArtifactImportEntry {
@@ -474,14 +490,12 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
             continue;
         }
         let mut candidate_ids = BTreeSet::from([source.id.clone()]);
-        let mut statement = conn.prepare("SELECT target_id FROM artifact_import_origins WHERE kind = ?1 AND source_id = ?2 ORDER BY target_id")?;
-        candidate_ids.extend(
-            statement
-                .query_map(rusqlite::params![kind_key(source.kind), source.id], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        );
+        candidate_ids.extend(crate::db::resource_identities::lookup(
+            conn,
+            &project_key,
+            &kind_key(source.kind),
+            source.slug(),
+        )?);
         if let Some(id) = choice.and_then(|choice| choice.target_id.as_ref()) {
             candidate_ids.insert(id.clone());
         }
@@ -669,10 +683,27 @@ pub async fn preview(
     }
 }
 
-fn record_origin(conn: &Connection, resource: &PlannedResource) -> Result<()> {
-    conn.execute("INSERT OR IGNORE INTO artifact_import_origins (kind, source_id, target_id) VALUES (?1, ?2, ?3)",
-        rusqlite::params![kind_key(resource.source.kind), resource.source.id, resource.target_id])?;
-    Ok(())
+fn record_origin(conn: &Connection, project_key: &str, resource: &PlannedResource) -> Result<()> {
+    crate::db::resource_identities::upsert(
+        conn,
+        project_key,
+        &kind_key(resource.source.kind),
+        resource.source.slug(),
+        &resource.target_id,
+    )
+}
+
+/// Drop workflow-step skill/profile/directive references that don't resolve
+/// on this instance instead of silently carrying a dangling id into the new
+/// local copy — `execution_requirements` already warns about the same gap,
+/// this is what makes the created step act on it (ADR-005 slice 3).
+fn resolve_step_requirements(step: &mut WorkflowStep) {
+    step.skill_ids
+        .retain(|id| crate::core::skills::get_skill(id).is_some());
+    step.profile_ids
+        .retain(|id| crate::core::profiles::get_profile(id).is_some());
+    step.directive_ids
+        .retain(|id| crate::core::directives::get_directive(id).is_some());
 }
 
 fn create_imported_page(
@@ -752,6 +783,8 @@ fn commit_plan(
 ) -> Result<ArtifactImportResult> {
     let map = remap_for(&plan.resources);
     let now = Utc::now();
+    let project_key =
+        crate::db::resource_identities::project_key(tx, request.project_id.as_deref())?;
     // Create action targets first, so Page action ingestion can resolve all of
     // them. Workflows contain JSON references and remain disabled throughout.
     for item in plan.resources.iter().filter(|item| {
@@ -768,7 +801,15 @@ fn commit_plan(
                 crate::db::quick_prompts::insert_quick_prompt(tx, &serde_json::from_value(value)?)?
             }
             ResourceKind::QuickApi => {
-                crate::db::quick_apis::insert_quick_api(tx, &serde_json::from_value(value)?)?
+                // Retarget to a local API config for the same plugin, reusing
+                // the same rebind the legacy workflow-import endpoint uses.
+                let mut api: QuickApi = serde_json::from_value(value)?;
+                super::super::workflows::rebind_quick_api_config(
+                    tx,
+                    &mut api,
+                    request.project_id.as_deref(),
+                );
+                crate::db::quick_apis::insert_quick_api(tx, &api)?
             }
             ResourceKind::QuickExec => {
                 crate::db::quick_execs::insert_quick_exec(tx, &serde_json::from_value(value)?)?
@@ -783,12 +824,23 @@ fn commit_plan(
                 {
                     step.id = Some(Uuid::new_v4().to_string());
                     step.gate_notify_url = None;
+                    resolve_step_requirements(step);
                 }
+                super::super::workflows::rebind_api_configs(
+                    tx,
+                    &mut workflow.steps,
+                    request.project_id.as_deref(),
+                );
+                super::super::workflows::rebind_api_configs(
+                    tx,
+                    &mut workflow.on_failure,
+                    request.project_id.as_deref(),
+                );
                 crate::db::workflows::insert_workflow(tx, &workflow)?;
             }
             ResourceKind::Artifact => unreachable!("filtered above"),
         }
-        record_origin(tx, item)?;
+        record_origin(tx, &project_key, item)?;
     }
     let mut root = None;
     for (index, item) in plan.resources.iter().enumerate() {
@@ -798,7 +850,7 @@ fn commit_plan(
             continue;
         }
         let page = create_imported_page(tx, item, &map, request.project_id.as_deref())?;
-        record_origin(tx, item)?;
+        record_origin(tx, &project_key, item)?;
         if index == 0 {
             root = Some(page);
         }

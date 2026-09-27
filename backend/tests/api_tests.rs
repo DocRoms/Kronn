@@ -2444,7 +2444,7 @@ async fn artifact_import_rollback_leaves_no_origin_mapping_or_partial_resource()
         .db
         .with_conn(|conn| {
             assert_eq!(
-                conn.query_row("SELECT COUNT(*) FROM artifact_import_origins", [], |r| r
+                conn.query_row("SELECT COUNT(*) FROM resource_identities", [], |r| r
                     .get::<_, i64>(0))?,
                 0
             );
@@ -2557,6 +2557,217 @@ async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_ide
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn artifact_import_identities_are_scoped_per_project_and_deduplicated_on_reimport() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let content = serde_json::to_string(&exported["data"]).unwrap();
+    let state = test_state();
+    let now = chrono::Utc::now();
+    for id in ["project-a", "project-b"] {
+        let project = kronn::models::Project {
+            id: id.into(),
+            name: id.into(),
+            path: format!("/tmp/kronn-test-{id}"),
+            repo_url: None,
+            token_override: None,
+            ai_config: kronn::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: kronn::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .db
+            .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+    }
+    let app = build_router_with_auth(state.clone(), false);
+    for project_id in ["project-a", "project-a", "project-b"] {
+        let (_, preview) = post_json(
+            app.clone(),
+            "/api/pages/import/preview",
+            serde_json::json!({
+                "content":content,"project_id":project_id,"approved_quick_exec_ids":["qe-portable"]
+            }),
+        )
+        .await;
+        assert_eq!(preview["data"]["can_import"], true, "{preview}");
+        let (_, imported) = post_json(
+            app.clone(),
+            "/api/pages/import",
+            serde_json::json!({
+                "content":content,"project_id":project_id,"approved_quick_exec_ids":["qe-portable"],
+                "preview_digest":preview["data"]["digest"]
+            }),
+        )
+        .await;
+        assert_eq!(imported["success"], true, "{imported}");
+    }
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                kronn::db::quick_prompts::list_quick_prompts(conn)?.len(),
+                2,
+                "one copy per distinct project; reimporting the same project must reuse it"
+            );
+            let identities: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM resource_identities WHERE kind = 'quick_prompt'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                identities, 2,
+                "one identity row per project — reimporting project-a must update it, not add a row"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn artifact_import_resolves_workflow_skill_profile_directive_ids_and_warns_on_the_rest() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut bundle = exported["data"].clone();
+    bundle["referenced_workflows"][0]["steps"][0]["skill_ids"] =
+        serde_json::json!(["rust", "custom-does-not-exist"]);
+    bundle["referenced_workflows"][0]["steps"][0]["profile_ids"] =
+        serde_json::json!(["architect", "does-not-exist-profile"]);
+    bundle["referenced_workflows"][0]["steps"][0]["directive_ids"] =
+        serde_json::json!(["token-saver", "does-not-exist-directive"]);
+    // A real registry slug, so a local config for it can be inserted below —
+    // the fixture's own placeholder ("chartbeat") isn't a registered server.
+    bundle["referenced_quick_apis"][0]["api_plugin_slug"] = serde_json::json!("api-chartbeat");
+    let content = bundle.to_string();
+    let state = test_state();
+    // A local, globally-scoped config for the same plugin as the bundled
+    // Quick API's dangling `api_config_id` — exercising the same
+    // `rebind_quick_api_config` the legacy workflow-import endpoint already
+    // reuses for this exact case (ADR-005 slice 3).
+    state
+        .db
+        .with_conn(|conn| {
+            let definition = kronn::core::registry::builtin_registry()
+                .into_iter()
+                .find(|definition| definition.id == "api-chartbeat")
+                .unwrap();
+            kronn::db::mcps::upsert_server(
+                conn,
+                &kronn::models::McpServer {
+                    id: definition.id.clone(),
+                    name: definition.name,
+                    description: definition.description,
+                    transport: definition.transport,
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: definition.api_spec,
+                },
+            )?;
+            kronn::db::mcps::insert_config(
+                conn,
+                &kronn::models::McpConfig {
+                    id: "local-chartbeat-config".into(),
+                    server_id: "api-chartbeat".into(),
+                    label: "Chartbeat".into(),
+                    env_keys: vec![],
+                    env_encrypted: String::new(),
+                    args_override: None,
+                    is_global: true,
+                    include_general: false,
+                    config_hash: "hash".into(),
+                    project_ids: vec![],
+                    host_sync: kronn::models::HostSyncMode::None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["can_import"], true,
+        "a missing instance-bound requirement must not block the import: {preview}"
+    );
+    let warnings = preview["data"]["warnings"].as_array().unwrap();
+    for (kind, id) in [
+        ("skill", "custom-does-not-exist"),
+        ("profile", "does-not-exist-profile"),
+        ("directive", "does-not-exist-directive"),
+    ] {
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w["kind"] == kind && w["id"] == id),
+            "missing {kind} {id} must be signalled clearly: {warnings:?}"
+        );
+    }
+    let (_, imported) = post_json(
+        app,
+        "/api/pages/import",
+        serde_json::json!({
+            "content":content,"approved_quick_exec_ids":["qe-portable"],
+            "preview_digest":preview["data"]["digest"]
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    state
+        .db
+        .with_conn(|conn| {
+            let workflows = kronn::db::workflows::list_workflows(conn)?;
+            let copy = workflows
+                .iter()
+                .find(|w| w.id != "workflow-portable")
+                .unwrap();
+            let step = &copy.steps[0];
+            assert_eq!(
+                step.skill_ids,
+                vec!["rust".to_string()],
+                "the resolvable skill is kept, the dangling one is dropped, not silently kept"
+            );
+            assert_eq!(step.profile_ids, vec!["architect".to_string()]);
+            assert_eq!(step.directive_ids, vec!["token-saver".to_string()]);
+            let apis = kronn::db::quick_apis::list_quick_apis(conn)?;
+            let copied_api = apis.iter().find(|a| a.id != "qa-portable").unwrap();
+            assert_eq!(
+                copied_api.api_config_id, "local-chartbeat-config",
+                "a dangling api_config_id must be rebound to the local config for the same plugin"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

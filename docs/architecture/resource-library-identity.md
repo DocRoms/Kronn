@@ -70,3 +70,9 @@ should close this gap if native-only agents need the same guarantee.
 The ad-hoc "Test step" preview endpoint (`api/workflows.rs`, no persisted
 `WorkflowRun`) passes `None` — each preview call should see current disk
 content, not a stale pin from an earlier unrelated call.
+
+See also [resource-identity-table](resource-identity-table.md) (ADR-005
+slice 3): the `(project, kind, slug) -> id` table that generalises this
+slice's `custom-<slug>` id scheme to Workflow, Quick Prompt, Quick Api and
+Quick Exec, and the symbolic references (`skill:<slug>`, …) that resolve
+against both.
