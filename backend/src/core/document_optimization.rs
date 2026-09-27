@@ -338,6 +338,7 @@ fn inspect_docs(
         let rel = relative(project, path);
         if rel != "docs/AGENTS.md"
             && !rel.starts_with("docs/tech-debt/")
+            && !rel.starts_with("docs/reports/")
             && !linked.contains(&normalize(path))
         {
             out.push(diag(
@@ -941,7 +942,10 @@ mod tests {
         );
         let report = analyze(tmp.path()).unwrap();
         assert!(
-            !report.diagnostics.iter().any(|d| d.code == "agents_md_budget"),
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "agents_md_budget"),
             "{:#?}",
             report.diagnostics
         );
@@ -955,8 +959,27 @@ mod tests {
         let tmp = skeleton_project();
         let docs = markdown_files(&tmp.path().join("docs")).unwrap();
         assert!(
-            !docs.iter().any(|p| p.file_name().and_then(|n| n.to_str()) == Some("TEMPLATE.md")),
+            !docs
+                .iter()
+                .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("TEMPLATE.md")),
             "{docs:?}"
+        );
+    }
+
+    #[test]
+    fn dated_reports_are_excluded_from_routing_diagnostics() {
+        let tmp = skeleton_project();
+        write(
+            &tmp.path().join("docs/reports/2026-09-27-audit-note.md"),
+            "# Audit note\n\nPoint-in-time result.\n",
+        );
+        let report = analyze(tmp.path()).unwrap();
+        assert!(
+            !report.diagnostics.iter().any(|d| {
+                d.code == "orphan_document" && d.path == "docs/reports/2026-09-27-audit-note.md"
+            }),
+            "dated reports are intentionally outside T0-T2 routing: {:#?}",
+            report.diagnostics
         );
     }
 

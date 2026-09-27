@@ -52,7 +52,7 @@ pub enum AntiHalluApplyResult {
 }
 
 /// The opening marker fragment we search for. We match on the prefix so any
-/// `curated=` / `audit=` attributes after the name don't break detection.
+/// ownership / provenance attributes after the name don't break detection.
 const OPEN_MARKER_PREFIX: &str = "<!-- kronn:section name=\"anti-hallu\"";
 
 /// Prefix of the spec-pointer marker line. Detected to avoid re-inserting it.
@@ -66,14 +66,16 @@ const SPEC_HEADER: &str = "\
 <!-- kronn:doc-version=\"1.0\" -->\n\
 <!-- kronn:spec=\"https://github.com/DocRoms/Kronn/blob/main/docs/conventions/agents-md-format-v1.md\" local=\"docs/conventions/agents-md-format-v1.md\" -->\n\
 <!-- This file follows the Kronn AGENTS.md convention v1. Sections marked\n\
-     curated=\"ai\" carry [src: …] provenance per assertion. Any agent — with\n\
-     or without Kronn — can read the spec at the URL above to understand the\n\
-     markers and the [src:] citation grammar. -->";
+     curated=\"ai\" carry [src: …] provenance per assertion. Template v2 adds\n\
+     owner=\"audit\" / owner=\"human\"; human-owned sections are never rewritten\n\
+     by an audit. Legacy curated=\"human\" sections receive the same protection. -->";
 
 /// Canonical opening marker — written with the date filled in.
 fn opening_marker_for_today() -> String {
     let today = Utc::now().format("%Y-%m-%d").to_string();
-    format!("<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"{today}\" -->")
+    format!(
+        "<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" owner=\"audit\" audit=\"{today}\" -->"
+    )
 }
 
 /// The full canonical block (open marker + body + close marker), with today's
@@ -330,7 +332,7 @@ mod tests {
         // header gets prepended → Refreshed (see next test).
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let input = format!(
-            "{SPEC_HEADER}\n\n# Header\n\n<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"{today}\" -->\nBODY\n<!-- kronn:section:end -->\n"
+            "{SPEC_HEADER}\n\n# Header\n\n<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" owner=\"audit\" audit=\"{today}\" -->\nBODY\n<!-- kronn:section:end -->\n"
         );
         let (out, result) = transform(&input);
         assert_eq!(result, AntiHalluApplyResult::NoOp);

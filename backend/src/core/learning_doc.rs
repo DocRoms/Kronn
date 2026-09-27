@@ -1,6 +1,6 @@
 //! 0.10.0 — Continual Learning doc-wiring (PR4c, spec §0).
 //!
-//! Maintains a `<!-- kronn:section name="learnings" curated="ai" -->` block in
+//! Maintains an audit-owned `<!-- kronn:section name="learnings" ... -->` block in
 //! `docs/AGENTS.md` that POINTS at `docs/learnings.md` — so agents reading the
 //! tiered loader actually discover the accumulated project learnings (verified:
 //! Kronn doesn't auto-inject the `docs/` tree; only `~/.kronn/user-context/*.md`
@@ -45,7 +45,7 @@ pub enum LearningDocOutcome {
 
 fn pointer_block() -> String {
     format!(
-        "<!-- kronn:section name=\"learnings\" curated=\"ai\" -->\n\
+        "<!-- kronn:section name=\"learnings\" curated=\"ai\" owner=\"audit\" -->\n\
 ## Learned conventions\n\
 \n\
 Validated learnings accumulate in [`docs/learnings.md`](learnings.md). Load it \

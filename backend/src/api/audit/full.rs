@@ -1062,6 +1062,31 @@ pub async fn full_audit(
                     continue;
                 }
             };
+            // Snapshot the full human-owned surface, not just target_file:
+            // Step 9 and future review prompts may legitimately edit several
+            // docs during one attempt.
+            let human_owned_snapshot =
+                match super::helpers::capture_human_owned_sections(&project_path) {
+                    Ok(snapshot) => snapshot,
+                    Err(reason) => {
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step, "file": file_label,
+                                "reason": reason, "repaired_from_template": false,
+                            }).to_string()
+                        );
+                        yield Event::default().event("step_done").data(
+                            serde_json::json!({
+                                "step": step, "success": false, "file": file_label,
+                                "tokens": 0, "duration_ms": 0,
+                                "total_tokens": total_tokens_so_far,
+                            }).to_string()
+                        );
+                        any_step_warning = true;
+                        warned_steps.push(step as u32);
+                        continue;
+                    }
+                };
 
             // 0.8.8 PR-A — enforce-mode per-step retry loop. `off`/`warn` run a
             // single attempt (`max_attempts == 1`) with the gate inert, so the
@@ -1272,6 +1297,37 @@ pub async fn full_audit(
                         }
                     }
 
+                    // Ownership is enforced at the attempt boundary, before
+                    // cancellation, retry, or failure can leave an agent's
+                    // rewrite on disk. A report failure also fails the step:
+                    // the human text is restored, but the promised proposal
+                    // was not durably recorded.
+                    let ownership_warning = match super::helpers::protect_human_owned_sections(
+                        &project_path,
+                        &human_owned_snapshot,
+                        &today,
+                    ) {
+                        Ok(_) => None,
+                        Err(reason) => {
+                            let reason = format!(
+                                "human-owned section protection failed for {file_label}: {reason}"
+                            );
+                            tracing::warn!("Audit step {} ({}): {}", step, file_label, reason);
+                            yield Event::default().event("step_warning").data(
+                                serde_json::json!({
+                                    "step": step,
+                                    "file": file_label,
+                                    "reason": reason.clone(),
+                                    "repaired_from_template": false,
+                                }).to_string()
+                            );
+                            Some(crate::api::audit::validation::StepValidationWarning {
+                                reason,
+                                repaired: false,
+                            })
+                        }
+                    };
+
                     // Check if cancelled during this step. Must finalize
                     // exactly like the pre-step branch: persist `Cancelled`
                     // and disarm the drop-guard. Without this the guard's Drop
@@ -1324,6 +1380,11 @@ pub async fn full_audit(
                         &project_path,
                         analysis_step.target_file,
                     );
+
+                    if let Some(ownership_warning) = ownership_warning {
+                        success = false;
+                        warning = Some(ownership_warning);
+                    }
 
                     if let Some(w) = &warning {
                         tracing::warn!(
@@ -1473,18 +1534,16 @@ pub async fn full_audit(
                                 });
                             }
                             RewriteProofVerdict::Proven => {
+                                let target_path = project_path.join(analysis_step.target_file);
                                 // Substantial rewrite PROVEN — only now may we
                                 // stamp the curated audit dates (mirrors
                                 // drift.rs: stamping an unproven rewrite would
                                 // mask a no-op step as freshly audited).
                                 if enforce_mode {
-                                    if let Ok(written) = std::fs::read_to_string(
-                                        project_path.join(analysis_step.target_file),
-                                    ) {
+                                    if let Ok(written) = std::fs::read_to_string(&target_path) {
                                         if let Some(stamped) =
                                             super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
                                         {
-                                            let target_path = project_path.join(analysis_step.target_file);
                                             if let Err(e) = std::fs::write(&target_path, &stamped) {
                                                 tracing::warn!(
                                                     "Audit step {} ({}): failed to stamp audit dates: {}",
@@ -3356,7 +3415,13 @@ mod resume_resolution_tests {
         // every other index — even though 4 and 5 are AFTER the warning,
         // unlike the old contiguous `<= last_completed_step` checkpoint that
         // used to freeze at 2 and replay 3..=5 wholesale.
-        let steps = vec![step(1, true), step(2, true), step(3, false), step(4, true), step(5, true)];
+        let steps = vec![
+            step(1, true),
+            step(2, true),
+            step(3, false),
+            step(4, true),
+            step(5, true),
+        ];
         let already = already_succeeded_step_indices(&steps);
         assert!(already.contains(&1) && already.contains(&2));
         assert!(already.contains(&4) && already.contains(&5), "{already:?}");
@@ -3371,7 +3436,10 @@ mod resume_resolution_tests {
         let steps = vec![step(1, true)];
         let already = already_succeeded_step_indices(&steps);
         assert!(already.contains(&1));
-        assert!(!already.contains(&2), "an unattempted step is not in the set");
+        assert!(
+            !already.contains(&2),
+            "an unattempted step is not in the set"
+        );
     }
 }
 
@@ -3422,7 +3490,9 @@ mod rewrite_proof_tests {
         let post = Err("target unreadable for rewrite proof: permission denied".to_string());
         assert_eq!(
             rewrite_proof_verdict("docs/AGENTS.md", &pre, post),
-            RewriteProofVerdict::Unreadable("target unreadable for rewrite proof: permission denied".into())
+            RewriteProofVerdict::Unreadable(
+                "target unreadable for rewrite proof: permission denied".into()
+            )
         );
     }
 
