@@ -64,7 +64,8 @@ pub async fn create(
     }
 }
 
-/// PUT /api/profiles/:id — update a custom profile
+/// PUT /api/profiles/:id — update a custom profile in place. The id never
+/// changes, even when the profile is renamed.
 pub async fn update(
     Path(id): Path<String>,
     _state: State<AppState>,
@@ -73,8 +74,6 @@ pub async fn update(
     if !id.starts_with("custom-") {
         return Json(ApiResponse::err("Cannot modify builtin profiles"));
     }
-
-    let _ = profiles::delete_custom_profile(&id);
 
     let data = profiles::CustomProfileData {
         name: &req.name,
@@ -86,8 +85,8 @@ pub async fn update(
         persona_prompt: &req.persona_prompt,
         default_engine: req.default_engine.as_deref(),
     };
-    match profiles::save_custom_profile(&data) {
-        Ok(new_id) => match profiles::get_profile(&new_id) {
+    match profiles::update_custom_profile(&id, &data) {
+        Ok(updated_id) => match profiles::get_profile(&updated_id) {
             Some(profile) => Json(ApiResponse::ok(profile)),
             None => Json(ApiResponse::err("Profile updated but could not be loaded")),
         },

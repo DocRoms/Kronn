@@ -3044,6 +3044,9 @@ pub async fn test_step(
             Some(&ollama_context_overrides),
             native_tools,
             Some(&state.db),
+            // Ad-hoc "Test step" preview, no persisted `WorkflowRun` to pin
+            // resources to — always resolve skills/directives/profiles fresh.
+            None,
         )
         .await;
 

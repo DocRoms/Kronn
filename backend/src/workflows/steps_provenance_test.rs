@@ -81,6 +81,7 @@ async fn run(step: &WorkflowStep, replies: Vec<(u16, serde_json::Value)>) -> Ste
         None,
         None,
         None,
+        Some("test-run"),
     )
     .await
     .result;
@@ -460,6 +461,7 @@ async fn a_claude_code_step_reports_its_cache_reads_and_writes() {
         None,
         None,
         None,
+        Some("test-run"),
     )
     .await
     .result;

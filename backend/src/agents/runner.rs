@@ -2621,6 +2621,14 @@ pub struct AgentStartConfig<'a> {
     /// vendor-native JSON-RPC transport in `start_native_acp`.
     #[cfg(test)]
     pub test_acp_transport: Option<std::sync::Arc<dyn crate::acp::AcpTransport>>,
+    /// ADR-005 slice 1 (KT-847) — when `Some`, skills/directives/profiles
+    /// are resolved through the run snapshot cache keyed by this id instead
+    /// of read fresh from disk: a resource edited or deleted while the run
+    /// is still executing doesn't change what this run already loaded.
+    /// Workflow runs pass their `WorkflowRun.id` here. `None` (the default)
+    /// preserves the previous always-fresh resolution — used by normal
+    /// discussions, benches and one-off spawns.
+    pub run_snapshot_id: Option<&'a str>,
 }
 
 impl<'a> AgentStartConfig<'a> {
@@ -2683,6 +2691,7 @@ impl<'a> AgentStartConfig<'a> {
             cancel_token: None,
             #[cfg(test)]
             test_acp_transport: None,
+            run_snapshot_id: None,
         }
     }
 }
@@ -3191,13 +3200,24 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let skills_prompt = if force_full_skill {
         // Compare judges cannot discover a skill through a tool, and compact
         // injection would omit the normative anchors after the first lines.
-        crate::core::skills::build_skills_prompt(config.skill_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids),
+            None => crate::core::skills::build_skills_prompt(config.skill_ids),
+        }
     } else if native_skills {
         crate::core::native_files::build_skills_reference_prompt(config.skill_ids)
     } else if compact {
-        crate::core::skills::build_skills_prompt_compact(config.skill_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_compact_for_run(run_id, config.skill_ids)
+            }
+            None => crate::core::skills::build_skills_prompt_compact(config.skill_ids),
+        }
     } else {
-        crate::core::skills::build_skills_prompt(config.skill_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids),
+            None => crate::core::skills::build_skills_prompt(config.skill_ids),
+        }
     };
 
     // 0.8.8 PR-B — enforce mode auto-attaches the `kronn-doc-author` cheat-sheet
@@ -3223,7 +3243,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     };
 
     // Build directives prompt (always injected — no native format)
-    let directives_prompt = crate::core::directives::build_directives_prompt(config.directive_ids);
+    let directives_prompt = match config.run_snapshot_id {
+        Some(run_id) => {
+            crate::core::directives::build_directives_prompt_for_run(run_id, config.directive_ids)
+        }
+        None => crate::core::directives::build_directives_prompt(config.directive_ids),
+    };
 
     // Build profiles prompt.
     //
@@ -3244,9 +3269,19 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         // `.claude/agents/<id>.md` on disk; the compact injection here is
         // a token-saving fallback in case the agent's one-shot mode
         // doesn't auto-pick the file up (which was the EW-7189 failure).
-        crate::core::profiles::build_profiles_prompt_compact(config.profile_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => {
+                crate::core::profiles::build_profiles_prompt_compact_for_run(run_id, config.profile_ids)
+            }
+            None => crate::core::profiles::build_profiles_prompt_compact(config.profile_ids),
+        }
     } else {
-        crate::core::profiles::build_profiles_prompt(config.profile_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => {
+                crate::core::profiles::build_profiles_prompt_for_run(run_id, config.profile_ids)
+            }
+            None => crate::core::profiles::build_profiles_prompt(config.profile_ids),
+        }
     };
 
     // A prelocalized HTTP worker is not a smaller general-purpose agent. Its

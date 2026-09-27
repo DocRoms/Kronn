@@ -621,6 +621,13 @@ async fn execute_run_with_notify_policy(
     let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, run.id.clone());
     let cancel_token = cancel_guard.token.clone();
 
+    // ADR-005 slice 1 (KT-847) — skills/directives/profiles this run
+    // resolves stay pinned to what it first loaded for the whole call
+    // (steps executed in immediate sequence, incl. repair/escalation/debate
+    // attempts). Released automatically when this call returns, whether by
+    // completion, a Gate pause, an error or cancellation.
+    let _resource_snapshot_guard = crate::core::resource_snapshot::RunSnapshotGuard::new(run.id.clone());
+
     // Update run status to Running. `false` = the Cancelled-stickiness guard
     // blocked the write: the user cancelled in the window between our caller
     // claiming the run (insert / gate-resume claim) and this line. Without
@@ -1736,6 +1743,7 @@ async fn execute_run_with_notify_policy(
                             Some(&ollama_context_overrides),
                             native_tools,
                             Some(&state.db),
+                            Some(&run.id),
                         )
                         .await;
                         // execute_step took ownership of progress_tx and dropped
@@ -2756,6 +2764,7 @@ async fn execute_run_with_notify_policy(
                         Some(&ollama_context_overrides),
                         native_tools,
                         Some(&state.db),
+                        Some(&run.id),
                     )
                     .await
                 }

@@ -38,7 +38,8 @@ pub async fn create(
     }
 }
 
-/// PUT /api/directives/:id — update a custom directive
+/// PUT /api/directives/:id — update a custom directive in place. The id
+/// never changes, even when the directive is renamed.
 pub async fn update(
     Path(id): Path<String>,
     _state: State<AppState>,
@@ -48,9 +49,8 @@ pub async fn update(
         return Json(ApiResponse::err("Cannot modify builtin directives"));
     }
 
-    let _ = directives::delete_custom_directive(&id);
-
-    match directives::save_custom_directive(
+    match directives::update_custom_directive(
+        &id,
         &req.name,
         &req.description,
         &req.icon,
@@ -58,7 +58,7 @@ pub async fn update(
         &req.content,
         &req.conflicts,
     ) {
-        Ok(new_id) => match directives::get_directive(&new_id) {
+        Ok(updated_id) => match directives::get_directive(&updated_id) {
             Some(directive) => Json(ApiResponse::ok(directive)),
             None => Json(ApiResponse::err(
                 "Directive updated but could not be loaded",

@@ -173,6 +173,13 @@ pub async fn execute_step(
     ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     catalog_db: Option<&crate::db::Database>,
+    // ADR-005 slice 1 (KT-847) — `Some(WorkflowRun.id)` pins the
+    // skills/directives/profiles every agent spawn in this call resolves,
+    // so a later step of the SAME run isn't affected by an edit or
+    // deletion made mid-run (see `RunSnapshotCache`). `None` for ad-hoc,
+    // non-persisted invocations (e.g. the workflow "Test step" preview),
+    // which keep the previous always-fresh resolution.
+    run_id: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -406,6 +413,7 @@ pub async fn execute_step(
             &mut provenance,
             WorkflowAgentAttemptRole::Initial,
             attempt + 1,
+            run_id,
         )
         .await
         {
@@ -503,6 +511,7 @@ pub async fn execute_step(
                             &mut provenance,
                             WorkflowAgentAttemptRole::Repair,
                             attempt + 1,
+                            run_id,
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -605,6 +614,7 @@ pub async fn execute_step(
                                 &mut provenance,
                                 WorkflowAgentAttemptRole::Escalation,
                                 attempt + 1,
+                                run_id,
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -714,6 +724,7 @@ pub async fn execute_step(
                         catalog_db,
                         &mut provenance,
                         attempt + 1,
+                        run_id,
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls, selected_attempt)) => {
                             total_tokens = add_tokens(total_tokens, debate_tokens);
@@ -1093,6 +1104,8 @@ async fn run_agent_with_timeout(
     provenance: &mut WorkflowAgentProvenance,
     role: WorkflowAgentAttemptRole,
     retry: u32,
+    // See `execute_step`'s `run_id` doc — forwarded unchanged.
+    run_id: Option<&str>,
 ) -> Result<AgentOutput> {
     let started_at = chrono::Utc::now();
     let started = Instant::now();
@@ -1151,6 +1164,7 @@ async fn run_agent_with_timeout(
             // shared by every OpenAI-compatible connection, so without this the
             // runner refuses the spawn outright.
             external_http,
+            run_snapshot_id: run_id,
             tools: native_tools,
             ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
         })
@@ -1523,6 +1537,8 @@ async fn run_multi_agent_debate(
     catalog_db: Option<&crate::db::Database>,
     provenance: &mut WorkflowAgentProvenance,
     retry: u32,
+    // See `execute_step`'s `run_id` doc — forwarded unchanged.
+    run_id: Option<&str>,
 ) -> Result<(String, Option<u64>, Vec<NativeToolCallLog>, Option<u32>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
@@ -1621,6 +1637,7 @@ async fn run_multi_agent_debate(
             provenance,
             WorkflowAgentAttemptRole::Review,
             retry,
+            run_id,
         )
         .await?;
         tokens = add_tokens(tokens, rev.tokens_used);
@@ -1684,6 +1701,7 @@ async fn run_multi_agent_debate(
             provenance,
             WorkflowAgentAttemptRole::Author,
             retry,
+            run_id,
         )
         .await?;
         tokens = add_tokens(tokens, auth.tokens_used);
@@ -3021,6 +3039,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            Some("test-run"),
         )
         .await;
 
@@ -3077,6 +3096,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            Some("test-run"),
         )
         .await;
 
@@ -3130,6 +3150,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            Some("test-run"),
         )
         .await;
 
@@ -3181,6 +3202,7 @@ mod http_native_tool_step_tests {
             None,
             None,
             Some(&db),
+            Some("test-run"),
         )
         .await;
 
@@ -3261,6 +3283,7 @@ mod http_native_tool_step_tests {
             None,
             Some(tools),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3351,6 +3374,7 @@ mod http_native_tool_step_tests {
             Some(&overrides),
             Some(tools),
             None,
+            Some("test-run"),
         )
         .await;
         match previous_host {

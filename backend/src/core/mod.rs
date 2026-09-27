@@ -47,6 +47,7 @@ pub mod quick_exec_templates;
 pub mod recovery;
 pub mod redact;
 pub mod registry;
+pub mod resource_snapshot;
 pub mod resume_bundle;
 pub mod review_payload;
 pub mod root_agent_files;
