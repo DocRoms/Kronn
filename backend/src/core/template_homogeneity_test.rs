@@ -75,21 +75,29 @@ mod tests {
         let base = templates_dir();
 
         /// Strings that every instruction file must contain (after stripping
-        /// frontmatter). Updated for the 0.7.1 pivot from `ai/` to `docs/`:
-        /// redirectors are now short stubs pointing at `docs/AGENTS.md` —
-        /// the per-file pointers (`repo-map.md`, `coding-rules.md`) live
-        /// inside `docs/AGENTS.md` itself, not duplicated in every redirector.
+        /// frontmatter). KT-841 — redirectors are now a PURE pointer to
+        /// `docs/AGENTS.md`: the project header stays (name/stack/language),
+        /// but there is no local "## Critical rules" section any more —
+        /// that content lives ONLY in `docs/AGENTS.md` (single source of
+        /// truth), reached via `## More context`.
         const REQUIRED: &[&str] = &[
             "{{PROJECT_NAME}}",
             "{{STACK_SUMMARY}}",
             "{{PROJECT_LANGUAGE}}",
+            "## More context",
+            "docs/AGENTS.md",
+        ];
+
+        /// KT-841 — strings that must NEVER reappear in a redirector: they
+        /// were the "two sources of truth" bug (DO_NOT_1/2 + a local
+        /// critical-rules section duplicating `docs/AGENTS.md`).
+        const FORBIDDEN: &[&str] = &[
             "## Critical rules",
             "{{DO_NOT_1}}",
             "{{DO_NOT_2}}",
             "DO NOT guess",
             "DO NOT edit auto-generated",
             "DO NOT skip tests",
-            "docs/AGENTS.md",
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -113,23 +121,39 @@ mod tests {
                     ));
                 }
             }
+            for &forbidden in FORBIDDEN {
+                if content.contains(forbidden) {
+                    failures.push(format!(
+                        "{}: must NOT duplicate {:?} — that rule lives only in docs/AGENTS.md",
+                        relative_path, forbidden
+                    ));
+                }
+            }
         }
 
         assert!(
             failures.is_empty(),
-            "Instruction template files are missing required content:\n{}",
+            "Instruction template files violate the pure-redirect contract:\n{}",
             failures.join("\n")
         );
     }
 
-    // ─── Test 3: DO NOT rules order — project-specific rules come first ───────
+    // ─── Test 3: no DO NOT rule is duplicated in a redirector ─────────────────
 
     #[test]
     fn do_not_project_rules_appear_before_generic_rules() {
+        // KT-841 — redirectors used to carry BOTH `{{DO_NOT_1}}`/`{{DO_NOT_2}}`
+        // (project-specific) and a fixed set of generic "DO NOT" bullets,
+        // ordered so the project-specific ones came first. The pure-redirect
+        // contract removed ALL of them from every adapter file — those rules
+        // now live exclusively in `docs/AGENTS.md`. This test now asserts
+        // that absence directly, instead of an ordering that no longer
+        // applies (there is nothing left to order).
         let base = templates_dir();
 
-        /// Generic DO NOT patterns that must appear AFTER `{{DO_NOT_1}}` and `{{DO_NOT_2}}`.
-        const GENERIC_DO_NOT: &[&str] = &[
+        const DO_NOT_MARKERS: &[&str] = &[
+            "{{DO_NOT_1}}",
+            "{{DO_NOT_2}}",
             "DO NOT guess",
             "DO NOT edit auto-generated",
             "DO NOT skip tests",
@@ -148,35 +172,20 @@ mod tests {
             };
             let content = strip_frontmatter(&raw);
 
-            // Find the position of the last project-specific placeholder.
-            let pos_do_not_1 = content.find("{{DO_NOT_1}}");
-            let pos_do_not_2 = content.find("{{DO_NOT_2}}");
-
-            let project_rules_end = match (pos_do_not_1, pos_do_not_2) {
-                (Some(p1), Some(p2)) => p1.max(p2),
-                (Some(p), None) | (None, Some(p)) => p,
-                (None, None) => {
-                    // Already caught by Test 2; skip here to avoid double-reporting.
-                    continue;
-                }
-            };
-
-            for &generic in GENERIC_DO_NOT {
-                if let Some(pos_generic) = content.find(generic) {
-                    if pos_generic < project_rules_end {
-                        failures.push(format!(
-                            "{}: {:?} appears at byte {} which is BEFORE the last project-specific \
-                             placeholder ({{{{DO_NOT_1}}}}/{{{{DO_NOT_2}}}}) at byte {}",
-                            relative_path, generic, pos_generic, project_rules_end
-                        ));
-                    }
+            for &marker in DO_NOT_MARKERS {
+                if content.contains(marker) {
+                    failures.push(format!(
+                        "{}: still carries a DO NOT rule ({:?}) — must be redirect-only, \
+                         the rule belongs in docs/AGENTS.md",
+                        relative_path, marker
+                    ));
                 }
             }
         }
 
         assert!(
             failures.is_empty(),
-            "Project-specific DO NOT rules must appear before generic rules:\n{}",
+            "Redirector files must carry NO DO NOT rule of their own:\n{}",
             failures.join("\n")
         );
     }
@@ -237,12 +246,40 @@ mod tests {
         );
     }
 
-    // ─── Test 5: Quick Facts block present in all files ──────────────────────
+    // ─── Test 5: no Quick Facts block is duplicated, redirect line is homogeneous ──
 
     #[test]
     fn all_instruction_files_contain_quick_facts_block() {
+        // KT-841 — inverted contract: the `<!-- KRONN:FACTS -->` block
+        // (Test:/Lint: commands) used to be copy-rendered into every
+        // adapter file from filesystem heuristics, independently of
+        // `docs/AGENTS.md` (the audit-verified source) — two sources of
+        // truth that could silently drift apart (the historical `Lint:
+        // phpcs` false positive). Every redirector must now be free of it,
+        // AND the redirect sentence itself must be IDENTICAL across every
+        // adapter (homogeneity) so there is exactly one place a human reads
+        // to know where the real facts live.
         let base = templates_dir();
         let mut failures: Vec<String> = Vec::new();
+
+        const FACTS_MARKERS: &[&str] = &[
+            "<!-- KRONN:FACTS",
+            "<!-- END KRONN:FACTS -->",
+            "{{TEST_CMD}}",
+            "{{LINT_CMD}}",
+        ];
+
+        /// First line right after `## More context` — the actual redirect
+        /// sentence. AGENTS.md (the always-installed shared entry point)
+        /// legitimately carries one extra follow-up line the vendor
+        /// adapters don't, so only this first line is compared for
+        /// homogeneity, not the whole section.
+        fn redirect_sentence(content: &str) -> Option<&str> {
+            let (_, after) = content.split_once("## More context")?;
+            after.trim_start_matches('\n').lines().next()
+        }
+
+        let mut reference: Option<(&str, String)> = None;
 
         for &relative_path in INSTRUCTION_FILES {
             let full_path = base.join(relative_path);
@@ -252,32 +289,37 @@ mod tests {
             };
             let content = strip_frontmatter(&raw);
 
-            if !content.contains("<!-- KRONN:FACTS") {
-                failures.push(format!("{}: missing <!-- KRONN:FACTS block", relative_path));
+            for &marker in FACTS_MARKERS {
+                if content.contains(marker) {
+                    failures.push(format!(
+                        "{}: must NOT duplicate the Quick Facts block ({:?}) — \
+                         docs/AGENTS.md is the single source of truth for test/lint commands",
+                        relative_path, marker
+                    ));
+                }
             }
-            if !content.contains("<!-- END KRONN:FACTS -->") {
-                failures.push(format!(
-                    "{}: missing <!-- END KRONN:FACTS --> closing",
+
+            match redirect_sentence(content).map(str::to_string) {
+                None => failures.push(format!(
+                    "{}: missing a redirect sentence under '## More context'",
                     relative_path
-                ));
-            }
-            if !content.contains("{{TEST_CMD}}") {
-                failures.push(format!(
-                    "{}: missing {{{{TEST_CMD}}}} placeholder",
-                    relative_path
-                ));
-            }
-            if !content.contains("{{LINT_CMD}}") {
-                failures.push(format!(
-                    "{}: missing {{{{LINT_CMD}}}} placeholder",
-                    relative_path
-                ));
+                )),
+                Some(sentence) => match &reference {
+                    None => reference = Some((relative_path, sentence)),
+                    Some((ref_file, ref_sentence)) if *ref_sentence != sentence => {
+                        failures.push(format!(
+                            "{}: redirect sentence differs from {} (reference)\n  {}: {:?}\n  {}: {:?}",
+                            relative_path, ref_file, ref_file, ref_sentence, relative_path, sentence
+                        ));
+                    }
+                    Some(_) => {}
+                },
             }
         }
 
         assert!(
             failures.is_empty(),
-            "Quick Facts block issues:\n{}",
+            "Redirector files violate the pure-redirect / no-duplicate-facts contract:\n{}",
             failures.join("\n")
         );
     }
