@@ -12,12 +12,13 @@ import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussion
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
+import { discussionMosaicUrl, MAX_MOSAIC_DISCUSSIONS } from '../lib/discussion-mosaic-navigation';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search,
   Filter, Users2, Trash2, CheckCheck, Columns3, ListChecks, LogIn,
-  Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown,
+  Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown, LayoutGrid,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -835,6 +836,19 @@ export function DiscussionSidebar({
         <div className="disc-sidebar-header-actions">
           {selectionMode ? (
             <>
+              {selectedIds.size >= 2 && selectedIds.size <= MAX_MOSAIC_DISCUSSIONS && !bulkActionBusy ? (
+                <a className="disc-icon-btn" href={discussionMosaicUrl([...selectedIds])}
+                  target="_blank" rel="noopener noreferrer"
+                  aria-label={t('disc.mosaic.open')} title={t('disc.mosaic.open')}>
+                  <LayoutGrid size={14} />
+                </a>
+              ) : (
+                <button type="button" className="disc-icon-btn" disabled
+                  aria-label={t('disc.mosaic.open')}
+                  title={t('disc.mosaic.selection', MAX_MOSAIC_DISCUSSIONS)}>
+                  <LayoutGrid size={14} />
+                </button>
+              )}
               <button
                 type="button"
                 className="disc-icon-btn"

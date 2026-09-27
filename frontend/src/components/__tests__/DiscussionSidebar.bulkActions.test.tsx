@@ -118,6 +118,35 @@ describe('DiscussionSidebar — bulk selection', () => {
     expect(screen.queryByText('disc.bulk.selected:2')).not.toBeInTheDocument();
   });
 
+  it('opens the selected mosaic in a separate tab without clearing selection or launching a comparison', () => {
+    const props = makeProps();
+    render(<DiscussionSidebar {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    expect(screen.getByRole('button', { name: 'disc.mosaic.open' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
+    expect(screen.getByRole('button', { name: 'disc.mosaic.open' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-b/ }));
+    const link = screen.getByRole('link', { name: 'disc.mosaic.open' });
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(link.getAttribute('href')).toContain('#discussions/mosaic?discussion=disc-a&discussion=disc-b&layout=auto');
+    link.addEventListener('click', event => event.preventDefault());
+    fireEvent.click(link);
+    expect(screen.getByText('disc.bulk.selected:2')).toBeInTheDocument();
+    expect(props.onCompareSelected).not.toHaveBeenCalled();
+    expect(props.onSelect).not.toHaveBeenCalled();
+  });
+
+  it('disables mosaic selection above twelve discussions', () => {
+    render(<DiscussionSidebar {...makeProps()} discussions={Array.from({ length: 13 }, (_, i) => makeDiscussion(`d-${i}`))} />);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    for (let i = 0; i < 13; i++) fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`Discussion d-${i}(?:$| )`) }));
+    expect(screen.getByRole('button', { name: 'disc.mosaic.open' })).toBeDisabled();
+    expect(screen.queryByRole('link', { name: 'disc.mosaic.open' })).toBeNull();
+  });
+
   it('selects rows without opening them and archives the selection after one confirmation', async () => {
     const props = makeProps();
     const confirmStub = vi.fn(() => true);

@@ -124,9 +124,9 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     await act(async () => { projectsTab?.click(); });
     expect(projectsTab).toHaveAttribute('aria-current', 'page');
   });
-  it('reveals Pages only after the first Page has activated the capability', async () => {
+  it('reveals Artifacts only after the first Artifact has activated the capability', async () => {
     await renderDashboard();
-    expect(screen.queryByRole('button', { name: 'Pages' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Artifacts' })).not.toBeInTheDocument();
     cleanup();
 
     vi.mocked(pagesApi.capability).mockResolvedValue({
@@ -135,7 +135,7 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     });
     await renderDashboard();
 
-    const button = await screen.findByRole('button', { name: 'Pages' });
+    const button = await screen.findByRole('button', { name: 'Artifacts' });
     const navOrder = Array.from(
       document.querySelectorAll<HTMLButtonElement>('.dash-nav-tabs [data-tour-id^="nav-"]'),
       item => item.dataset.tourId,
@@ -153,18 +153,18 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     expect(await screen.findByTestId('pages-page')).toBeInTheDocument();
   });
 
-  it('reveals Pages immediately when a workflow import activates the capability', async () => {
+  it('reveals Artifacts immediately when a workflow import activates the capability', async () => {
     vi.mocked(pagesApi.capability)
       .mockResolvedValueOnce({ activated: false, activated_at: null })
       .mockResolvedValueOnce({ activated: true, activated_at: '2026-08-26T16:00:00Z' });
     await renderDashboard();
-    expect(screen.queryByRole('button', { name: 'Pages' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Artifacts' })).not.toBeInTheDocument();
 
     await act(async () => {
       window.dispatchEvent(new Event('kronn:pages-activated'));
     });
 
-    const pagesButton = await screen.findByRole('button', { name: 'Pages' });
+    const pagesButton = await screen.findByRole('button', { name: 'Artifacts' });
     expect(pagesApi.capability).toHaveBeenCalledTimes(2);
     pagesButton.click();
     expect(await screen.findByTestId('pages-page')).toBeInTheDocument();

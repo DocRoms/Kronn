@@ -4,6 +4,7 @@ import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle } from 'lucide-react';
 import { AGENT_LABELS, agentTextColor } from '../../lib/constants';
+import { AgentProvenanceDetails, StepModelBadge } from './AgentProvenance';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import { CopyIdPill } from '../CopyIdPill';
 import {
@@ -1049,17 +1050,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       {AGENT_LABELS[sr.step_agent] ?? sr.step_agent}
                     </span>
                   )}
-                  {/* 2026-06-13 — the model/tier actually resolved for this step
-                      (backend-stamped), shown on EVERY agent step incl. per-item
-                      fan-out routing. Falls back to the step-def tier for runs
-                      recorded before step_model shipped. */}
-                  {sr.step_kind === 'Agent' && (() => {
-                    const fallback = workflowSteps?.find(ws => ws.name === sr.step_name)?.agent_settings;
-                    const label = sr.step_model || fallback?.model || fallback?.tier;
-                    return label ? (
-                      <span className="wf-tier-badge" title={t('wf.modelTierHint')}>{label}</span>
-                    ) : null;
-                  })()}
+                  {/* Backend-stamped at run time; an older run without it stays
+                      unknown rather than borrowing today's workflow config. */}
+                  <StepModelBadge sr={sr} t={t} />
                   <span className="text-ghost">
                     {sr.duration_ms > 0 ? `${(sr.duration_ms / 1000).toFixed(1)}s` : ''}
                   </span>
@@ -1086,6 +1079,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
 
                 {isExpanded && (
                   <div className="wf-step-output-full">
+                    <AgentProvenanceDetails sr={sr} t={t} />
                     {sr.native_tool_calls && sr.native_tool_calls.length > 0 && (
                       <div className="wf-native-tools" data-testid="wf-native-tools">
                         <span className="wf-native-tools-label">{t('wf.nativeTools')}</span>

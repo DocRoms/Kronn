@@ -14,6 +14,7 @@ import { isImageFile, isVideoFile, isTextAttachment, isPreviewableAttachment } f
 import { extractLastFrame, LastFrameError, lastFrameFilename } from '../lib/lastFrame';
 import { MediaPlayer } from './MediaPlayer';
 import { TextAttachmentPreview } from './TextAttachmentPreview';
+import { CopyAssetButton } from './CopyAssetButton';
 
 type T = (key: string, ...args: (string | number)[]) => string;
 const EMPTY_GENERATION_CONNECTIONS: ExternalApiConnectionView[] = [];
@@ -618,6 +619,12 @@ export function MessageAttachments({
               >
                 <ExternalLink size={17} />
               </a>}
+              <CopyAssetButton
+                key={selectedFile.id}
+                file={selectedFile}
+                kind={isTextAttachment(selectedFile) ? 'text' : isVideoFile(selectedFile) ? 'video' : 'image'}
+                t={t}
+              />
               {onExtracted && isVideoFile(selectedFile) && urls[selectedFile.id] && (
                 // Offered only once the bytes are here: without them there is
                 // nothing to decode, and the button would promise a frame it

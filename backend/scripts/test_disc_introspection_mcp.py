@@ -6463,6 +6463,109 @@ class WorkflowRunHistoryTests(unittest.TestCase):
         self.assertLess(len(s["output"]), 2000)
         self.assertIn("truncated", s["output"])
 
+    def test_workflow_run_get_exposes_step_model_and_provenance_fields(self):
+        run = {"id": "r", "step_results": [
+            {
+                "step_name": "step1",
+                "status": "Success",
+                "duration_ms": 10,
+                "tokens_used": 100,
+                "step_kind": "Agent",
+                "step_agent": "ClaudeCode",
+                "output": "hello",
+                "step_model": "qwen3.8:27b-mlx",
+                "step_api_plugin_slug": "mcp-github",
+                "step_api_endpoint_path": "/repos/owner/repo/issues",
+                "envelope_detected": True,
+                "child_run_id": "child-123",
+                "is_rollback": True,
+                "native_tool_calls": [{"name": "tool1", "ok": True}],
+            },
+            {
+                "step_name": "step2",
+                "status": "Success",
+                "duration_ms": 5,
+                "tokens_used": 0,
+                "step_kind": "ApiCall",
+                "step_agent": None,
+                "output": "world",
+                "step_model": None,
+                "step_api_plugin_slug": None,
+                "step_api_endpoint_path": None,
+                "envelope_detected": None,
+                "child_run_id": None,
+                "is_rollback": False,
+                "native_tool_calls": [],
+            }
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)):
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+
+        steps = out["step_results"]
+        self.assertEqual(len(steps), 2)
+
+        # Step 1: all fields present
+        s1 = steps[0]
+        self.assertEqual(s1["step_name"], "step1")
+        self.assertEqual(s1["status"], "Success")
+        self.assertEqual(s1["duration_ms"], 10)
+        self.assertEqual(s1["tokens_used"], 100)
+        self.assertEqual(s1["step_kind"], "Agent")
+        self.assertEqual(s1["step_agent"], "ClaudeCode")
+        self.assertEqual(s1["output"], "hello")
+        self.assertEqual(s1["step_model"], "qwen3.8:27b-mlx")
+        self.assertEqual(s1["step_api_plugin_slug"], "mcp-github")
+        self.assertEqual(s1["step_api_endpoint_path"], "/repos/owner/repo/issues")
+        self.assertEqual(s1["envelope_detected"], True)
+        self.assertEqual(s1["child_run_id"], "child-123")
+        self.assertEqual(s1["is_rollback"], True)
+        self.assertEqual(s1["native_tool_calls"], [{"name": "tool1", "ok": True}])
+
+        # Step 2: optional/null/empty fields omitted, but 7 historical keys present
+        s2 = steps[1]
+        self.assertEqual(s2["step_name"], "step2")
+        self.assertEqual(s2["status"], "Success")
+        self.assertEqual(s2["duration_ms"], 5)
+        self.assertEqual(s2["tokens_used"], 0)
+        self.assertEqual(s2["step_kind"], "ApiCall")
+        self.assertEqual(s2["step_agent"], None)
+        self.assertEqual(s2["output"], "world")
+
+        # Check that optional fields are NOT in s2
+        for field in ["step_model", "step_api_plugin_slug", "step_api_endpoint_path", "envelope_detected", "child_run_id", "is_rollback", "native_tool_calls"]:
+            self.assertNotIn(field, s2)
+
+    def test_workflow_run_get_keeps_captured_attempts_without_inventing_legacy_data(self):
+        provenance = {
+            "selected_attempt": None,
+            "attempts": [{
+                "id": 1, "role": "Initial", "retry": 1,
+                "agent": "Ollama", "tier": "Default", "connection_id": None,
+                "requested_model": "local-alias", "resolved_model": "local-alias",
+                "model_applied": True, "observed_models": [], "format_fallback": True,
+                "started_at": "2026-09-23T13:00:00Z", "duration_ms": 25, "succeeded": False,
+            }],
+        }
+        empty = {"selected_attempt": None, "attempts": []}
+        run = {"id": "r", "step_results": [
+            {"step_name": "failed", "status": "Failed", "output": "x" * 5000,
+             "agent_provenance": provenance},
+            {"step_name": "preflight", "agent_provenance": empty},
+            {"step_name": "legacy", "step_model": "historical-model"},
+            {"step_name": "null", "agent_provenance": None},
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)) as http:
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+        steps = out["step_results"]
+        self.assertEqual(steps[0]["agent_provenance"], provenance)
+        self.assertIn("truncated", steps[0]["output"])
+        self.assertEqual(steps[1]["agent_provenance"], empty)
+        self.assertEqual(steps[2]["step_model"], "historical-model")
+        self.assertNotIn("agent_provenance", steps[2])
+        self.assertNotIn("agent_provenance", steps[3])
+        http.assert_called_once_with("GET", "/api/workflows/wf/runs/r")
+        self.assertEqual(run["step_results"][0]["output"], "x" * 5000)
+
     def test_workflow_run_get_requires_both_ids(self):
         with self.assertRaises(RuntimeError):
             self.mod.call_workflow_run_get({"workflow_id": "wf"})
@@ -10804,8 +10907,94 @@ class WaitOutsideLlmLoopTests(unittest.TestCase):
             result = self.mod.call_disc_wait_for_peer({})
 
         self.assertIn("interrupted", result["hint"])
+        self.assertEqual(result["interrupted"], "new_request")
+        self.assertTrue(result["timed_out"], "additive: existing readers are unchanged")
         # The preempting request stays queued for the main loop, unconsumed.
         self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 12)
+        self.assertEqual(self.mod._WAIT_PREEMPTED["notice"]["listening"], False)
+        self.mod._WAIT_PREEMPTED["notice"] = None
+
+    def test_interruption_during_pacing_sleep_keeps_its_captured_reason(self):
+        def fake_wait_once(args):
+            self.now[0] += 60
+            return self._quiet(delay=30)
+
+        def queue_during_sleep(_seconds):
+            self.now[0] += 1
+            if self.mod._REQUEST_QUEUE.empty():
+                self.mod._REQUEST_QUEUE.put({"method": "tools/call", "id": 13,
+                                             "params": {"name": "disc_meta", "arguments": {}}})
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once), \
+             mock.patch.object(self.mod.time, "sleep", queue_during_sleep):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(result["interrupted"], "new_request")
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 13)
+        self.mod._WAIT_PREEMPTED["notice"] = None
+
+    def _call(self, rid, name, fn):
+        with mock.patch.dict(self.mod.DISPATCH, {name: fn}), \
+             mock.patch.object(self.mod, "_room_peek_for_tool_result", return_value=None):
+            return self.mod._handle({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                                     "params": {"name": name, "arguments": {}}})
+
+    def test_preempting_call_result_says_once_that_no_wait_is_armed(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        first = self._call(21, "disc_meta", lambda _args: {"id": "d"})
+        blocks = first["result"]["content"]
+        self.assertEqual(json.loads(blocks[0]["text"]), {"id": "d"}, "payload shape unchanged")
+        self.assertFalse(json.loads(blocks[1]["text"])["wait_preempted"]["listening"])
+
+        second = self._call(22, "disc_meta", lambda _args: {"id": "d"})
+        self.assertEqual(len(second["result"]["content"]), 1, "reported once")
+
+    def test_preemption_notice_rides_on_list_and_error_results_too(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        listed = self._call(23, "disc_list", lambda _args: [{"id": "a"}])
+        self.assertEqual(json.loads(listed["result"]["content"][0]["text"]), [{"id": "a"}])
+        self.assertIn("wait_preempted", listed["result"]["content"][1]["text"])
+
+        def boom(_args):
+            raise RuntimeError("backend down")
+
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        failed = self._call(24, "disc_meta", boom)
+        self.assertTrue(failed["result"]["isError"])
+        self.assertIn("wait_preempted", failed["result"]["content"][1]["text"])
+
+    def test_preemption_notice_survives_a_stale_bridge_after_dispatch(self):
+        def stale(_args):
+            raise self.mod.BridgeStaleError("catalogue changed")
+
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        with mock.patch.object(self.mod, "_schedule_bridge_reload",
+                               return_value={"status": "failed", "error": "simulated"}):
+            response = self._call(26, "disc_meta", stale)
+        blocks = response["result"]["content"]
+        self.assertEqual(json.loads(blocks[0]["text"])["error_code"], "bridge_stale")
+        self.assertIn("wait_preempted", blocks[1]["text"])
+        self.assertIsNone(self.mod._WAIT_PREEMPTED["notice"])
+
+    def test_stale_guard_before_dispatch_keeps_the_notice_for_the_next_call(self):
+        guarded = next(iter(self.mod._GUARDED_ORCHESTRATION_TOOLS))
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        with mock.patch.object(self.mod, "_require_fresh_bridge",
+                               side_effect=self.mod.BridgeStaleError("stale")), \
+             mock.patch.object(self.mod, "_schedule_bridge_reload",
+                               return_value={"status": "failed", "error": "simulated"}):
+            refused = self._call(27, guarded, lambda _args: {})
+        self.assertEqual(len(refused["result"]["content"]), 1)
+        self.assertIsNotNone(self.mod._WAIT_PREEMPTED["notice"], "not consumed, not lost")
+        later = self._call(28, "disc_meta", lambda _args: {"id": "d"})
+        self.assertIn("wait_preempted", later["result"]["content"][1]["text"])
+
+    def test_re_arming_the_wait_clears_the_preemption_notice(self):
+        self.mod._WAIT_PREEMPTED["notice"] = dict(self.mod._WAIT_PREEMPTED_NOTICE)
+        rearmed = self._call(25, "disc_wait_for_peer",
+                             lambda _args: {"timed_out": True, "messages": []})
+        self.assertEqual(len(rearmed["result"]["content"]), 1)
+        self.assertIsNone(self.mod._WAIT_PREEMPTED["notice"])
 
     def test_ping_and_tools_list_are_serviced_without_waking_the_model(self):
         # Codex review P0: control traffic must be answered inline; only a

@@ -1262,6 +1262,11 @@ pub struct TaskExecutionHttpTurnUsage {
     pub provider: String,
     pub phase: TaskExecutionHttpPhase,
     pub prompt_tokens: u64,
+    /// Share of `prompt_tokens` served from the provider's prompt cache. `None`
+    /// when the provider does not report it, including every journal entry
+    /// written before this field existed: unknown, not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
     pub eval_tokens: u64,
     pub duration_ms: u64,
     pub provider_ok: bool,
@@ -1275,6 +1280,11 @@ pub struct TaskExecutionHttpPhaseUsage {
     pub phase: TaskExecutionHttpPhase,
     pub turns: u32,
     pub prompt_tokens: u64,
+    /// Sum over the `cache_reported_turns` that reported a cached share only.
+    #[serde(default)]
+    pub cached_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_reported_turns: u32,
     pub eval_tokens: u64,
     pub duration_ms: u64,
 }
@@ -1287,6 +1297,12 @@ pub struct TaskExecutionHttpPhaseUsage {
 pub struct TaskExecutionHttpUsage {
     pub turns: u32,
     pub prompt_tokens: u64,
+    /// Sum over the `cache_reported_turns` that reported a cached share only;
+    /// never a cache rate for turns that did not report one.
+    #[serde(default)]
+    pub cached_prompt_tokens: u64,
+    #[serde(default)]
+    pub cache_reported_turns: u32,
     pub eval_tokens: u64,
     pub traffic_tokens: u64,
     pub peak_context_tokens: u64,

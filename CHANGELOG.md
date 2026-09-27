@@ -11,6 +11,72 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Workflow Agent results retain execution provenance for initial, repair,
+  escalation and debate attempts, including model resolution, structured
+  runtime model observations and format fallback. Compact agent/model badges
+  follow the retained output; historical runs keep their existing metadata.
+  See [workflow agent provenance](docs/operations/workflow-agent-provenance.md).
+- A workflow run's Agent step lists every attempt in its details (role, agent,
+  reported or resolved model, format fallback, duration, outcome) and marks the
+  one whose output was kept. A step with no recorded model shows "unknown
+  model" instead of today's step configuration.
+- Task execution usage for HTTP agents records the prompt tokens a provider
+  served from its cache, when it reports them (`prompt_tokens_details.cached_tokens`
+  or `cache_read_input_tokens`). Turns that do not report it stay unknown and are
+  counted separately, so no cache rate is inferred for them.
+- Open 2–12 selected discussions in a separate mosaic tab, with Artifact-style
+  layouts, plan progress, recent messages and saved response checkpoints.
+  Each tile scrolls independently and links to its full discussion. The bounded
+  read-only monitor shares one WebSocket and batches refreshes without marking
+  discussions read or launching agents; a missing room does not block its peers.
+  [Monitoring limits and behavior](docs/operations/discussion-mosaic.md).
+- The discussion asset carousel has a copy button. Text, JSON and log files are
+  copied whole (up to 2 MiB), images as PNG, and videos only where the browser
+  accepts that type; otherwise the button says why it is unavailable.
+
+### Changed
+
+- The Pages interface is now named Artifacts in all four languages, including
+  workflow publishing and the mosaic. Existing URLs, identifiers, API routes
+  and MCP tool names remain compatible.
+
+### Fixed
+
+- Native backend hot reload uses the initial startup readiness budget instead
+  of stopping a still-starting backend after roughly 30 seconds. Slow project
+  MCP synchronization can finish before the HTTP listener becomes ready;
+  diagnostics distinguish readiness timeout from an actual backend exit.
+- Workflow HTTP agents recover once from an explicit unsupported structured
+  output response by keeping the schema in the prompt and retaining the model,
+  tools and local validation policy. A persistent notice records the fallback,
+  including when repair or escalation replaces the answer. Generic 501 errors
+  are no longer retried as transient failures, and tool-support advice appears
+  only when the provider explicitly rejects tools. Invalid schemas, credentials
+  and quota errors remain failures.
+- Workflow document audits keep native Unix filename bytes instead of failing
+  on non-UTF-8 names. Escaped diagnostic labels distinguish these files without
+  changing their names, contents or index entries.
+- Workflow document audits preserve preexisting and concurrent working-tree
+  changes, staged content and untracked files. They compare pre-step content
+  fingerprints instead of restoring every dirty document from HEAD or deleting
+  it. Changed content with a credential signal now fails the step with a
+  persistent, secret-free diagnostic; legitimate documents over 8 KiB are not
+  rejected for their size. See the [audit and recovery notes](docs/operations/workflow-docs-audit.md).
+- Commits made through a task worker drop `Signed-off-by`, `Co-authored-by` and
+  similar identity trailers written by the model, keeping only the sign-off Kronn
+  adds from the git configuration. The tool result lists what was removed. A
+  worker could otherwise record an invented identity in the history.
+- A room wait ended by another Kronn tool call is no longer silent. The bridge
+  serves one call at a time, so a host that moved `disc_wait_for_peer` to the
+  background stopped listening at its next call while the protocol said the
+  wait remained active. That call's result now carries `wait_preempted`, the
+  wait's own result says `interrupted`, and the protocol text asks for a re-arm.
+- A failed workflow import rolls back every bundled resource, including Pages
+  and Quick Prompts created before the error. Late validation or database
+  failures no longer leave partial imports or activate an empty Pages library.
+
 ## [0.14.0] - 2026-09-23
 
 ### Added

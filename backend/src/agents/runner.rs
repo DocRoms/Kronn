@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+use super::provenance::{self, AgentProvenanceCapture};
 use crate::core::cmd::{async_cmd, sync_cmd};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
 
@@ -2430,6 +2431,8 @@ fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>) -> 
 /// Configuration for starting an agent process.
 pub struct AgentStartConfig<'a> {
     pub agent_type: &'a AgentType,
+    /// Optional caller-owned capture survives spawn/provider failures.
+    pub provenance: Option<AgentProvenanceCapture>,
     /// Used to read .mcp.json and resolve MCP context.
     pub project_path: &'a str,
     /// Working directory for the agent. If `None`, defaults to `project_path`.
@@ -2564,6 +2567,7 @@ impl<'a> AgentStartConfig<'a> {
     ) -> Self {
         Self {
             agent_type,
+            provenance: None,
             project_path,
             prompt,
             tokens,
@@ -3342,6 +3346,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.tier,
             config.model_tiers,
         );
+        provenance::resolve_model(config.provenance.as_ref(), model_flag.as_deref(), None);
         // LiteLLM has no safe built-in default: model ids come from the
         // operator's `config.yaml`, so guessing one yields an opaque 404.
         let model = match (config.agent_type, model_flag.as_deref()) {
@@ -3427,6 +3432,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.cancel_token.as_ref(),
             config.reasoning_effort_override,
             config.max_tokens_override,
+            config.provenance.clone(),
         )
         .await;
     }
@@ -3438,6 +3444,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.tier,
         config.model_tiers,
     );
+    provenance::resolve_model(config.provenance.as_ref(), model_flag.as_deref(), None);
     // KT-646 — resolve reasoning effort the same way: explicit override wins,
     // else the tier's configured preset, else no flag (CLI default). Gated to
     // agents with a proven contract; every other agent gets `None` here.
@@ -3495,6 +3502,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 resume_id: acp_resume_id,
                 session_store: config.acp_session_store.clone(),
                 fallback_prompt: config.native_acp_full_prompt,
+                provenance: config.provenance.clone(),
             };
             #[cfg(test)]
             if let Some(transport) = config.test_acp_transport.clone() {
@@ -3521,6 +3529,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 resume_id: acp_resume_id,
                 session_store: config.acp_session_store.clone(),
                 fallback_prompt: config.native_acp_full_prompt,
+                provenance: config.provenance.clone(),
             };
             #[cfg(test)]
             if let Some(transport) = config.test_acp_transport.clone() {
@@ -3702,6 +3711,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Always stream stdout
     if let Some(stdout) = child.stdout.take() {
         let tx_out = tx.clone();
+        let provenance = config.provenance.clone();
+        let observe_claude = *config.agent_type == AgentType::ClaudeCode;
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             // Don't conflate a read error (e.g. non-UTF-8 output) with EOF:
@@ -3710,6 +3721,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
+                        if observe_claude {
+                            if let Some(model) = provenance::claude_observed_model(&line) {
+                                provenance::observe_model(provenance.as_ref(), &model);
+                            }
+                        }
                         if tx_out.send(line).await.is_err() {
                             break;
                         }
@@ -3867,6 +3883,7 @@ struct AcpSessionRequest<'a> {
     resume_id: Option<&'a str>,
     session_store: Option<AcpSessionStore>,
     fallback_prompt: Option<&'a str>,
+    provenance: Option<AgentProvenanceCapture>,
 }
 
 async fn start_native_acp(
@@ -3917,6 +3934,11 @@ async fn start_adapted_acp(
 
     let agent_type = request.agent_type;
     let model = request.model_flag.map(str::to_owned);
+    provenance::resolve_model(
+        request.provenance.as_ref(),
+        request.model_flag,
+        request.model_flag.map(|_| true),
+    );
     let reasoning_effort = request.reasoning_effort.map(str::to_owned);
     if let Some(model) = &model {
         tracing::debug!(agent = ?agent_type, model, "ACP adapter model applied via direct CLI flag");
@@ -3983,6 +4005,7 @@ async fn run_acp_session(
         resume_id,
         session_store,
         fallback_prompt,
+        provenance,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4087,12 +4110,18 @@ async fn run_acp_session(
     // its own default instead of receiving a bad flag.
     if let Some(model) = model_flag {
         match host.select_model(&session, model).await {
-            Ok(true) => tracing::debug!(agent = ?agent_type, model, "ACP model selection applied"),
-            Ok(false) => tracing::debug!(
+            Ok(true) => {
+                provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
+                tracing::debug!(agent = ?agent_type, model, "ACP model selection applied");
+            }
+            Ok(false) => {
+                provenance::resolve_model(provenance.as_ref(), Some(model), Some(false));
+                tracing::debug!(
                 agent = ?agent_type,
                 model,
                 "ACP session exposes no matching model option; keeping its default"
-            ),
+                );
+            }
             Err(error) => {
                 return Err(acp_start_failure(
                     &host,
@@ -4164,6 +4193,9 @@ async fn run_acp_session(
                         if tx.send(text).await.is_err() {
                             break;
                         }
+                    }
+                    AcpSessionEvent::ModelObserved(model) => {
+                        provenance::observe_model(provenance.as_ref(), &model);
                     }
                     AcpSessionEvent::ToolCall { name } => {
                         // A tool call is not text. Forwarding it on `tx` — the
@@ -5744,7 +5776,9 @@ pub(crate) fn build_ollama_chat_body(
 #[derive(Default)]
 pub(crate) struct TokenTally {
     prompt: u64,
+    cached_prompt: Option<u64>,
     eval: u64,
+    provenance: Option<AgentProvenanceCapture>,
 }
 
 /// Cumulative ceiling telemetry carried in stderr; the last marker wins.
@@ -5917,6 +5951,9 @@ struct HttpTurnTrace {
     provider: String,
     phase: crate::models::TaskExecutionHttpPhase,
     prompt_tokens: u64,
+    // Absent when unreported, and from traces written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cached_prompt_tokens: Option<u64>,
     eval_tokens: u64,
     duration_ms: u64,
     provider_ok: bool,
@@ -5986,6 +6023,7 @@ pub(crate) fn parse_http_turn_telemetry(
                     provider: trace.provider,
                     phase: trace.phase,
                     prompt_tokens: trace.prompt_tokens,
+                    cached_prompt_tokens: trace.cached_prompt_tokens,
                     eval_tokens: trace.eval_tokens,
                     duration_ms: trace.duration_ms,
                     provider_ok: trace.provider_ok,
@@ -6179,6 +6217,9 @@ pub(crate) async fn forward_chat_line(
     let Some(chunk) = codec.parse_line(line) else {
         return true;
     };
+    if let Some(model) = &chunk.model {
+        provenance::observe_model(tally.provenance.as_ref(), model);
+    }
     if !chunk.tool_calls.is_empty() {
         pending_tools.push(chunk.tool_calls);
     }
@@ -6216,6 +6257,9 @@ pub(crate) async fn forward_chat_line(
     }
     if chunk.prompt_tokens > 0 {
         tally.prompt = chunk.prompt_tokens;
+    }
+    if chunk.cached_prompt_tokens.is_some() {
+        tally.cached_prompt = chunk.cached_prompt_tokens;
     }
     if chunk.eval_tokens > 0 {
         tally.eval = chunk.eval_tokens;
@@ -6281,7 +6325,10 @@ fn is_permanent_provider_failure(detail: &str) -> bool {
 }
 
 fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &str) -> bool {
-    if is_permanent_provider_failure(detail) {
+    // 501 declares an unimplemented capability; repeating the same body cannot
+    // recover it. This differs from capacity/availability failures (503/504).
+    if status == Some(reqwest::StatusCode::NOT_IMPLEMENTED) || is_permanent_provider_failure(detail)
+    {
         return false;
     }
     if status.is_some_and(|status| {
@@ -6326,6 +6373,53 @@ fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
         // Long enough for a saturated worker slot to clear, still bounded so
         // the user is never left behind an invisible minute-long retry loop.
         std::time::Duration::from_secs(if failed_attempt == 1 { 2 } else { 5 })
+    }
+}
+
+/// Positive evidence that the provider rejects constrained output itself.
+/// Do not infer this from model names/storage formats, a generic 501, or an
+/// invalid schema: those must retain their original failure and request body.
+fn rejects_structured_output(failure: &HttpProviderFailure) -> bool {
+    if !matches!(
+        failure.status,
+        Some(
+            reqwest::StatusCode::BAD_REQUEST
+                | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                | reqwest::StatusCode::NOT_IMPLEMENTED
+        )
+    ) || is_permanent_provider_failure(&failure.detail)
+    {
+        return false;
+    }
+    // Inspect the error message, not a serialized request/schema echoed beside
+    // it: a schema property named response_format is not a capability signal.
+    let Some(message) = provider_error_message(&failure.detail) else {
+        return false;
+    };
+    [
+        "structured output is unavailable",
+        "structured outputs are unavailable",
+        "structured output is not supported",
+        "structured outputs are not supported",
+        "does not support structured output",
+        "response_format is not supported",
+        "does not support response_format",
+        "unsupported response_format",
+        "json_schema is not supported",
+        "does not support json_schema",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn provider_error_message(detail: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(detail) {
+        Ok(value) => value["error"]
+            .as_str()
+            .or_else(|| value["error"]["message"].as_str())
+            .or_else(|| value["message"].as_str())
+            .map(str::to_ascii_lowercase),
+        Err(_) => Some(detail.to_ascii_lowercase()),
     }
 }
 
@@ -6471,6 +6565,7 @@ async fn start_ollama_http(
     parent_cancel: Option<&tokio_util::sync::CancellationToken>,
     reasoning_effort: Option<&str>,
     max_tokens: Option<u64>,
+    provenance: Option<AgentProvenanceCapture>,
 ) -> Result<AgentProcess, String> {
     let identity_context = http_agent_identity_context(agent_type, model);
     let system_context = if system_context.trim().is_empty() {
@@ -6814,7 +6909,8 @@ async fn start_ollama_http(
         .map(tokio_util::sync::CancellationToken::child_token)
         .unwrap_or_default();
     let initial_request_started_at = std::time::Instant::now();
-    let initial = tokio::select! {
+    provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
+    let mut initial = tokio::select! {
         biased;
         _ = http_cancel.cancelled() => {
             return Err(format!("{backend} run cancelled before the provider accepted the initial request"));
@@ -6831,19 +6927,69 @@ async fn start_ollama_http(
             &stderr_capture,
         ) => response,
     };
+    // Workflow prompts already carry the schema and the caller validates the
+    // resulting envelope. Negotiate only an explicitly refused wire feature,
+    // once, before any output/tool execution; keep all other request settings.
+    let mut format_fallback_notice = None;
+    if let Err(failure) = &initial {
+        if format.is_some() && rejects_structured_output(failure) {
+            if let Some(capture) = &provenance {
+                if let Ok(mut capture) = capture.lock() {
+                    capture.format_fallback = true;
+                }
+            }
+            let attempt = failure.attempts + 1;
+            let notice = format!(
+                "[structured-output fallback: {backend} rejected constrained JSON; retrying once using the schema in the prompt. Model and tools are unchanged; workflow validation and on_invalid policy still apply.]\n\n"
+            );
+            tracing::warn!(target: "kronn::agent::structured_output", backend, model, "{notice}");
+            if let Ok(mut capture) = stderr_capture.lock() {
+                capture.push(notice.trim().to_string());
+            }
+            if let Some(object) = body.as_object_mut() {
+                object.remove(if is_openai_wire {
+                    "response_format"
+                } else {
+                    "format"
+                });
+            }
+            format_fallback_notice = Some(notice);
+            initial = tokio::select! {
+                biased;
+                _ = http_cancel.cancelled() => {
+                    return Err(format!("{backend} run cancelled before the provider accepted the format fallback"));
+                }
+                response = send_http_agent_request(
+                    &client, &url, &body, auth_key.as_deref(), backend,
+                    attempt, attempt, false, &stderr_capture,
+                ) => response,
+            };
+        }
+    }
+    let used_format_fallback = format_fallback_notice.is_some();
     let (response, initial_provider_attempt) = initial.map_err(|failure| {
-        let tool_hint = if tools_declared > 0 {
-            " Kronn declared native tools on this request; this provider route/model may not support tool calling. Choose a tool-capable model or move the call to an ApiCall step."
-        } else {
-            ""
-        };
-        format_provider_failure(backend, &base, &failure, tool_hint)
+        let tools_rejected = tools_declared > 0 && provider_error_message(&failure.detail)
+            .is_some_and(|message| ["tools are not supported", "does not support tools", "tool calling is not supported"]
+                .iter().any(|needle| message.contains(needle)));
+        let hint = if tools_rejected {
+            " This provider route/model may not support tool calling. Choose a tool-capable model or move the call to an ApiCall step."
+        } else { "" };
+        let error = format_provider_failure(backend, &base, &failure, hint);
+        match format_fallback_notice.as_deref() {
+            Some(notice) => format!("{notice}{error}"),
+            None => error,
+        }
     })?;
 
     // Stream the response — each line is a JSON object with a `message.content` field.
     // The last chunk has `done: true` and includes token counts.
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
     let stderr_clone = stderr_capture.clone();
+    // Successful workflows do not persist arbitrary stderr, so expose the
+    // notice in the run output too. It precedes (never splits) the JSON envelope.
+    if let Some(notice) = format_fallback_notice {
+        let _ = tx.send(notice).await;
+    }
 
     // AgentProcess requires a child, but Ollama's execution is HTTP-based. The
     // child must mirror the STREAM's lifetime exactly: consumers `child.wait()`
@@ -7012,7 +7158,10 @@ async fn start_ollama_http(
             // Provider usage is per response. Resetting here prevents a clean
             // zero-usage/error frame from inheriting the preceding turn's
             // counts; parse_token_usage later sums the independent markers.
-            let mut tally = TokenTally::default();
+            let mut tally = TokenTally {
+                provenance: provenance.clone(),
+                ..Default::default()
+            };
             // The response below was generated from this exact catalogue. A
             // model can remember a tool that was withdrawn on a previous turn
             // and still emit its name; declaration removal is not an execution
@@ -7126,6 +7275,7 @@ async fn start_ollama_http(
                     provider: backend.to_ascii_lowercase(),
                     phase: current_http_phase,
                     prompt_tokens: tally.prompt,
+                    cached_prompt_tokens: tally.cached_prompt,
                     eval_tokens: tally.eval,
                     duration_ms: request_started_at
                         .elapsed()
@@ -7142,7 +7292,7 @@ async fn start_ollama_http(
             // A 2xx only means that the provider accepted the request; NVIDIA
             // may still put ResourceExhausted inside the SSE body. Call an
             // attempt successful only after its terminal frame was decoded.
-            if got_done && !got_error && provider_attempt > 1 {
+            if got_done && !got_error && provider_attempt > 1 && !used_format_fallback {
                 push_provider_retry_trace(
                     &stderr_clone,
                     format!(
@@ -7161,6 +7311,7 @@ async fn start_ollama_http(
                 !got_done && !got_error && calls.is_empty()
             };
             if retryable_stream_failure
+                && !used_format_fallback
                 && !external_effect_observed
                 && !emitted_this_turn
                 && provider_attempt < HTTP_PROVIDER_MAX_ATTEMPTS
@@ -7222,6 +7373,7 @@ async fn start_ollama_http(
                 }
             }
             if retryable_stream_failure
+                && !used_format_fallback
                 && !external_effect_observed
                 && !emitted_this_turn
                 && provider_attempt >= HTTP_PROVIDER_MAX_ATTEMPTS
@@ -11439,6 +11591,7 @@ mod acp_resume_tests {
                 resume_id,
                 session_store,
                 fallback_prompt,
+                provenance: None,
             },
             transport,
         )
@@ -11781,6 +11934,7 @@ mod acp_resume_tests {
                     resume_id: Some("recorded-session"),
                     session_store: None,
                     fallback_prompt: Some("complete history"),
+                    provenance: None,
                 },
                 transport.clone(),
             )

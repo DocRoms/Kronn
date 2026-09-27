@@ -23,9 +23,27 @@ pub struct StepOutcome {
 /// Output from a single agent run, including token usage.
 #[derive(Debug)]
 struct AgentOutput {
+    attempt_id: u32,
     text: String,
     tokens_used: u64,
     native_tool_calls: Vec<NativeToolCallLog>,
+    runtime_notices: Vec<String>,
+}
+
+// Keep transport notices when repair/escalation replaces the model's answer.
+// They precede the final envelope and must not participate in schema/signals.
+fn with_runtime_notices(output: String, notices: &[String]) -> String {
+    let mut missing = Vec::new();
+    for notice in notices {
+        if !output.lines().any(|line| line == notice) && !missing.contains(notice) {
+            missing.push(notice.clone());
+        }
+    }
+    if missing.is_empty() {
+        output
+    } else {
+        format!("{}\n\n{output}", missing.join("\n"))
+    }
 }
 
 /// Optional sender for streaming partial agent output during step execution.
@@ -170,6 +188,7 @@ pub async fn execute_step(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: Some(Box::default()),
                     native_tool_calls: Box::default(),
                 },
                 condition_action: None,
@@ -240,6 +259,7 @@ pub async fn execute_step(
     // Execute with retry logic
     let max_attempts = step.retry.as_ref().map(|r| r.max_retries + 1).unwrap_or(1);
     let mut last_error = String::new();
+    let mut provenance = WorkflowAgentProvenance::default();
 
     let resolved_connection = match resolve_step_connection(step, catalog_db).await {
         Ok(connection) => connection,
@@ -261,6 +281,7 @@ pub async fn execute_step(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: Some(Box::default()),
                     native_tool_calls: Box::default(),
                 },
                 condition_action: None,
@@ -311,6 +332,7 @@ pub async fn execute_step(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    agent_provenance: Some(Box::default()),
                     native_tool_calls: Box::default(),
                 },
                 condition_action: None,
@@ -361,14 +383,19 @@ pub async fn execute_step(
             progress_tx.as_ref(),
             external_http.as_ref(),
             model_override.as_deref(),
+            &mut provenance,
+            WorkflowAgentAttemptRole::Initial,
+            attempt + 1,
         )
         .await
         {
             Ok(agent_output) => {
+                provenance.selected_attempt = Some(agent_output.attempt_id);
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let mut final_output = agent_output.text.clone();
                 let mut total_tokens = agent_output.tokens_used;
                 let mut native_tool_calls = agent_output.native_tool_calls;
+                let mut runtime_notices = agent_output.runtime_notices;
 
                 // For Structured / TypedSchema steps: verify envelope exists,
                 // try repair if missing. TypedSchema additionally validates
@@ -452,6 +479,9 @@ pub async fn execute_step(
                             None,
                             external_http.as_ref(),
                             model_override.as_deref(),
+                            &mut provenance,
+                            WorkflowAgentAttemptRole::Repair,
+                            attempt + 1,
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -460,6 +490,7 @@ pub async fn execute_step(
                             tracing::warn!("Step '{}': repair run failed: {}", step.name, e);
                         }
                         if let Ok(repair_output) = repair_res {
+                            runtime_notices.extend(repair_output.runtime_notices.clone());
                             total_tokens += repair_output.tokens_used;
                             native_tool_calls.extend(repair_output.native_tool_calls.clone());
                             let repaired_env = crate::workflows::template::extract_step_envelope(
@@ -479,6 +510,7 @@ pub async fn execute_step(
                             repair_valid =
                                 matches!((&repaired_env, &repaired_error), (Some(_), None));
                             if repair_valid {
+                                provenance.selected_attempt = Some(repair_output.attempt_id);
                                 final_output = repair_output.text;
                                 tracing::info!("Step '{}': repair succeeded", step.name);
                             } else {
@@ -548,6 +580,9 @@ pub async fn execute_step(
                                 None,
                                 None,
                                 escalated_model.as_deref(),
+                                &mut provenance,
+                                WorkflowAgentAttemptRole::Escalation,
+                                attempt + 1,
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -559,6 +594,7 @@ pub async fn execute_step(
                                 );
                             }
                             if let Ok(esc) = esc_res {
+                                runtime_notices.extend(esc.runtime_notices.clone());
                                 total_tokens += esc.tokens_used;
                                 native_tool_calls.extend(esc.native_tool_calls.clone());
                                 let esc_env =
@@ -570,6 +606,7 @@ pub async fn execute_step(
                                     _ => None,
                                 };
                                 if matches!((&esc_env, &esc_error), (Some(_), None)) {
+                                    provenance.selected_attempt = Some(esc.attempt_id);
                                     final_output = esc.text;
                                     repair_valid = true; // valid now → don't fail below
                                     tracing::info!(target: "kronn::ollama::escalation", step = %step.name, "escalation to Claude succeeded");
@@ -604,7 +641,7 @@ pub async fn execute_step(
                                         status: RunStatus::Failed,
                                         output: format!(
                                             "TypedSchema validation failed after repair attempt.\n\nError: {}\n\nLast agent output:\n{}",
-                                            err_msg, final_output,
+                                            err_msg, with_runtime_notices(final_output, &runtime_notices),
                                         ),
                                         tokens_used: total_tokens,
                                         duration_ms: start.elapsed().as_millis() as u64,
@@ -618,6 +655,7 @@ pub async fn execute_step(
                                         step_api_endpoint_path: None,
                                         is_rollback: false,
                                         child_run_id: None,
+                                        agent_provenance: Some(Box::new(provenance)),
                                         native_tool_calls: native_tool_calls.into_boxed_slice(),
                                     },
                                     condition_action: None,
@@ -646,8 +684,10 @@ pub async fn execute_step(
                         model_override.as_deref(),
                         resolved_connection.as_ref(),
                         catalog_db,
+                        &mut provenance,
+                        attempt + 1,
                     ).await {
-                        Ok((converged, debate_tokens, debate_tool_calls)) => {
+                        Ok((converged, debate_tokens, debate_tool_calls, selected_attempt)) => {
                             total_tokens += debate_tokens;
                             native_tool_calls.extend(debate_tool_calls);
                             // Envelope safety: on a Structured/TypedSchema step
@@ -667,6 +707,9 @@ pub async fn execute_step(
                                 }
                             } else { true };
                             if ok {
+                                if let Some(selected) = selected_attempt {
+                                    provenance.selected_attempt = Some(selected);
+                                }
                                 final_output = converged;
                             } else {
                                 tracing::warn!(
@@ -734,7 +777,7 @@ pub async fn execute_step(
                     result: StepResult {
                         step_name: step.name.clone(),
                         status: RunStatus::Success,
-                        output: final_output,
+                        output: with_runtime_notices(final_output, &runtime_notices),
                         tokens_used: total_tokens,
                         duration_ms,
                         started_at: None,
@@ -747,6 +790,7 @@ pub async fn execute_step(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        agent_provenance: Some(Box::new(provenance)),
                         native_tool_calls: native_tool_calls.into_boxed_slice(),
                     },
                     condition_action,
@@ -772,6 +816,7 @@ pub async fn execute_step(
     let stalled = is_stall_error(&last_error);
     let (output, condition_result, condition_action) =
         timeout_routing(stalled, &step.on_timeout, max_attempts, &last_error);
+    provenance.selected_attempt = None;
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
@@ -789,6 +834,7 @@ pub async fn execute_step(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: Some(Box::new(provenance)),
             native_tool_calls: Box::default(),
         },
         condition_action,
@@ -1017,7 +1063,13 @@ async fn run_agent_with_timeout(
     progress_tx: Option<&ProgressSender>,
     external_http: Option<&runner::ExternalHttpRuntime>,
     effective_model: Option<&str>,
+    provenance: &mut WorkflowAgentProvenance,
+    role: WorkflowAgentAttemptRole,
+    retry: u32,
 ) -> Result<AgentOutput> {
+    let started_at = chrono::Utc::now();
+    let started = Instant::now();
+    let capture = crate::agents::provenance::AgentProvenanceCapture::default();
     // 30 min default — generous safety net rather than aggressive ceiling.
     // With tool-call streaming (cf. format_tool_input_suffix), an active
     // agent emits a chunk every Edit/Bash/Read, so the only legitimate
@@ -1034,58 +1086,97 @@ async fn run_agent_with_timeout(
     // (owned here so it outlives the borrow in AgentStartConfig below).
     let ollama_format = ollama_envelope_format(&step.output_format);
 
-    let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
-        work_dir: Some(work_dir),
-        full_access,
-        skill_ids: &step.skill_ids,
-        directive_ids: &step.directive_ids,
-        profile_ids: &step.profile_ids,
+    let result = async {
+        let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
+            provenance: Some(capture.clone()),
+            work_dir: Some(work_dir),
+            full_access,
+            skill_ids: &step.skill_ids,
+            directive_ids: &step.directive_ids,
+            profile_ids: &step.profile_ids,
+            tier: step
+                .agent_settings
+                .as_ref()
+                .and_then(|s| s.tier)
+                .unwrap_or_default(),
+            model_tiers,
+            http_endpoints,
+            ollama_context_overrides,
+            // Workflow steps already expose their own timeout; use that exact
+            // value for the initial HTTP request too instead of the discussion
+            // Settings budget or a transport-only constant.
+            http_request_timeout: Some(stall_timeout),
+            ollama_format: ollama_format.as_ref(),
+            // Explicit per-step model (from the wizard's model picker) — now
+            // actually consumed at run time, not just stamped for display.
+            model_override: effective_model,
+            // KT-646 — explicit per-step reasoning effort, from the wizard's
+            // effort picker. Wins over the tier's configured preset; `None`
+            // falls back to that preset, then to the CLI default (see
+            // `runner::effective_reasoning_effort`).
+            reasoning_effort_override: step
+                .agent_settings
+                .as_ref()
+                .and_then(|s| s.reasoning_effort.as_deref()),
+            max_tokens_override: step.agent_settings.as_ref().and_then(|s| s.max_tokens),
+            // The named connection this step points at. `AgentType::Custom` is
+            // shared by every OpenAI-compatible connection, so without this the
+            // runner refuses the spawn outright.
+            external_http,
+            tools: native_tools,
+            ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+        // 0.8.8 — the post-spawn consumption loop + finalize is extracted into
+        // `drive_agent_to_output` (generic over `runner::AgentIo`) so it's
+        // unit-testable with a `ScriptedProcess` — no real CLI, no tokens.
+        drive_agent_to_output(
+            agent_process,
+            progress_tx,
+            stall_timeout,
+            &step.agent,
+            &step.name,
+        )
+        .await
+    }
+    .await;
+    let runtime = capture
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let id = provenance.attempts.len() as u32 + 1;
+    provenance.attempts.push(WorkflowAgentAttempt {
+        id,
+        role,
+        retry,
+        agent: step.agent.clone(),
         tier: step
             .agent_settings
             .as_ref()
-            .and_then(|s| s.tier)
+            .and_then(|settings| settings.tier)
             .unwrap_or_default(),
-        model_tiers,
-        http_endpoints,
-        ollama_context_overrides,
-        // Workflow steps already expose their own timeout; use that exact
-        // value for the initial HTTP request too instead of the discussion
-        // Settings budget or a transport-only constant.
-        http_request_timeout: Some(stall_timeout),
-        ollama_format: ollama_format.as_ref(),
-        // Explicit per-step model (from the wizard's model picker) — now
-        // actually consumed at run time, not just stamped for display.
-        model_override: effective_model,
-        // KT-646 — explicit per-step reasoning effort, from the wizard's
-        // effort picker. Wins over the tier's configured preset; `None`
-        // falls back to that preset, then to the CLI default (see
-        // `runner::effective_reasoning_effort`).
-        reasoning_effort_override: step
+        connection_id: step
             .agent_settings
             .as_ref()
-            .and_then(|s| s.reasoning_effort.as_deref()),
-        max_tokens_override: step.agent_settings.as_ref().and_then(|s| s.max_tokens),
-        // The named connection this step points at. `AgentType::Custom` is
-        // shared by every OpenAI-compatible connection, so without this the
-        // runner refuses the spawn outright.
-        external_http,
-        tools: native_tools,
-        ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
+            .and_then(|settings| settings.connection_id.clone()),
+        requested_model: step
+            .agent_settings
+            .as_ref()
+            .and_then(|settings| settings.model.clone()),
+        resolved_model: runtime.resolved_model,
+        model_applied: runtime.model_applied,
+        observed_models: runtime.observed_models,
+        format_fallback: runtime.format_fallback,
+        started_at,
+        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        succeeded: result.is_ok(),
+    });
+    result.map(|mut output: AgentOutput| {
+        output.attempt_id = id;
+        output
     })
-    .await
-    .map_err(|e| anyhow::anyhow!(e))?;
-
-    // 0.8.8 — the post-spawn consumption loop + finalize is extracted into
-    // `drive_agent_to_output` (generic over `runner::AgentIo`) so it's
-    // unit-testable with a `ScriptedProcess` — no real CLI, no tokens.
-    drive_agent_to_output(
-        agent_process,
-        progress_tx,
-        stall_timeout,
-        &step.agent,
-        &step.name,
-    )
-    .await
 }
 
 /// 2026-06-10 — format a useful error when an agent process fails with an
@@ -1298,9 +1389,14 @@ async fn drive_agent_to_output(
     let native_tool_calls = native_tool_calls_from_stderr(&stderr_lines);
 
     Ok(AgentOutput {
+        attempt_id: 0, // Assigned by the launch recorder, outside the IO loop.
         text: output,
         tokens_used,
         native_tool_calls,
+        runtime_notices: stderr_lines
+            .into_iter()
+            .filter(|line| line.starts_with("[structured-output fallback:"))
+            .collect(),
     })
 }
 
@@ -1368,7 +1464,9 @@ async fn run_multi_agent_debate(
     author_model: Option<&str>,
     author_connection: Option<&ExternalApiConnection>,
     catalog_db: Option<&crate::db::Database>,
-) -> Result<(String, u64, Vec<NativeToolCallLog>)> {
+    provenance: &mut WorkflowAgentProvenance,
+    retry: u32,
+) -> Result<(String, u64, Vec<NativeToolCallLog>, Option<u32>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
         t.lines()
@@ -1384,6 +1482,7 @@ async fn run_multi_agent_debate(
     let mut converged = planner_output.to_string();
     let mut tokens = 0u64;
     let mut native_tool_calls = Vec::new();
+    let mut selected_attempt = None;
 
     // A reviewer turn: a synthetic step running the reviewer agent (different
     // family + its own tier), FreeText, no nested debate / on_result.
@@ -1461,6 +1560,9 @@ async fn run_multi_agent_debate(
                 .then_some(external_http)
                 .flatten(),
             reviewer_model.as_deref(),
+            provenance,
+            WorkflowAgentAttemptRole::Review,
+            retry,
         )
         .await?;
         tokens += rev.tokens_used;
@@ -1520,6 +1622,9 @@ async fn run_multi_agent_debate(
             progress_tx,
             external_http,
             author_model,
+            provenance,
+            WorkflowAgentAttemptRole::Author,
+            retry,
         )
         .await?;
         tokens += auth.tokens_used;
@@ -1531,6 +1636,7 @@ async fn run_multi_agent_debate(
             auth.text
         ));
         converged = auth.text.clone();
+        selected_attempt = Some(auth.attempt_id);
         if approved(&auth.text) {
             tracing::info!(
                 "multi_agent_review: author+reviewer converged at round {}",
@@ -1539,7 +1645,7 @@ async fn run_multi_agent_debate(
             break;
         }
     }
-    Ok((converged, tokens, native_tool_calls))
+    Ok((converged, tokens, native_tool_calls, selected_attempt))
 }
 
 /// Evaluate on_result conditions against the step output.
@@ -1620,6 +1726,7 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            agent_provenance: Some(Box::default()),
             native_tool_calls: Box::default(),
         },
         condition_action: None,
@@ -2437,6 +2544,30 @@ mod drive_agent_to_output_tests {
 
     const LONG: Duration = Duration::from_secs(3600);
 
+    #[tokio::test]
+    async fn structured_output_notice_survives_collection_and_replaced_answer() {
+        let notice = "[structured-output fallback: Ollama rejected constrained JSON]";
+        let process = ScriptedProcess::raw(["initial invalid answer"]).with_stderr([notice]);
+        let collected = drive_agent_to_output(process, None, LONG, &AgentType::Ollama, "advise")
+            .await
+            .expect("successful collection");
+        assert_eq!(collected.runtime_notices, [notice]);
+        let repaired = r#"{"data":{"ok":true},"status":"OK"}"#;
+        let recorded = super::with_runtime_notices(repaired.into(), &collected.runtime_notices);
+        assert!(recorded.starts_with(notice));
+        assert!(crate::workflows::template::extract_step_envelope(&recorded).is_some());
+        assert_eq!(
+            super::with_runtime_notices(recorded.clone(), &collected.runtime_notices),
+            recorded,
+            "the initial streamed notice must not be duplicated"
+        );
+        let duplicate = vec![notice.to_string(), notice.to_string()];
+        assert_eq!(
+            super::with_runtime_notices(repaired.into(), &duplicate),
+            recorded
+        );
+    }
+
     #[test]
     fn native_tool_history_keeps_name_and_status_but_drops_arguments() {
         let lines = vec![
@@ -2560,6 +2691,10 @@ mod drive_agent_to_output_tests {
         assert_eq!(out.tokens_used, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "steps_provenance_test.rs"]
+mod provenance_tests;
 
 #[cfg(test)]
 mod http_native_tool_step_tests {
@@ -2777,6 +2912,22 @@ mod http_native_tool_step_tests {
 
         assert_eq!(outcome.result.status, RunStatus::Success);
         assert!(outcome.result.output.contains("selected B"));
+        let provenance = outcome.result.agent_provenance.as_ref().unwrap();
+        assert_eq!(provenance.selected_attempt, Some(1));
+        assert_eq!(provenance.attempts.len(), 1);
+        assert_eq!(
+            provenance.attempts[0].connection_id.as_deref(),
+            Some("connection-b")
+        );
+        assert_eq!(
+            provenance.attempts[0].resolved_model.as_deref(),
+            Some("model-b")
+        );
+        assert!(provenance.attempts[0].requested_model.is_none());
+        assert!(
+            provenance.attempts[0].observed_models.is_empty(),
+            "provider did not report a model"
+        );
         assert!(provider_a.received_requests().await.unwrap().is_empty());
         let requests = provider_b.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);

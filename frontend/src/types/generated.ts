@@ -2490,6 +2490,16 @@ poll_policy: PollBackoffPolicy,
  */
 pacing?: PacingState, project_id: string | null, };
 
+/**
+ * A bounded read-only view for monitoring several rooms without loading their
+ * full transcripts. Missing or unreadable discussions fail independently.
+ */
+export type DiscussionMonitorItem = { id: string, preview: DiscussionMonitorPreview | null, error: string | null, };
+
+export type DiscussionMonitorMessage = { id: string, role: string, channel: string, content: string, truncated: boolean, agent_type: AgentType | null, model: string | null, author_pseudo: string | null, author_cli_ordinal: number | null, timestamp: string, };
+
+export type DiscussionMonitorPreview = { plan: PlanningPlanStats, title: string, shared_id: string | null, agent: AgentType | null, connection_name: string | null, awaiting_agent: boolean, agent_running: boolean, progress_phase: string | null, pending_question_count: number, updated_at: string, messages: Array<DiscussionMonitorMessage>, partial_response: DiscussionMonitorMessage | null, };
+
 export type DiscussionNativeAgentMode = { disabled: boolean, };
 
 export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>,
@@ -6321,6 +6331,11 @@ is_rollback: boolean,
  */
 child_run_id?: string | null,
 /**
+ * Captured execution provenance. Older rows have no such information;
+ * reading them must never manufacture attempts from today's config.
+ */
+agent_provenance?: WorkflowAgentProvenance | null,
+/**
  * Bounded Kronn-native calls made by an HTTP Agent step (Ollama or
  * LiteLLM). Only tool name + outcome are persisted; arguments/results
  * stay in the provider round-trip and can never leak into run history.
@@ -6455,7 +6470,11 @@ export type TaskExecutionEvent = { id: string, task_execution_id: string, action
  */
 export type TaskExecutionHttpPhase = "read" | "mutation" | "commit" | "delivery" | "finalization" | "exploration" | "answer";
 
-export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns: number, prompt_tokens: number, eval_tokens: number, duration_ms: number, };
+export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns: number, prompt_tokens: number,
+/**
+ * Sum over the `cache_reported_turns` that reported a cached share only.
+ */
+cached_prompt_tokens: number, cache_reported_turns: number, eval_tokens: number, duration_ms: number, };
 
 export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
 
@@ -6464,14 +6483,25 @@ export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
  * bounded protocol identifiers; arguments, results, prompts and endpoints are
  * deliberately absent from this durable projection.
  */
-export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | null, provider: string, phase: TaskExecutionHttpPhase, prompt_tokens: number, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
+export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | null, provider: string, phase: TaskExecutionHttpPhase, prompt_tokens: number,
+/**
+ * Share of `prompt_tokens` served from the provider's prompt cache. `None`
+ * when the provider does not report it, including every journal entry
+ * written before this field existed: unknown, not zero.
+ */
+cached_prompt_tokens?: number | null, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
 
 /**
  * Aggregate across every dispatch/rework of one durable task execution. The
  * totals cover the complete journal while `recent_turns` is bounded for UI and
  * MCP payload safety.
  */
-export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
+export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number,
+/**
+ * Sum over the `cache_reported_turns` that reported a cached share only;
+ * never a cache rate for turns that did not report one.
+ */
+cached_prompt_tokens: number, cache_reported_turns: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
 
 /**
  * A resolved TaskExecution + its lineage, answerable in one query (DoD-4):
@@ -7280,6 +7310,39 @@ variables?: Array<PromptVariable>, enabled: boolean,
 pinned: boolean, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
+
+export type WorkflowAgentAttempt = { id: number, role: WorkflowAgentAttemptRole,
+/**
+ * One-based outer Agent retry; repair/debate retain their parent's number.
+ */
+retry: number, agent: AgentType, tier: ModelTier, connection_id: string | null,
+/**
+ * Explicit model override, before resolving connection/tier defaults.
+ */
+requested_model: string | null,
+/**
+ * Model resolved at the actual launch boundary. Not provider observation.
+ */
+resolved_model: string | null,
+/**
+ * Whether the transport applied that selection. None means unknown or no
+ * selection; native ACP can explicitly retain its default (false).
+ */
+model_applied: boolean | null,
+/**
+ * Distinct model identifiers reported by structured runtime responses.
+ * Empty means unreported; never inferred from generated prose or config.
+ */
+observed_models: Array<string>, format_fallback: boolean, started_at: string, duration_ms: number, succeeded: boolean, };
+
+export type WorkflowAgentAttemptRole = "Initial" | "Repair" | "Escalation" | "Review" | "Author";
+
+export type WorkflowAgentProvenance = { attempts: Array<WorkflowAgentAttempt>,
+/**
+ * One-based attempt id whose output the step retained. Absent when no
+ * attempt produced a retained output, including preflight failures.
+ */
+selected_attempt: number | null, };
 
 /**
  * Self-contained envelope produced by `GET /api/workflows/:id/export`.

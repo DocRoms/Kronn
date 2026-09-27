@@ -13,6 +13,16 @@ describe('i18n', () => {
       expect(t(locale, 'disc.delete')).toBe(deletion);
     });
 
+    it.each(['fr', 'en', 'es', 'zh'] as const)('presents the artifact library and workflow destination consistently in %s', locale => {
+      expect(t(locale, 'nav.pages')).toBe('Artifacts');
+      expect(t(locale, 'pages.title')).toBe('Artifacts');
+      for (const key of ['pages.open', 'pages.select', 'pages.mosaic.open', 'pages.sidebar.hint', 'wiz.stepTypePublishPage', 'wiz.publishPagePicker', 'disc.action.stalePageSource', 'disc.action.dynamicBinding']) {
+        expect(t(locale, key, 'Report')).toContain('Artifact');
+        expect(t(locale, key, 'Report')).not.toMatch(/\bPages?\b|[Pp]áginas?|页面/);
+      }
+      expect(t(locale, 'pages.open', 'Report')).toContain('Report');
+    });
+
     it('returns French translation by default', () => {
       expect(t('fr', 'nav.projects')).toBe('Projets');
     });

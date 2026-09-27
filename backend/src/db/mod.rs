@@ -16,6 +16,7 @@ pub mod discussion_ceiling_requests;
 pub mod discussion_effort;
 pub mod discussion_important;
 pub(crate) mod discussion_launch_settings;
+pub mod discussion_monitor;
 pub mod discussion_questions;
 pub mod discussion_sessions;
 pub mod discussion_video_sequences;

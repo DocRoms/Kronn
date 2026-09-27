@@ -45,6 +45,16 @@ describe('api module', () => {
     return mod;
   }
 
+  it('reads a bounded discussion monitor batch with GET and forwards cancellation', async () => {
+    const { discussions, setApiBase } = await getApi();
+    setApiBase(''); mockFetchResponse([]);
+    const request = new AbortController();
+    await discussions.monitor(['a/b', 'c'], request.signal);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith('/api/discussions/monitor?ids=a%2Fb%2Cc', expect.objectContaining({ method: 'GET', signal: request.signal }));
+    expect(vi.mocked(fetch).mock.calls[0][1]?.body).toBeUndefined();
+  });
+
   // ─── setApiBase / getApiBase ─────────────────────────────────────────
 
   describe('setApiBase / getApiBase', () => {
