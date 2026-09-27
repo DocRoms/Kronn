@@ -1,6 +1,6 @@
 use crate::models::{
-    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpServer, McpTransport,
-    OAuth2ExtraHeader, PluginInterface, PluginKind, TokenInjection,
+    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, CredentialSource, McpDefinition, McpServer,
+    McpTransport, OAuth2ExtraHeader, PluginInterface, PluginKind, TokenInjection,
 };
 
 /// Sentinel id surfaced at the top of the registry. Picking it in the UI
@@ -2542,6 +2542,19 @@ pub fn effective_plugin_kind(server: &McpServer) -> PluginKind {
     }
 }
 
+/// Where this plugin's outbound API credential comes from, derived once
+/// from `ApiAuthKind` — independent of the `cli` tag, so Microsoft 365
+/// (`CliToken`, no `cli` tag) and Fastly (`CliToken`, `cli` tag) both
+/// report `CliToken` rather than only the tagged one.
+pub fn credential_source(server: &McpServer) -> CredentialSource {
+    match server.api_spec.as_ref().map(|spec| &spec.auth) {
+        Some(ApiAuthKind::CliToken { .. }) => CredentialSource::CliToken,
+        Some(ApiAuthKind::None) => CredentialSource::None,
+        Some(_) => CredentialSource::Stored,
+        None => CredentialSource::Stored,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2625,6 +2638,29 @@ mod tests {
             available_plugin_interfaces(&server),
             vec![PluginInterface::Api, PluginInterface::Mcp]
         );
+    }
+
+    #[test]
+    fn credential_source_microsoft_365_is_cli_token_with_no_stored_fallback() {
+        // KT-821: no `cli` tag, `CliToken` auth, no `fallback_env_key` — the
+        // old tag-based frontend guess called this "stored API credentials".
+        let server = registry_server("api-microsoft-365");
+        assert_eq!(credential_source(&server), CredentialSource::CliToken);
+    }
+
+    #[test]
+    fn credential_source_fastly_is_cli_token_despite_the_cli_tag_and_fallback_key() {
+        // Same `CliToken` auth as Microsoft 365, but Fastly ALSO carries the
+        // `cli` tag and a `fallback_env_key` — credential_source is derived
+        // from the auth kind alone, not the tag, so both report CliToken.
+        let server = registry_server("mcp-fastly");
+        assert_eq!(credential_source(&server), CredentialSource::CliToken);
+    }
+
+    #[test]
+    fn credential_source_github_is_stored() {
+        let server = registry_server("mcp-github");
+        assert_eq!(credential_source(&server), CredentialSource::Stored);
     }
 
     use std::collections::HashSet;

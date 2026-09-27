@@ -363,6 +363,23 @@ pub enum PluginKind {
     Cli,
 }
 
+/// Where a plugin's outbound API credential actually comes from, computed
+/// once server-side (`registry::credential_source`) from `ApiAuthKind`.
+/// Independent of the registry's `cli` tag: Microsoft 365 uses `CliToken`
+/// (no stored env keys at all) but has no `cli` tag, so the old
+/// tag-based frontend guess mislabelled it as "credentials used by the
+/// API" (KT-821) — this field lets the badge say "no token stored"
+/// whenever the auth kind is actually `CliToken`, Fastly included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CredentialSource {
+    #[default]
+    Stored,
+    CliToken,
+    None,
+}
+
 /// Display-safe version of McpConfig (secrets masked)
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -408,6 +425,9 @@ pub struct McpConfigDisplay {
     /// stored preference stale. What the agent will actually use.
     #[serde(default)]
     pub effective_preferred_interface: PluginInterface,
+    /// See `CredentialSource`.
+    #[serde(default)]
+    pub credential_source: CredentialSource,
     /// Set to the pre-existing config's id when this response is the result
     /// of re-adding an identical plugin: creation merged project scope into
     /// that config instead of silently dropping the new request's label,

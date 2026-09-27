@@ -272,10 +272,6 @@ describe('api.mcps (rest)', () => {
     const b = await exec(mcps.cleanupOrphanEnv('srv', ['OLD_KEY']), 'POST', '/mcps/custom/srv/cleanup-orphan-env');
     expect(b).toEqual({ keys: ['OLD_KEY'] });
   });
-  it('exportFileUrl returns an encoded URL string (no fetch)', () => {
-    expect(mcps.exportFileUrl('my srv')).toBe('/api/mcps/custom/my%20srv/export-file');
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
   it('importPluginFile', async () => { await exec(mcps.importPluginFile({} as never), 'POST', '/mcps/custom/import-file'); });
   it('deleteConfig', async () => { await exec(mcps.deleteConfig('c-1'), 'DELETE', '/mcps/configs/c-1'); });
   it('setConfigProjects', async () => { await exec(mcps.setConfigProjects('c-1', {} as never), 'PATCH', '/mcps/configs/c-1/projects'); });

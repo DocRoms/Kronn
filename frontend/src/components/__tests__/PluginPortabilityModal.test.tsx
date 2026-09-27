@@ -50,6 +50,10 @@ const config: McpConfigDisplay = {
   secrets_broken: false,
   host_sync: 'None',
   preferred_interface: 'api',
+  interfaces: ['api', 'mcp', 'cli'],
+  effective_kind: 'cli',
+  effective_preferred_interface: 'api',
+  credential_source: 'cli_token',
 };
 
 const preview: PluginBundlePreview = {

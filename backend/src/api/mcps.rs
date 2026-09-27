@@ -3621,6 +3621,7 @@ mod tests {
             interfaces: vec![PluginInterface::Mcp],
             effective_kind: PluginKind::Mcp,
             effective_preferred_interface: PluginInterface::Mcp,
+            credential_source: CredentialSource::Stored,
             merged_into_existing: None,
         }
     }

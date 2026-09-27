@@ -519,15 +519,17 @@ pub fn list_configs_display(
                 false
             };
 
-            let (interfaces, effective_kind) = match server_map.get(&c.server_id) {
+            let (interfaces, effective_kind, credential_source) = match server_map.get(&c.server_id)
+            {
                 Some(server) => (
                     crate::core::registry::available_plugin_interfaces(server),
                     crate::core::registry::effective_plugin_kind(server),
+                    crate::core::registry::credential_source(server),
                 ),
                 // Orphaned config (server row missing): no capability to
                 // offer, badge falls back to the same default the frontend
                 // used when it couldn't resolve a registry descriptor.
-                None => (Vec::new(), PluginKind::default()),
+                None => (Vec::new(), PluginKind::default(), CredentialSource::default()),
             };
             let effective_preferred_interface = if interfaces.contains(&preferred_interface) {
                 preferred_interface
@@ -618,6 +620,7 @@ pub fn list_configs_display(
                 interfaces,
                 effective_kind,
                 effective_preferred_interface,
+                credential_source,
                 merged_into_existing: None,
             }
         })

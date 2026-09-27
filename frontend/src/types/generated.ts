@@ -1566,6 +1566,17 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  */
 enabled?: boolean | null, };
 
+/**
+ * Where a plugin's outbound API credential actually comes from, computed
+ * once server-side (`registry::credential_source`) from `ApiAuthKind`.
+ * Independent of the registry's `cli` tag: Microsoft 365 uses `CliToken`
+ * (no stored env keys at all) but has no `cli` tag, so the old
+ * tag-based frontend guess mislabelled it as "credentials used by the
+ * API" (KT-821) — this field lets the badge say "no token stored"
+ * whenever the auth kind is actually `CliToken`, Fastly included.
+ */
+export type CredentialSource = "stored" | "cli_token" | "none";
+
 export type CustomApiField = { label: string, value: string, };
 
 /**
@@ -3776,6 +3787,10 @@ effective_kind: PluginKind,
  * stored preference stale. What the agent will actually use.
  */
 effective_preferred_interface: PluginInterface,
+/**
+ * See `CredentialSource`.
+ */
+credential_source: CredentialSource,
 /**
  * Set to the pre-existing config's id when this response is the result
  * of re-adding an identical plugin: creation merged project scope into

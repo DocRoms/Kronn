@@ -1429,13 +1429,6 @@ export const mcps = {
    *  `updateCustomSpec` call. */
   cleanupOrphanEnv: (serverId: string, keys: string[]) =>
     api<CleanupOrphanEnvResponse>('POST', `/mcps/custom/${encodeURIComponent(serverId)}/cleanup-orphan-env`, { keys }),
-  /** 0.8.6 (#63) — Path B export. Returns the path to call directly via
-   *  `<a href="...">` for download — the route emits Content-Disposition
-   *  attachment, the browser handles the rest. Auth header is added by
-   *  the global `api()` helper, so callers should fetch + blob if they
-   *  need to thread the token; here we return the URL for a direct link. */
-  exportFileUrl: (serverId: string) =>
-    `/api/mcps/custom/${encodeURIComponent(serverId)}/export-file`,
   /** 0.8.6 (#63) — Path B import. Frontend reads the user's `.json` file
    *  via `FileReader`, parses to JSON, POSTs the parsed payload. */
   importPluginFile: (payload: CustomApiPayload) =>
