@@ -549,6 +549,24 @@ async fn validate_sub_workflow_graph_db(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    if !s.read_only_repos.is_empty() {
+        if !matches!(s.step_type, StepType::Agent)
+            || !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex)
+        {
+            return Err(format!(
+                "Step « {} »: read_only_repos requires a Claude Code or Codex Agent step",
+                s.name
+            ));
+        }
+        if s.read_only_repos.iter().any(|path| {
+            path.trim().is_empty() || !crate::core::scanner::resolve_host_path(path).is_absolute()
+        }) {
+            return Err(format!(
+                "Step « {} »: read_only_repos requires absolute local repository paths",
+                s.name
+            ));
+        }
+    }
     if let Some(room) = s.room_id.as_deref() {
         if !matches!(s.step_type, StepType::Agent) {
             return Err(format!(
@@ -4602,6 +4620,7 @@ pub async fn suggestions(
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
                     room_id: None,
+                    read_only_repos: vec![],
                     sub_workflow_variables: std::collections::HashMap::new(),
                 })
                 .collect(),
@@ -5541,6 +5560,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            read_only_repos: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -6751,6 +6771,43 @@ mod tests {
         exec.room_id = Some("disc-1".into());
         let misplaced = validate_step_required_fields(&exec).expect_err("Agent only");
         assert!(misplaced.contains("room_id"), "{misplaced}");
+    }
+
+    #[test]
+    fn read_only_repos_are_explicit_agent_paths_and_round_trip() {
+        let mut step = mk_step("inspect", StepType::Agent);
+        step.prompt_template = "Inspect".into();
+        step.agent = AgentType::ClaudeCode;
+        step.read_only_repos = vec!["/repos/API équipe".into()];
+        validate_step_required_fields(&step).unwrap();
+        let json = serde_json::to_value(&step).unwrap();
+        let decoded: WorkflowStep = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.read_only_repos, step.read_only_repos);
+        for agent in [AgentType::Ollama, AgentType::GeminiCli] {
+            step.agent = agent;
+            assert!(validate_step_required_fields(&step)
+                .unwrap_err()
+                .contains("read_only_repos"));
+        }
+        step.agent = AgentType::Codex;
+        for path in ["", "relative", "https://example.com/repo", "{{repo}}"] {
+            step.read_only_repos = vec![path.into()];
+            assert!(validate_step_required_fields(&step)
+                .unwrap_err()
+                .contains("read_only_repos"));
+        }
+        step.read_only_repos = vec!["/repos/backend".into()];
+        step.step_type = StepType::Exec;
+        assert!(validate_step_required_fields(&step)
+            .unwrap_err()
+            .contains("read_only_repos"));
+        let legacy: WorkflowStep =
+            serde_json::from_value(serde_json::json!({"name": "old"})).unwrap();
+        assert!(legacy.read_only_repos.is_empty());
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("read_only_repos")
+            .is_none());
     }
 
     #[test]

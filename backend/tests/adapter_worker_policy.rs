@@ -45,6 +45,14 @@ async fn default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries() {
     }
     let bin = dir.path().join("bin");
     let project = dir.path().join("project");
+    let linked = dir.path().join("linked repo");
+    let initialized = kronn::core::cmd::sync_cmd("git")
+        .arg("init")
+        .arg(&linked)
+        .output()
+        .unwrap();
+    assert!(initialized.status.success());
+    let read_only_repos = vec![linked.to_string_lossy().to_string()];
     let mut env = Environment(Vec::new());
     env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
     env.set("KRONN_HOST_HOME", dir.path().join("host"));
@@ -99,8 +107,10 @@ esac
     ] {
         for toggle in [None, Some("0"), Some("1")] {
             env.change(switch, toggle.map(OsString::from));
-            for worker in [false, true] {
-                let label = format!("{agent:?} toggle={toggle:?} worker={worker}");
+            for mode in ["ordinary", "worker", "read-only"] {
+                let worker = mode == "worker";
+                let read_only = mode == "read-only";
+                let label = format!("{agent:?} toggle={toggle:?} mode={mode}");
                 let argv = dir.path().join(format!("argv-{count}"));
                 let child_env = dir.path().join(format!("env-{count}"));
                 env.set("KRONN_POLICY_ARGV", argv.clone());
@@ -116,6 +126,7 @@ esac
                     Duration::from_secs(10),
                     start_agent_with_config(AgentStartConfig {
                         full_access: true,
+                        read_only_repos: if read_only { &read_only_repos } else { &[] },
                         discussion_id: Some("fixture-discussion"),
                         mcp_context_override: Some(""),
                         // Even an explicit hint must not resume a task worker.
@@ -231,6 +242,59 @@ esac
                             "Codex worker sandbox missing",
                         );
                     }
+                } else if read_only {
+                    check(
+                        !args.contains(&"--dangerously-skip-permissions")
+                            && !args.iter().any(|arg| arg.starts_with("--sandbox=")),
+                        "full access or container policy overrides read-only repositories",
+                    );
+                    if agent == AgentType::ClaudeCode {
+                        check(
+                            observed[3] == "unset",
+                            "read-only Claude inherited sandbox bypass marker",
+                        );
+                        let settings: serde_json::Value = serde_json::from_str(
+                            args[args.iter().position(|arg| *arg == "--settings").unwrap() + 1],
+                        )
+                        .unwrap();
+                        check(
+                            settings["sandbox"]["filesystem"]["denyWrite"]
+                                == serde_json::json!([linked.canonicalize().unwrap()]),
+                            "linked repo must be unwritable by subprocesses",
+                        );
+                        check(
+                            settings["permissions"]["deny"]
+                                .as_array()
+                                .is_some_and(|rules| !rules.is_empty()),
+                            "built-in edits must also be denied",
+                        );
+                        check(
+                            args.windows(2).any(|p| {
+                                p[0] == "--add-dir"
+                                    && p[1] == linked.canonicalize().unwrap().to_str().unwrap()
+                            }),
+                            "linked repo read access missing",
+                        );
+                    } else {
+                        check(
+                            args.contains(&"approval_policy=\"never\""),
+                            "Codex escalation must be disabled",
+                        );
+                        check(
+                            args.contains(&"--ignore-user-config")
+                                && args.contains(&"--strict-config"),
+                            "Codex policy can be silently ignored",
+                        );
+                        check(
+                            args.iter()
+                                .any(|arg| arg.starts_with("permissions={kronn_read_only_repos=")),
+                            "Codex read-only profile missing",
+                        );
+                        check(
+                            !args.contains(&"--add-dir"),
+                            "Codex linked repo became writable",
+                        );
+                    }
                 } else {
                     check(
                         observed[0] == "unset",
@@ -241,6 +305,6 @@ esac
             }
         }
     }
-    assert_eq!(count, 12);
+    assert_eq!(count, 18);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

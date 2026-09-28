@@ -424,7 +424,8 @@ impl AcpTransport for CodexAcpAdapter {
         }
         // `codex exec resume` rejects `--sandbox` and does not keep the first
         // turn's mode, so a resumed turn passes it as a config override.
-        if self.launch.worker_context.is_none() {
+        // Worker and read-only-repo launches carry their own policy args.
+        if self.launch.worker_context.is_none() && self.launch.worker_args.is_none() {
             if let Some(sandbox) = self.broker.session_policy().codex_sandbox {
                 if known_thread.is_none() {
                     args.push(format!("--sandbox={sandbox}"));

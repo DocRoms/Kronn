@@ -4946,6 +4946,8 @@ const zh: TranslationDict = {
   "wiz.model": "模型",
   "wiz.modelPlaceholder": "例如：o3",
   "wiz.roomId": "房间（讨论 ID）",
+  "wiz.readOnlyRepos": "只读仓库",
+  "wiz.readOnlyReposHint": "每行一个本地 Git 仓库的绝对路径。支持 macOS/Linux 上的 Claude Code 或 Codex。仓库及 Git 历史记录保持只读。路径必须存在，且不得与工作目录重叠。",
   "wiz.roomIdHint": "可选，仅限 Claude Code 或 Codex。讨论 ID 或模板。此步骤的代理在每次启动和每次恢复时都以主代理身份加入该房间，无需邀请令牌。",
   "wiz.stallTimeout": "停滞超时（秒）",
   "wiz.delayAfter": "延迟后（秒）",

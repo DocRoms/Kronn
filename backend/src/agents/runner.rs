@@ -2770,6 +2770,7 @@ pub struct AgentStartConfig<'a> {
     pub project_path: &'a str,
     /// Working directory for the agent. If `None`, defaults to `project_path`.
     pub work_dir: Option<&'a str>,
+    pub read_only_repos: &'a [String],
     pub prompt: &'a str,
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
@@ -2936,6 +2937,7 @@ impl<'a> AgentStartConfig<'a> {
             prompt,
             tokens,
             work_dir: None,
+            read_only_repos: &[],
             full_access: false,
             skill_ids: &[],
             repository_skills: &[],
@@ -3397,6 +3399,21 @@ pub async fn start_agent(
 
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
+    if config.task_worker_context.is_some() && !config.read_only_repos.is_empty() {
+        return Err(
+            "read_only_repos is a workflow Agent policy, not a task-worker override".into(),
+        );
+    }
+    let read_only_repos = if config.read_only_repos.is_empty() {
+        None
+    } else {
+        let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
+        super::read_only_repos::ReadOnlyRepos::resolve(
+            config.agent_type,
+            &work_dir,
+            config.read_only_repos,
+        )?
+    };
     super::generation_settings::validate(
         config.agent_type,
         config.reasoning_effort_override,
@@ -3974,6 +3991,21 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     &work_dir,
                     config.project_path,
                 )?)
+            } else if let Some(policy) = &read_only_repos {
+                let (_, _, mut args, _, _, _) = agent_command_with_task_worker_policy(
+                    config.agent_type,
+                    "",
+                    false,
+                    "",
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                );
+                policy.apply(config.agent_type, &work_dir, &mut args);
+                args.pop();
+                Some(args)
             } else {
                 None
             };
@@ -3984,7 +4016,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
             };
-            return start_adapted_acp(request, config.full_access && !task_worker, launch).await;
+            return start_adapted_acp(
+                request,
+                config.full_access && !task_worker && read_only_repos.is_none(),
+                launch,
+            )
+            .await;
         }
         _ => {}
     }
@@ -4002,6 +4039,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             // conversation starts with the task, not with a room's history.
             (!task_worker).then_some(config.cli_resume_id).flatten(),
         );
+
+    if let Some(policy) = &read_only_repos {
+        policy.apply(config.agent_type, &work_dir, &mut args);
+    }
 
     // Claude Code in --print mode does NOT auto-load .mcp.json from CWD.
     // Explicitly pass it via --mcp-config so MCP tools are available.
@@ -4262,6 +4303,7 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
     pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
     pub(crate) workflow_step_context: Option<WorkflowStepBridgeContext>,
+    /// Complete invocation policy for task workers or read-only workflow repos.
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
 }
@@ -12292,8 +12334,13 @@ pub(crate) fn try_spawn(
     // below — sending a Linux path to a Windows-native spawn would just fail.
     let (cmd_name, mut cmd_args, resolved_via_wsl) =
         resolve_agent_invocation(binary, npx_package, args)?;
-    if task_worker_context.is_some()
-        && (binary == "claude" || npx_package == Some("@anthropic-ai/claude-code"))
+    let sandbox_required = task_worker_context.is_some()
+        || args.windows(2).any(|pair| {
+            pair[0] == "--settings"
+                && serde_json::from_str::<serde_json::Value>(&pair[1])
+                    .is_ok_and(|settings| settings["sandbox"]["failIfUnavailable"] == true)
+        });
+    if sandbox_required && (binary == "claude" || npx_package == Some("@anthropic-ai/claude-code"))
     {
         claude_task_worker_platform_check(cfg!(windows), resolved_via_wsl)?;
     }
@@ -12505,7 +12552,7 @@ pub(crate) fn try_spawn(
     // and pretending an outer sandbox exists would undermine that guarantee.
     // Note: use CLAUDE_CODE_BUBBLEWRAP, not IS_SANDBOX — IS_SANDBOX also
     // suppresses 529 overloaded errors causing infinite silent retries.
-    if task_worker_context.is_none() {
+    if !sandbox_required {
         cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
     } else {
         cmd.env_remove("CLAUDE_CODE_BUBBLEWRAP");

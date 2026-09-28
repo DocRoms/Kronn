@@ -8855,7 +8855,13 @@ multi_agent_review?: MultiAgentReviewConfig | null,
  * step's agent joins that room as its principal without an invite token,
  * on every launch and every resume of the step.
  */
-room_id?: string | null, };
+room_id?: string | null,
+/**
+ * Absolute local repository paths made readable, never writable, by this
+ * Agent step. Supported by Claude Code and Codex only; empty preserves
+ * the existing launch policy. Paths are validated again before launch.
+ */
+read_only_repos?: Array<string>, };
 
 /**
  * Durable identity of an Agent step that joined a discussion room.

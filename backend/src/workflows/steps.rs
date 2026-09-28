@@ -107,6 +107,19 @@ pub(crate) fn build_step_prompt(
     // signal addenda below anchor the END of the prompt (LLMs follow trailing
     // instructions more reliably than leading ones).
 
+    // Only a step that declares read-only repositories says so: an undeclared
+    // step's prompt stays exactly its rendered template (KT-926).
+    if !step.read_only_repos.is_empty() {
+        prompt.push_str("\n\nWORKFLOW REPOSITORY ACCESS\nA repository path in a ticket, project list or companion document is a location, not a filesystem permission grant. Do not assume that a main checkout outside the working directory is readable. If a read is denied, report that limitation instead of claiming to have inspected the repository.\n");
+        prompt.push_str("This step declares the following local repositories for read-only access (including Git history). Never edit them; the launch must fail if the read-only policy cannot be configured:\n");
+        for path in &step.read_only_repos {
+            prompt.push_str(&format!(
+                "- {}\n",
+                serde_json::to_string(path).unwrap_or_default()
+            ));
+        }
+    }
+
     // Auto-inject structured output format instructions when output_format
     // is `Structured` or `TypedSchema`. The TypedSchema variant adds the
     // schema constraint to the same envelope shape so downstream
@@ -1146,6 +1159,7 @@ async fn run_agent_with_timeout(
             provenance: Some(capture.clone()),
             activity: activity.cloned(),
             work_dir: Some(work_dir),
+            read_only_repos: &step.read_only_repos,
             full_access,
             skill_ids: &step.skill_ids,
             directive_ids: &step.directive_ids,
@@ -2382,6 +2396,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            read_only_repos: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -2410,6 +2425,17 @@ mod tests {
 
         assert!(error.contains("issue.titel"));
         assert!(error.contains("Unknown workflow template variable"));
+    }
+
+    #[test]
+    fn build_step_prompt_states_declared_read_only_access() {
+        let mut step = make_step("Review the ticket");
+        step.read_only_repos = vec!["/repos/API équipe".into()];
+        let prompt = build_step_prompt(&step, &TemplateContext::new()).unwrap();
+        assert!(prompt.starts_with("Review the ticket"));
+        assert!(prompt.contains("\"/repos/API équipe\""));
+        assert!(prompt.contains("Never edit them"));
+        assert!(prompt.contains("not a filesystem permission grant"));
     }
 
     #[test]

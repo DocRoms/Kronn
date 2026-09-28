@@ -26,6 +26,7 @@
         "skill_ids",
         "profile_ids",
         "directive_ids",
+        "read_only_repos (array of absolute local Git repository paths; Claude Code/Codex on macOS/Linux only; grants reads including Git history and denies writes, even with full_access; no templates; missing paths or overlap with the working directory fail before launch)",
         "multi_agent_review (bool — second agent debates the output)",
         "room_id (Claude Code/Codex only; template rendering to a discussion id — the step's agent is a member and principal of that room at every launch and resume, no kr-join token)"
       ],
