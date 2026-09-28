@@ -27,8 +27,10 @@ use tokio::time::timeout;
 use crate::db::model_catalog::{self as db, DiscoveredModel};
 use crate::db::Database;
 use crate::models::{
-    AgentType, AppConfig, CatalogPreflightFailure, ModelAvailability, ModelCatalogView, ModelTier,
-    ModelTierConfig, ModelTiersConfig, ModelUnavailableReason,
+    AgentType, AppConfig, CatalogModelEntry, CatalogPreflightFailure, ModelAvailability,
+    ModelCatalogAlert, ModelCatalogReference, ModelCatalogReferenceKind, ModelCatalogView,
+    ModelProvenance, ModelTier, ModelTierConfig, ModelTiersConfig, ModelUnavailableReason,
+    StepType,
 };
 
 /// How long a successful live snapshot is trusted before a consumer should
@@ -527,7 +529,169 @@ pub async fn build_view(
         last_attempt_at: log.as_ref().map(|l| l.last_attempt_at),
         last_error_reason: log.as_ref().and_then(|l| l.last_error_reason),
         last_error_detail: log.as_ref().and_then(|l| l.last_error_detail.clone()),
+        alerts: Vec::new(),
     })
+}
+
+fn live_replacement_for_entry(
+    entries: &[CatalogModelEntry],
+    missing: &CatalogModelEntry,
+) -> Option<String> {
+    let resolved = missing.resolved_model.as_deref()?;
+    let alias_stem = missing.model_id.split_once('[').map(|(stem, _suffix)| stem);
+    entries
+        .iter()
+        .filter(|candidate| {
+            candidate.model_id != missing.model_id
+                && candidate.provenance == ModelProvenance::Live
+                && candidate.availability == ModelAvailability::Available
+                && candidate.resolved_model.as_deref() == Some(resolved)
+        })
+        .min_by_key(|candidate| {
+            (
+                alias_stem != Some(candidate.model_id.as_str()),
+                candidate.model_id == "default",
+                candidate.model_id.clone(),
+            )
+        })
+        .map(|candidate| candidate.model_id.clone())
+}
+
+fn configured_tier_models(
+    config: &ModelTiersConfig,
+    agent_type: &AgentType,
+) -> Vec<(ModelTier, String)> {
+    let tier_config = match agent_type {
+        AgentType::ClaudeCode => Some(&config.claude_code),
+        AgentType::Codex => Some(&config.codex),
+        AgentType::OpenCode => Some(&config.open_code),
+        AgentType::GeminiCli => Some(&config.gemini_cli),
+        AgentType::Kiro => Some(&config.kiro),
+        AgentType::Vibe => Some(&config.vibe),
+        AgentType::CopilotCli => Some(&config.copilot_cli),
+        AgentType::Ollama => Some(&config.ollama),
+        AgentType::LiteLlm => Some(&config.lite_llm),
+        AgentType::Nvidia => Some(&config.nvidia),
+        AgentType::Custom => None,
+    };
+    let Some(tier_config) = tier_config else {
+        return Vec::new();
+    };
+    [
+        (ModelTier::Economy, tier_config.economy.as_ref()),
+        (ModelTier::Default, tier_config.default.as_ref()),
+        (ModelTier::Reasoning, tier_config.reasoning.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(tier, model)| {
+        model
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| (tier, model.clone()))
+    })
+    .collect()
+}
+
+fn reference_runtime_target(agent_type: &AgentType, connection_id: Option<&str>) -> String {
+    connection_id
+        .map(db::http_runtime_target_id)
+        .unwrap_or_else(|| db::agent_runtime_target_id(agent_type))
+}
+
+/// Attach warnings for persisted references to models that disappeared from
+/// the latest successful catalogue. The warning is recalculated from current
+/// workflow, tier and Quick Prompt state, so fixing the last reference clears
+/// it without mutating catalogue history.
+pub async fn populate_reference_alerts(
+    database: &Database,
+    config: &AppConfig,
+    view: &mut ModelCatalogView,
+) -> anyhow::Result<()> {
+    if !view.models.iter().any(|entry| {
+        entry.availability == ModelAvailability::Unavailable
+            && entry.unavailable_reason == Some(ModelUnavailableReason::Disappeared)
+    }) {
+        view.alerts.clear();
+        return Ok(());
+    }
+    let (workflows, quick_prompts) = database
+        .with_read_conn(|conn| {
+            Ok((
+                crate::db::workflows::list_workflows(conn)?,
+                crate::db::quick_prompts::list_quick_prompts(conn)?,
+            ))
+        })
+        .await?;
+    let tier_models = configured_tier_models(&config.agents.model_tiers, &view.agent_type);
+    let mut alerts = Vec::new();
+
+    for missing in view.models.iter().filter(|entry| {
+        entry.availability == ModelAvailability::Unavailable
+            && entry.unavailable_reason == Some(ModelUnavailableReason::Disappeared)
+    }) {
+        let mut references = Vec::new();
+        for workflow in &workflows {
+            for step in workflow.steps.iter().chain(&workflow.on_failure) {
+                if !matches!(step.step_type, StepType::Agent | StepType::BatchQuickPrompt) {
+                    continue;
+                }
+                let Some(settings) = step.agent_settings.as_ref() else {
+                    continue;
+                };
+                if settings.model.as_deref() != Some(missing.model_id.as_str())
+                    || reference_runtime_target(&step.agent, settings.connection_id.as_deref())
+                        != view.runtime_target_id
+                {
+                    continue;
+                }
+                references.push(ModelCatalogReference {
+                    kind: ModelCatalogReferenceKind::WorkflowStep,
+                    resource_id: Some(workflow.id.clone()),
+                    label: format!("{} · {}", workflow.name, step.name),
+                });
+            }
+        }
+        if view.runtime_target_id == db::agent_runtime_target_id(&view.agent_type) {
+            for (tier, model) in &tier_models {
+                if model == &missing.model_id {
+                    references.push(ModelCatalogReference {
+                        kind: ModelCatalogReferenceKind::ModelTier,
+                        resource_id: None,
+                        label: format!("{:?} · {tier:?}", view.agent_type),
+                    });
+                }
+            }
+        }
+        for prompt in &quick_prompts {
+            let Some(settings) = prompt.agent_settings.as_ref() else {
+                continue;
+            };
+            let connection_id = settings
+                .connection_id
+                .as_deref()
+                .or(prompt.connection_id.as_deref());
+            if settings.model.as_deref() != Some(missing.model_id.as_str())
+                || reference_runtime_target(&prompt.agent, connection_id) != view.runtime_target_id
+            {
+                continue;
+            }
+            references.push(ModelCatalogReference {
+                kind: ModelCatalogReferenceKind::QuickPrompt,
+                resource_id: Some(prompt.id.clone()),
+                label: prompt.name.clone(),
+            });
+        }
+        references.sort_by(|left, right| left.label.cmp(&right.label));
+        if !references.is_empty() {
+            alerts.push(ModelCatalogAlert {
+                model_id: missing.model_id.clone(),
+                replacement: live_replacement_for_entry(&view.models, missing),
+                references,
+            });
+        }
+    }
+    alerts.sort_by(|left, right| left.model_id.cmp(&right.model_id));
+    view.alerts = alerts;
+    Ok(())
 }
 
 /// Serve the current snapshot, refreshing first when it is stale (or when
@@ -647,6 +811,7 @@ pub async fn preflight_check(
                     detail: format!("catalog assignment lookup failed: {error}"),
                     last_checked_at: Utc::now(),
                     recommended_action: "recheck_catalog".into(),
+                    replacement: None,
                 })
             }
         }
@@ -670,6 +835,7 @@ pub async fn preflight_check(
                     detail: format!("catalog refresh failed: {error}"),
                     last_checked_at: Utc::now(),
                     recommended_action: "recheck_catalog".into(),
+                    replacement: None,
                 });
             }
         }
@@ -710,16 +876,23 @@ pub async fn preflight_check(
                     .unwrap_or_else(|| "the runtime catalog could not be refreshed".into()),
                 last_checked_at: view.last_attempt_at.unwrap_or_else(Utc::now),
                 recommended_action: recommended_action_for(reason).to_string(),
+                replacement: None,
             });
         }
     }
     let target = runtime_target_id.clone();
     let mid = model_id.clone();
-    let entry = db
-        .with_conn(move |conn| db::get(conn, &target, &mid))
+    let (entry, replacement) = db
+        .with_read_conn(move |conn| {
+            let entries = db::list_for_target(conn, &target)?;
+            let entry = entries.iter().find(|entry| entry.model_id == mid).cloned();
+            let replacement = entry
+                .as_ref()
+                .and_then(|missing| live_replacement_for_entry(&entries, missing));
+            Ok((entry, replacement))
+        })
         .await
-        .ok()
-        .flatten();
+        .unwrap_or((None, None));
     match entry {
         Some(entry) if entry.availability == ModelAvailability::Unavailable => {
             let reason = entry
@@ -735,6 +908,7 @@ pub async fn preflight_check(
                     .unwrap_or_else(|| "this model is not currently available".into()),
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(reason).to_string(),
+                replacement,
             })
         }
         // KT-545 DoD #3: a model the catalog positively tags with
@@ -761,6 +935,7 @@ pub async fn preflight_check(
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(ModelUnavailableReason::Unsupported)
                     .to_string(),
+                replacement: None,
             })
         }
         _ => None,
@@ -781,6 +956,8 @@ mod tests {
         DiscoveredModel {
             model_id: "claude-fable-5-1[1m]".into(),
             display_name: "Fable".into(),
+            resolved_model: Some("claude-fable-5-1".into()),
+            description: Some("Long-context Fable".into()),
             capabilities: vec!["chat".into()],
             reasoning_modes: vec!["low".into(), "max".into()],
             default_reasoning_mode: None,
@@ -1077,6 +1254,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "some-other-model".into(),
                     display_name: "Some other model".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1147,6 +1326,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "seedance-2.0-mini".into(),
                     display_name: "Seedance 2.0 mini".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["video".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1183,6 +1364,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "llama-3.3-70b".into(),
                     display_name: "Llama 3.3 70B".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1231,6 +1414,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "other-model".into(),
                     display_name: "Other model".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec![],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1254,6 +1439,163 @@ mod tests {
         assert_eq!(failure.model_id.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(failure.reason, ModelUnavailableReason::Disappeared);
         assert_eq!(failure.recommended_action, "choose_replacement");
+    }
+
+    #[tokio::test]
+    async fn disappeared_claude_alias_names_live_resolved_model_replacement() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let alias = DiscoveredModel {
+                    model_id: "opus[1m]".into(),
+                    display_name: "Opus 1M".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Legacy long-context alias".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let live = DiscoveredModel {
+                    model_id: "opus".into(),
+                    display_name: "Opus".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Current Opus alias".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let default = DiscoveredModel {
+                    model_id: "default".into(),
+                    display_name: "Default".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Recommended model".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    &[alias, default.clone(), live.clone()],
+                )?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[default, live])
+            })
+            .await
+            .unwrap();
+
+        let failure = preflight_check(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("opus[1m]"),
+            None,
+        )
+        .await
+        .expect("the disappeared alias remains a deliberate preflight refusal");
+        assert_eq!(failure.reason, ModelUnavailableReason::Disappeared);
+        assert_eq!(failure.recommended_action, "choose_replacement");
+        assert_eq!(failure.replacement.as_deref(), Some("opus"));
+    }
+
+    #[tokio::test]
+    async fn refresh_alert_names_workflow_tier_and_quick_prompt_references() {
+        let database = test_db();
+        let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+        let alias = DiscoveredModel {
+            model_id: "opus[1m]".into(),
+            display_name: "Opus 1M".into(),
+            resolved_model: Some("claude-opus-5-5".into()),
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        let live = DiscoveredModel {
+            model_id: "opus".into(),
+            display_name: "Opus".into(),
+            resolved_model: Some("claude-opus-5-5".into()),
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        database
+            .with_conn({
+                let target = target.clone();
+                let alias = alias.clone();
+                let live = live.clone();
+                move |conn| {
+                    db::reconcile_live(
+                        conn,
+                        &target,
+                        &AgentType::ClaudeCode,
+                        &[alias, live],
+                    )?;
+                    let now = Utc::now().to_rfc3339();
+                    conn.execute(
+                        "INSERT INTO workflows \
+                         (id, name, trigger_json, steps_json, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                        rusqlite::params![
+                            "workflow-release",
+                            "Release workflow",
+                            r#"{"type":"Manual"}"#,
+                            r#"[{"name":"orchestrator","step_type":{"type":"Agent"},"agent":"ClaudeCode","prompt_template":"Ship","agent_settings":{"model":"opus[1m]"}}]"#,
+                            now,
+                        ],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO quick_prompts \
+                         (id, name, prompt_template, agent, tier, agent_settings_json, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                        rusqlite::params![
+                            "qp-framing",
+                            "Framing analysis",
+                            "Analyse",
+                            "ClaudeCode",
+                            "reasoning",
+                            r#"{"model":"opus[1m]"}"#,
+                            now,
+                        ],
+                    )?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let mut config = crate::core::config::default_config();
+        config.agents.model_tiers.claude_code.reasoning = Some("opus[1m]".into());
+
+        let mut view = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![live]),
+                refresh_if_stale(&database, AgentType::ClaudeCode, true),
+            )
+            .await
+            .unwrap();
+        populate_reference_alerts(&database, &config, &mut view)
+            .await
+            .unwrap();
+
+        assert_eq!(view.alerts.len(), 1);
+        let alert = &view.alerts[0];
+        assert_eq!(alert.model_id, "opus[1m]");
+        assert_eq!(alert.replacement.as_deref(), Some("opus"));
+        assert_eq!(
+            alert
+                .references
+                .iter()
+                .map(|reference| reference.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ClaudeCode · Reasoning",
+                "Framing analysis",
+                "Release workflow · orchestrator",
+            ]
+        );
     }
 
     #[tokio::test]

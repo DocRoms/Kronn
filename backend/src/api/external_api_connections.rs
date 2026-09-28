@@ -838,6 +838,8 @@ pub async fn test(
                 .map(|model| catalog_store::DiscoveredModel {
                     model_id: model.id.clone(),
                     display_name: model.display_name.clone(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: model.capabilities.clone(),
                     reasoning_modes: Vec::new(),
                     default_reasoning_mode: None,

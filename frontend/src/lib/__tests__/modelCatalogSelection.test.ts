@@ -69,15 +69,21 @@ describe('catalogue selection contract', () => {
     const unavailable = entry('exact/id', {
       display_name: 'Technical name', display_alias: 'Alias', reasoning_modes: ['high'],
       availability: 'unavailable', unavailable_reason: 'disappeared', unavailable_detail: 'No longer listed',
+      resolved_model: 'provider/canonical', description: 'Provider description',
       privacy_note: 'Operator note', cost_hint: 'paid',
     });
-    const [option] = catalogModelOptions({ ...view([unavailable]), stale: true }, 'exact/id', (key, ...args) => [key, ...args].join(' '), () => 'Observed $0.01');
+    const [option] = catalogModelOptions({
+      ...view([unavailable]), stale: true,
+      alerts: [{ model_id: 'exact/id', replacement: 'replacement/id', references: [] }],
+    }, 'exact/id', (key, ...args) => [key, ...args].join(' '), () => 'Observed $0.01');
     expect(option.label).toBe('Alias — modelCatalog.unavailable');
     expect(option.disabled).toBe(true);
-    for (const text of ['exact/id', 'modelCatalog.provenance.cached', unavailable.last_checked_at, 'high', 'No longer listed', 'Observed $0.01', 'Operator note']) {
+    for (const text of ['exact/id', 'Provider description', 'modelCatalog.provenance.cached', unavailable.last_checked_at, 'high', 'No longer listed', 'modelCatalog.replacement replacement/id', 'Observed $0.01', 'Operator note']) {
       expect(option.description).toContain(text);
     }
     expect(option.keywords).toContain('Technical name');
+    expect(option.keywords).toContain('provider/canonical');
+    expect(option.keywords).toContain('replacement/id');
     expect(catalogModelOptions(undefined, '', key => key, () => '')).toEqual([]);
   });
 });

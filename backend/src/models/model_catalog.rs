@@ -101,6 +101,15 @@ pub struct CatalogModelEntry {
     /// `--model` flag or API `model` field must receive.
     pub model_id: String,
     pub display_name: String,
+    /// Provider-reported canonical model identity. For Claude aliases this
+    /// lets Kronn relate two CLI identifiers without treating either one as
+    /// an automatic substitute for the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    /// Provider-supplied explanatory text, retained verbatim when discovery
+    /// exposes it. `None` means the source did not report a description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Operator-set label override. When present, selectors show this
     /// instead of `display_name`, even after the record is reconciled to
     /// `Live` (KT-531: operator display choices survive reconciliation).
@@ -210,6 +219,40 @@ pub struct ModelCatalogView {
     pub last_error_reason: Option<ModelUnavailableReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_detail: Option<String>,
+    /// Referenced models that the latest successful catalogue no longer
+    /// contains. This is a warning only: changing a reference remains an
+    /// explicit operator action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<ModelCatalogAlert>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ModelCatalogReferenceKind {
+    WorkflowStep,
+    ModelTier,
+    QuickPrompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct ModelCatalogReference {
+    pub kind: ModelCatalogReferenceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    /// Human-facing resource and location name, for example
+    /// `Release workflow · review` or `ClaudeCode · reasoning`.
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct ModelCatalogAlert {
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+    pub references: Vec<ModelCatalogReference>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -252,4 +295,8 @@ pub struct CatalogPreflightFailure {
     /// maps this to the recheck/settings shortcut; it is deliberately not a
     /// prose sentence so i18n stays centralized in the frontend dictionaries.
     pub recommended_action: String,
+    /// Live identifier resolving to the same provider model, when discovery
+    /// reported one. Informational only; Kronn never substitutes it silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
 }

@@ -165,6 +165,8 @@ esac
                     model_catalog::DiscoveredModel {
                         model_id: "effort-model".into(),
                         display_name: "Test".into(),
+                        resolved_model: None,
+                        description: None,
                         capabilities: vec!["chat".into()],
                         reasoning_modes: vec!["low".into(), "high".into()],
                         default_reasoning_mode: None,
@@ -172,6 +174,8 @@ esac
                     model_catalog::DiscoveredModel {
                         model_id: "other-model".into(),
                         display_name: "Other".into(),
+                        resolved_model: None,
+                        description: None,
                         capabilities: vec!["chat".into()],
                         reasoning_modes: vec!["low".into()],
                         default_reasoning_mode: None,

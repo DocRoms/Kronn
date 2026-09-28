@@ -1136,6 +1136,17 @@ agent_type: AgentType,
  */
 model_id: string, display_name: string,
 /**
+ * Provider-reported canonical model identity. For Claude aliases this
+ * lets Kronn relate two CLI identifiers without treating either one as
+ * an automatic substitute for the other.
+ */
+resolved_model?: string | null,
+/**
+ * Provider-supplied explanatory text, retained verbatim when discovery
+ * exposes it. `None` means the source did not report a description.
+ */
+description?: string | null,
+/**
  * Operator-set label override. When present, selectors show this
  * instead of `display_name`, even after the record is reconciled to
  * `Live` (KT-531: operator display choices survive reconciliation).
@@ -1192,7 +1203,12 @@ export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: A
  * maps this to the recheck/settings shortcut; it is deliberately not a
  * prose sentence so i18n stays centralized in the frontend dictionaries.
  */
-recommended_action: string, };
+recommended_action: string,
+/**
+ * Live identifier resolving to the same provider model, when discovery
+ * reported one. Informational only; Kronn never substitutes it silently.
+ */
+replacement?: string | null, };
 
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
@@ -4217,6 +4233,17 @@ export type Metric = { label: string, value: string, };
 
 export type ModelAvailability = "available" | "unavailable";
 
+export type ModelCatalogAlert = { model_id: string, replacement?: string | null, references: Array<ModelCatalogReference>, };
+
+export type ModelCatalogReference = { kind: ModelCatalogReferenceKind, resource_id?: string | null,
+/**
+ * Human-facing resource and location name, for example
+ * `Release workflow · review` or `ClaudeCode · reasoning`.
+ */
+label: string, };
+
+export type ModelCatalogReferenceKind = "workflow_step" | "model_tier" | "quick_prompt";
+
 export type ModelCatalogSnapshot = { targets: Array<ModelCatalogView>, };
 
 /**
@@ -4235,7 +4262,13 @@ live_refresh_ok: boolean,
  * window, or there has never been one. The UI must never present
  * `Cached`/`Migrated` entries as a current discovery when this is true.
  */
-stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null, };
+stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null,
+/**
+ * Referenced models that the latest successful catalogue no longer
+ * contains. This is a warning only: changing a reference remains an
+ * explicit operator action.
+ */
+alerts?: Array<ModelCatalogAlert>, };
 
 /**
  * Coarse, catalog-driven cost classification. Never inferred from a

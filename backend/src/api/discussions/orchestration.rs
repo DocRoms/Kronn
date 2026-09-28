@@ -1880,6 +1880,8 @@ mod orchestrate_validation_tests {
                     &[crate::db::model_catalog::DiscoveredModel {
                         model_id: model.clone(),
                         display_name: model,
+                        resolved_model: None,
+                        description: None,
                         capabilities,
                         reasoning_modes: Vec::new(),
                         default_reasoning_mode: None,
@@ -1913,6 +1915,8 @@ mod orchestrate_validation_tests {
                     &[crate::db::model_catalog::DiscoveredModel {
                         model_id: model.clone(),
                         display_name: model,
+                        resolved_model: None,
+                        description: None,
                         capabilities,
                         reasoning_modes: Vec::new(),
                         default_reasoning_mode: None,

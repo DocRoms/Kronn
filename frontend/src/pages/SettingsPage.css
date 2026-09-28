@@ -2638,6 +2638,23 @@
   background: var(--kr-bg-surface);
 }
 
+.set-model-catalog-alert {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--kr-warning) 45%, transparent);
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--kr-warning) 10%, transparent);
+  color: var(--kr-text-primary);
+  font-size: 0.78rem;
+}
+
+.set-model-catalog-alert ul {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
 .set-model-catalog .set-section-header-lg {
   display: flex;
   align-items: flex-start;

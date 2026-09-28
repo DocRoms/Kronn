@@ -20,6 +20,14 @@ vi.mock('../../../lib/api', () => buildApiMock({
   },
 }));
 
+vi.mock('../../../lib/I18nContext', () => ({
+  useT: () => ({
+    t: (key: string, ...args: (string | number)[]) => (
+      args.length > 0 ? `${key}:${args.join(',')}` : key
+    ),
+  }),
+}));
+
 import { ModelCatalogSection } from '../ModelCatalogSection';
 
 const snapshot = {
@@ -110,6 +118,36 @@ describe('ModelCatalogSection', () => {
     expect(row).toHaveTextContent('modelCatalog.cliDefault');
     expect(screen.getByTestId('model-catalog-row-agent:codex:default')).not.toHaveTextContent('modelCatalog.cliDefault');
     expect(screen.getByTestId('model-catalog-row-agent:claude-code:fable')).not.toHaveTextContent('modelCatalog.cliDefault');
+  });
+
+  it('alerts before launch with every named reference and the resolved replacement', async () => {
+    listMock.mockResolvedValue({ targets: [{
+      runtime_target_id: 'agent:claude-code', target_label: 'ClaudeCode', agent_type: 'ClaudeCode',
+      stale: false, live_refresh_ok: true,
+      models: [{
+        ...model({ id: 'opus-old', model_id: 'opus[1m]', display_name: 'Opus 1M' }),
+        runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode',
+        provenance: 'cached', availability: 'unavailable', unavailable_reason: 'disappeared',
+        resolved_model: 'claude-opus-5-5',
+      }],
+      alerts: [{
+        model_id: 'opus[1m]', replacement: 'opus', references: [
+          { kind: 'workflow_step', resource_id: 'wf-1', label: 'Release workflow · orchestrator' },
+          { kind: 'model_tier', label: 'ClaudeCode · Reasoning' },
+          { kind: 'quick_prompt', resource_id: 'qp-1', label: 'Framing analysis' },
+        ],
+      }],
+    }] });
+
+    render(<ModelCatalogSection />);
+
+    const alert = await screen.findByTestId('model-catalog-alert-opus[1m]');
+    expect(alert).toHaveAttribute('role', 'alert');
+    expect(alert).toHaveTextContent('modelCatalog.disappearedAlert:opus[1m]');
+    expect(alert).toHaveTextContent('modelCatalog.replacement:opus');
+    expect(alert).toHaveTextContent('Release workflow · orchestrator');
+    expect(alert).toHaveTextContent('ClaudeCode · Reasoning');
+    expect(alert).toHaveTextContent('Framing analysis');
   });
 
   it.each(['create', 'update', 'delete', 'refresh'] as const)('serializes synchronous %s clicks until reload finishes and permits retry', async (operation) => {
