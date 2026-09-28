@@ -112,7 +112,7 @@ async fn provenance_distinguishes_override_inherited_tier_and_observed_model() {
         let provenance = result.agent_provenance.as_ref().unwrap();
         assert_eq!(provenance.selected_attempt, Some(1));
         let attempt = &provenance.attempts[0];
-        assert_eq!(attempt.requested_model.as_deref(), explicit);
+        assert_eq!(attempt.requested_model.as_deref(), Some(expected));
         assert_eq!(attempt.resolved_model.as_deref(), Some(expected));
         assert_eq!(attempt.observed_models, ["served-model"]);
         assert_eq!(attempt.model_applied, Some(true));
@@ -317,6 +317,7 @@ fn provenance_snapshot_keeps_escalation_after_config_changes_and_unknown_acp_def
             connection_id: None,
             requested_model: None,
             resolved_model: Some("launch-alias".into()),
+            preflight_warning: None,
             model_applied: Some(true),
             observed_models: vec!["served-claude".into()],
             format_fallback: false,
@@ -515,6 +516,7 @@ fn step_cache_totals_sum_reporting_attempts_and_stay_unknown_otherwise() {
         connection_id: None,
         requested_model: None,
         resolved_model: None,
+        preflight_warning: None,
         model_applied: None,
         observed_models: vec![],
         format_fallback: false,

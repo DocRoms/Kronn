@@ -4167,6 +4167,7 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'wf.attemptConnectionCopy': 'Copiar el ID de la conexión guardada {0}',
   'wf.attemptFormatFallback': 'sin restricción de formato',
   'wf.attemptModelCliDefault': 'modelo por defecto del CLI',
+  'wf.modelFallbackWarning': 'Solicitado: {0}; usado: {1} porque el modelo solicitado desapareció',
   'wf.attemptRoleInitial': 'inicial',
   'wf.attemptRoleRepair': 'reparación',
   'wf.attemptRoleEscalation': 'escalada',

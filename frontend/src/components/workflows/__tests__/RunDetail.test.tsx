@@ -186,6 +186,37 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     expect(chips[0]).toHaveAttribute('data-retained', 'false');
   });
 
+  it('warns when catalogue preflight replaced a disappeared model', () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'Agent',
+        step_agent: 'ClaudeCode',
+        step_model: 'opus · reasoning',
+        agent_provenance: {
+          selected_attempt: 1,
+          attempts: [attempt({
+            agent: 'ClaudeCode',
+            tier: 'reasoning',
+            requested_model: 'opus[1m]',
+            resolved_model: 'opus',
+            preflight_warning: {
+              requested_model: 'opus[1m]',
+              effective_model: 'opus',
+              reason: 'disappeared',
+              detail: 'absent from the latest successful live catalog',
+              replacement_source: 'resolved_model',
+              equivalent_tier: 'reasoning',
+            },
+          })],
+        },
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    const warning = within(screen.getByTestId('wf-agent-provenance')).getByRole('status');
+    expect(warning).toHaveTextContent('wf.modelFallbackWarning:opus[1m],opus');
+  });
+
   it('says when no attempt was kept and never presents a CLI default as the requested model', () => {
     const run = mkRun({
       step_results: [mkResult({

@@ -113,7 +113,7 @@ async fn checked_launch_connection(
     let model = connection
         .as_ref()
         .and_then(|connection| crate::http_transport::connection_tier_model(connection, tier));
-    if let Some(failure) = crate::core::model_catalog::preflight_check(
+    let preflight = crate::core::model_catalog::preflight_resolve(
         &state.db,
         runtime_target_id.as_deref(),
         agent.clone(),
@@ -122,13 +122,13 @@ async fn checked_launch_connection(
         Some(model_tiers),
     )
     .await
-    {
-        return Err(format!(
+    .map_err(|failure| {
+        format!(
             "model_catalog_preflight_failed:{}",
             serde_json::to_string(&failure).unwrap_or_default()
-        ));
-    }
-    Ok((connection, model))
+        )
+    })?;
+    Ok((connection, preflight.effective_model))
 }
 
 async fn unavailable_local_participants_with<Detect, DetectFuture>(
@@ -452,7 +452,7 @@ pub async fn orchestrate(
         let model_override = connection.as_ref().and_then(|connection| {
             crate::http_transport::connection_tier_model(connection, participant_tier)
         });
-        if let Some(failure) = crate::core::model_catalog::preflight_check(
+        if let Err(failure) = crate::core::model_catalog::preflight_resolve(
             &state.db,
             runtime_target_id.as_deref(),
             participant.agent_type.clone(),

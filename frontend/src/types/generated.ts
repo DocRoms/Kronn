@@ -1206,9 +1206,21 @@ export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: A
 recommended_action: string,
 /**
  * Live identifier resolving to the same provider model, when discovery
- * reported one. Informational only; Kronn never substitutes it silently.
+ * reported one. Refusals expose it as operator guidance; successful
+ * same-agent fallbacks use `CatalogPreflightWarning` instead.
  */
 replacement?: string | null, };
+
+export type CatalogPreflightResolution = { requested_model: string | null, effective_model: string | null, warning?: CatalogPreflightWarning | null, };
+
+/**
+ * Non-blocking catalogue decision made immediately before a launch. The
+ * requested and effective identifiers remain distinct so execution history
+ * can explain an automatic same-agent replacement without rewriting config.
+ */
+export type CatalogPreflightWarning = { requested_model: string, effective_model: string, reason: ModelUnavailableReason, detail: string, replacement_source: CatalogReplacementSource, equivalent_tier: ModelTier, };
+
+export type CatalogReplacementSource = "resolved_model" | "equivalent_tier";
 
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
@@ -7695,13 +7707,20 @@ export type WorkflowAgentAttempt = { id: number, role: WorkflowAgentAttemptRole,
  */
 retry: number, agent: AgentType, tier: ModelTier, connection_id: string | null,
 /**
- * Explicit model override, before resolving connection/tier defaults.
+ * Model requested at preflight after resolving any connection or tier
+ * default, before a catalogue fallback is applied.
  */
 requested_model: string | null,
 /**
  * Model resolved at the actual launch boundary. Not provider observation.
  */
 resolved_model: string | null,
+/**
+ * Non-blocking catalogue fallback applied before this attempt. Absent
+ * when the requested model was still available or catalogue state did not
+ * require a replacement.
+ */
+preflight_warning?: CatalogPreflightWarning | null,
 /**
  * Whether the transport applied that selection. None means unknown or no
  * selection; native ACP can explicitly retain its default (false).

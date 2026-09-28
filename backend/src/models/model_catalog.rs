@@ -296,7 +296,39 @@ pub struct CatalogPreflightFailure {
     /// prose sentence so i18n stays centralized in the frontend dictionaries.
     pub recommended_action: String,
     /// Live identifier resolving to the same provider model, when discovery
-    /// reported one. Informational only; Kronn never substitutes it silently.
+    /// reported one. Refusals expose it as operator guidance; successful
+    /// same-agent fallbacks use `CatalogPreflightWarning` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CatalogReplacementSource {
+    ResolvedModel,
+    EquivalentTier,
+}
+
+/// Non-blocking catalogue decision made immediately before a launch. The
+/// requested and effective identifiers remain distinct so execution history
+/// can explain an automatic same-agent replacement without rewriting config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CatalogPreflightWarning {
+    pub requested_model: String,
+    pub effective_model: String,
+    pub reason: ModelUnavailableReason,
+    pub detail: String,
+    pub replacement_source: CatalogReplacementSource,
+    pub equivalent_tier: ModelTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CatalogPreflightResolution {
+    pub requested_model: Option<String>,
+    pub effective_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<CatalogPreflightWarning>,
 }

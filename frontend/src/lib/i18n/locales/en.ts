@@ -4167,6 +4167,7 @@ suggestion; that would overwrite the real value with a placeholder
   'wf.attemptConnectionCopy': 'Copy saved connection ID {0}',
   'wf.attemptFormatFallback': 'without format constraint',
   'wf.attemptModelCliDefault': 'CLI default model',
+  'wf.modelFallbackWarning': 'Requested {0}; used {1} because the requested model disappeared',
   'wf.attemptRoleInitial': 'initial',
   'wf.attemptRoleRepair': 'repair',
   'wf.attemptRoleEscalation': 'escalation',

@@ -1512,6 +1512,7 @@ mod tests {
             connection_id: None,
             requested_model: None,
             resolved_model: resolved.map(str::to_owned),
+            preflight_warning: None,
             model_applied: None,
             observed_models: vec![],
             format_fallback: false,

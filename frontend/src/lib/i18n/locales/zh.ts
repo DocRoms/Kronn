@@ -4075,6 +4075,7 @@ const zh: TranslationDict = {
   "wf.attemptConnectionCopy": "复制已保存的连接 ID {0}",
   "wf.attemptFormatFallback": "无格式约束",
   "wf.attemptModelCliDefault": "CLI 默认模型",
+  "wf.modelFallbackWarning": "请求了 {0}；因该模型已消失，实际使用 {1}",
   "wf.attemptRoleInitial": "初始",
   "wf.attemptRoleRepair": "修复",
   "wf.attemptRoleEscalation": "升级",

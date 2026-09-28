@@ -4180,6 +4180,7 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wf.attemptConnectionCopy': 'Copier l’identifiant de la connexion enregistrée {0}',
   'wf.attemptFormatFallback': 'sans contrainte de format',
   'wf.attemptModelCliDefault': 'modèle par défaut du CLI',
+  'wf.modelFallbackWarning': 'Demandé : {0} ; utilisé : {1}, car le modèle demandé a disparu',
   'wf.attemptRoleInitial': 'initiale',
   'wf.attemptRoleRepair': 'réparation',
   'wf.attemptRoleEscalation': 'escalade',

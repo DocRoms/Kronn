@@ -635,7 +635,8 @@ async fn execute_run_with_notify_policy(
     // ADR-005 slice 1 (KT-847) — skills/directives/profiles this run
     // resolves stay pinned to what it first loaded for the whole call.
     // Released when this call returns (completion, Gate pause, error or cancel).
-    let _resource_snapshot_guard = crate::core::resource_snapshot::RunSnapshotGuard::new(run.id.clone());
+    let _resource_snapshot_guard =
+        crate::core::resource_snapshot::RunSnapshotGuard::new(run.id.clone());
 
     // Update run status to Running. `false` = the Cancelled-stickiness guard
     // blocked the write: the user cancelled in the window between our caller
@@ -1161,7 +1162,7 @@ async fn execute_run_with_notify_policy(
                     crate::db::model_catalog::http_runtime_target_id(&connection.id)
                 });
                 let model = step_model_override(step, connection.as_ref());
-                if let Some(failure) = crate::core::model_catalog::preflight_check(
+                if let Err(failure) = crate::core::model_catalog::preflight_resolve(
                     &state.db,
                     runtime_target_id.as_deref(),
                     step.agent.clone(),

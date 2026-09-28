@@ -52,6 +52,15 @@ export function AgentProvenanceDetails({ sr, t }: { sr: StepResult; t: Translate
           >
             {retained ? '★ ' : attempt.succeeded ? '✓ ' : '! '}
             {t(ROLE_KEYS[attempt.role])} · {AGENT_LABELS[attempt.agent] ?? attempt.agent} · {attemptModelLabel(attempt, t)}
+            {attempt.preflight_warning && (
+              <span className="wf-model-fallback-warning" role="status">
+                {' · ⚠ '}{t(
+                  'wf.modelFallbackWarning',
+                  attempt.preflight_warning.requested_model,
+                  attempt.preflight_warning.effective_model,
+                )}
+              </span>
+            )}
             {attempt.connection_id && (
               <> · {t('wf.attemptConnection')} <CopyIdPill id={attempt.connection_id} title={t('wf.attemptConnectionCopy', attempt.connection_id)} /></>
             )}
