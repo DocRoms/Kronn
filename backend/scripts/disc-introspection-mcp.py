@@ -1469,21 +1469,15 @@ TOOLS = [
     {
         "name": "page_list",
         "description": (
-            "List every Live Page in Kronn as a compact discovery view: id, "
+            "List Live Pages (all, or one project's with `project_id`): id, "
             "title, slug, project_id, data_revision, updated_at and "
-            "last_published_at. Call this before authoring a PublishPageData "
-            "step: Pages are shared destinations and several workflows may "
-            "publish into the same Page. Reuse a matching page_id instead of "
-            "creating a duplicate."
+            "last_published_at. Before authoring a PublishPageData step, "
+            "reuse a matching page_id: several workflows may publish into "
+            "the same Page."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "project_id": {
-                    "type": "string",
-                    "description": "Optional project id; when present, return only that project's Pages.",
-                }
-            },
+            "properties": {"project_id": {"type": "string"}},
         },
     },
     {
