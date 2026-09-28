@@ -102,7 +102,10 @@ describe('ProjectCard — AI & automation tab', () => {
     }));
     renderCard(onNavigate);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'projects.repositoryResources.action.approve' }));
+    // "To handle" is per sub-tab: the automation lives under its own tab.
+    fireEvent.click(await screen.findByRole('tab', { name: /tab\.automation/ }));
+    const toHandle = within(await screen.findByTestId('repository-attention'));
+    fireEvent.click(toHandle.getByRole('button', { name: 'projects.repositoryResources.action.approve' }));
     fireEvent.click(await screen.findByRole('button', { name: 'projects.repositoryResources.approve.addKey' }));
     expect(onNavigate).toHaveBeenCalledWith('mcps');
     fireEvent.keyDown(document.body, { key: 'Escape' });

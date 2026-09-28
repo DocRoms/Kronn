@@ -85,6 +85,66 @@ pub struct RenderedRepositoryResource {
     pub required_secrets: Vec<String>,
 }
 
+/// The ASCII letters an accented Latin letter stands for, `None` when it has
+/// no plain-ASCII reading.
+fn ascii_fold(character: char) -> Option<&'static str> {
+    Some(match character {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'æ' => "ae",
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
+        'ď' | 'đ' => "d",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+        'ĥ' | 'ħ' => "h",
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+        'ĵ' => "j",
+        'ķ' => "k",
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+        'ñ' | 'ń' | 'ņ' | 'ň' | 'ŉ' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+        'œ' => "oe",
+        'ŕ' | 'ŗ' | 'ř' => "r",
+        'ś' | 'ŝ' | 'ş' | 'š' => "s",
+        'ß' => "ss",
+        'ţ' | 'ť' | 'ŧ' => "t",
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'ŵ' => "w",
+        'ý' | 'ÿ' | 'ŷ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        _ => return None,
+    })
+}
+
+/// A file-name slug made of `a-z`, `0-9` and single hyphens only: accents fold
+/// to their base letter (`réduit` → `reduit`), anything else becomes a
+/// separator. Used for the files Kronn writes into a repository; slugs already
+/// recorded for existing resources are never recomputed.
+pub fn ascii_slug(label: &str) -> String {
+    let mut folded = String::with_capacity(label.len());
+    for character in label.to_lowercase().chars() {
+        if ('\u{300}'..='\u{36f}').contains(&character) {
+            continue;
+        }
+        if let Some(plain) = ascii_fold(character) {
+            folded.push_str(plain);
+        } else if character.is_ascii_alphanumeric() {
+            folded.push(character);
+        } else {
+            folded.push('-');
+        }
+    }
+    folded
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Short form of a content hash, enough to tell two versions apart by eye.
+pub fn fingerprint(hash: &str) -> String {
+    hash.chars().take(8).collect()
+}
+
 pub fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -692,19 +752,18 @@ pub fn publish_side_effect_paths(root: &Path) -> Vec<String> {
 /// Whether a publish can write into this repository right now, and why not
 /// otherwise. Checked ahead of time so a write attempt never surfaces as a
 /// mid-publish error for a condition that was already knowable.
-pub fn can_write_repository(root: &Path) -> (bool, Option<String>) {
-    if let Err(reason) = ensure_kronn_dir_available(root) {
-        return (false, Some(reason));
+pub fn can_write_repository(root: &Path) -> (bool, Option<crate::models::RepositoryWriteBlocker>) {
+    use crate::models::RepositoryWriteBlocker;
+    let kronn = root.join("kronn");
+    if kronn.exists() && !kronn.is_dir() {
+        return (false, Some(RepositoryWriteBlocker::KronnPathIsFile));
     }
     match std::fs::metadata(root) {
         Ok(metadata) if metadata.permissions().readonly() => {
-            (false, Some(format!("{} is read-only", root.display())))
+            (false, Some(RepositoryWriteBlocker::RepositoryReadOnly))
         }
         Ok(_) => (true, None),
-        Err(error) => (
-            false,
-            Some(format!("cannot inspect {}: {error}", root.display())),
-        ),
+        Err(_) => (false, Some(RepositoryWriteBlocker::RepositoryUnreadable)),
     }
 }
 
@@ -734,35 +793,141 @@ pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<Stri
         .collect()
 }
 
-/// The repository's own account of when a managed path last changed: the
-/// author and date of its last commit when the file is tracked and git is
-/// available, else the filesystem mtime (checkout/pull do not preserve
-/// commit dates, so the commit date is always preferred when it is known).
-pub fn repository_file_updated_at(
-    root: &Path,
-    relative: &str,
-) -> (Option<DateTime<Utc>>, Option<String>) {
-    let output = crate::core::cmd::sync_cmd("git")
-        .arg("-C")
-        .arg(root)
-        .args(["log", "-1", "--format=%aI%x1f%an", "--", relative])
-        .output();
-    if let Ok(output) = output {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let text = text.trim();
-            if let Some((date, author)) = text.split_once('\u{1f}') {
-                if let Some(date) = parse_rfc3339(date) {
-                    return (Some(date), Some(author.to_string()));
+/// The repository's own account of when its managed files last changed: the
+/// author and date of each tracked file's last commit, else the filesystem
+/// mtime (checkout/pull do not preserve commit dates, so the commit date is
+/// always preferred when it is known).
+///
+/// Read once per listing — one `git ls-files` and one `git log` that stops as
+/// soon as every tracked file is resolved — instead of one `git log` per file,
+/// which walks the whole history for each path it cannot answer quickly. The
+/// walk gets a time budget: on a very deep history the files it has not
+/// reached yet fall back to their mtime rather than keep the listing waiting.
+#[derive(Default)]
+pub struct RepositoryFileDates {
+    root: std::path::PathBuf,
+    commits: BTreeMap<String, (DateTime<Utc>, String)>,
+}
+
+/// How long the listing waits for git to date the tracked files.
+const FILE_DATES_BUDGET: std::time::Duration = std::time::Duration::from_millis(600);
+
+impl RepositoryFileDates {
+    /// Last commit of every tracked file under `directories` (relative to
+    /// `root`). Any git failure leaves the index empty: every lookup then
+    /// falls back to the file's mtime.
+    pub fn read(root: &Path, directories: &[&str]) -> Self {
+        Self::read_within(root, directories, FILE_DATES_BUDGET)
+    }
+
+    fn read_within(root: &Path, directories: &[&str], budget: std::time::Duration) -> Self {
+        let mut dates = Self {
+            root: root.to_path_buf(),
+            commits: BTreeMap::new(),
+        };
+        let existing: Vec<&str> = directories
+            .iter()
+            .copied()
+            .filter(|directory| root.join(directory).is_dir())
+            .collect();
+        if existing.is_empty() {
+            return dates;
+        }
+        let listed = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "core.quotepath=off", "ls-files", "-z", "--"])
+            .args(&existing)
+            .output();
+        let Ok(listed) = listed else {
+            return dates;
+        };
+        if !listed.status.success() {
+            return dates;
+        }
+        let mut pending: BTreeSet<String> = listed
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        if pending.is_empty() {
+            return dates;
+        }
+        let spawned = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "core.quotepath=off",
+                "log",
+                "--format=%x1e%aI%x1f%an",
+                "--name-only",
+                "--no-renames",
+                "--relative",
+                "--",
+            ])
+            .args(&existing)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let Ok(mut child) = spawned else {
+            return dates;
+        };
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return dates;
+        };
+        // A thread feeds the lines so the wait for the next one can time out:
+        // git is silent while it walks commits that touch none of our files.
+        let (sender, receiver) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let deadline = std::time::Instant::now() + budget;
+        let mut current: Option<(DateTime<Utc>, String)> = None;
+        while let Ok(line) =
+            receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            if let Some(header) = line.strip_prefix('\u{1e}') {
+                current = header.split_once('\u{1f}').and_then(|(date, author)| {
+                    parse_rfc3339(date).map(|date| (date, author.to_string()))
+                });
+            } else if let Some(commit) = current.as_ref() {
+                if pending.remove(line.as_str()) {
+                    dates.commits.insert(line, commit.clone());
+                    if pending.is_empty() {
+                        break;
+                    }
                 }
             }
         }
+        let _ = child.kill();
+        let _ = child.wait();
+        dates
     }
-    let modified = std::fs::metadata(root.join(relative))
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .map(DateTime::<Utc>::from);
-    (modified, None)
+
+    /// Date and author of `relative`'s last change. Nothing for a path that is
+    /// not there: it has no history worth looking up.
+    pub fn updated_at(&self, relative: &str) -> (Option<DateTime<Utc>>, Option<String>) {
+        if let Some((date, author)) = self.commits.get(relative) {
+            return (Some(*date), Some(author.clone()));
+        }
+        let modified = std::fs::metadata(self.root.join(relative))
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(DateTime::<Utc>::from);
+        (modified, None)
+    }
 }
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
@@ -1457,7 +1622,10 @@ mod tests {
         std::fs::write(root.path().join("kronn"), "#!/bin/sh\n").unwrap();
         let (writable, reason) = can_write_repository(root.path());
         assert!(!writable);
-        assert!(reason.unwrap().contains("is not a directory"));
+        assert_eq!(
+            reason,
+            Some(crate::models::RepositoryWriteBlocker::KronnPathIsFile)
+        );
     }
 
     #[test]
@@ -1614,5 +1782,126 @@ mod tests {
             "the hunk must stay local: {}",
             diff.lines().count()
         );
+    }
+
+    #[test]
+    fn ascii_slug_folds_accents_and_keeps_only_plain_ascii() {
+        assert_eq!(
+            ascii_slug("Plan de correction — jeu réduit"),
+            "plan-de-correction-jeu-reduit"
+        );
+        assert_eq!(
+            ascii_slug("Œuvre à l'été, ÇA & Naïve"),
+            "oeuvre-a-l-ete-ca-naive"
+        );
+        assert_eq!(ascii_slug("Straße"), "strasse");
+        assert_eq!(ascii_slug("re\u{301}duit"), "reduit");
+        assert_eq!(
+            ascii_slug("PR #1897 — v3.3 pack-context"),
+            "pr-1897-v3-3-pack-context"
+        );
+        assert_eq!(ascii_slug("日本語"), "");
+        assert_eq!(ascii_slug("  --  "), "");
+    }
+
+    #[test]
+    fn fingerprint_is_the_first_eight_characters_of_the_hash() {
+        assert_eq!(fingerprint(&sha256(b"abc")), "ba7816bf");
+        assert_eq!(fingerprint("ab"), "ab");
+    }
+
+    fn commit_as(root: &Path, author: &str, date: &str, message: &str) {
+        let git = |args: &[&str]| {
+            crate::core::cmd::sync_cmd("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", author)
+                .env("GIT_AUTHOR_EMAIL", "a@example.com")
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_NAME", author)
+                .env("GIT_COMMITTER_EMAIL", "a@example.com")
+                .env("GIT_COMMITTER_DATE", date)
+                .status()
+                .unwrap()
+        };
+        assert!(git(&["add", "-A"]).success());
+        assert!(git(&["commit", "-q", "-m", message]).success());
+    }
+
+    #[test]
+    fn file_dates_come_from_each_files_last_commit_in_one_pass() {
+        let root = tempfile::tempdir().unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        std::fs::create_dir_all(root.path().join("kronn/workflows")).unwrap();
+        std::fs::create_dir_all(root.path().join(".claude/skills/lint")).unwrap();
+        std::fs::write(root.path().join("kronn/workflows/a.yaml"), "1").unwrap();
+        commit_as(root.path(), "Alice", "2026-01-01T10:00:00+00:00", "a");
+        std::fs::write(root.path().join(".claude/skills/lint/SKILL.md"), "1").unwrap();
+        commit_as(root.path(), "Bob", "2026-02-01T10:00:00+00:00", "b");
+        std::fs::write(root.path().join("kronn/workflows/a.yaml"), "2").unwrap();
+        commit_as(root.path(), "Carol", "2026-03-01T10:00:00+00:00", "c");
+        std::fs::write(root.path().join("kronn/workflows/untracked.yaml"), "x").unwrap();
+
+        let dates = RepositoryFileDates::read(root.path(), &["kronn", ".claude/skills"]);
+
+        let (date, author) = dates.updated_at("kronn/workflows/a.yaml");
+        assert_eq!(author.as_deref(), Some("Carol"), "the last commit wins");
+        assert_eq!(date.unwrap().to_rfc3339(), "2026-03-01T10:00:00+00:00");
+        let (date, author) = dates.updated_at(".claude/skills/lint/SKILL.md");
+        assert_eq!(author.as_deref(), Some("Bob"));
+        assert_eq!(date.unwrap().to_rfc3339(), "2026-02-01T10:00:00+00:00");
+
+        let (date, author) = dates.updated_at("kronn/workflows/untracked.yaml");
+        assert!(date.is_some(), "an untracked file falls back to its mtime");
+        assert!(author.is_none());
+        assert_eq!(
+            dates.updated_at("kronn/workflows/absent.yaml"),
+            (None, None),
+            "a path that is not there has no date and costs no lookup"
+        );
+    }
+
+    #[test]
+    fn file_dates_stop_waiting_for_git_when_the_budget_is_spent() {
+        let root = tempfile::tempdir().unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        std::fs::create_dir_all(root.path().join("kronn")).unwrap();
+        std::fs::write(root.path().join("kronn/a.yaml"), "1").unwrap();
+        commit_as(root.path(), "Alice", "2026-01-01T10:00:00+00:00", "a");
+
+        let unbounded = RepositoryFileDates::read(root.path(), &["kronn"]);
+        assert_eq!(
+            unbounded.updated_at("kronn/a.yaml").1.as_deref(),
+            Some("Alice")
+        );
+
+        let spent =
+            RepositoryFileDates::read_within(root.path(), &["kronn"], std::time::Duration::ZERO);
+        let (date, author) = spent.updated_at("kronn/a.yaml");
+        assert!(date.is_some(), "the file still gets its mtime");
+        assert!(author.is_none(), "git was not waited for");
+    }
+
+    #[test]
+    fn file_dates_outside_a_git_repository_fall_back_to_the_mtime() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("kronn")).unwrap();
+        std::fs::write(root.path().join("kronn/present.yaml"), "x").unwrap();
+        let dates = RepositoryFileDates::read(root.path(), &["kronn"]);
+        let (date, author) = dates.updated_at("kronn/present.yaml");
+        assert!(date.is_some());
+        assert!(author.is_none());
+        assert_eq!(dates.updated_at("kronn/absent.yaml"), (None, None));
     }
 }

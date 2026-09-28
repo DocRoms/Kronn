@@ -11,6 +11,7 @@ import {
 import { removeFromKronn } from '../lib/repositoryResourceExecution';
 import type { TransferKind, TransferPlan } from '../lib/repositoryResourceEffects';
 import {
+  alignExcludedCount,
   alignLines,
   attachedSkillIds,
   attentionItems,
@@ -128,8 +129,8 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   }, [projectId, applyResult]);
 
   const rows: RepositoryRows | null = useMemo(() => (data ? buildRows(data) : null), [data]);
-  const attention: AttentionItem[] = useMemo(() => (rows ? attentionItems(rows) : []), [rows]);
-  const attentionTotal = attention.length;
+  const attentionAll: AttentionItem[] = useMemo(() => (rows ? attentionItems(rows) : []), [rows]);
+  const attentionTotal = attentionAll.length;
   const loaded = data !== null;
 
   useEffect(() => {
@@ -192,7 +193,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
         path,
         status: resource.status as ProjectRepositoryResourceStatus | undefined,
       }))),
-      ...data.skills_present.map(skill => ({
+      ...data.skills_present.filter(skill => !skill.suggested).map(skill => ({
         key: `skill:${skill.id}`,
         id: skill.id,
         path: skill.publication_path,
@@ -306,19 +307,20 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const hasNativeSkills = nativeSkillRoots.some(root => root.path !== 'kronn/skills' && root.skill_count > 0);
   const uncommitted = data.uncommitted_managed_paths ?? [];
   const repositoryScaffoldIncluded = Boolean(data.kronn_exists || selected.size > 0);
-  const allLines = alignLines(rows);
+  const attention = attentionAll.filter(item => item.row.group === activeTab);
+  const allLines = alignLines(rows, activeTab);
   const lineCount = allLines.filter(line => line.direction === 'to_kronn' || canWrite).length;
-  const excludedCount = attention.filter(item => item.reason === 'conflict' || item.reason === 'approval').length;
+  const excludedCount = alignExcludedCount(rows, activeTab);
   const selectedForPublication = [...rows.skills, ...rows.automation, ...rows.artifacts]
-    .filter(row => row.state === 'kronn_only' && selected.has(row.key));
+    .filter(row => row.state === 'kronn_only' && !row.suggested && selected.has(row.key));
   const sheetRow = sheet
     ? [...rows.skills, ...rows.automation, ...rows.artifacts].find(row => row.key === sheet.key)
     : undefined;
-  const attentionByTab = (tab: ProjectRepositoryResourcesTab) => attention.filter(item => item.row.group === tab).length;
+  const attentionByTab = (tab: ProjectRepositoryResourcesTab) => attentionAll.filter(item => item.row.group === tab).length;
   const visibleAttention = attentionOpen ? attention : attention.slice(0, ATTENTION_VISIBLE);
 
   const tabs: Array<{ id: ProjectRepositoryResourcesTab; count: number }> = [
-    { id: 'skills', count: rows.skills.length },
+    { id: 'skills', count: rows.skills.filter(row => !row.suggested).length },
     { id: 'automation', count: rows.automation.length },
     { id: 'artifacts', count: rows.artifacts.length },
   ];
@@ -333,7 +335,8 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const sections: Array<{ id: string; title: string; kind?: string; rows: ResourceRow[] }> = [];
   if (activeTab === 'skills') {
     sections.push(
-      { id: 'present', title: t('projects.repositoryResources.skills.present'), rows: rows.skills.filter(row => visibleSet.has(row.key)) },
+      { id: 'present', title: t('projects.repositoryResources.skills.present'), rows: rows.skills.filter(row => !row.suggested && visibleSet.has(row.key)) },
+      { id: 'suggested', title: t('projects.repositoryResources.skills.suggested'), rows: rows.skills.filter(row => row.suggested && visibleSet.has(row.key)) },
       { id: 'available', title: t('projects.repositoryResources.skills.available'), rows: rows.catalog.filter(row => visibleSet.has(row.key)) },
     );
   } else if (activeTab === 'automation') {
@@ -372,9 +375,17 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
             >
               <Icon size={14} aria-hidden="true" />
               {t(`projects.repositoryResources.tab.${id}`)}
-              <span>{count}</span>
+              <span className="rr-count">{count}</span>
               {todo > 0 && (
-                <span className="rr-todo" title={t('projects.repositoryResources.tab.todo', todo)}>{todo}</span>
+                <span
+                  className="rr-todo"
+                  role="status"
+                  title={t('projects.repositoryResources.tab.todo', todo)}
+                  aria-label={t('projects.repositoryResources.tab.todo', todo)}
+                >
+                  <AlertTriangle size={10} aria-hidden="true" />
+                  {todo}
+                </span>
               )}
             </button>
           );
@@ -382,24 +393,22 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       </div>
 
       {!data.kronn_exists && canWrite && (
-        <div
-          className="project-repository-resources-banner"
-          data-tone={hasNativeSkills ? 'secondary' : undefined}
-          role="status"
-        >
-          <FolderTree size={16} />{' '}
+        <p className="project-repository-resources-note" role="status">
+          <FolderTree size={12} aria-hidden="true" />
           {t(hasNativeSkills
             ? 'projects.repositoryResources.kronnMissingSecondary'
             : 'projects.repositoryResources.kronnMissing')}
-        </div>
+        </p>
       )}
       {!canWrite && (
         <div className="project-repository-resources-banner" data-tone="secondary" role="status" data-banner="write-disabled">
-          <Lock size={16} aria-hidden="true" />
+          <Lock size={14} aria-hidden="true" />
           <div>
             <strong>{t('projects.repositoryResources.banner.writeDisabled.title')}</strong>
             <p>{t('projects.repositoryResources.banner.writeDisabled.body')}</p>
-            {data.can_write_repository_reason && <code>{data.can_write_repository_reason}</code>}
+            {data.can_write_repository_reason && (
+              <p>{t(`projects.repositoryResources.banner.writeDisabled.reason.${data.can_write_repository_reason}`)}</p>
+            )}
           </div>
         </div>
       )}
@@ -430,7 +439,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
             {visibleAttention.map(({ row, reason }) => (
               <li key={row.key} data-reason={reason}>
                 <span>
-                  {t(`projects.repositoryResources.attention.${row.attachOnly && row.state === 'repository_only' ? 'notAttached' : ATTENTION_SENTENCE[row.state]}`, row.name)}
+                  {t(`projects.repositoryResources.attention.${ATTENTION_SENTENCE[row.state]}`, row.name)}
                 </span>
                 <button
                   type="button"
@@ -512,17 +521,21 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
                   {t('projects.repositoryResources.publishSelected', selectedForPublication.length)}
                 </button>
               )}
-              {lineCount > 0 && (
-                <button
-                  type="button"
-                  className="rr-button"
-                  disabled={busyKey !== null}
-                  onClick={() => setAlignOpen(true)}
-                >
-                  <ArrowRightLeft size={14} aria-hidden="true" />
-                  {t('projects.repositoryResources.alignAll', lineCount)}
-                </button>
-              )}
+              <button
+                type="button"
+                className="rr-button"
+                data-testid="align-all"
+                disabled={busyKey !== null || lineCount === 0}
+                title={allLines.length > 0 && lineCount === 0
+                  ? t('projects.repositoryResources.banner.writeDisabled.title')
+                  : undefined}
+                onClick={() => setAlignOpen(true)}
+              >
+                <ArrowRightLeft size={14} aria-hidden="true" />
+                {allLines.length === 0
+                  ? t('projects.repositoryResources.alignAllDone')
+                  : t('projects.repositoryResources.alignAll', lineCount)}
+              </button>
             </div>
           </div>
 
@@ -638,9 +651,6 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       {alignOpen && (
         <RepositoryResourceAlign
           lines={allLines}
-          initiallyChecked={new Set(allLines
-            .filter(line => line.direction === 'to_kronn' || selected.has(line.row.key))
-            .map(line => line.row.key))}
           excludedCount={excludedCount}
           canWrite={canWrite}
           kronnExists={kronnExists}

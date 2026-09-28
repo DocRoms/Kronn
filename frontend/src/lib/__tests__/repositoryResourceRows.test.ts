@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { listing, resource, skill } from '../../components/__tests__/repositoryResourceFixtures';
 import {
+  alignExcludedCount,
   alignLines,
   attachedSkillIds,
   attentionCount,
@@ -70,11 +71,11 @@ describe('repository resource rows', () => {
           repository_paths: ['.agents/skills/ref/SKILL.md'], referenced: true,
         }),
         skill({
-          id: 'docs', name: 'Docs', provenance: 'repository', status: null,
+          id: 'docs', name: 'Docs', provenance: 'repository', status: 'repository_only',
           repository_paths: ['.claude/skills/docs/SKILL.md'],
         }),
       ],
-      skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: null })],
+      skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only' })],
     }));
     const byName = Object.fromEntries([...rows.skills, ...rows.catalog].map(row => [row.name, row]));
     expect(byName.Lint).toMatchObject({ state: 'native_skill', primary: 'use_native', presence: 'repository', origins: ['.claude'] });
@@ -114,10 +115,11 @@ describe('repository resource rows', () => {
     expect(attentionCount(listing())).toBe(0);
   });
 
-  it('leaves conflicts, approvals and native skills out of "align all"', () => {
+  it('aligns only what is behind on one side, toward the newer copy', () => {
     const rows = buildRows(listing({
       skills_present: [
         skill({ id: 'repository:lint', name: 'Lint', provenance: 'repository', status: 'native_skill', repository_paths: ['.claude/skills/lint/SKILL.md'] }),
+        skill({ id: 'devops', name: 'DevOps', provenance: 'kronn', status: 'kronn_only', suggested: true, suggested_reason: 'Dockerfile' }),
       ],
       resources: [
         resource({ id: 'a', name: 'A', kind: 'quick_prompt', status: 'kronn_only' }),
@@ -126,14 +128,83 @@ describe('repository resource rows', () => {
         resource({ id: 'd', name: 'D', kind: 'workflow', status: 'kronn_newer' }),
         resource({ id: 'e', name: 'E', kind: 'quick_api', status: 'conflict' }),
         resource({ id: 'f', name: 'F', kind: 'quick_exec', status: 'approval_required' }),
+        resource({ id: 'g', name: 'G', kind: 'quick_exec', status: 'up_to_date' }),
       ],
     }));
     expect(alignLines(rows).map(line => [line.row.name, line.direction])).toEqual([
-      ['A', 'to_repository'],
-      ['B', 'to_kronn'],
       ['C', 'to_kronn'],
       ['D', 'to_repository'],
     ]);
+    expect(alignExcludedCount(rows, 'automation')).toBe(2);
+    expect(alignExcludedCount(rows, 'skills')).toBe(0);
+    expect(alignLines(rows, 'skills')).toEqual([]);
+  });
+
+  it('never lists the 79 Kronn-only automations of a repository that has none written', () => {
+    const rows = buildRows(listing({
+      resources: Array.from({ length: 79 }, (_, index) => resource({
+        id: `qe-${index}`, name: `Automation ${index}`, kind: 'quick_exec', status: 'kronn_only',
+      })),
+    }));
+    expect(alignLines(rows)).toEqual([]);
+    expect(attentionItems(rows)).toEqual([]);
+  });
+
+  it('treats a stack-suggested skill as Kronn-only, never as a repository file to process', () => {
+    const data = listing({
+      skills_present: [
+        skill({
+          id: 'devops', name: 'DevOps', provenance: 'kronn', status: 'kronn_only', is_builtin: true,
+          suggested: true, suggested_reason: 'Dockerfile', repository_paths: [],
+        }),
+        skill({ id: 'custom-mine', name: 'Mine', provenance: 'kronn', status: 'kronn_only' }),
+      ],
+    });
+    const [attached, devops] = buildRows(data).skills.sort((left, right) => left.name.localeCompare(right.name)).reverse();
+    expect(devops).toMatchObject({
+      state: 'kronn_only', presence: 'kronn', scope: 'suggested', primary: 'attach',
+      suggested: true, suggestedReason: 'Dockerfile', displayPath: '', pathExists: false, paths: [],
+    });
+    // An attached, unwritten skill still points at the file it would create.
+    expect(attached).toMatchObject({ state: 'kronn_only', primary: 'publish', scope: 'attached', suggested: false });
+    expect(attached.displayPath).toBe(attached.targetPath);
+    expect(attentionItems(buildRows(data))).toEqual([]);
+    expect(attentionCount(data)).toBe(0);
+    expect(attachedSkillIds(data)).toEqual(['custom-mine']);
+  });
+
+  it('shows no path for an unrelated catalog skill', () => {
+    const [rust] = buildRows(listing({
+      skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only' })],
+    })).catalog;
+    expect(rust).toMatchObject({ state: 'catalog', primary: 'attach', displayPath: '', pathExists: false });
+  });
+
+  it('keeps a catalog skill found in a repository folder out of "À traiter"', () => {
+    const data = listing({
+      skills_present: [
+        skill({ id: 'typescript', name: 'TypeScript', provenance: 'repository', status: 'repository_only', repository_paths: ['.claude/skills/typescript/SKILL.md'] }),
+        skill({ id: 'repository:lint', name: 'Lint', provenance: 'repository', status: 'native_skill', repository_paths: ['.claude/skills/lint/SKILL.md'] }),
+      ],
+    });
+    expect(attentionItems(buildRows(data)).map(item => [item.row.name, item.reason])).toEqual([['Lint', 'new']]);
+  });
+
+  it('gives each sub-tab its own list and counts all of them for the card tab', () => {
+    const data = listing({
+      skills_present: [
+        skill({ id: 'repository:lint', name: 'Lint', provenance: 'repository', status: 'native_skill', repository_paths: ['.claude/skills/lint/SKILL.md'] }),
+      ],
+      resources: [
+        resource({ id: 'l', name: 'Late', kind: 'workflow', status: 'kronn_newer' }),
+        resource({ id: 'p', name: 'Page', kind: 'artifact', status: 'conflict', repository_paths: ['kronn/artifacts/p/index.html'] }),
+      ],
+    });
+    const rows = buildRows(data);
+    expect(attentionItems(rows, 'skills').map(item => item.row.name)).toEqual(['Lint']);
+    expect(attentionItems(rows, 'automation').map(item => item.row.name)).toEqual(['Late']);
+    expect(attentionItems(rows, 'artifacts').map(item => item.row.name)).toEqual(['Page']);
+    expect(attentionCount(data)).toBe(3);
   });
 
   it('filters by presence and searches the name and every path', () => {
@@ -156,10 +227,24 @@ describe('repository resource rows', () => {
     expect(matchesQuery(both, '  ')).toBe(true);
   });
 
-  it('labels a path by its top folder and keeps the last two segments visible', () => {
+  it('labels a path by its top folder', () => {
     expect(originLabel('kronn/skills/rust/SKILL.md')).toBe('kronn/');
     expect(originLabel('.claude/skills/rust/SKILL.md')).toBe('.claude');
-    expect(splitPath('.claude/skills/rust/SKILL.md')).toEqual({ head: '.claude/skills/', tail: 'rust/SKILL.md' });
+  });
+
+  it('splits a path so the start can shrink while a short file name stays whole', () => {
+    expect(splitPath('.claude/skills/rust/SKILL.md')).toEqual({ head: '.claude/skills/rust', tail: '/SKILL.md' });
     expect(splitPath('INDEX.md')).toEqual({ head: '', tail: 'INDEX.md' });
+    expect(splitPath('kronn/INDEX.md')).toEqual({ head: 'kronn', tail: '/INDEX.md' });
+  });
+
+  it('keeps the start of a long path in the head and the end of the file name in the tail', () => {
+    const path = 'kronn/workflows/pr-1897-v3-3-pack-context-review-of-the-whole-branch.yaml';
+    const { head, tail } = splitPath(path);
+    expect(head + tail).toBe(path);
+    expect(head.startsWith('kronn/workflows/')).toBe(true);
+    expect(tail).toBe(path.slice(-tail.length));
+    expect(tail.endsWith('branch.yaml')).toBe(true);
+    expect(tail.length).toBeLessThanOrEqual(18);
   });
 });

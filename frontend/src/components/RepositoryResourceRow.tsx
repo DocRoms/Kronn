@@ -52,11 +52,7 @@ function PathLine({ row }: { row: ResourceRow }) {
         <span className="rr-path-tail">{tail}</span>
       </code>
       {!row.pathExists && (
-        <span className="rr-path-note">
-          {t(row.state === 'catalog'
-            ? 'projects.repositoryResources.notInRepository'
-            : 'projects.repositoryResources.willBeCreated')}
-        </span>
+        <span className="rr-path-note">{t('projects.repositoryResources.willBeCreated')}</span>
       )}
       {row.pathExists && <CopyPathButton path={row.displayPath} />}
     </span>
@@ -140,7 +136,7 @@ export function RepositoryResourceRow({ row, checked, busy, canWrite, onToggle, 
         <input
           type="checkbox"
           checked={checked}
-          disabled={row.state !== 'kronn_only'}
+          disabled={row.state !== 'kronn_only' || row.suggested}
           onChange={onToggle}
           aria-label={t('projects.repositoryResources.include', row.name)}
         />
@@ -166,7 +162,12 @@ export function RepositoryResourceRow({ row, checked, busy, canWrite, onToggle, 
           {t(`projects.repositoryResources.scope.${row.scope}`)}
           {row.builtin && ` · ${t('projects.repositoryResources.builtin')}`}
         </span>
-        {row.kronnUpdatedAt && <small>{formatResourceDate(row.kronnUpdatedAt, locale)}</small>}
+        {row.suggested && row.suggestedReason && (
+          <small>{t('projects.repositoryResources.suggestedBecause', row.suggestedReason)}</small>
+        )}
+        {!row.suggested && row.kronnUpdatedAt && (
+          <small>{formatResourceDate(row.kronnUpdatedAt, locale)}</small>
+        )}
       </div>
       <div className="rr-cell rr-cell-action" role="cell">
         {row.primary === 'view' ? (

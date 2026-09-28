@@ -525,90 +525,119 @@ pub(crate) fn build_validation_prompt(
     prompt
 }
 
-/// Auto-detect skills from project filesystem (config files, package managers, etc.)
-pub(crate) fn detect_project_skills(project_path: &std::path::Path) -> Vec<String> {
-    let mut skills: Vec<String> = Vec::new();
+/// The first of `candidates` (relative to the project) that exists.
+fn first_existing_marker(project_path: &std::path::Path, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| project_path.join(candidate).exists())
+        .map(|candidate| (*candidate).to_string())
+}
+
+/// Skills the project's stack suggests, each with the file that triggered it
+/// (`("devops", "Dockerfile")`). Pure filesystem look, no logging: the listing
+/// calls it on every read.
+pub(crate) fn detect_project_skill_markers(
+    project_path: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut skills: Vec<(String, String)> = Vec::new();
+    let mut push = |id: &str, marker: Option<String>| {
+        if let Some(marker) = marker {
+            skills.push((id.to_string(), marker));
+        }
+    };
 
     // ── Language detection (from package managers / config files) ──
-    if project_path.join("Cargo.toml").exists() {
-        skills.push("rust".into());
-    }
+    push("rust", first_existing_marker(project_path, &["Cargo.toml"]));
     if project_path.join("package.json").exists() {
         // Check if TypeScript
-        if project_path.join("tsconfig.json").exists()
-            || project_path.join("tsconfig.app.json").exists()
-        {
-            skills.push("typescript".into());
-        }
+        push(
+            "typescript",
+            first_existing_marker(project_path, &["tsconfig.json", "tsconfig.app.json"]),
+        );
     }
-    if project_path.join("requirements.txt").exists()
-        || project_path.join("pyproject.toml").exists()
-        || project_path.join("setup.py").exists()
-    {
-        skills.push("python".into());
-    }
-    if project_path.join("go.mod").exists() {
-        skills.push("go".into());
-    }
-    if project_path.join("composer.json").exists() {
-        skills.push("php".into());
-    }
+    push(
+        "python",
+        first_existing_marker(
+            project_path,
+            &["requirements.txt", "pyproject.toml", "setup.py"],
+        ),
+    );
+    push("go", first_existing_marker(project_path, &["go.mod"]));
+    push(
+        "php",
+        first_existing_marker(project_path, &["composer.json"]),
+    );
 
     // ── Domain detection ──
     // DevOps: Dockerfile, CI/CD, IaC
-    if project_path.join("Dockerfile").exists()
-        || project_path.join("docker-compose.yml").exists()
-        || project_path.join("docker-compose.yaml").exists()
-        || project_path.join(".github").join("workflows").exists()
-        || project_path.join(".gitlab-ci.yml").exists()
-        || project_path.join("Makefile").exists()
-    {
-        skills.push("devops".into());
-    }
+    push(
+        "devops",
+        first_existing_marker(
+            project_path,
+            &[
+                "Dockerfile",
+                "docker-compose.yml",
+                "docker-compose.yaml",
+                ".github/workflows",
+                ".gitlab-ci.yml",
+                "Makefile",
+            ],
+        ),
+    );
 
     // Database: migrations, schema files
-    if project_path.join("migrations").exists()
-        || project_path.join("db").exists()
-        || project_path.join("prisma").exists()
-        || project_path.join("drizzle").exists()
-    {
-        skills.push("database".into());
-    }
+    push(
+        "database",
+        first_existing_marker(project_path, &["migrations", "db", "prisma", "drizzle"]),
+    );
 
     // Security: auth configs, security headers
-    if project_path.join(".env.example").exists()
-        || project_path.join("security.yaml").exists()
-        || project_path
-            .join("config")
-            .join("packages")
-            .join("security.yaml")
-            .exists()
-    {
-        skills.push("security".into());
-    }
+    push(
+        "security",
+        first_existing_marker(
+            project_path,
+            &[
+                ".env.example",
+                "security.yaml",
+                "config/packages/security.yaml",
+            ],
+        ),
+    );
 
     // ── Business detection ──
     // Web performance: frontend projects with build tools
-    if project_path.join("webpack.config.js").exists()
-        || project_path.join("vite.config.ts").exists()
-        || project_path.join("vite.config.js").exists()
-        || project_path.join("next.config.js").exists()
-        || project_path.join("next.config.ts").exists()
-    {
-        skills.push("web-performance".into());
-    }
+    push(
+        "web-performance",
+        first_existing_marker(
+            project_path,
+            &[
+                "webpack.config.js",
+                "vite.config.ts",
+                "vite.config.js",
+                "next.config.js",
+                "next.config.ts",
+            ],
+        ),
+    );
 
     // SEO: robots.txt, sitemap
-    if project_path.join("robots.txt").exists()
-        || project_path.join("public").join("robots.txt").exists()
-    {
-        skills.push("seo".into());
-    }
+    push(
+        "seo",
+        first_existing_marker(project_path, &["robots.txt", "public/robots.txt"]),
+    );
 
     // Filter to only keep skills that actually exist in the system
-    let valid: Vec<String> = skills
+    skills
         .into_iter()
-        .filter(|id| crate::core::skills::get_skill(id).is_some())
+        .filter(|(id, _)| crate::core::skills::get_skill(id).is_some())
+        .collect()
+}
+
+/// Auto-detect skills from project filesystem (config files, package managers, etc.)
+pub(crate) fn detect_project_skills(project_path: &std::path::Path) -> Vec<String> {
+    let valid: Vec<String> = detect_project_skill_markers(project_path)
+        .into_iter()
+        .map(|(id, _)| id)
         .collect();
 
     tracing::info!(
@@ -1241,6 +1270,31 @@ mod compute_audit_info_tests {
         fs::write(dir.path().join("Makefile"), "all:\n\techo hi").unwrap();
         let skills = detect_project_skills(dir.path());
         assert!(skills.contains(&"devops".into()));
+    }
+
+    #[test]
+    fn skill_markers_name_the_file_that_triggered_each_skill() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Dockerfile"), "FROM scratch").unwrap();
+        fs::write(dir.path().join("Makefile"), "all:").unwrap();
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        fs::write(dir.path().join("tsconfig.app.json"), "{}").unwrap();
+        fs::write(dir.path().join("vite.config.ts"), "").unwrap();
+        let markers = detect_project_skill_markers(dir.path());
+        let marker = |skill: &str| {
+            markers
+                .iter()
+                .find(|(id, _)| id == skill)
+                .map(|(_, marker)| marker.as_str())
+        };
+        assert_eq!(marker("devops"), Some("Dockerfile"));
+        assert_eq!(marker("typescript"), Some("tsconfig.app.json"));
+        assert_eq!(marker("web-performance"), Some("vite.config.ts"));
+        assert_eq!(marker("rust"), None);
+        assert_eq!(
+            markers.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+            detect_project_skills(dir.path())
+        );
     }
 
     #[test]

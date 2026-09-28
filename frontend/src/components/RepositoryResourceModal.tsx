@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import './RepositoryResourceSheets.css';
@@ -13,7 +14,9 @@ interface Props {
   footer?: ReactNode;
 }
 
-/** Dialog shell: Escape and a backdrop click close it; full screen on a phone. */
+/** Dialog shell: Escape and a backdrop click close it; full screen on a phone.
+ *  Rendered at the document root so no ancestor's transform or overflow can
+ *  pin it to a corner of the card. */
 export function RepositoryResourceModal({ title, subtitle, size = 'sheet', testId, onClose, children, footer }: Props) {
   const { t } = useT();
   const titleId = useId();
@@ -37,7 +40,7 @@ export function RepositoryResourceModal({ title, subtitle, size = 'sheet', testI
     };
   }, []);
 
-  return (
+  return createPortal(
     <div className="rr-modal-backdrop" onClick={onClose}>
       <div
         className="rr-modal"
@@ -60,6 +63,7 @@ export function RepositoryResourceModal({ title, subtitle, size = 'sheet', testI
         <div className="rr-modal-body">{children}</div>
         {footer && <footer className="rr-modal-footer">{footer}</footer>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

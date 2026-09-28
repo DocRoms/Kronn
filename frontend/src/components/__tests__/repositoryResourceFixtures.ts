@@ -22,6 +22,8 @@ export const skill = (overrides: Partial<ProjectRepositorySkill> & Pick<ProjectR
   slug: overrides.id,
   description: '',
   provenance: 'both',
+  status: 'up_to_date',
+  suggested: false,
   approval_required: false,
   approved: false,
   file_diffs: [],

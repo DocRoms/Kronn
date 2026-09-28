@@ -7,8 +7,6 @@ import { RepositoryResourceModal } from './RepositoryResourceModal';
 
 interface Props {
   lines: AlignLine[];
-  /** Row keys ticked when the recap opens. */
-  initiallyChecked: Set<string>;
   /** Rows left out because they hold two versions or wait for approval. */
   excludedCount: number;
   canWrite: boolean;
@@ -20,13 +18,16 @@ interface Props {
 
 const SECTIONS: AlignDirection[] = ['to_kronn', 'to_repository'];
 
-/** Recap of everything "Align all" would move, one checkbox per line. */
+/** Recap of everything "Align all" would move, one checkbox per line, all
+ *  ticked when it opens except what the repository's state forbids writing. */
 export function RepositoryResourceAlign({
-  lines, initiallyChecked, excludedCount, canWrite, kronnExists, busy, onConfirm, onCancel,
+  lines, excludedCount, canWrite, kronnExists, busy, onConfirm, onCancel,
 }: Props) {
   const { t } = useT();
-  const [checked, setChecked] = useState(initiallyChecked);
   const usable = (line: AlignLine) => line.direction === 'to_kronn' || canWrite;
+  const [checked, setChecked] = useState(
+    () => new Set(lines.filter(usable).map(line => line.row.key)),
+  );
   const chosen = lines.filter(line => checked.has(line.row.key) && usable(line));
   const toggle = (key: string) => setChecked(current => {
     const next = new Set(current);
@@ -81,8 +82,8 @@ export function RepositoryResourceAlign({
                       disabled={disabled || busy}
                       onChange={() => toggle(line.row.key)}
                     />
-                    <span>{line.row.name}</span>
-                    <code>{line.row.displayPath}</code>
+                    <span className="rr-align-name">{line.row.name}</span>
+                    <code title={line.row.displayPath}>{line.row.displayPath}</code>
                   </label>
                 </li>
               ))}

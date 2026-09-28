@@ -5225,7 +5225,12 @@ field_diff: Array<RepositoryResourceFieldDiff>, repository_paths: Array<string>,
  * skill) and `docs/AGENTS.md` when its Kronn line is still missing.
  * Empty for a repository-only resource: there is nothing to publish.
  */
-write_preview: Array<string>, required_secrets: Array<RequiredSecretStatus>, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string, };
+write_preview: Array<string>, required_secrets: Array<RequiredSecretStatus>, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string,
+/**
+ * First 8 characters of the content hash of each side, so two versions
+ * can be told apart at a glance. Absent when that side has no file.
+ */
+repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
 
@@ -5246,7 +5251,7 @@ skill_roots: Array<ProjectSkillRoot>, skills_present: Array<ProjectRepositorySki
  * Whether a publish can write into this repository right now, and why
  * not otherwise (e.g. a `kronn` file occupying the directory slot).
  */
-can_write_repository: boolean, can_write_repository_reason?: string,
+can_write_repository: boolean, can_write_repository_reason?: RepositoryWriteBlocker,
 /**
  * Repository-relative paths Kronn wrote (per `kronn.lock`) that `git
  * status` reports as modified or untracked — the banner's "N files
@@ -5261,7 +5266,23 @@ uncommitted_managed_paths: Array<string>, };
  */
 export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
 
-export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, approval_required: boolean, approved: boolean, diff?: string,
+export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null,
+/**
+ * Always defined: a skill only in Kronn's catalog (suggested or not) is
+ * `kronn_only`, one found only in a repository folder is `repository_only`
+ * (`native_skill` when Kronn has no counterpart at all).
+ */
+status: ProjectRepositoryResourceStatus,
+/**
+ * Proposed for this repository from its detected stack, not attached to
+ * it: never an item to process, only a suggestion to attach.
+ */
+suggested: boolean,
+/**
+ * What triggered the suggestion, as the detected file name (`Dockerfile`,
+ * `Cargo.toml`…) — the UI words it in the reader's language.
+ */
+suggested_reason?: string, approval_required: boolean, approved: boolean, diff?: string,
 /**
  * One unified diff per differing file, for the same states as `diff`.
  */
@@ -5281,7 +5302,12 @@ write_preview: Array<string>,
  * True once "Use in Kronn" attached this native skill by path reference
  * (read-only, tracked at the source, no `kronn.lock` entry).
  */
-referenced: boolean, required_secrets: Array<RequiredSecretStatus>, adr_level: ResourceAdrLevel, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string, };
+referenced: boolean, required_secrets: Array<RequiredSecretStatus>, adr_level: ResourceAdrLevel, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string,
+/**
+ * First 8 characters of the content hash of each side, so two versions
+ * can be told apart at a glance. Absent when that side has no file.
+ */
+repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
@@ -5746,6 +5772,12 @@ export type RepositoryResourceFieldDiff = { field: string, repository?: any, kro
  * resource is written to.
  */
 export type RepositoryResourceFileDiff = { path: string, diff: string, };
+
+/**
+ * Why Kronn cannot write into a repository right now — a code the UI
+ * translates, never a raw error message.
+ */
+export type RepositoryWriteBlocker = "kronn_path_is_file" | "repository_read_only" | "repository_unreadable";
 
 export type RepoSource = { id: string, label: string, provider: string, };
 

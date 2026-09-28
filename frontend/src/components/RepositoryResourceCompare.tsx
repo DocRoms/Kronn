@@ -93,6 +93,8 @@ export function RepositoryResourceCompare({
             <dd>{date(row.repositoryUpdatedAt)}</dd>
             <dt>{t('projects.repositoryResources.compare.author')}</dt>
             <dd>{row.repositoryUpdatedBy ?? '—'}</dd>
+            <dt>{t('projects.repositoryResources.compare.fingerprint')}</dt>
+            <dd><code data-testid="fingerprint-repository">{row.repositoryFingerprint ?? '—'}</code></dd>
           </dl>
         </section>
         <section aria-label={t('projects.repositoryResources.columns.kronn')}>
@@ -109,6 +111,8 @@ export function RepositoryResourceCompare({
             <dd>{date(row.kronnUpdatedAt)}</dd>
             <dt>{t('projects.repositoryResources.compare.lastAligned')}</dt>
             <dd>{date(row.alignedAt)}</dd>
+            <dt>{t('projects.repositoryResources.compare.fingerprint')}</dt>
+            <dd><code data-testid="fingerprint-kronn">{row.kronnFingerprint ?? '—'}</code></dd>
           </dl>
         </section>
       </div>

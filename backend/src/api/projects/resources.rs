@@ -34,6 +34,19 @@ const PROJECT_SKILL_ROOTS: &[&str] = &[
     ".gemini/skills",
 ];
 
+/// Every directory whose files the listing dates: `kronn/` and the native
+/// skill folders.
+fn managed_directories() -> Vec<&'static str> {
+    std::iter::once("kronn")
+        .chain(
+            PROJECT_SKILL_ROOTS
+                .iter()
+                .copied()
+                .filter(|root| !root.starts_with("kronn/")),
+        )
+        .collect()
+}
+
 #[derive(Default)]
 struct RepositorySkillSeed {
     name: String,
@@ -189,10 +202,11 @@ fn parse_adr_level(raw: &str) -> ResourceAdrLevel {
 /// Every path a publish of this resource would write: its own target paths
 /// plus the shared scaffold (index, config, router skill, `docs/AGENTS.md`
 /// line when missing) — shown regardless of the current sync state, so the
-/// target path is visible even before the file exists.
-fn write_preview_paths(root: &Path, own_paths: &[String]) -> Vec<String> {
+/// target path is visible even before the file exists. The scaffold is the
+/// same for every resource, so the caller reads it once per listing.
+fn write_preview_paths(side_effects: &[String], own_paths: &[String]) -> Vec<String> {
     let mut preview: Vec<String> = own_paths.to_vec();
-    preview.extend(crate::core::repository_resources::publish_side_effect_paths(root));
+    preview.extend(side_effects.iter().cloned());
     preview.sort();
     preview.dedup();
     preview
@@ -205,11 +219,11 @@ struct AlignmentView {
     diff: Option<String>,
     file_diffs: Vec<RepositoryResourceFileDiff>,
     field_diff: Vec<crate::models::RepositoryResourceFieldDiff>,
-    repository_updated_at: Option<DateTime<Utc>>,
-    repository_updated_by: Option<String>,
     kronn_updated_at: Option<DateTime<Utc>>,
     aligned_at: Option<DateTime<Utc>>,
     required_secret_names: Vec<String>,
+    repository_fingerprint: Option<String>,
+    kronn_fingerprint: Option<String>,
 }
 
 /// Kinds Kronn can execute: the only ones an imported definition must be
@@ -362,9 +376,6 @@ fn alignment_status(
         Vec::new()
     };
 
-    let (repository_updated_at, repository_updated_by) = primary_diff_path(entry)
-        .map(|path| crate::core::repository_resources::repository_file_updated_at(root, path))
-        .unwrap_or((None, None));
     let required_secret_names = if entry.required_secrets.is_empty() {
         rendered.required_secrets.clone()
     } else {
@@ -378,11 +389,13 @@ fn alignment_status(
         diff,
         file_diffs,
         field_diff,
-        repository_updated_at,
-        repository_updated_by,
         kronn_updated_at: Some(rendered.document.updated_at),
         aligned_at: alignment.and_then(|alignment| parse_identity_time(&alignment.aligned_at)),
         required_secret_names,
+        repository_fingerprint: repository_hash.map(crate::core::repository_resources::fingerprint),
+        kronn_fingerprint: Some(crate::core::repository_resources::fingerprint(
+            &rendered.hash,
+        )),
     })
 }
 
@@ -503,51 +516,76 @@ fn take_repository_skill(
     seed
 }
 
+struct SkillRepositoryFacts {
+    diverge: bool,
+    updated_at: Option<DateTime<Utc>>,
+    updated_by: Option<String>,
+    fingerprint: Option<String>,
+}
+
 /// Whether the same slug's copies across native skill roots are not
-/// byte-identical, and when the file last changed on the repository side —
-/// both computed from the filesystem alone, no database needed.
+/// byte-identical, when the first copy last changed on the repository side and
+/// its fingerprint — all computed from the filesystem alone, no database needed.
 fn skill_repository_facts(
     root: &Path,
+    dates: &crate::core::repository_resources::RepositoryFileDates,
     paths: &[String],
-) -> (bool, Option<DateTime<Utc>>, Option<String>) {
+) -> SkillRepositoryFacts {
     let mut sorted_paths = paths.to_vec();
     sorted_paths.sort();
-    let mut hashes: Vec<String> = sorted_paths
-        .iter()
-        .filter_map(|path| std::fs::read(root.join(path)).ok())
-        .map(|bytes| crate::core::repository_resources::sha256(&bytes))
-        .collect();
+    let mut fingerprint = None;
+    let mut hashes: Vec<String> = Vec::new();
+    for path in &sorted_paths {
+        let Ok(bytes) = std::fs::read(root.join(path)) else {
+            continue;
+        };
+        let hash = crate::core::repository_resources::sha256(&bytes);
+        if fingerprint.is_none() {
+            fingerprint = Some(crate::core::repository_resources::fingerprint(&hash));
+        }
+        hashes.push(hash);
+    }
     hashes.sort();
     hashes.dedup();
-    let diverge = hashes.len() > 1;
     let (updated_at, updated_by) = sorted_paths
         .first()
-        .map(|path| crate::core::repository_resources::repository_file_updated_at(root, path))
+        .map(|path| dates.updated_at(path))
         .unwrap_or((None, None));
-    (diverge, updated_at, updated_by)
+    SkillRepositoryFacts {
+        diverge: hashes.len() > 1,
+        updated_at,
+        updated_by,
+        fingerprint,
+    }
+}
+
+/// Where a skill attached to the project stands before any alignment is
+/// known: a file already at its publication path means the repository holds
+/// something Kronn has not aligned yet.
+fn attached_skill_status(root: &Path, publication_path: &str) -> ProjectRepositoryResourceStatus {
+    if root.join(publication_path).is_file() {
+        ProjectRepositoryResourceStatus::RepositoryNewer
+    } else {
+        ProjectRepositoryResourceStatus::KronnOnly
+    }
 }
 
 fn project_skills(
     project_id: &str,
     root: &Path,
+    dates: &crate::core::repository_resources::RepositoryFileDates,
     linked_skill_ids: &[String],
     copy_origins: &BTreeMap<String, String>,
 ) -> anyhow::Result<(Vec<ProjectRepositorySkill>, Vec<ProjectRepositorySkill>)> {
     let catalog = crate::core::skills::list_all_skills();
     let mut repository_skills = discover_repository_skills(root);
-
-    for detected_id in crate::api::audit::detect_project_skills(root) {
-        let slug = crate::core::native_files::slug(&detected_id);
-        let detected_name = catalog
-            .iter()
-            .find(|skill| skill.id == detected_id)
-            .map(|skill| skill.name.clone())
-            .unwrap_or_else(|| detected_id.clone());
-        let seed = repository_skills.entry(slug).or_default();
-        if seed.name.is_empty() {
-            seed.name = detected_name;
-        }
-    }
+    // What the detected stack proposes, by skill id, with the file that
+    // triggered it. Kept apart from `repository_skills`: none of these is a
+    // file of the repository.
+    let suggestions: BTreeMap<String, String> =
+        crate::api::audit::detect_project_skill_markers(root)
+            .into_iter()
+            .collect();
 
     let linked: BTreeSet<&str> = linked_skill_ids.iter().map(String::as_str).collect();
     let mut handled = BTreeSet::new();
@@ -575,26 +613,36 @@ fn project_skills(
             (true, false) => ProjectRepositorySkillProvenance::Repository,
             (false, _) => ProjectRepositorySkillProvenance::Kronn,
         };
-        let status = is_linked.then_some(if root.join(&publication_path).is_file() {
-            ProjectRepositoryResourceStatus::RepositoryNewer
+        let suggested_reason = if is_linked || repository.is_some() {
+            None
+        } else {
+            suggestions.get(&skill.id).cloned()
+        };
+        let status = if is_linked {
+            attached_skill_status(root, &publication_path)
+        } else if repository.is_some() {
+            ProjectRepositoryResourceStatus::RepositoryOnly
         } else {
             ProjectRepositoryResourceStatus::KronnOnly
-        });
+        };
+        let suggested = suggested_reason.is_some();
         let item = skill_entry(
             root,
+            dates,
             SkillIdentity {
                 slug: crate::core::native_files::slug(&skill.id),
                 id: skill.id,
                 name: skill.name,
                 description: skill.description,
                 is_builtin: Some(skill.is_builtin),
+                suggested_reason,
             },
             provenance,
             status,
             repository_paths,
             publication_path,
         );
-        if repository.is_some() || is_linked {
+        if repository.is_some() || is_linked || suggested {
             present.push(item);
         } else {
             available.push(item);
@@ -621,16 +669,17 @@ fn project_skills(
         let repository_paths = repository
             .map(|seed| seed.repository_paths)
             .unwrap_or_default();
-        let status = (!root.join(&publication_path).is_file())
-            .then_some(ProjectRepositoryResourceStatus::KronnOnly);
+        let status = attached_skill_status(root, &publication_path);
         present.push(skill_entry(
             root,
+            dates,
             SkillIdentity {
                 id: skill_id.clone(),
                 name,
                 slug,
                 description: String::new(),
                 is_builtin: None,
+                suggested_reason: None,
             },
             if is_native {
                 ProjectRepositorySkillProvenance::Both
@@ -646,6 +695,7 @@ fn project_skills(
     for (slug, seed) in repository_skills {
         present.push(skill_entry(
             root,
+            dates,
             SkillIdentity {
                 id: format!("repository:{slug}"),
                 name: if seed.name.is_empty() {
@@ -656,9 +706,10 @@ fn project_skills(
                 description: String::new(),
                 is_builtin: None,
                 slug: slug.clone(),
+                suggested_reason: None,
             },
             ProjectRepositorySkillProvenance::Repository,
-            Some(ProjectRepositoryResourceStatus::NativeSkill),
+            ProjectRepositoryResourceStatus::NativeSkill,
             seed.repository_paths,
             format!("kronn/skills/{slug}/SKILL.md"),
         ));
@@ -681,20 +732,21 @@ struct SkillIdentity {
     slug: String,
     description: String,
     is_builtin: Option<bool>,
+    suggested_reason: Option<String>,
 }
 
 /// A skill as the listing first shows it: only what the filesystem and the
 /// skill's own file can tell, alignment facts being layered on afterwards.
 fn skill_entry(
     root: &Path,
+    dates: &crate::core::repository_resources::RepositoryFileDates,
     identity: SkillIdentity,
     provenance: ProjectRepositorySkillProvenance,
-    status: Option<ProjectRepositoryResourceStatus>,
+    status: ProjectRepositoryResourceStatus,
     repository_paths: Vec<String>,
     publication_path: String,
 ) -> ProjectRepositorySkill {
-    let (diverge, repository_updated_at, repository_updated_by) =
-        skill_repository_facts(root, &repository_paths);
+    let facts = skill_repository_facts(root, dates, &repository_paths);
     ProjectRepositorySkill {
         kronn_updated_at: crate::core::skills::custom_skill_modified_at(&identity.id),
         id: identity.id,
@@ -704,20 +756,24 @@ fn skill_entry(
         provenance,
         is_builtin: identity.is_builtin,
         status,
+        suggested: identity.suggested_reason.is_some(),
+        suggested_reason: identity.suggested_reason,
         approval_required: false,
         approved: false,
         diff: None,
         file_diffs: Vec::new(),
         repository_paths,
-        repository_paths_diverge: diverge,
+        repository_paths_diverge: facts.diverge,
         publication_path,
         write_preview: Vec::new(),
         referenced: false,
         required_secrets: Vec::new(),
         adr_level: ResourceAdrLevel::N1,
-        repository_updated_at,
-        repository_updated_by,
+        repository_updated_at: facts.updated_at,
+        repository_updated_by: facts.updated_by,
         aligned_at: None,
+        repository_fingerprint: facts.fingerprint,
+        kronn_fingerprint: None,
     }
 }
 
@@ -790,6 +846,11 @@ pub async fn repository_resources(
             );
 
             let root = PathBuf::from(&project.path);
+            let side_effects = crate::core::repository_resources::publish_side_effect_paths(&root);
+            let dates = crate::core::repository_resources::RepositoryFileDates::read(
+                &root,
+                &managed_directories(),
+            );
             let lock =
                 crate::core::repository_resources::load_lock(&root).map_err(anyhow::Error::msg)?;
             let configured_secrets =
@@ -798,6 +859,7 @@ pub async fn repository_resources(
             let (mut skills_present, skills_available) = project_skills(
                 &project_id,
                 &root,
+                &dates,
                 &project.default_skill_ids,
                 &copy_origins,
             )?;
@@ -812,8 +874,10 @@ pub async fn repository_resources(
                             .is_some();
                 }
                 if !skill.id.starts_with("repository:") {
-                    skill.write_preview =
-                        write_preview_paths(&root, std::slice::from_ref(&skill.publication_path));
+                    skill.write_preview = write_preview_paths(
+                        &side_effects,
+                        std::slice::from_ref(&skill.publication_path),
+                    );
                 }
                 let Some(entry) = lock.as_ref().and_then(|lock| {
                     lock.resources.iter().find(|entry| {
@@ -825,7 +889,7 @@ pub async fn repository_resources(
                 };
                 skill.repository_paths = merge_paths(&skill.repository_paths, &entry.paths);
                 if skill.id.starts_with("repository:") {
-                    skill.status = Some(ProjectRepositoryResourceStatus::RepositoryOnly);
+                    skill.status = ProjectRepositoryResourceStatus::RepositoryOnly;
                     skill.required_secrets =
                         crate::core::repository_resources::required_secret_statuses(
                             &entry.required_secrets,
@@ -858,7 +922,7 @@ pub async fn repository_resources(
                     timestamp,
                 )?;
                 let view = alignment_status(conn, &root, entry, &rendered, alignment.as_ref())?;
-                skill.status = Some(view.status);
+                skill.status = view.status;
                 skill.approval_required = view.approval_required;
                 skill.approved = view.approved;
                 skill.diff = view.diff;
@@ -868,9 +932,15 @@ pub async fn repository_resources(
                         &view.required_secret_names,
                         &configured_secrets,
                     );
-                skill.repository_updated_at = view.repository_updated_at;
-                skill.repository_updated_by = view.repository_updated_by;
+                if let Some((updated_at, updated_by)) =
+                    primary_diff_path(entry).map(|path| dates.updated_at(path))
+                {
+                    skill.repository_updated_at = updated_at;
+                    skill.repository_updated_by = updated_by;
+                }
                 skill.aligned_at = view.aligned_at;
+                skill.repository_fingerprint = view.repository_fingerprint;
+                skill.kronn_fingerprint = view.kronn_fingerprint;
             }
             let mut resources = Vec::with_capacity(seeds.len());
             for seed in seeds {
@@ -881,7 +951,7 @@ pub async fn repository_resources(
                     &seed.id,
                 )?;
                 let generated_slug = || {
-                    let slug = crate::core::mcp_scanner::slugify_label(&seed.name);
+                    let slug = crate::core::repository_resources::ascii_slug(&seed.name);
                     if slug.is_empty() {
                         let id_prefix: String = seed.id.chars().take(8).collect();
                         format!("resource-{id_prefix}")
@@ -910,7 +980,10 @@ pub async fn repository_resources(
                     &repository_paths,
                 );
                 let view = alignment_status(conn, &root, &entry, &rendered, alignment.as_ref())?;
-                let write_preview = write_preview_paths(&root, &entry.paths);
+                let (repository_updated_at, repository_updated_by) = primary_diff_path(&entry)
+                    .map(|path| dates.updated_at(path))
+                    .unwrap_or((None, None));
+                let write_preview = write_preview_paths(&side_effects, &entry.paths);
                 resources.push(ProjectRepositoryResource {
                     id: seed.id,
                     name: seed.name,
@@ -932,35 +1005,41 @@ pub async fn repository_resources(
                         &view.required_secret_names,
                         &configured_secrets,
                     ),
-                    repository_updated_at: view.repository_updated_at,
-                    repository_updated_by: view.repository_updated_by,
+                    repository_updated_at,
+                    repository_updated_by,
                     kronn_updated_at: view.kronn_updated_at,
                     aligned_at: view.aligned_at,
+                    repository_fingerprint: view.repository_fingerprint,
+                    kronn_fingerprint: view.kronn_fingerprint,
                 });
             }
             if let Some(lock) = lock.as_ref() {
+                let listed: BTreeSet<(&'static str, String)> = resources
+                    .iter()
+                    .map(|resource| (resource.kind.identity_kind(), resource.slug.clone()))
+                    .collect();
                 for entry in &lock.resources {
                     if entry.kind == ProjectRepositoryResourceKind::Skill
-                        || resources.iter().any(|resource| {
-                            resource.kind == entry.kind && resource.slug == entry.slug
-                        })
+                        || listed.contains(&(entry.kind.identity_kind(), entry.slug.clone()))
                     {
                         continue;
                     }
                     let (repository_updated_at, repository_updated_by) = primary_diff_path(entry)
-                        .map(|path| {
-                            crate::core::repository_resources::repository_file_updated_at(
-                                &root, path,
-                            )
-                        })
+                        .map(|path| dates.updated_at(path))
                         .unwrap_or((None, None));
+                    let repository_file =
+                        crate::core::repository_resources::read_resource(&root, entry);
+                    let repository_fingerprint = repository_file
+                        .as_ref()
+                        .ok()
+                        .map(|(_, hash)| crate::core::repository_resources::fingerprint(hash));
                     resources.push(ProjectRepositoryResource {
                         id: format!("repository:{}:{}", entry.kind.identity_kind(), entry.slug),
                         name: entry.name.clone(),
                         slug: entry.slug.clone(),
                         kind: entry.kind,
                         level: entry.kind.level(),
-                        adr_level: crate::core::repository_resources::read_resource(&root, entry)
+                        adr_level: repository_file
                             .map(|(document, _)| {
                                 crate::core::repository_resources::resource_adr_level(&document)
                             })
@@ -982,6 +1061,8 @@ pub async fn repository_resources(
                         repository_updated_by,
                         kronn_updated_at: None,
                         aligned_at: None,
+                        repository_fingerprint,
+                        kronn_fingerprint: None,
                     });
                 }
             }
@@ -1342,7 +1423,7 @@ fn publish_one(
             }
         }
         .unwrap_or_else(|| request.id.clone());
-        let slug = crate::core::mcp_scanner::slugify_label(&name);
+        let slug = crate::core::repository_resources::ascii_slug(&name);
         if slug.is_empty() {
             format!(
                 "resource-{}",
@@ -1839,7 +1920,6 @@ mod tests {
             unpublished.status,
             ProjectRepositoryResourceStatus::KronnOnly
         );
-        assert!(unpublished.repository_updated_at.is_none());
         assert_eq!(
             unpublished.kronn_updated_at,
             Some(rendered.document.updated_at)
@@ -2326,10 +2406,7 @@ mod tests {
             .find(|skill| skill.slug == "review")
             .expect("the referenced skill is listed");
         assert!(skill.referenced);
-        assert_eq!(
-            skill.status,
-            Some(ProjectRepositoryResourceStatus::NativeSkill)
-        );
+        assert_eq!(skill.status, ProjectRepositoryResourceStatus::NativeSkill);
         assert_eq!(
             skill.repository_paths,
             vec![
@@ -2416,10 +2493,7 @@ mod tests {
             .iter()
             .find(|skill| skill.id == mutation.id)
             .expect("the copied skill is listed");
-        assert_eq!(
-            skill.status,
-            Some(ProjectRepositoryResourceStatus::KronnOnly)
-        );
+        assert_eq!(skill.status, ProjectRepositoryResourceStatus::KronnOnly);
         assert_eq!(
             skill.repository_paths,
             vec![".claude/skills/cr/SKILL.md".to_string()]
@@ -2641,13 +2715,365 @@ mod tests {
 
         let listing = list_resources(&state, &project_id).await;
         assert!(!listing.can_write_repository);
-        assert!(
-            listing
-                .can_write_repository_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("is not a directory")),
-            "{:?}",
-            listing.can_write_repository_reason
+        assert_eq!(
+            listing.can_write_repository_reason,
+            Some(crate::models::RepositoryWriteBlocker::KronnPathIsFile),
+            "the reason is a code the UI words, not a raw error"
         );
+    }
+
+    fn by_id<'a>(
+        skills: &'a [ProjectRepositorySkill],
+        id: &str,
+    ) -> Option<&'a ProjectRepositorySkill> {
+        skills.iter().find(|skill| skill.id == id)
+    }
+
+    #[tokio::test]
+    async fn stack_suggested_skills_are_kronn_only_with_their_reason_and_never_repository_files() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(root.path().join("package.json"), "{}").unwrap();
+        std::fs::write(root.path().join("tsconfig.json"), "{}").unwrap();
+        write_native_skill(root.path(), ".agents/skills", "review", "Review", "Body.");
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+
+        let listing = list_resources(&state, &project_id).await;
+
+        for (id, marker) in [("devops", "Dockerfile"), ("typescript", "tsconfig.json")] {
+            let skill = by_id(&listing.skills_present, id)
+                .unwrap_or_else(|| panic!("{id} is suggested for this stack"));
+            assert!(skill.suggested, "{id}");
+            assert_eq!(skill.suggested_reason.as_deref(), Some(marker));
+            assert_eq!(skill.status, ProjectRepositoryResourceStatus::KronnOnly);
+            assert_eq!(skill.provenance, ProjectRepositorySkillProvenance::Kronn);
+            assert!(
+                skill.repository_paths.is_empty(),
+                "no repository file: {id}"
+            );
+        }
+        let native = by_id(&listing.skills_present, "repository:review").unwrap();
+        assert!(!native.suggested);
+        assert_eq!(native.status, ProjectRepositoryResourceStatus::NativeSkill);
+        assert!(native.repository_fingerprint.is_some());
+        assert_eq!(
+            native.repository_fingerprint.as_ref().map(String::len),
+            Some(8)
+        );
+    }
+
+    #[tokio::test]
+    async fn every_skill_has_a_defined_state_and_unrelated_catalog_skills_stay_available() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+
+        let listing = list_resources(&state, &project_id).await;
+
+        let rust = by_id(&listing.skills_present, "rust").expect("rust is suggested");
+        assert!(rust.suggested);
+        let available = by_id(&listing.skills_available, "web-performance")
+            .expect("an unrelated catalog skill stays available");
+        assert!(!available.suggested);
+        assert!(available.suggested_reason.is_none());
+        assert_eq!(available.status, ProjectRepositoryResourceStatus::KronnOnly);
+        assert!(available.repository_paths.is_empty());
+        assert!(
+            by_id(&listing.skills_present, "web-performance").is_none(),
+            "nothing detected it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_suggested_skill_that_is_already_attached_is_no_longer_a_suggestion() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        let project_id = "project-1".to_string();
+        let mut project = mk_project(&project_id, root.path());
+        project.default_skill_ids = vec!["devops".into()];
+        seed_project(&state, project).await;
+
+        let listing = list_resources(&state, &project_id).await;
+
+        let devops = by_id(&listing.skills_present, "devops").unwrap();
+        assert!(!devops.suggested);
+        assert_eq!(devops.provenance, ProjectRepositorySkillProvenance::Kronn);
+        assert_eq!(devops.status, ProjectRepositoryResourceStatus::KronnOnly);
+    }
+
+    #[tokio::test]
+    async fn a_catalog_skill_found_in_a_repository_folder_is_repository_only() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        write_native_skill(root.path(), ".claude/skills", "devops", "DevOps", "Body.");
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+
+        let listing = list_resources(&state, &project_id).await;
+
+        let devops = by_id(&listing.skills_present, "devops").unwrap();
+        assert_eq!(
+            devops.status,
+            ProjectRepositoryResourceStatus::RepositoryOnly
+        );
+        assert_eq!(
+            devops.provenance,
+            ProjectRepositorySkillProvenance::Repository
+        );
+        assert!(!devops.suggested);
+        assert_eq!(
+            devops.repository_paths,
+            vec![".claude/skills/devops/SKILL.md".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn both_sides_carry_an_eight_character_fingerprint_that_differs_between_two_versions() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_execs::insert_quick_exec(conn, &sample_exec("project-1"))?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let before = list_resources(&state, &project_id).await;
+        let unwritten = &before.resources[0];
+        assert!(unwritten.repository_fingerprint.is_none(), "no file yet");
+        assert_eq!(
+            unwritten.kronn_fingerprint.as_ref().map(String::len),
+            Some(8)
+        );
+
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(PublishProjectRepositoryResourceRequest {
+                kind: ProjectRepositoryResourceKind::QuickExec,
+                id: "qe-1".into(),
+                overwrite_repository_changes: false,
+            }),
+        )
+        .await;
+        assert!(published.0.data.is_some(), "{:?}", published.0.error);
+
+        let after = list_resources(&state, &project_id).await;
+        let aligned = &after.resources[0];
+        assert_eq!(aligned.status, ProjectRepositoryResourceStatus::UpToDate);
+        assert_eq!(aligned.repository_fingerprint, aligned.kronn_fingerprint);
+
+        let path = root.path().join("kronn/quick-execs/lint.yaml");
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("check", "build");
+        std::fs::write(&path, edited).unwrap();
+        let drifted = list_resources(&state, &project_id).await;
+        let item = &drifted.resources[0];
+        assert_ne!(item.repository_fingerprint, item.kronn_fingerprint);
+        assert_eq!(
+            item.repository_fingerprint.as_ref().map(String::len),
+            Some(8)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_resource_slug_is_plain_ascii_and_an_existing_one_is_left_alone() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let mut exec = sample_exec("project-1");
+                exec.name = "Plan de correction jeu réduit".into();
+                crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let listing = list_resources(&state, &project_id).await;
+        assert_eq!(listing.resources[0].slug, "plan-de-correction-jeu-reduit");
+        assert_eq!(
+            listing.resources[0].repository_paths,
+            vec!["kronn/quick-execs/plan-de-correction-jeu-reduit.yaml".to_string()]
+        );
+
+        // Once published the slug is recorded: renaming the resource later
+        // must not move the file.
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(PublishProjectRepositoryResourceRequest {
+                kind: ProjectRepositoryResourceKind::QuickExec,
+                id: "qe-1".into(),
+                overwrite_repository_changes: false,
+            }),
+        )
+        .await;
+        assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE quick_execs SET name = 'Autre nom' WHERE id = 'qe-1'",
+                    [],
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        let renamed = list_resources(&state, &project_id).await;
+        assert_eq!(renamed.resources[0].slug, "plan-de-correction-jeu-reduit");
+    }
+    /// A repository with a long history: `git log` on a path the history never
+    /// touched has to walk all of it, which is what made the listing slow.
+    fn seed_history(root: &Path, commits: usize) {
+        use std::io::Write;
+        let mut stream = String::new();
+        for index in 0..commits {
+            let body = format!("revision {index}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{}\ncommitter T <t@example.com> {} +0000\ndata 2\nc\n",
+                index + 1,
+                1_600_000_000 + index
+            ));
+            if index > 0 {
+                stream.push_str(&format!("from :{index}\n"));
+            }
+            stream.push_str(&format!(
+                "M 100644 inline src/file-{}.txt\ndata {}\n{}\n",
+                index % 300,
+                body.len(),
+                body
+            ));
+        }
+        let mut child = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args(["reset", "--hard", "-q"])
+            .status()
+            .unwrap();
+    }
+
+    /// `cargo test --lib listing_speed -- --ignored --nocapture`: a stand-in for
+    /// a large repository with many automations (79) and a few skills.
+    #[tokio::test]
+    #[ignore = "timing measurement, run on demand"]
+    async fn listing_speed_on_a_long_history_with_many_automations() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        seed_history(root.path(), 5_000);
+        for marker in [
+            "Dockerfile",
+            "package.json",
+            "tsconfig.json",
+            "vite.config.ts",
+        ] {
+            std::fs::write(root.path().join(marker), "{}\n").unwrap();
+        }
+        write_native_skill(root.path(), ".agents/skills", "review", "Review", "Body.");
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                for index in 0..79 {
+                    let mut exec = sample_exec("project-1");
+                    exec.id = format!("qe-{index}");
+                    exec.name = format!("Automation {index}");
+                    crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let listing = list_resources(&state, &project_id).await;
+            runs.push(started.elapsed());
+            assert_eq!(listing.resources.len(), 79);
+        }
+        eprintln!("LISTING_SPEED unpublished runs={runs:?}");
+
+        // Worst case: every automation already lives in the repository, so
+        // each one has a real file whose last commit must be looked up.
+        for index in 0..79 {
+            let published = publish_repository_resource(
+                State(state.clone()),
+                AxumPath(project_id.clone()),
+                Json(PublishProjectRepositoryResourceRequest {
+                    kind: ProjectRepositoryResourceKind::QuickExec,
+                    id: format!("qe-{index}"),
+                    overwrite_repository_changes: false,
+                }),
+            )
+            .await;
+            assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        }
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["add", "-A"])
+            .status()
+            .unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+            .args(["commit", "-q", "-m", "publish"])
+            .status()
+            .unwrap();
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let listing = list_resources(&state, &project_id).await;
+            runs.push(started.elapsed());
+            assert!(listing
+                .resources
+                .iter()
+                .all(|item| item.status == ProjectRepositoryResourceStatus::UpToDate));
+        }
+        eprintln!("LISTING_SPEED all-published runs={runs:?}");
     }
 }

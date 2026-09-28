@@ -78,6 +78,10 @@ export function RepositoryResourceApprove({ row, busy, onApprove, onReject, onAd
           <dd>{formatResourceDate(row.repositoryUpdatedAt, locale)}</dd>
           <dt>{t('projects.repositoryResources.compare.author')}</dt>
           <dd>{row.repositoryUpdatedBy ?? '—'}</dd>
+          <dt>{t('projects.repositoryResources.compare.fingerprint')} · {t('projects.repositoryResources.columns.repository')}</dt>
+          <dd><code data-testid="fingerprint-repository">{row.repositoryFingerprint ?? '—'}</code></dd>
+          <dt>{t('projects.repositoryResources.compare.fingerprint')} · {t('projects.repositoryResources.columns.kronn')}</dt>
+          <dd><code data-testid="fingerprint-kronn">{row.kronnFingerprint ?? '—'}</code></dd>
         </dl>
       </section>
 

@@ -109,12 +109,27 @@ pub struct ProjectRepositoryResources {
     pub can_write_repository: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub can_write_repository_reason: Option<String>,
+    pub can_write_repository_reason: Option<RepositoryWriteBlocker>,
     /// Repository-relative paths Kronn wrote (per `kronn.lock`) that `git
     /// status` reports as modified or untracked — the banner's "N files
     /// changed, not committed" count.
     #[serde(default)]
     pub uncommitted_managed_paths: Vec<String>,
+}
+
+/// Why Kronn cannot write into a repository right now — a code the UI
+/// translates, never a raw error message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum RepositoryWriteBlocker {
+    /// A `kronn` file (e.g. a launcher script) occupies the slot of the
+    /// `kronn/` directory.
+    KronnPathIsFile,
+    /// The repository root is read-only.
+    RepositoryReadOnly,
+    /// The repository root cannot be inspected (moved, unmounted…).
+    RepositoryUnreadable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -134,8 +149,19 @@ pub struct ProjectRepositorySkill {
     pub provenance: ProjectRepositorySkillProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_builtin: Option<bool>,
+    /// Always defined: a skill only in Kronn's catalog (suggested or not) is
+    /// `kronn_only`, one found only in a repository folder is `repository_only`
+    /// (`native_skill` when Kronn has no counterpart at all).
+    pub status: ProjectRepositoryResourceStatus,
+    /// Proposed for this repository from its detected stack, not attached to
+    /// it: never an item to process, only a suggestion to attach.
+    #[serde(default)]
+    pub suggested: bool,
+    /// What triggered the suggestion, as the detected file name (`Dockerfile`,
+    /// `Cargo.toml`…) — the UI words it in the reader's language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ProjectRepositoryResourceStatus>,
+    #[ts(optional)]
+    pub suggested_reason: Option<String>,
     #[serde(default)]
     pub approval_required: bool,
     #[serde(default)]
@@ -176,6 +202,14 @@ pub struct ProjectRepositorySkill {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub aligned_at: Option<DateTime<Utc>>,
+    /// First 8 characters of the content hash of each side, so two versions
+    /// can be told apart at a glance. Absent when that side has no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repository_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kronn_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -237,6 +271,14 @@ pub struct ProjectRepositoryResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub aligned_at: Option<DateTime<Utc>>,
+    /// First 8 characters of the content hash of each side, so two versions
+    /// can be told apart at a glance. Absent when that side has no file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repository_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kronn_fingerprint: Option<String>,
 }
 
 /// A secret name a resource requires (`secret://NAME` in its file, listed in

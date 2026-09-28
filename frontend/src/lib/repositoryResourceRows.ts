@@ -12,11 +12,11 @@ import type { ProjectRepositoryResourcesTab } from './projectRepositoryResources
 
 export type RowGroup = ProjectRepositoryResourcesTab;
 
-/** `catalog` = a Kronn catalog skill not attached to the project; `unknown` =
- *  no baseline to compare against. Everything else is the backend status. */
-export type SyncState = ProjectRepositoryResourceStatus | 'catalog' | 'unknown';
+/** `catalog` = a Kronn catalog skill unrelated to the repository's stack;
+ *  everything else is the backend status, always defined. */
+export type SyncState = ProjectRepositoryResourceStatus | 'catalog';
 export type Presence = 'repository' | 'kronn' | 'both';
-export type KronnScope = 'catalog' | 'attached' | 'referenced' | 'absent';
+export type KronnScope = 'catalog' | 'attached' | 'referenced' | 'absent' | 'suggested';
 export type PresenceFilter = 'all' | Presence;
 
 export type PrimaryAction =
@@ -50,8 +50,15 @@ export interface ResourceRow {
   pathsDiverge: boolean;
   scope: KronnScope;
   builtin: boolean;
-  /** A catalog skill found in the repository but not attached to the project. */
+  /** A catalog skill that is not attached to the project yet: found in a
+   *  repository folder, proposed for the stack, or simply in the catalog. */
   attachOnly: boolean;
+  /** Proposed from the detected stack; never an item to process. */
+  suggested: boolean;
+  /** The detected file that triggered the suggestion (`Dockerfile`…). */
+  suggestedReason?: string;
+  repositoryFingerprint?: string;
+  kronnFingerprint?: string;
   primary: PrimaryAction;
   approvalRequired: boolean;
   approved: boolean;
@@ -90,15 +97,17 @@ export function originLabel(path: string): string {
   return first || path;
 }
 
-/** Head and tail of a path so CSS can ellipsize the middle: the last two
- *  segments always stay visible. */
+/** How much of a path's end stays visible when its middle is ellipsized. */
+const PATH_TAIL = 18;
+
+/** Head and tail of a path so CSS can ellipsize the middle: the start
+ *  (`kronn/workflows/`) shrinks with an ellipsis while the end of the file
+ *  name always stays visible. A short file name stays whole in the tail. */
 export function splitPath(path: string): { head: string; tail: string } {
-  const segments = path.split('/');
-  if (segments.length <= 2) return { head: '', tail: path };
-  return {
-    head: `${segments.slice(0, -2).join('/')}/`,
-    tail: segments.slice(-2).join('/'),
-  };
+  const slash = path.lastIndexOf('/');
+  const file = path.slice(Math.max(slash, 0));
+  if (file.length <= PATH_TAIL) return { head: path.slice(0, path.length - file.length), tail: file };
+  return { head: path.slice(0, path.length - PATH_TAIL), tail: path.slice(-PATH_TAIL) };
 }
 
 function mainPath(kind: ProjectRepositoryResourceKind, paths: string[]): string | undefined {
@@ -106,11 +115,10 @@ function mainPath(kind: ProjectRepositoryResourceKind, paths: string[]): string 
   return paths[0];
 }
 
-function presenceOf(state: SyncState, referenced: boolean, hasKronnSide: boolean): Presence {
+function presenceOf(state: SyncState, referenced: boolean): Presence {
   if (state === 'repository_only') return 'repository';
   if (state === 'native_skill') return referenced ? 'both' : 'repository';
   if (state === 'kronn_only' || state === 'catalog') return 'kronn';
-  if (state === 'unknown') return hasKronnSide ? 'both' : 'repository';
   return 'both';
 }
 
@@ -118,7 +126,7 @@ function primaryOf(state: SyncState, attachOnly: boolean): PrimaryAction {
   switch (state) {
     case 'repository_only': return attachOnly ? 'attach' : 'import';
     case 'native_skill': return 'use_native';
-    case 'kronn_only': return 'publish';
+    case 'kronn_only': return attachOnly ? 'attach' : 'publish';
     case 'repository_newer': return 'update_kronn';
     case 'kronn_newer': return 'update_repository';
     case 'conflict': return 'compare';
@@ -143,7 +151,7 @@ function resourceRow(resource: ProjectRepositoryResource): ResourceRow {
     name: resource.name,
     description: '',
     state,
-    presence: presenceOf(state, false, true),
+    presence: presenceOf(state, false),
     paths,
     displayPath,
     pathExists: paths.length > 0,
@@ -153,6 +161,7 @@ function resourceRow(resource: ProjectRepositoryResource): ResourceRow {
     scope: resource.id.startsWith('repository:') ? 'absent' : 'attached',
     builtin: false,
     attachOnly: false,
+    suggested: false,
     primary: primaryOf(state, false),
     approvalRequired: resource.approval_required,
     approved: resource.approved,
@@ -165,28 +174,32 @@ function resourceRow(resource: ProjectRepositoryResource): ResourceRow {
     repositoryUpdatedBy: resource.repository_updated_by,
     kronnUpdatedAt: resource.kronn_updated_at,
     alignedAt: resource.aligned_at,
+    repositoryFingerprint: resource.repository_fingerprint,
+    kronnFingerprint: resource.kronn_fingerprint,
     level: resource.level,
   };
 }
 
 function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRow {
-  const attachOnly = available || (!skill.status && skill.provenance === 'repository');
+  const nativeFolder = skill.status === 'repository_only' && !skill.id.startsWith('repository:');
+  const attachOnly = available || skill.suggested || nativeFolder;
   let state: SyncState;
   if (available) state = 'catalog';
   else if (skill.status === 'native_skill' && skill.referenced) state = 'up_to_date';
-  else if (skill.status) state = skill.status;
-  else if (skill.provenance === 'repository') state = 'repository_only';
-  else state = 'unknown';
-  // A kronn_only skill has nothing at its publication path yet: show that
-  // target rather than a native folder it may also live in.
+  else state = skill.status;
+  // A skill only in Kronn has no repository file to show: attached, it is
+  // written to its publication path; suggested or in the catalog, it is not
+  // written at all until someone attaches it.
   const paths = state === 'kronn_only' || available ? [] : skill.repository_paths;
   const targetPath = skill.publication_path;
   const linked = skill.provenance !== 'repository';
   let scope: KronnScope = 'absent';
   if (available) scope = 'catalog';
+  else if (skill.suggested) scope = 'suggested';
   else if (skill.referenced) scope = 'referenced';
   else if (linked) scope = 'attached';
-  else if (skill.provenance === 'repository' && !skill.id.startsWith('repository:')) scope = 'catalog';
+  else if (nativeFolder) scope = 'catalog';
+  const shownPath = available || skill.suggested ? '' : (paths[0] ?? targetPath);
   return {
     key: `skill:${skill.id}`,
     group: 'skills',
@@ -196,9 +209,9 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
     name: skill.name,
     description: skill.description,
     state,
-    presence: presenceOf(state, skill.referenced, linked),
+    presence: presenceOf(state, skill.referenced),
     paths,
-    displayPath: paths[0] ?? targetPath,
+    displayPath: shownPath,
     pathExists: paths.length > 0,
     targetPath,
     origins: [...new Set(paths.map(originLabel))],
@@ -206,6 +219,8 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
     scope,
     builtin: Boolean(skill.is_builtin),
     attachOnly,
+    suggested: skill.suggested,
+    suggestedReason: skill.suggested_reason,
     primary: state === 'up_to_date' && skill.referenced ? 'view' : primaryOf(state, attachOnly),
     approvalRequired: skill.approval_required,
     approved: skill.approved,
@@ -218,6 +233,8 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
     repositoryUpdatedBy: skill.repository_updated_by,
     kronnUpdatedAt: skill.kronn_updated_at,
     alignedAt: skill.aligned_at,
+    repositoryFingerprint: skill.repository_fingerprint,
+    kronnFingerprint: skill.kronn_fingerprint,
     level: 'usable_without_kronn',
   };
 }
@@ -245,7 +262,7 @@ export const allRows = (rows: RepositoryRows): ResourceRow[] => [
  *  `default-skills` update must resend, since it replaces the whole set. */
 export const attachedSkillIds = (data: ProjectRepositoryResources): string[] => (
   data.skills_present
-    .filter(skill => skill.provenance !== 'repository')
+    .filter(skill => skill.provenance !== 'repository' && !skill.suggested)
     .map(skill => skill.id)
 );
 
@@ -258,14 +275,16 @@ const ATTENTION_RANK: Record<AttentionReason, number> = {
   new: 3,
 };
 
+/** Only what asks for a sync or safety decision. A skill the stack merely
+ *  suggests, or a catalog skill not attached yet, is never one. */
 export function attentionReason(row: ResourceRow): AttentionReason | null {
   switch (row.state) {
     case 'conflict': return 'conflict';
     case 'approval_required': return 'approval';
     case 'repository_newer':
     case 'kronn_newer': return 'late';
-    case 'repository_only':
     case 'native_skill': return 'new';
+    case 'repository_only': return row.attachOnly ? null : 'new';
     default: return null;
   }
 }
@@ -276,9 +295,11 @@ export interface AttentionItem {
 }
 
 /** Rows that need a decision, most urgent first: two versions, then waiting
- *  for approval, then out of date, then newly found in the repository. */
-export function attentionItems(rows: RepositoryRows): AttentionItem[] {
+ *  for approval, then out of date, then newly found in the repository. Each
+ *  sub-tab has its own list; without `group`, every sub-tab's. */
+export function attentionItems(rows: RepositoryRows, group?: RowGroup): AttentionItem[] {
   return allRows(rows)
+    .filter(row => group === undefined || row.group === group)
     .flatMap(row => {
       const reason = attentionReason(row);
       return reason ? [{ row, reason }] : [];
@@ -310,17 +331,27 @@ export interface AlignLine {
   direction: AlignDirection;
 }
 
-/** What "Align all" may move. Two versions, approvals and native skills are
- *  never included: each needs its own decision. */
-export function alignLines(rows: RepositoryRows): AlignLine[] {
-  return [...rows.skills, ...rows.automation, ...rows.artifacts].flatMap((row): AlignLine[] => {
-    if (row.approvalRequired) return [];
-    if (row.state === 'repository_newer') return [{ row, direction: 'to_kronn' }];
-    if (row.state === 'repository_only' && !row.attachOnly) return [{ row, direction: 'to_kronn' }];
-    if (row.state === 'kronn_newer' || row.state === 'kronn_only') return [{ row, direction: 'to_repository' }];
-    return [];
-  });
+/** What "Align all" may move: only what is behind on one side, in the
+ *  direction of the newer copy. Two versions and approvals each need their own
+ *  decision; something present on one side only is written by selecting it. */
+export function alignLines(rows: RepositoryRows, group?: RowGroup): AlignLine[] {
+  return [...rows.skills, ...rows.automation, ...rows.artifacts]
+    .filter(row => group === undefined || row.group === group)
+    .flatMap((row): AlignLine[] => {
+      if (row.approvalRequired) return [];
+      if (row.state === 'repository_newer') return [{ row, direction: 'to_kronn' }];
+      if (row.state === 'kronn_newer') return [{ row, direction: 'to_repository' }];
+      return [];
+    });
 }
+
+/** Rows "Align all" leaves aside because each holds a decision of its own. */
+export const alignExcludedCount = (rows: RepositoryRows, group?: RowGroup): number => (
+  [...rows.skills, ...rows.automation, ...rows.artifacts]
+    .filter(row => (group === undefined || row.group === group)
+      && (row.state === 'conflict' || row.state === 'approval_required'))
+    .length
+);
 
 export const writesRepository = (action: PrimaryAction): boolean => (
   action === 'publish' || action === 'update_repository'

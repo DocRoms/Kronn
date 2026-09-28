@@ -79,7 +79,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(within(roots).getByText('.github/skills/')).toBeInTheDocument();
       expect(within(roots).getByText(`${R}skillRoots.count:3`)).toBeInTheDocument();
       const notice = screen.getByText(new RegExp(`${R}kronnMissingSecondary`)).closest('[role="status"]');
-      expect(notice).toHaveAttribute('data-tone', 'secondary');
+      expect(notice).toHaveClass('project-repository-resources-note');
       expect(screen.queryByText(`${R}kronnMissing`)).not.toBeInTheDocument();
     });
 
@@ -87,7 +87,13 @@ describe('ProjectRepositoryResourcesPanel', () => {
       await show(listing({ kronn_exists: false }));
 
       expect(screen.getByText(`${R}skillRoots.none`)).toBeInTheDocument();
-      expect(screen.getByText(new RegExp(`${R}kronnMissing$`)).closest('[role="status"]')).not.toHaveAttribute('data-tone');
+      expect(screen.getByText(new RegExp(`${R}kronnMissing$`)).closest('[role="status"]')).toHaveClass('project-repository-resources-note');
+    });
+
+    it('states the missing kronn/ folder as a discreet note, not as a banner', () => {
+      expect(panelCss).toMatch(/\.project-repository-resources-note \{[^}]*color: var\(--kr-text-muted\)[^}]*font-size: var\(--kr-fs-sm\)/);
+      expect(panelCss).not.toMatch(/\.project-repository-resources-note \{[^}]*font-size: (1[2-9]|2\d)px/);
+      expect(panelCss).toMatch(/\.project-repository-resources \{[^}]*font-size: var\(--kr-fs-sm\)/);
     });
   });
 
@@ -160,7 +166,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
     it('groups automations by kind and remembers the sub-tab', async () => {
       const first = await show(listing({
         skills_present: [skill({ id: 'rust', name: 'Rust', status: 'up_to_date', repository_paths: ['kronn/skills/rust/SKILL.md'] })],
-        skills_available: [skill({ id: 'custom-review', name: 'Review', provenance: 'kronn', status: null })],
+        skills_available: [skill({ id: 'custom-review', name: 'Review', provenance: 'kronn', status: 'kronn_only' })],
         resources: [
           resource({ id: 'wf', name: 'Nightly', kind: 'workflow', status: 'up_to_date' }),
           resource({ id: 'qp', name: 'Review ticket', kind: 'quick_prompt', status: 'up_to_date' }),
@@ -233,10 +239,11 @@ describe('ProjectRepositoryResourcesPanel', () => {
           resource({ id: 'c', name: 'Clash', kind: 'workflow', status: 'conflict' }),
         ],
       }), { onAttentionChange });
+      openTab('automation');
 
       const block = screen.getByTestId('repository-attention');
       const items = within(block).getAllByRole('listitem');
-      expect(items.map(item => item.dataset.reason)).toEqual(['conflict', 'approval', 'late', 'new', 'new']);
+      expect(items.map(item => item.dataset.reason)).toEqual(['conflict', 'approval', 'late', 'new']);
       expect(items[0]).toHaveTextContent(`${R}attention.conflict:Clash`);
       expect(within(items[0]).getByRole('button', { name: `${R}action.compare` })).toBeInTheDocument();
       expect(within(items[1]).getByRole('button', { name: `${R}action.approve` })).toBeInTheDocument();
@@ -247,8 +254,45 @@ describe('ProjectRepositoryResourcesPanel', () => {
       await waitFor(() => expect(onAttentionChange).toHaveBeenLastCalledWith(5));
     });
 
+    it('is proper to each sub-tab: the automations never show the skills to process', async () => {
+      await show(listing({
+        skills_present: [
+          skill({ id: 'repository:lint', name: 'Lint', provenance: 'repository', status: 'native_skill', repository_paths: ['.claude/skills/lint/SKILL.md'] }),
+        ],
+        resources: [resource({ id: 'l', name: 'Late', kind: 'workflow', status: 'kronn_newer' })],
+      }));
+
+      const skillsBlock = within(screen.getByTestId('repository-attention'));
+      expect(skillsBlock.getByText(`${R}attention.nativeSkill:Lint`)).toBeInTheDocument();
+      expect(skillsBlock.queryByText(/Late/)).not.toBeInTheDocument();
+
+      openTab('automation');
+      const automationBlock = within(screen.getByTestId('repository-attention'));
+      expect(automationBlock.getByText(`${R}attention.kronnNewer:Late`)).toBeInTheDocument();
+      expect(automationBlock.queryByText(/Lint/)).not.toBeInTheDocument();
+
+      openTab('artifacts');
+      expect(screen.queryByTestId('repository-attention')).not.toBeInTheDocument();
+    });
+
+    it('never lists suggested or unattached skills, and shows a count only above zero', async () => {
+      const onAttentionChange = vi.fn();
+      await show(listing({
+        skills_present: [
+          skill({ id: 'devops', name: 'DevOps', provenance: 'kronn', status: 'kronn_only', suggested: true, suggested_reason: 'Dockerfile', is_builtin: true }),
+          skill({ id: 'typescript', name: 'TypeScript', provenance: 'repository', status: 'repository_only', repository_paths: ['.claude/skills/typescript/SKILL.md'] }),
+        ],
+        skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only' })],
+      }), { onAttentionChange });
+
+      expect(screen.queryByTestId('repository-attention')).not.toBeInTheDocument();
+      expect(within(screen.getByRole('tab', { name: /tab\.skills/ })).queryByTitle(/tab\.todo/)).not.toBeInTheDocument();
+      await waitFor(() => expect(onAttentionChange).toHaveBeenLastCalledWith(0));
+    });
+
     it('runs the same flow as the row action', async () => {
       await show(listing({ resources: [resource({ id: 'l', name: 'Late', kind: 'workflow', status: 'repository_newer' })] }));
+      openTab('automation');
 
       fireEvent.click(within(screen.getByTestId('repository-attention')).getByRole('button', { name: `${R}action.update_kronn` }));
 
@@ -494,33 +538,95 @@ describe('ProjectRepositoryResourcesPanel', () => {
       ],
     });
 
-    it('recaps two lists, leaves out conflicts and approvals, and moves only the ticked lines', async () => {
+    it('recaps the late items in two lists, all ticked, and moves only the ticked lines', async () => {
       await show(mixed());
-      fireEvent.click(screen.getByRole('button', { name: `${R}alignAll:4` }));
+      openTab('automation');
+      fireEvent.click(screen.getByRole('button', { name: `${R}alignAll:2` }));
 
       const dialog = within(await screen.findByRole('dialog'));
       const toKronn = within(dialog.getByRole('heading', { name: `${R}align.to_kronn` }).closest('section') as HTMLElement);
       const toRepository = within(dialog.getByRole('heading', { name: `${R}align.to_repository` }).closest('section') as HTMLElement);
-      expect(toKronn.getAllByRole('checkbox')).toHaveLength(2);
-      expect(toRepository.getAllByRole('checkbox')).toHaveLength(2);
-      expect(dialog.queryByText(/Echo clash|Foxtrot waiting/)).not.toBeInTheDocument();
+      expect(toKronn.getAllByRole('checkbox')).toHaveLength(1);
+      expect(toRepository.getAllByRole('checkbox')).toHaveLength(1);
+      expect(dialog.queryByText(/Alpha private|Bravo repo|Echo clash|Foxtrot waiting/)).not.toBeInTheDocument();
       expect(dialog.getByText(`${R}align.excluded:2`)).toBeInTheDocument();
-      // A Kronn-only resource stays unticked until the user chose it.
-      expect(toRepository.getByRole('checkbox', { name: /Alpha private/ })).not.toBeChecked();
+      dialog.getAllByRole('checkbox').forEach(box => expect(box).toBeChecked());
 
-      fireEvent.click(toKronn.getByRole('checkbox', { name: /Charlie late/ }));
-      fireEvent.click(dialog.getByRole('button', { name: `${R}align.confirm:2` }));
+      fireEvent.click(toRepository.getByRole('checkbox', { name: /Delta ahead/ }));
+      fireEvent.click(dialog.getByRole('button', { name: `${R}align.confirm:1` }));
 
       await waitFor(() => expect(importRepositoryResource).toHaveBeenCalledTimes(1));
-      expect(importRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'quick_prompt', slug: 'bravo', overwrite_kronn_changes: false });
-      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(1));
-      expect(publishRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'workflow', id: 'd', overwrite_repository_changes: false });
+      expect(importRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'workflow', slug: 'charlie', overwrite_kronn_changes: false });
+      expect(publishRepositoryResource).not.toHaveBeenCalled();
     });
 
-    it('does not count what it could not write when the repository is read-only', async () => {
-      await show({ ...mixed(), can_write_repository: false });
+    it('moves both directions when both are ticked', async () => {
+      await show(mixed());
+      openTab('automation');
+      fireEvent.click(screen.getByRole('button', { name: `${R}alignAll:2` }));
 
-      expect(screen.getByRole('button', { name: `${R}alignAll:2` })).toBeInTheDocument();
+      fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: `${R}align.confirm:2` }));
+
+      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(1));
+      expect(publishRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'workflow', id: 'd', overwrite_repository_changes: false });
+      expect(importRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'workflow', slug: 'charlie', overwrite_kronn_changes: false });
+    });
+
+    it('is turned off with "everything is aligned" when nothing is behind', async () => {
+      await show(listing({
+        resources: [
+          ...Array.from({ length: 79 }, (_, index) => resource({ id: `qe-${index}`, name: `Automation ${index}`, kind: 'quick_exec', status: 'kronn_only' })),
+          resource({ id: 'same', name: 'Same', kind: 'workflow', status: 'up_to_date' }),
+        ],
+      }));
+      openTab('automation');
+
+      const button = screen.getByTestId('align-all');
+      expect(button).toBeDisabled();
+      expect(button).toHaveTextContent(`${R}alignAllDone`);
+      fireEvent.click(button);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('counts only the items of the sub-tab being looked at', async () => {
+      await show(listing({
+        skills_present: [skill({ id: 'kept', name: 'Kept', status: 'repository_newer', repository_paths: ['kronn/skills/kept/SKILL.md'] })],
+        resources: [resource({ id: 'l', name: 'Late', kind: 'workflow', status: 'kronn_newer' })],
+      }));
+
+      expect(screen.getByTestId('align-all')).toHaveTextContent(`${R}alignAll:1`);
+      openTab('automation');
+      expect(screen.getByTestId('align-all')).toHaveTextContent(`${R}alignAll:1`);
+      openTab('artifacts');
+      expect(screen.getByTestId('align-all')).toHaveTextContent(`${R}alignAllDone`);
+    });
+
+    it('turns off the "repository will be updated" part when the repository cannot be written', async () => {
+      await show({ ...mixed(), can_write_repository: false });
+      openTab('automation');
+
+      expect(screen.getByRole('button', { name: `${R}alignAll:1` })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: `${R}alignAll:1` }));
+      const dialog = within(await screen.findByRole('dialog'));
+      const toRepository = within(dialog.getByRole('heading', { name: `${R}align.to_repository` }).closest('section') as HTMLElement);
+      expect(toRepository.getByRole('checkbox', { name: /Delta ahead/ })).toBeDisabled();
+      expect(toRepository.getByRole('checkbox', { name: /Delta ahead/ })).not.toBeChecked();
+      expect(dialog.getByRole('button', { name: `${R}align.confirm:1` })).toBeEnabled();
+    });
+
+    it('opens in the middle of the screen, outside the card, with checkboxes of one size', () => {
+      expect(sheetsCss).toMatch(/\.rr-modal-backdrop \{[^}]*align-items: center; justify-content: center/);
+      expect(sheetsCss).toMatch(/\.rr-align-list input\[type='checkbox'\] \{[^}]*width: 16px; height: 16px/);
+    });
+
+    it('renders its dialog at the document root so no ancestor can pin it to a corner', async () => {
+      const view = await show(mixed());
+      openTab('automation');
+      fireEvent.click(screen.getByRole('button', { name: `${R}alignAll:2` }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(view.container.contains(dialog)).toBe(false);
+      expect(dialog.closest('.rr-modal-backdrop')?.parentElement).toBe(document.body);
     });
   });
 
@@ -538,7 +644,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
       await show(listing({
         kronn_exists: false,
         can_write_repository: false,
-        can_write_repository_reason: 'a file named kronn is in the way',
+        can_write_repository_reason: 'kronn_path_is_file',
         resources: [
           resource({ id: 'a', name: 'Private', kind: 'quick_prompt', status: 'kronn_only' }),
           resource({ id: 'repository:quick_prompt:b', name: 'Shared', kind: 'quick_prompt', status: 'repository_only' }),
@@ -548,7 +654,8 @@ describe('ProjectRepositoryResourcesPanel', () => {
 
       const banner = document.querySelector('[data-banner="write-disabled"]') as HTMLElement;
       expect(within(banner).getByText(`${R}banner.writeDisabled.title`)).toBeInTheDocument();
-      expect(within(banner).getByText('a file named kronn is in the way')).toBeInTheDocument();
+      expect(within(banner).getByText(`${R}banner.writeDisabled.reason.kronn_path_is_file`)).toBeInTheDocument();
+      expect(banner).not.toHaveTextContent(/exists and is not a directory/);
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
       expect(screen.queryByText(`${R}kronnMissing`)).not.toBeInTheDocument();
       expect(actionIn(rowOf('Private'), 'publish')).toBeDisabled();
@@ -624,7 +731,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
       setDefaultSkills.mockResolvedValue(true);
       await show(listing({
         skills_present: [skill({ id: 'kept', name: 'Kept', status: 'up_to_date', repository_paths: ['kronn/skills/kept/SKILL.md'] })],
-        skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: null })],
+        skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only' })],
       }));
 
       const row = rowOf('Rust');
@@ -698,6 +805,235 @@ describe('ProjectRepositoryResourcesPanel', () => {
       const box = within(rowOf('Daily report')).getByRole('checkbox');
       expect(box).toBeChecked();
       expect(box).toBeDisabled();
+    });
+  });
+
+  describe('every state, as the recette showed them', () => {
+    const devops = () => skill({
+      id: 'devops', name: 'DevOps', provenance: 'kronn', status: 'kronn_only', is_builtin: true,
+      suggested: true, suggested_reason: 'Dockerfile',
+    });
+    const matrix = () => listing({
+      skills_present: [
+        skill({ id: 'repository:lint', name: 'Native lint', provenance: 'repository', status: 'native_skill', repository_paths: ['.agents/skills/lint/SKILL.md'] }),
+        devops(),
+        skill({ id: 'custom-mine', name: 'Mine attached', provenance: 'kronn', status: 'kronn_only', publication_path: 'kronn/skills/mine/SKILL.md' }),
+        skill({ id: 'typescript', name: 'In a folder', provenance: 'repository', status: 'repository_only', repository_paths: ['.claude/skills/typescript/SKILL.md'] }),
+        skill({ id: 'same', name: 'Same skill', status: 'up_to_date', repository_paths: ['kronn/skills/same/SKILL.md'] }),
+      ],
+      skills_available: [skill({ id: 'rust', name: 'Unrelated', provenance: 'kronn', status: 'kronn_only' })],
+      resources: [
+        resource({ id: 'k', name: 'Only Kronn', kind: 'quick_prompt', status: 'kronn_only', repository_paths: ['kronn/prompts/only-kronn.md'] }),
+        resource({ id: 'repository:quick_exec:r', name: 'Only Repo', kind: 'quick_exec', status: 'repository_only', repository_paths: ['kronn/quick-execs/only-repo.yaml'] }),
+        resource({ id: 'rn', name: 'Repo Newer', kind: 'workflow', status: 'repository_newer' }),
+        resource({ id: 'kn', name: 'Kronn Newer', kind: 'workflow', status: 'kronn_newer' }),
+        resource({ id: 'cf', name: 'Two Versions', kind: 'quick_api', status: 'conflict' }),
+        resource({ id: 'ap', name: 'Needs Approval', kind: 'quick_exec', status: 'approval_required' }),
+        resource({ id: 'ok', name: 'Identical', kind: 'quick_prompt', status: 'up_to_date', repository_paths: ['kronn/prompts/identical.md'] }),
+      ],
+    });
+
+    it('calls a stack-suggested skill "Kronn only · suggested", never "in the repository"', async () => {
+      await show(matrix());
+
+      const row = rowOf('DevOps');
+      expect(within(row).getByText(`${R}status.kronn_only`)).toBeInTheDocument();
+      expect(within(row).getByText(new RegExp(`${R}scope.suggested`))).toBeInTheDocument();
+      expect(within(row).getByText(`${R}suggestedBecause:Dockerfile`)).toBeInTheDocument();
+      expect(within(row).getByText('—')).toBeInTheDocument();
+      expect(row.querySelector('.rr-path')).toBeNull();
+      expect(actionIn(row, 'attach')).toBeInTheDocument();
+      expect(within(row).getByRole('checkbox')).toBeDisabled();
+      expect(screen.queryByText(new RegExp(`attention\\.repositoryOnly:DevOps|attention\\.notAttached`))).not.toBeInTheDocument();
+    });
+
+    it('lists the suggestions apart and counts only what is really in the project', async () => {
+      await show(matrix());
+
+      const suggested = document.querySelector('[role="rowgroup"][aria-label="' + R + 'skills.suggested"]') as HTMLElement;
+      expect(within(suggested).getByText('DevOps')).toBeInTheDocument();
+      expect(within(suggested).queryByText('Mine attached')).not.toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /tab\.skills 4/ })).toBeInTheDocument();
+    });
+
+    it('shows "—" on the repository side of an unrelated catalog skill, and no hypothetical path', async () => {
+      await show(matrix());
+
+      const row = rowOf('Unrelated');
+      expect(within(row).getByText('—')).toBeInTheDocument();
+      expect(row.querySelector('.rr-path')).toBeNull();
+      expect(row).not.toHaveTextContent('SKILL.md');
+      expect(row).not.toHaveTextContent(`${R}notInRepository`);
+      expect(within(row).getByText(`${R}status.catalog`)).toBeInTheDocument();
+    });
+
+    it('leaves one primary action per state and none on the identical ones', async () => {
+      await show(matrix());
+      const expectSkill: Record<string, string | null> = {
+        'Native lint': 'use_native',
+        DevOps: 'attach',
+        'Mine attached': 'publish',
+        'In a folder': 'attach',
+        'Same skill': null,
+        Unrelated: 'attach',
+      };
+      for (const [name, action] of Object.entries(expectSkill)) {
+        const row = rowOf(name);
+        if (action === null) {
+          expect(row.querySelector('.rr-action')).toBeNull();
+          expect(actionIn(row, 'view')).toBeInTheDocument();
+        } else {
+          expect(actionIn(row, action)).toBeInTheDocument();
+          expect(row.querySelectorAll('.rr-action')).toHaveLength(1);
+        }
+      }
+      openTab('automation');
+      const expectAutomation: Record<string, string> = {
+        'Only Kronn': 'publish', 'Only Repo': 'import', 'Repo Newer': 'update_kronn',
+        'Kronn Newer': 'update_repository', 'Two Versions': 'compare', 'Needs Approval': 'approve',
+      };
+      for (const [name, action] of Object.entries(expectAutomation)) {
+        expect(actionIn(rowOf(name), action)).toBeInTheDocument();
+      }
+    });
+
+    it('only puts what needs a decision in "À traiter", skills and automations apart', async () => {
+      await show(matrix());
+
+      const skills = within(screen.getByTestId('repository-attention')).getAllByRole('listitem');
+      expect(skills).toHaveLength(1);
+      expect(skills[0]).toHaveTextContent(`${R}attention.nativeSkill:Native lint`);
+
+      openTab('automation');
+      const automations = within(screen.getByTestId('repository-attention')).getAllByRole('listitem');
+      expect(automations.map(item => item.dataset.reason)).toEqual(['conflict', 'approval', 'late', 'late', 'new']);
+    });
+
+    it('shows the todo count as a warning badge next to a plainer count, only when above zero', async () => {
+      await show(matrix());
+
+      const skillsTab = screen.getByRole('tab', { name: /tab\.skills/ });
+      const count = skillsTab.querySelector('.rr-count') as HTMLElement;
+      const todo = skillsTab.querySelector('.rr-todo') as HTMLElement;
+      expect(count).toHaveTextContent('4');
+      expect(todo).toHaveTextContent('1');
+      expect(todo).not.toBe(count);
+      openTab('artifacts');
+      expect(screen.getByRole('tab', { name: /tab\.artifacts/ }).querySelector('.rr-todo')).toBeNull();
+      expect(panelCss).toMatch(/\.project-repository-resources-tabs \.rr-todo \{[^}]*var\(--kr-warning\)/);
+      expect(panelCss).toMatch(/\.project-repository-resources-tabs \.rr-count \{[^}]*var\(--kr-bg-hover\)/);
+    });
+  });
+
+  describe('the repository path never overlaps its note', () => {
+    const LONG = 'kronn/workflows/pr-1897-v3-3-pack-context-review-of-the-whole-branch.yaml';
+    const longRows = () => listing({
+      resources: [
+        resource({ id: 'w1', name: 'PR #1897 — v3.3 pack-context', kind: 'workflow', status: 'kronn_only', repository_paths: [LONG] }),
+        resource({ id: 'w2', name: 'Written already', kind: 'workflow', status: 'up_to_date', repository_paths: [LONG.replace('1897', '1898')] }),
+      ],
+    });
+
+    it('keeps the start and the end of the name as separate parts, the whole path in the tooltip', async () => {
+      await show(longRows());
+      openTab('automation');
+
+      const path = within(rowOf('PR #1897 — v3.3 pack-context')).getByTitle(LONG);
+      expect(path.querySelector('.rr-path-head')?.textContent?.startsWith('kronn/workflows/')).toBe(true);
+      expect(path.querySelector('.rr-path-tail')?.textContent?.endsWith('branch.yaml')).toBe(true);
+      expect(path).toHaveTextContent(LONG);
+    });
+
+    it('puts "will be created" on the same line as the path, as its own item', async () => {
+      await show(longRows());
+      openTab('automation');
+
+      const line = within(rowOf('PR #1897 — v3.3 pack-context')).getByText(`${R}willBeCreated`).closest('.rr-path') as HTMLElement;
+      expect(line.querySelector('code')).not.toContainElement(line.querySelector('.rr-path-note') as HTMLElement);
+      expect(line.children).toHaveLength(2);
+      const written = rowOf('Written already').querySelector('.rr-path') as HTMLElement;
+      expect(written.children).toHaveLength(2);
+    });
+
+    it('lets only the head shrink, ellipsizing its end, and never lets the note or the tail wrap', () => {
+      expect(panelCss).toMatch(/\.rr-path-head \{[^}]*flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap/);
+      expect(panelCss).toMatch(/\.rr-path-tail \{[^}]*flex: none; white-space: nowrap/);
+      expect(panelCss).toMatch(/\.rr-path-note \{[^}]*flex: none[^}]*white-space: nowrap/);
+      expect(panelCss).toMatch(/\.rr-path > code \{[^}]*flex: 0 1 auto; min-width: 0; overflow: hidden/);
+    });
+
+    it('gives the path the full width of the row at 400 px, the sync pill going below it', () => {
+      const rules = panelCss.slice(panelCss.indexOf('@media (max-width: 640px)'));
+      expect(rules).toMatch(/grid-template-areas: 'select repository repository' 'select sync kronn' 'action action action'/);
+    });
+  });
+
+  describe('sync pills', () => {
+    it('are neutral and dashed when something exists on one side only', () => {
+      expect(panelCss).toMatch(/\.rr-pill\[data-state='repository_only'\],\s*\.rr-pill\[data-state='kronn_only'\],\s*\.rr-pill\[data-state='native_skill'\],\s*\.rr-pill\[data-state='catalog'\] \{[^}]*border-style: dashed[^}]*var\(--kr-text-muted\)/);
+    });
+
+    it('keep blue for "newer", yellow for two versions and pink for approval', () => {
+      expect(panelCss).toMatch(/\[data-state='repository_newer'\],\s*\.rr-pill\[data-state='kronn_newer'\] \{[^}]*var\(--kr-info\)/);
+      expect(panelCss).toMatch(/\.rr-pill\[data-state='conflict'\] \{[^}]*var\(--kr-warning\)/);
+      expect(panelCss).toMatch(/\.rr-pill\[data-state='approval_required'\] \{[^}]*var\(--kr-pink\)/);
+    });
+
+    it('are readable: 11 px at least', () => {
+      expect(panelCss).toMatch(/\.rr-pill \{[^}]*font-size: var\(--kr-fs-sm\)/);
+      expect(panelCss).not.toMatch(/\.rr-pill \{[^}]*--kr-fs-(2xs|xs)/);
+    });
+  });
+
+  describe('write-blocked notice', () => {
+    it.each([
+      ['kronn_path_is_file'],
+      ['repository_read_only'],
+      ['repository_unreadable'],
+    ] as const)('words %s from its code, never from a raw error', async reason => {
+      await show(listing({ can_write_repository: false, can_write_repository_reason: reason }));
+
+      const banner = document.querySelector('[data-banner="write-disabled"]') as HTMLElement;
+      expect(within(banner).getByText(`${R}banner.writeDisabled.reason.${reason}`)).toBeInTheDocument();
+      expect(banner).not.toHaveTextContent(/exists and is not a directory|cannot inspect/);
+    });
+
+    it('titles it at the size of the other section titles', () => {
+      expect(panelCss).toMatch(/\.project-repository-resources-banner strong \{[^}]*font-size: 12px/);
+      expect(panelCss).toMatch(/\.project-repository-resources h3 \{[^}]*font-size: 12px/);
+    });
+  });
+
+  describe('fingerprints on the sheets', () => {
+    it('shows the eight-character fingerprint of both sides when comparing', async () => {
+      await show(listing({
+        resources: [resource({
+          id: 'wf-1', name: 'Nightly', slug: 'nightly', kind: 'workflow', status: 'conflict',
+          repository_fingerprint: '1a2b3c4d', kronn_fingerprint: '9f8e7d6c',
+        })],
+      }));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(dialog.getByTestId('fingerprint-repository')).toHaveTextContent('1a2b3c4d');
+      expect(dialog.getByTestId('fingerprint-kronn')).toHaveTextContent('9f8e7d6c');
+    });
+
+    it('shows them when approving, and a dash for a side without a file', async () => {
+      quickExecsList.mockResolvedValue([]);
+      await show(listing({
+        resources: [resource({
+          id: 'qe-1', name: 'Lint', slug: 'lint', kind: 'quick_exec', status: 'approval_required',
+          kronn_fingerprint: '0badc0de',
+        })],
+      }));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Lint'), 'approve'));
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(dialog.getByTestId('fingerprint-kronn')).toHaveTextContent('0badc0de');
+      expect(dialog.getByTestId('fingerprint-repository')).toHaveTextContent('—');
     });
   });
 
