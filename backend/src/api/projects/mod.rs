@@ -15,6 +15,7 @@ pub mod dependencies;
 pub mod docker;
 pub mod git;
 pub mod migrate;
+pub mod resources;
 pub mod template;
 
 pub use anti_hallu_inject::*;
@@ -25,6 +26,7 @@ pub use dependencies::*;
 pub use docker::*;
 pub use git::*;
 pub use migrate::*;
+pub use resources::*;
 pub use template::*;
 
 /// 0.8.3 — Format the list of OTHER Kronn-registered projects as a

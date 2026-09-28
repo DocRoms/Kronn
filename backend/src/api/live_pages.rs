@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use chrono::Utc;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::models::{
@@ -30,10 +31,24 @@ pub async fn capability(
     }
 }
 
-pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<LivePage>>> {
+#[derive(Debug, Default, Deserialize)]
+pub struct ListLivePagesQuery {
+    pub project_id: Option<String>,
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    Query(query): Query<ListLivePagesQuery>,
+) -> Json<ApiResponse<Vec<LivePage>>> {
+    let project_id = query.project_id.filter(|id| !id.trim().is_empty());
     match state
         .db
-        .with_read_conn(crate::db::live_pages::list_live_pages)
+        .with_read_conn(move |conn| match project_id {
+            Some(project_id) => {
+                crate::db::live_pages::list_live_pages_for_project(conn, &project_id)
+            }
+            None => crate::db::live_pages::list_live_pages(conn),
+        })
         .await
     {
         Ok(pages) => Json(ApiResponse::ok(pages)),

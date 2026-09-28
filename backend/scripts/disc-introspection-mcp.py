@@ -1476,7 +1476,15 @@ TOOLS = [
             "publish into the same Page. Reuse a matching page_id instead of "
             "creating a duplicate."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "Optional project id; when present, return only that project's Pages.",
+                }
+            },
+        },
     },
     {
         "name": "page_get",
@@ -7587,9 +7595,13 @@ def call_qe_list(_args):
     ]
 
 
-def call_page_list(_args):
+def call_page_list(args):
     """Compact Page discovery for workflow composition."""
-    data = _unwrap(_http("GET", "/api/pages")) or []
+    project_id = args.get("project_id")
+    path = "/api/pages"
+    if project_id:
+        path += "?" + urllib.parse.urlencode({"project_id": project_id})
+    data = _unwrap(_http("GET", path)) or []
     return [
         {
             "id": page.get("id"),

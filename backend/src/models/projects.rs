@@ -91,6 +91,57 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Read-only projection of the automations and artifacts attached to a project
+/// and their alignment with the repository's `kronn/` directory.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectRepositoryResources {
+    pub kronn_exists: bool,
+    pub resources: Vec<ProjectRepositoryResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectRepositoryResource {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub kind: ProjectRepositoryResourceKind,
+    pub level: ProjectRepositoryResourceLevel,
+    pub status: ProjectRepositoryResourceStatus,
+    pub repository_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ProjectRepositoryResourceKind {
+    Workflow,
+    QuickPrompt,
+    QuickApi,
+    QuickExec,
+    Artifact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ProjectRepositoryResourceLevel {
+    UsableWithoutKronn,
+    KronnRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ProjectRepositoryResourceStatus {
+    NotPublished,
+    UpToDate,
+    RepositoryModified,
+    KronnModified,
+    Conflict,
+}
+
 fn default_true() -> bool {
     true
 }

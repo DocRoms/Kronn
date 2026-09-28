@@ -3118,6 +3118,105 @@ async fn transform_data_preview_uses_runtime_recipe() {
 }
 
 #[tokio::test]
+async fn live_page_list_filters_by_project_without_changing_the_unfiltered_contract() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, name) in [("page-project-a", "Project A"), ("page-project-b", "Project B")] {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![id, name, format!("/tmp/{id}"), now],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    for (title, project_id) in [
+        ("Project A report", Some("page-project-a")),
+        ("Project B report", Some("page-project-b")),
+        ("General report", None),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/pages",
+            serde_json::json!({
+                "title": title,
+                "html": format!("<h1>{title}</h1>"),
+                "datasets": [],
+                "project_id": project_id,
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+    }
+
+    let (status, filtered) = get_json(app.clone(), "/api/pages?project_id=page-project-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered["success"], true, "{filtered}");
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["data"][0]["title"], "Project A report");
+
+    let (_, unfiltered) = get_json(app, "/api/pages").await;
+    assert_eq!(unfiltered["data"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn project_repository_resources_lists_project_artifacts_without_publishing_them() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["repository-project", "Repository project", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Project health",
+            "html": "<h1>Health</h1>",
+            "datasets": [],
+            "project_id": "repository-project",
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+
+    let (status, response) =
+        get_json(app, "/api/projects/repository-project/repository-resources").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["kronn_exists"], false);
+    let resources = response["data"]["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["kind"], "artifact");
+    assert_eq!(resources[0]["status"], "not_published");
+    assert_eq!(
+        resources[0]["repository_paths"],
+        serde_json::json!([
+            "kronn/artifacts/project-health/artifact.yaml",
+            "kronn/artifacts/project-health/index.html",
+        ]),
+    );
+}
+
+#[tokio::test]
 async fn live_page_create_publish_and_read_round_trip() {
     let app = test_app();
     let (_, capability_before) = get_json(app.clone(), "/api/pages/capability").await;

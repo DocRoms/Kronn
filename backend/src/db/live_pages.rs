@@ -260,6 +260,19 @@ pub fn list_live_pages(conn: &Connection) -> Result<Vec<LivePage>> {
     Ok(pages)
 }
 
+pub fn list_live_pages_for_project(conn: &Connection, project_id: &str) -> Result<Vec<LivePage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, title, slug, current_revision_id, data_revision,
+                created_at, updated_at, last_published_at, pinned, archived
+           FROM live_pages WHERE project_id = ?1
+           ORDER BY pinned DESC, updated_at DESC, title COLLATE NOCASE",
+    )?;
+    let pages = stmt
+        .query_map([project_id], map_page)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(pages)
+}
+
 pub fn update_live_page(
     conn: &Connection,
     page_id: &str,

@@ -54,6 +54,7 @@ import { CopyIdPill } from '../components/CopyIdPill';
 import { ConfirmDeleteButton } from '../components/ConfirmDeleteButton';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
+import { CollectionProjectTree } from '../components/CollectionProjectTree';
 import {
   sortQuickApis,
   sortQuickPrompts,
@@ -64,7 +65,6 @@ import './DiscussionsPage.css';
 import './WorkflowsPage.css';
 
 type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs';
-type AutomationSection = AutomationTab | 'favorites';
 type CompareTarget = {
   agent: AgentType;
   tier: ModelTier;
@@ -100,6 +100,7 @@ type AutomationResource = {
   searchText: string;
   meta: string;
   icon: string;
+  updatedAt: string;
   workflow?: WorkflowSummary;
   quickApi?: QuickApi;
   quickPrompt?: QuickPrompt;
@@ -129,6 +130,7 @@ interface AutomationResourceRowProps {
   openLabel: string;
   pinLabel: string;
   unpinLabel: string;
+  actionItemName?: string;
   onOpen: () => void;
   onTogglePinned: () => void;
   rowProps?: { className: string; 'aria-current'?: 'true'; onClick: () => void };
@@ -150,6 +152,7 @@ function AutomationResourceRow({
   openLabel,
   pinLabel,
   unpinLabel,
+  actionItemName,
   onOpen,
   onTogglePinned,
   rowProps,
@@ -192,7 +195,7 @@ function AutomationResourceRow({
           </span>
         </button>
         <CollectionRowActions
-          itemName={name}
+          itemName={actionItemName ?? name}
           favorite={{ active: pinned, onToggle: onTogglePinned, activeLabel: unpinLabel, inactiveLabel: pinLabel }}
           menuLabel={t('collection.moreActions')}
           copyId={resourceId}
@@ -230,17 +233,13 @@ function readAutomationNavigation(): AutomationNavigationState {
   }
 }
 
-function isAutomationSection(value: unknown): value is AutomationSection {
-  return value === 'favorites' || isAutomationTab(value);
-}
-
-function readCollapsedAutomationSections(): Set<AutomationSection> {
+function readCollapsedAutomationSections(): Set<string> {
   try {
     const parsed = JSON.parse(
       localStorage.getItem(AUTOMATION_COLLAPSED_STORAGE_KEY) ?? '[]',
     ) as unknown;
     if (!Array.isArray(parsed)) return new Set();
-    return new Set(parsed.filter(isAutomationSection));
+    return new Set(parsed.filter((value): value is string => typeof value === 'string'));
   } catch {
     return new Set();
   }
@@ -320,9 +319,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [automationQuery, setAutomationQuery] = useState('');
   const [sidebarOpen, setSidebarOpen] = usePersistentSidebarOpen('kronn:automation:sidebarCollapsed', isMobile);
   const [automationProjectFilter, setAutomationProjectFilter] = useState('all');
+  const [automationKindFilter, setAutomationKindFilter] = useState<AutomationTab | 'all'>(
+    postImprovedQpId ? 'quickPrompts' : 'all',
+  );
   const [showAutomationProjectFilter, setShowAutomationProjectFilter] = useState(false);
   const automationProjectFilterButtonRef = useRef<HTMLButtonElement>(null);
-  const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<AutomationSection>>(
+  const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<string>>(
     readCollapsedAutomationSections,
   );
   const [quickPromptSort, setQuickPromptSort] = useState<QuickPromptSort>('name');
@@ -723,22 +725,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       id: `workflows:${workflow.id}`, resourceId: workflow.id, kind: 'workflows' as const, name: workflow.name, projectId: workflow.project_id,
       pinned: workflow.pinned, searchText: `${workflow.name} ${workflow.project_name ?? ''} ${workflow.trigger_type}`,
       meta: `${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type} · ${workflow.step_count} step${workflow.step_count > 1 ? 's' : ''}`,
-      icon: workflow.enabled ? '⚡' : '○', workflow,
+      icon: workflow.enabled ? '⚡' : '○', updatedAt: workflow.created_at, workflow,
     })),
     ...(quickApiList ?? []).map(quickApi => ({
       id: `quickApis:${quickApi.id}`, resourceId: quickApi.id, kind: 'quickApis' as const, name: quickApi.name, projectId: quickApi.project_id,
       pinned: quickApi.pinned, searchText: `${quickApi.name} ${quickApi.description ?? ''} ${quickApi.api_plugin_slug} ${quickApi.api_endpoint_path}`,
-      meta: `${quickApi.api_method ?? 'GET'} · ${quickApi.api_endpoint_path}`, icon: quickApi.icon, quickApi,
+      meta: `${quickApi.api_method ?? 'GET'} · ${quickApi.api_endpoint_path}`, icon: quickApi.icon, updatedAt: quickApi.updated_at, quickApi,
     })),
     ...(quickPromptList ?? []).map(quickPrompt => ({
       id: `quickPrompts:${quickPrompt.id}`, resourceId: quickPrompt.id, kind: 'quickPrompts' as const, name: quickPrompt.name, projectId: quickPrompt.project_id,
       pinned: quickPrompt.pinned, searchText: `${quickPrompt.name} ${quickPrompt.description ?? ''} ${AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent}`,
-      meta: AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent, icon: quickPrompt.icon, quickPrompt,
+      meta: AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent, icon: quickPrompt.icon, updatedAt: quickPrompt.updated_at, quickPrompt,
     })),
     ...(quickExecList ?? []).map(quickExec => ({
       id: `quickExecs:${quickExec.id}`, resourceId: quickExec.id, kind: 'quickExecs' as const, name: quickExec.name, projectId: quickExec.project_id,
       pinned: quickExec.pinned, searchText: `${quickExec.name} ${quickExec.description ?? ''} ${quickExec.command} ${quickExec.output_format}`,
-      meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`, icon: quickExec.icon, quickExec,
+      meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`, icon: quickExec.icon, updatedAt: quickExec.updated_at, quickExec,
     })),
   ].sort((left, right) => Number(right.pinned) - Number(left.pinned) || left.name.localeCompare(right.name)), [quickApiList, quickExecList, quickPromptList, workflows]);
   const visibleQuickPrompts = selectedQuickPromptId
@@ -879,6 +881,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     if (!initialSelectedWorkflowId) return;
     const timeoutId = window.setTimeout(() => {
       setTab('workflows');
+      setAutomationKindFilter('workflows');
       void openDetail(initialSelectedWorkflowId, initialSelectedWorkflowRunId ?? undefined);
       onInitialSelectionConsumed?.();
     }, 0);
@@ -1845,17 +1848,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const selectAutomationKind = (kind: AutomationTab) => {
     clearAutomationEditors();
     setTab(kind);
-    setCollapsedAutomationSections(current => {
-      if (automationQuery.trim()) return current;
-      const next = new Set(current);
-      if (tab === kind) {
-        if (next.has(kind)) next.delete(kind);
-        else next.add(kind);
-      } else {
-        next.delete(kind);
-      }
-      return next;
-    });
+    setAutomationKindFilter(current => current === kind ? 'all' : kind);
     if (kind === 'workflows') {
       setSelectedId(null);
       setDetailWorkflow(null);
@@ -1868,19 +1861,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  const isAutomationSectionCollapsed = (kind: AutomationSection) => (
+  const isAutomationSectionCollapsed = (kind: string) => (
     !automationQuery.trim() && collapsedAutomationSections.has(kind)
   );
 
-  const toggleFavoritesSection = () => {
+  const toggleAutomationSection = (section: string) => {
     if (automationQuery.trim()) return;
     setCollapsedAutomationSections(current => {
       const next = new Set(current);
-      if (next.has('favorites')) next.delete('favorites');
-      else next.add('favorites');
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
       return next;
     });
   };
+  const toggleFavoritesSection = () => toggleAutomationSection('favorites');
 
   const openQuickPrompt = (quickPrompt: QuickPrompt) => {
     clearAutomationEditors();
@@ -1929,8 +1923,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         items={automationResources}
         getId={resource => resource.id}
         getLabel={resource => resource.searchText}
-        itemFilter={resource => automationProjectFilter === 'all'
-          || (automationProjectFilter === '__global__' ? !resource.projectId : resource.projectId === automationProjectFilter)}
+        itemFilter={resource => (
+          automationKindFilter === 'all' || resource.kind === automationKindFilter
+        ) && (
+          automationProjectFilter === 'all'
+          || (automationProjectFilter === '__global__' ? !resource.projectId : resource.projectId === automationProjectFilter)
+        )}
         persistence={{
           query: automationQuery,
           onQueryChange: setAutomationQuery,
@@ -2045,36 +2043,44 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           >
             <Filter size={14} aria-hidden="true" />
           </button>,
-          afterSidebarHeader: showAutomationProjectFilter ? <div
-            id="automation-project-filter-options"
-            className="collection-shell-search-options"
-            onKeyDown={event => {
-              if (event.key === 'Escape') {
-                event.preventDefault();
-                setShowAutomationProjectFilter(false);
-                automationProjectFilterButtonRef.current?.focus();
-              }
-            }}
-          >
-            <select
-              className="automation-project-filter"
-              value={automationProjectFilter}
-              onChange={event => setAutomationProjectFilter(event.target.value)}
-              aria-label={t('automation.projectFilter')}
+          afterSidebarHeader: <>
+            {showAutomationProjectFilter && <div
+              id="automation-project-filter-options"
+              className="collection-shell-search-options"
+              onKeyDown={event => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setShowAutomationProjectFilter(false);
+                  automationProjectFilterButtonRef.current?.focus();
+                }
+              }}
             >
-              <option value="all">{t('automation.allProjects')}</option>
-              <option value="__global__">{t('disc.general')}</option>
-              {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
-            </select>
-          </div> : null,
+              <select
+                className="automation-project-filter"
+                value={automationProjectFilter}
+                onChange={event => setAutomationProjectFilter(event.target.value)}
+                aria-label={t('automation.projectFilter')}
+              >
+                <option value="all">{t('automation.allProjects')}</option>
+                <option value="__global__">{t('disc.noProject')}</option>
+                {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+            </div>}
+            <div className="automation-kind-filters" aria-label={t('automation.typeFilter')}>
+              <button type="button" data-active={automationKindFilter === 'all'} aria-pressed={automationKindFilter === 'all'} onClick={() => setAutomationKindFilter('all')}>{t('automation.allTypes')}</button>
+              <button type="button" data-tour-id="automation-kind-workflow" data-active={automationKindFilter === 'workflows'} aria-pressed={automationKindFilter === 'workflows'} onClick={() => selectAutomationKind('workflows')}><WorkflowIcon size={11} />{t('wf.tabWorkflows')} ({workflows.length})</button>
+              <button type="button" data-tour-id="automation-kind-quick-api" data-active={automationKindFilter === 'quickApis'} aria-pressed={automationKindFilter === 'quickApis'} onClick={() => selectAutomationKind('quickApis')}><PlugZap size={11} />{t('wf.tabQuickApis')} ({quickApiList?.length ?? 0})</button>
+              <button type="button" data-tour-id="automation-kind-quick-prompt" data-active={automationKindFilter === 'quickPrompts'} aria-pressed={automationKindFilter === 'quickPrompts'} onClick={() => selectAutomationKind('quickPrompts')}><MessageSquareText size={11} />{t('wf.tabQuickPrompts')} ({quickPromptList?.length ?? 0})</button>
+              <button type="button" data-tour-id="automation-kind-quick-exec" data-active={automationKindFilter === 'quickExecs'} aria-pressed={automationKindFilter === 'quickExecs'} onClick={() => selectAutomationKind('quickExecs')}><TerminalSquare size={11} />{t('wf.tabQuickExecs')} ({quickExecList?.length ?? 0})</button>
+            </div>
+          </>,
           renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
             const sidebarWorkflows = visibleItems.flatMap(resource => resource.workflow ? [resource.workflow] : []);
             const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);
             const sidebarQuickPrompts = visibleItems.flatMap(resource => resource.quickPrompt ? [resource.quickPrompt] : []);
             const sidebarQuickExecs = visibleItems.flatMap(resource => resource.quickExec ? [resource.quickExec] : []);
-            // A favorited item's own kind section already renders it — the
-            // Favorites shortcut only avoids a duplicate row (and a duplicate
-            // checkbox on the same item) when it is hidden during selection.
+            // Selection mode renders each item only in the canonical project
+            // tree, avoiding duplicate checkboxes in Favorites and Recents.
             const sidebarFavoriteCount = canMultiSelect ? 0 : visibleItems.filter(resource => resource.pinned).length;
             const rowProps = (kind: AutomationTab, resourceId: string) => {
               const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
@@ -2107,6 +2113,56 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 label: t('automation.selectResource', resource.name),
               };
             };
+            const activeResource = (resource: AutomationResource) => (
+              resource.kind === 'workflows' ? tab === 'workflows' && selectedId === resource.resourceId
+                : resource.kind === 'quickApis' ? tab === 'quickApis' && selectedQuickApiId === resource.resourceId
+                  : resource.kind === 'quickPrompts' ? tab === 'quickPrompts' && selectedQuickPromptId === resource.resourceId
+                    : tab === 'quickExecs' && selectedQuickExecId === resource.resourceId
+            );
+            const kindName = (kind: AutomationTab) => t(
+              kind === 'workflows' ? 'wf.tabWorkflows'
+                : kind === 'quickApis' ? 'wf.tabQuickApis'
+                  : kind === 'quickPrompts' ? 'wf.tabQuickPrompts' : 'wf.tabQuickExecs',
+            );
+            const renderResource = (resource: AutomationResource, prefix: string) => {
+              const open = () => {
+                if (resource.workflow) { clearAutomationEditors(); setTab('workflows'); void openDetail(resource.workflow.id); }
+                else if (resource.quickApi) openQuickApi(resource.quickApi);
+                else if (resource.quickPrompt) openQuickPrompt(resource.quickPrompt);
+                else if (resource.quickExec) openQuickExec(resource.quickExec);
+              };
+              const togglePinned = () => {
+                if (resource.workflow) void handleTogglePin(resource.workflow);
+                else if (resource.quickApi) void toggleQuickFavorite('quickApis', resource.quickApi.id, resource.quickApi.pinned, quickApisApi.setPinned, refetchQA);
+                else if (resource.quickPrompt) void toggleQuickFavorite('quickPrompts', resource.quickPrompt.id, resource.quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP);
+                else if (resource.quickExec) void toggleQuickFavorite('quickExecs', resource.quickExec.id, resource.quickExec.pinned, quickExecsApi.setPinned, refetchQE);
+              };
+              return <AutomationResourceRow
+                key={`${prefix}-${resource.id}`}
+                resourceId={resource.resourceId}
+                name={resource.name}
+                meta={`${kindName(resource.kind)} · ${resource.meta}`}
+                icon={resource.icon}
+                running={resource.workflow ? isWorkflowRunning(resource.workflow.last_run?.status) : false}
+                active={activeResource(resource)}
+                pinned={resource.pinned}
+                openLabel={prefix === 'recent'
+                  ? `${t('disc.recent')} · ${t('automation.openResource', resource.name)}`
+                  : t('automation.openResource', resource.name)}
+                pinLabel={t('wf.pin')}
+                unpinLabel={t('wf.unpin')}
+                actionItemName={prefix === 'recent' ? `${t('disc.recent')} · ${resource.name}` : undefined}
+                onOpen={open}
+                onTogglePinned={togglePinned}
+                rowProps={getRowProps(resource)}
+                selection={selectionFor(resource.kind, resource.resourceId)}
+                onDelete={deleteFor(resource.kind, resource.resourceId)}
+              />;
+            };
+            const recentResources = canMultiSelect ? [] : [...visibleItems]
+              .filter(resource => !resource.pinned)
+              .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+              .slice(0, 10);
             return <>
         <div className="disc-sidebar-list automation-sidebar-items" data-tour-id="automation-kinds">
           {sidebarFavoriteCount > 0 && (
@@ -2200,145 +2256,34 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             </div>
           )}
 
-          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('workflows')}>
-            <button
-              type="button"
-              className="disc-group-btn automation-kind-button"
-              data-active={tab === 'workflows'}
-              data-tour-id="automation-kind-workflow"
-              onClick={() => selectAutomationKind('workflows')}
-              aria-expanded={!isAutomationSectionCollapsed('workflows')}
-            >
-              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('workflows')} />
-              <WorkflowIcon size={11} />
-              <span>{t('wf.tabWorkflows')}</span>
-              <span className="disc-group-count">({sidebarWorkflows.length})</span>
-            </button>
-            {!isAutomationSectionCollapsed('workflows') && sidebarWorkflows.map(workflow => (
-              <AutomationResourceRow
-                key={workflow.id}
-                resourceId={workflow.id}
-                name={workflow.name}
-                meta={`${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type} · ${workflow.step_count} step${workflow.step_count > 1 ? 's' : ''}`}
-                icon={workflow.enabled ? '⚡' : '○'}
-                running={isWorkflowRunning(workflow.last_run?.status)}
-                active={tab === 'workflows' && selectedId === workflow.id}
-                pinned={workflow.pinned}
-                openLabel={t('automation.openResource', workflow.name)}
-                pinLabel={t('wf.pin')}
-                unpinLabel={t('wf.unpin')}
-                onOpen={() => { clearAutomationEditors(); setTab('workflows'); void openDetail(workflow.id); }}
-                onTogglePinned={() => { void handleTogglePin(workflow); }}
-                rowProps={rowProps('workflows', workflow.id)}
-                  selection={selectionFor('workflows', workflow.id)}
-                  onDelete={deleteFor('workflows', workflow.id)}
-              />
-            ))}
-          </div>
+          {recentResources.length > 0 && (
+            <div className="disc-sidebar-section disc-sidebar-recent automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('recent')}>
+              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleAutomationSection('recent')} aria-expanded={!isAutomationSectionCollapsed('recent')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('recent')} />
+                <Clock size={10} /><span>{t('disc.recent')}</span><span className="disc-group-count">{recentResources.length}</span>
+              </button>
+              {!isAutomationSectionCollapsed('recent') && recentResources.map(resource => renderResource(resource, 'recent'))}
+            </div>
+          )}
 
-          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('quickApis')}>
-            <button
-              type="button"
-              className="disc-group-btn automation-kind-button"
-              data-active={tab === 'quickApis'}
-              data-tour-id="automation-kind-quick-api"
-              onClick={() => selectAutomationKind('quickApis')}
-              aria-expanded={!isAutomationSectionCollapsed('quickApis')}
-            >
-              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('quickApis')} />
-              <PlugZap size={11} />
-              <span>{t('wf.tabQuickApis')}</span>
-              <span className="disc-group-count">({sidebarQuickApis.length})</span>
+          <div className="disc-sidebar-section disc-sidebar-projects automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('projects')}>
+            <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleAutomationSection('projects')} aria-expanded={!isAutomationSectionCollapsed('projects')}>
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('projects')} />
+              <GitBranch size={10} /><span>{t('projects.title')}</span><span className="disc-group-count">{visibleItems.length}</span>
             </button>
-            {!isAutomationSectionCollapsed('quickApis') && sidebarQuickApis.map(quickApi => (
-              <AutomationResourceRow
-                key={quickApi.id}
-                resourceId={quickApi.id}
-                name={quickApi.name}
-                meta={`${quickApi.api_method ?? 'GET'} · ${quickApi.api_endpoint_path}`}
-                icon={quickApi.icon}
-                active={tab === 'quickApis' && selectedQuickApiId === quickApi.id}
-                pinned={quickApi.pinned}
-                openLabel={t('automation.openResource', quickApi.name)}
-                pinLabel={t('wf.pin')}
-                unpinLabel={t('wf.unpin')}
-                onOpen={() => openQuickApi(quickApi)}
-                onTogglePinned={() => { void toggleQuickFavorite('quickApis', quickApi.id, quickApi.pinned, quickApisApi.setPinned, refetchQA); }}
-                rowProps={rowProps('quickApis', quickApi.id)}
-                  selection={selectionFor('quickApis', quickApi.id)}
-                  onDelete={deleteFor('quickApis', quickApi.id)}
+            {!isAutomationSectionCollapsed('projects') && (
+              <CollectionProjectTree
+                projects={projects}
+                items={visibleItems}
+                getProjectId={resource => resource.projectId}
+                isItemActive={activeResource}
+                collapsedGroups={canMultiSelect || automationQuery.trim() ? new Set() : collapsedAutomationSections}
+                onToggleGroup={toggleAutomationSection}
+                renderGroup={({ items }) => items.map(resource => renderResource(resource, 'project'))}
+                labels={{ noProject: t('disc.noProject'), local: t('disc.local') }}
+                noProjectIcon={<WorkflowIcon size={10} />}
               />
-            ))}
-          </div>
-
-          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('quickPrompts')}>
-            <button
-              type="button"
-              className="disc-group-btn automation-kind-button"
-              data-active={tab === 'quickPrompts'}
-              data-tour-id="automation-kind-quick-prompt"
-              onClick={() => selectAutomationKind('quickPrompts')}
-              aria-expanded={!isAutomationSectionCollapsed('quickPrompts')}
-            >
-              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('quickPrompts')} />
-              <MessageSquareText size={11} />
-              <span>{t('wf.tabQuickPrompts')}</span>
-              <span className="disc-group-count">({sidebarQuickPrompts.length})</span>
-            </button>
-            {!isAutomationSectionCollapsed('quickPrompts') && sidebarQuickPrompts.map(quickPrompt => (
-              <AutomationResourceRow
-                key={quickPrompt.id}
-                resourceId={quickPrompt.id}
-                name={quickPrompt.name}
-                meta={AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent}
-                icon={quickPrompt.icon}
-                active={tab === 'quickPrompts' && selectedQuickPromptId === quickPrompt.id}
-                pinned={quickPrompt.pinned}
-                openLabel={t('automation.openResource', quickPrompt.name)}
-                pinLabel={t('wf.pin')}
-                unpinLabel={t('wf.unpin')}
-                onOpen={() => openQuickPrompt(quickPrompt)}
-                onTogglePinned={() => { void toggleQuickFavorite('quickPrompts', quickPrompt.id, quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP); }}
-                rowProps={rowProps('quickPrompts', quickPrompt.id)}
-                  selection={selectionFor('quickPrompts', quickPrompt.id)}
-                  onDelete={deleteFor('quickPrompts', quickPrompt.id)}
-              />
-            ))}
-          </div>
-
-          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('quickExecs')}>
-            <button
-              type="button"
-              className="disc-group-btn automation-kind-button"
-              data-active={tab === 'quickExecs'}
-              data-tour-id="automation-kind-quick-exec"
-              onClick={() => selectAutomationKind('quickExecs')}
-              aria-expanded={!isAutomationSectionCollapsed('quickExecs')}
-            >
-              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('quickExecs')} />
-              <TerminalSquare size={11} />
-              <span>{t('wf.tabQuickExecs')}</span>
-              <span className="disc-group-count">({sidebarQuickExecs.length})</span>
-            </button>
-            {!isAutomationSectionCollapsed('quickExecs') && sidebarQuickExecs.map(quickExec => (
-              <AutomationResourceRow
-                key={quickExec.id}
-                resourceId={quickExec.id}
-                name={quickExec.name}
-                meta={`${quickExec.command} · ${quickExec.output_format.toUpperCase()}`}
-                icon={quickExec.icon}
-                active={tab === 'quickExecs' && selectedQuickExecId === quickExec.id}
-                pinned={quickExec.pinned}
-                openLabel={t('automation.openResource', quickExec.name)}
-                pinLabel={t('wf.pin')}
-                unpinLabel={t('wf.unpin')}
-                onOpen={() => openQuickExec(quickExec)}
-                onTogglePinned={() => { void toggleQuickFavorite('quickExecs', quickExec.id, quickExec.pinned, quickExecsApi.setPinned, refetchQE); }}
-                rowProps={rowProps('quickExecs', quickExec.id)}
-                  selection={selectionFor('quickExecs', quickExec.id)}
-                  onDelete={deleteFor('quickExecs', quickExec.id)}
-              />
-            ))}
+            )}
           </div>
 
           {sidebarWorkflows.length + sidebarQuickApis.length + sidebarQuickPrompts.length + sidebarQuickExecs.length === 0 && (

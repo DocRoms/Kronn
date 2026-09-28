@@ -3233,6 +3233,7 @@ html[data-density="large"] .dash-main {
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='code'] .project-detail-section[data-project-view='code'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='docker'] .project-detail-section[data-project-view='docker'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='git'] .project-detail-section[data-project-view='git'],
+.project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='automationArtifacts'] .project-repository-resources[data-project-view='automationArtifacts'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='resources'] .project-detail-section[data-project-view='resources'] {
   display: block;
 }

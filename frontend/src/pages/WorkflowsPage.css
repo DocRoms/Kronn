@@ -8190,3 +8190,29 @@
   white-space: nowrap;
   border: 0;
 }
+.automation-kind-filters {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--kr-border);
+}
+
+.automation-kind-filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--kr-text-muted);
+  font-size: 10px;
+}
+
+.automation-kind-filters button[data-active='true'] {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent-ink);
+  background: var(--kr-accent-bg);
+}

@@ -176,6 +176,14 @@ describe('ProjectCard — repository overview', () => {
     expect(docsSection?.querySelector('.aidoc-loading, .aidoc-root, .aidoc-empty'))
       .toBeInTheDocument();
 
+    const automationArtifactsTab = screen.getByRole('button', {
+      name: 'projects.master.tab.automationArtifacts',
+    });
+    fireEvent.click(automationArtifactsTab);
+    expect(automationArtifactsTab).toHaveAttribute('data-active', 'true');
+    expect(detailBody).toHaveAttribute('data-detail-view', 'automationArtifacts');
+    expect(await screen.findByText('projects.repositoryResources.kronnMissing')).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.code' }));
     expect(screen.getByRole('button', { name: 'projects.master.tab.code' }))
       .toHaveAttribute('data-active', 'true');

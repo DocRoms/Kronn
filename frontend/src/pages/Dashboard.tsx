@@ -1468,6 +1468,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           <ErrorBoundary mode="zone" label={t('nav.pages')}>
             <Suspense fallback={<PageFallback />}>
               <PagesPage
+                projects={projects}
                 initialSelectedPageId={openPageId}
                 onInitialSelectionConsumed={() => setOpenPageId(null)}
                 onNavigateWorkflow={(workflowId, runId) => {

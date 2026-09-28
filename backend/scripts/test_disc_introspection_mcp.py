@@ -6612,6 +6612,15 @@ class LivePageToolTests(unittest.TestCase):
         self.assertNotIn("current_revision_id", result[0])
         self.assertNotIn("large", result[0])
 
+    def test_page_list_forwards_the_optional_project_filter(self):
+        with mock.patch.object(self.mod, "_http", return_value=self._env([])) as http:
+            result = self.mod.call_page_list({"project_id": "project/one"})
+        http.assert_called_once_with("GET", "/api/pages?project_id=project%2Fone")
+        self.assertEqual(result, [])
+
+        contract = next(tool for tool in self.mod.TOOLS if tool["name"] == "page_list")
+        self.assertIn("project_id", contract["inputSchema"]["properties"])
+
     def test_page_get_returns_detail_and_workflow_links(self):
         responses = [
             self._env({"id": "page/one", "revision": {"html": "<h1>A</h1>"}}),

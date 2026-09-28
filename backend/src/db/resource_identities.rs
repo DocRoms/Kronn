@@ -11,6 +11,12 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
+#[derive(Debug, Clone)]
+pub struct ResourceIdentity {
+    pub slug: String,
+    pub updated_at: String,
+}
+
 /// Scope key for the identity table: the destination project's normalised
 /// `repo_url` when known, else its path, else `""` for no project — never
 /// the local project UUID, which is instance-specific and does not survive
@@ -60,6 +66,29 @@ pub fn lookup(
         "SELECT target_id FROM resource_identities WHERE project_key = ?1 AND kind = ?2 AND slug = ?3",
         rusqlite::params![project_key, kind, slug],
         |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Publication/import baseline for a concrete local resource, when known.
+pub fn find_by_target(
+    conn: &Connection,
+    project_key: &str,
+    kind: &str,
+    target_id: &str,
+) -> Result<Option<ResourceIdentity>> {
+    conn.query_row(
+        "SELECT slug, updated_at FROM resource_identities
+          WHERE project_key = ?1 AND kind = ?2 AND target_id = ?3
+          ORDER BY updated_at DESC LIMIT 1",
+        rusqlite::params![project_key, kind, target_id],
+        |row| {
+            Ok(ResourceIdentity {
+                slug: row.get(0)?,
+                updated_at: row.get(1)?,
+            })
+        },
     )
     .optional()
     .map_err(Into::into)

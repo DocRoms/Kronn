@@ -5122,6 +5122,20 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, status: ProjectRepositoryResourceStatus, repository_paths: Array<string>, };
+
+export type ProjectRepositoryResourceKind = "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
+
+export type ProjectRepositoryResourceLevel = "usable_without_kronn" | "kronn_required";
+
+/**
+ * Read-only projection of the automations and artifacts attached to a project
+ * and their alignment with the repository's `kronn/` directory.
+ */
+export type ProjectRepositoryResources = { kronn_exists: boolean, resources: Array<ProjectRepositoryResource>, };
+
+export type ProjectRepositoryResourceStatus = "not_published" | "up_to_date" | "repository_modified" | "kronn_modified" | "conflict";
+
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
 
 /**

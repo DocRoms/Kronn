@@ -1,0 +1,29 @@
+.project-repository-resources { padding: 14px; }
+.project-repository-resources-banner,
+.project-repository-resources-loading,
+.project-repository-resources-error { display: flex; align-items: center; gap: 8px; padding: 12px; color: var(--kr-text-muted); }
+.project-repository-resources-banner { margin-bottom: 12px; border: 1px solid var(--kr-border); border-radius: 8px; background: var(--kr-bg-raised); color: var(--kr-warning); }
+.project-repository-resources-columns { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, 1fr); gap: 16px; }
+.project-repository-resources-list,
+.project-repository-resources-tree { min-width: 0; border: 1px solid var(--kr-border); border-radius: 8px; overflow: hidden; }
+.project-repository-resources h3 { margin: 0; padding: 11px 12px; border-bottom: 1px solid var(--kr-border); font-size: 12px; }
+.project-repository-resources-list > p { padding: 12px; color: var(--kr-text-muted); }
+.project-repository-resource-row { display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 7px 10px; border-bottom: 1px solid var(--kr-border-subtle); cursor: pointer; }
+.project-repository-resource-row:has(input:disabled) { cursor: default; }
+.project-repository-resource-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+.project-repository-resource-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.project-repository-resource-copy span { color: var(--kr-text-muted); font-size: 10px; }
+.project-repository-resource-status { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--kr-text-muted); }
+.project-repository-resource-status[data-status='conflict'] { color: var(--kr-error); }
+.project-repository-resource-status[data-status='up_to_date'] { color: var(--kr-success); }
+.project-repository-tree-root { display: flex; gap: 8px; padding: 10px 12px 5px; font-family: var(--kr-font-mono); font-weight: 700; font-size: 12px; }
+.project-repository-tree-root[data-excluded='true'] { color: var(--kr-text-ghost); }
+.project-repository-tree-entry { display: flex; gap: 8px; padding: 3px 12px 3px 27px; font: 11px/1.5 var(--kr-font-mono); }
+.project-repository-tree-entry[data-excluded='true'] { color: var(--kr-text-ghost); }
+.project-repository-tree-marker { width: 10px; color: var(--kr-success); font-weight: 700; }
+.project-repository-tree-marker[data-status='repository_modified'],
+.project-repository-tree-marker[data-status='kronn_modified'] { color: var(--kr-warning); }
+.project-repository-tree-marker[data-status='conflict'] { color: var(--kr-error); }
+.project-repository-resources-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 12px; padding-top: 8px; border-top: 1px solid var(--kr-border); color: var(--kr-text-muted); font-size: 10px; }
+.project-repository-resources-excluded { color: var(--kr-text-ghost); }
+@media (max-width: 900px) { .project-repository-resources-columns { grid-template-columns: 1fr; } }

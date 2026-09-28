@@ -11,6 +11,7 @@ import type {
   ApiKeyDisplay,
   ApiKeysResponse,
   Project,
+  ProjectRepositoryResources,
   ProjectDockerAction,
   ProjectDockerLogs,
   ProjectDockerRunningSummary,
@@ -893,6 +894,8 @@ export interface MigrateDocsResponse {
 export const projects = {
   list: () => api<Project[]>('GET', '/projects'),
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
+  repositoryResources: (id: string) =>
+    api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
   dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
   dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
   dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>
@@ -2546,7 +2549,10 @@ export const pages = {
   previewImport: (request: ArtifactImportRequest) => api<ArtifactImportPreview>('POST', '/pages/import/preview', request),
   importArtifact: (request: ArtifactImportRequest) => api<ArtifactImportResult>('POST', '/pages/import', request),
   capability: () => api<LivePagesCapability>('GET', '/pages/capability'),
-  list: () => api<LivePage[]>('GET', '/pages'),
+  list: (projectId?: string) => api<LivePage[]>(
+    'GET',
+    `/pages${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
+  ),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
   revisions: (id: string) => api<LivePageRevision[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
   workflows: (id: string) => api<LivePageWorkflowLink[]>('GET', `/pages/${encodeURIComponent(id)}/workflows`),

@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import type {
   LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
-  LivePageRevision, LivePageWorkflowLink,
+  LivePageRevision, LivePageWorkflowLink, Project,
 } from '../types/generated';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
 import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
@@ -32,6 +32,7 @@ import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHead
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { CollectionShell } from '../components/CollectionShell';
+import { CollectionProjectTree } from '../components/CollectionProjectTree';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
@@ -57,7 +58,6 @@ import './PagesPage.css';
 const REFRESH_MS = 30_000;
 const PAGE_NAVIGATION_STORAGE_KEY = 'kronn:pageNavigation';
 const PAGE_COLLAPSED_STORAGE_KEY = 'kronn:pageCollapsedSections';
-const PAGE_SECTIONS = new Set(['favorites', 'recent', 'pages', 'archives']);
 
 interface PageNavigationPreference {
   resourceId: string | null;
@@ -78,9 +78,7 @@ function readCollapsedPageSections(): Set<string> {
   try {
     const parsed = JSON.parse(localStorage.getItem(PAGE_COLLAPSED_STORAGE_KEY) ?? '[]') as unknown;
     if (!Array.isArray(parsed)) return new Set(['archives']);
-    return new Set(parsed.filter((section): section is string => (
-      typeof section === 'string' && PAGE_SECTIONS.has(section)
-    )));
+    return new Set(parsed.filter((section): section is string => typeof section === 'string'));
   } catch {
     return new Set(['archives']);
   }
@@ -140,6 +138,7 @@ function useDismissibleDetails<T extends HTMLDetailsElement>() {
 }
 
 interface PagesPageProps {
+  projects?: Project[];
   initialSelectedPageId?: string | null;
   onInitialSelectionConsumed?: () => void;
   onNavigateWorkflow?: (workflowId: string, runId?: string) => void;
@@ -147,6 +146,7 @@ interface PagesPageProps {
 }
 
 export function PagesPage({
+  projects = [],
   initialSelectedPageId,
   onInitialSelectionConsumed,
   onNavigateWorkflow,
@@ -859,13 +859,25 @@ export function PagesPage({
           )}
 
           {visibleActive.length > 0 && (
-            <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!collapsedInCurrentMode('pages')}>
-              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('pages')} aria-expanded={!collapsedInCurrentMode('pages')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('pages')} />
+            <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!collapsedInCurrentMode('projects')}>
+              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('projects')} aria-expanded={!collapsedInCurrentMode('projects')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('projects')} />
                 <FileCode2 size={10} />
-                <span>{t('pages.filter.active')}</span><span className="disc-group-count">{visibleActive.length}</span>
+                <span>{t('projects.title')}</span><span className="disc-group-count">{visibleActive.length}</span>
               </button>
-              {!collapsedInCurrentMode('pages') && visibleActive.map(page => row(page, 'page'))}
+              {!collapsedInCurrentMode('projects') && (
+                <CollectionProjectTree
+                  projects={projects}
+                  items={visibleActive}
+                  getProjectId={page => page.project_id}
+                  isItemActive={page => page.id === selectedId}
+                  collapsedGroups={canMultiSelect || query.trim() ? new Set() : collapsedSections}
+                  onToggleGroup={toggleSection}
+                  renderGroup={({ items }) => items.map(page => row(page, 'page'))}
+                  labels={{ noProject: t('disc.noProject'), local: t('disc.local') }}
+                  noProjectIcon={<FileCode2 size={10} />}
+                />
+              )}
             </div>
           )}
 

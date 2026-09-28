@@ -36,16 +36,17 @@ import { ProjectTasksPanel } from './ProjectTasksPanel';
 import { ContextHelp } from './ContextHelp';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { ProjectDockerPanel } from './ProjectDockerPanel';
+import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
   Failed: 'var(--kr-error)', Cancelled: 'var(--kr-cancelled)', WaitingApproval: 'var(--kr-accent-ink)',
 };
 
-type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'resources';
+type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'automationArtifacts' | 'resources';
 
 const PROJECT_DETAIL_VIEWS: ProjectDetailView[] = [
-  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'resources',
+  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'automationArtifacts', 'resources',
 ];
 const PROJECT_DETAIL_VIEW_STORAGE_KEY = 'kronn:projectDetailView';
 
@@ -1530,6 +1531,7 @@ export function ProjectCard({
               ['code', t('projects.master.tab.code'), Code2, undefined],
               ['docker', t('projects.master.tab.docker'), Container, undefined],
               ['git', t('projects.master.tab.git'), GitBranch, undefined],
+              ['automationArtifacts', t('projects.master.tab.automationArtifacts'), Package, undefined],
               ['resources', t('projects.master.tab.resources'), Puzzle, undefined],
             ] as const).map(([view, label, Icon, count]) => (
               <button
@@ -2446,6 +2448,9 @@ export function ProjectCard({
                 }}
               />
             </section>
+          )}
+          {detailMode && detailView === 'automationArtifacts' && (
+            <ProjectRepositoryResourcesPanel projectId={proj.id} />
           )}
           {detailMode && detailView === 'tasks' && (
             <section className="project-detail-section" data-project-view="tasks">
