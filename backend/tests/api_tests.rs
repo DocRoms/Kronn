@@ -5852,6 +5852,42 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     assert_eq!(accepted["success"], true, "{accepted}");
     assert_eq!(accepted["data"]["child_discussion_id"], child_id);
 
+    // Compatibility fixture: pre-KT-837 bridges physically moved both the live
+    // membership and the durable source binding into the execution child after
+    // accepting. Keep exercising the authenticated return-resume route against
+    // exactly that persisted legacy state, independently of the new acceptance model.
+    state
+        .db
+        .with_conn({
+            let child_id = child_id.clone();
+            move |conn| {
+                kronn::db::discussion_sessions::move_session_to_discussion(conn, 657, &child_id)?;
+                kronn::db::disc_source::bind_to_source(conn, &child_id, "Codex", "stable-binding")?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let legacy_child_state = state
+        .db
+        .with_conn(|conn| {
+            let membership: String = conn.query_row(
+                "SELECT disc_id FROM discussion_sessions WHERE id = 657",
+                [],
+                |row| row.get(0),
+            )?;
+            let binding = kronn::db::disc_source::find_disc_by_source_session(
+                conn,
+                "Codex",
+                "stable-binding",
+            )?;
+            Ok((membership, binding))
+        })
+        .await
+        .unwrap();
+    assert_eq!(legacy_child_state.0, child_id);
+    assert_eq!(legacy_child_state.1.as_deref(), Some(child_id.as_str()));
+
     let (status, brief) = get_json(
         app.clone(),
         &format!(

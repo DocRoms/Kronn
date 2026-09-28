@@ -328,9 +328,10 @@ pub fn cli_session_identity(
     Ok((ordinal, alias))
 }
 
-/// Re-home a joined CLI session's membership to another discussion (KT-328 handshake:
-/// on acceptance the worker leaves the origin room and joins its sub-discussion). The
-/// "one active session = one discussion" invariant is preserved because
+/// Re-home a joined CLI session's membership to another discussion. Current worker
+/// acceptance keeps the principal-room membership; this primitive remains for explicit
+/// room transfers and compatibility with sessions moved by older bridges. The "one
+/// active session = one discussion" invariant is preserved because
 /// `idx_disc_sessions_session_active` is on `(agent_type, session_id)` WITHOUT
 /// `disc_id`, so moving the row keeps exactly one active row for the identity. Only a
 /// non-`left` row moves. Returns whether a row moved (idempotent: a session already in

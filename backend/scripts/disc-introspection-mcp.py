@@ -1006,10 +1006,9 @@ TOOLS = [
     {
         "name": "task_exec_accept_worker_offer",
         "description": (
-            "Accept a task worker offer for THIS joined CLI using only its opaque "
-            "offer_id. The backend verifies the exact session and grants the worker "
-            "role to that execution without moving this bridge out of its principal "
-            "room. The result carries the worker instructions. See "
+            "Accept THIS CLI's worker offer by opaque offer_id. Grants "
+            "execution-scoped authority, preserves its principal room, and returns "
+            "the worker instructions. See "
             "tool_manual({tool: \"task_exec_accept_worker_offer\"})."
         ),
         "inputSchema": {
