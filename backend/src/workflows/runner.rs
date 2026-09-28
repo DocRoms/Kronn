@@ -5116,6 +5116,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_run_requires_current_hash_approval_after_imported_alignment_refresh() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(::std::collections::HashMap::new());
+        workflow.id = "wf-imported".into();
+        workflow.steps = vec![json_data_step(
+            "emit",
+            serde_json::json!({ "approved": true }),
+        )];
+        let mut run = pending_run("run-imported", &workflow.id);
+        let workflow_for_db = workflow.clone();
+        let run_for_db = run.clone();
+
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &workflow_for_db)?;
+                crate::db::workflows::insert_run(conn, &run_for_db)?;
+                crate::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repo",
+                    "workflow",
+                    "imported",
+                    "wf-imported",
+                    "repository-imported",
+                    "database-imported",
+                    "2026-09-28T10:00:00Z",
+                    true,
+                )?;
+                crate::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repo",
+                    "workflow",
+                    "imported",
+                    "wf-imported",
+                    "repository-published",
+                    "database-published",
+                    "2026-09-28T11:00:00Z",
+                    false,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let blocked = execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(blocked.to_string().contains("must be approved"));
+
+        let rendered = crate::core::repository_resources::render_workflow(&workflow, "imported")
+            .expect("render imported workflow");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::repository_resources::approve(
+                    conn,
+                    "repo",
+                    "workflow",
+                    "imported",
+                    &crate::core::repository_resources::approval_hash(&rendered.document),
+                )
+            })
+            .await
+            .unwrap();
+
+        execute_run(
+            state, &workflow, &mut run, &tokens, &agents, None, None, None,
+        )
+        .await
+        .expect("the approved workflow fingerprint must execute");
+        assert_eq!(run.status, RunStatus::Success);
+    }
+
+    #[tokio::test]
     async fn project_linked_fire_and_forget_batch_runs_without_parent_worktree() {
         // KT-343 composition regression: the runner used to create a worktree
         // for every project-linked workflow, even when isolation was disabled.

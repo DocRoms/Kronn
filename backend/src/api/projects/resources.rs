@@ -1014,12 +1014,27 @@ fn publish_one(
         &rendered.document.updated_at.to_rfc3339(),
         false,
     )?;
+    let alignment = crate::db::repository_resources::find_alignment(
+        conn,
+        &project_key,
+        request.kind.identity_kind(),
+        &slug,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("Published resource alignment not found"))?;
+    let approved = !alignment.imported
+        || crate::db::repository_resources::is_approved(
+            conn,
+            &project_key,
+            request.kind.identity_kind(),
+            &slug,
+            &crate::core::repository_resources::approval_hash(&rendered.document),
+        )?;
     Ok(ProjectRepositoryResourceMutation {
         kind: request.kind,
         id: request.id,
         slug,
         status: ProjectRepositoryResourceStatus::UpToDate,
-        approved: true,
+        approved,
     })
 }
 

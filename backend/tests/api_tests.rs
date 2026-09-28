@@ -3219,6 +3219,7 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
 #[tokio::test]
 async fn repository_resource_publish_align_import_and_hash_approval_round_trip() {
     let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
     let project_directory = tempfile::TempDir::new().unwrap();
     state
         .db
@@ -3370,6 +3371,67 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         .unwrap()
         .contains("approved"));
 
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
+            item.description = "Changed after repository import".into();
+            item.command = "echo".into();
+            item.args = vec![r#"{"approved":true}"#.into()];
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, changed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(changed["data"]["resources"][0]["status"], "kronn_modified");
+    assert_eq!(changed["data"]["resources"][0]["approval_required"], true);
+
+    let (_, republished) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/publish",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "id": "qe-portable",
+            "overwrite_repository_changes": true,
+        }),
+    )
+    .await;
+    assert_eq!(republished["success"], true, "{republished}");
+    assert_eq!(republished["data"]["approved"], false, "{republished}");
+
+    let (_, republished_state) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(
+        republished_state["data"]["resources"][0]["status"],
+        "up_to_date"
+    );
+    assert_eq!(
+        republished_state["data"]["resources"][0]["approval_required"],
+        true
+    );
+    assert_eq!(republished_state["data"]["resources"][0]["approved"], false);
+
+    let (_, republished_blocked) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(republished_blocked["data"]["success"], false);
+    assert!(republished_blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+
     let (_, approved) = post_json(
         app.clone(),
         "/api/projects/portable-project/repository-resources/approve",
@@ -3378,6 +3440,15 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     .await;
     assert_eq!(approved["success"], true, "{approved}");
     assert_eq!(approved["data"]["approved"], true);
+
+    let (_, accepted) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(accepted["data"]["success"], true, "{accepted}");
+    assert_eq!(accepted["data"]["data"]["approved"], true, "{accepted}");
 
     state
         .db
