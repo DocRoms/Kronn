@@ -3166,52 +3166,33 @@ mod http_native_tool_step_tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial_test::serial(kt874_cli_model_fallback)]
     async fn disappeared_model_dispatches_same_target_replacement_and_records_both_models() {
-        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
-        impl Drop for RestoreEnv {
-            fn drop(&mut self) {
-                for (name, value) in &self.0 {
-                    if let Some(value) = value {
-                        std::env::set_var(name, value);
-                    } else {
-                        std::env::remove_var(name);
-                    }
-                }
-            }
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let argv = dir.path().join("argv.txt");
-        let fixture = crate::acp::test_support::write_fixture_script(
-            dir.path(),
+        let fixture_body = [
+            format!(
+                "cat >/dev/null\nprintf '%s\\n' \"$*\" > '{}'\n",
+                argv.display()
+            ),
             r#"
-printf '%s\n' "$*" > "$KRONN_TEST_KT874_ARGV"
 printf '%s\n' '{"type":"assistant","message":{"model":"provider/canonical","content":[]}}'
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"replacement used"}}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":2}}'
-"#,
+"#
+            .to_owned(),
+        ]
+        .concat();
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &fixture_body);
+        let project = dir.path().to_string_lossy().into_owned();
+        let work_dir = runner::resolve_agent_work_dir(Some(&project), &project).unwrap();
+        let _route = runner::test_acp_routes::route(
+            &work_dir,
+            Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                fixture.to_string_lossy(),
+                Some("current-alias".into()),
+                false,
+            )),
         );
-        std::fs::rename(fixture, dir.path().join("claude")).unwrap();
-        let previous_path = std::env::var_os("PATH");
-        let mut paths = vec![dir.path().to_path_buf()];
-        if let Some(value) = previous_path.as_ref() {
-            paths.extend(std::env::split_paths(value));
-        }
-        let _restore = RestoreEnv(vec![
-            ("PATH", previous_path),
-            (
-                "KRONN_ACP_ADAPTER_CLAUDE",
-                std::env::var_os("KRONN_ACP_ADAPTER_CLAUDE"),
-            ),
-            (
-                "KRONN_TEST_KT874_ARGV",
-                std::env::var_os("KRONN_TEST_KT874_ARGV"),
-            ),
-        ]);
-        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
-        std::env::set_var("KRONN_TEST_KT874_ARGV", &argv);
 
         let db = crate::db::Database::open_in_memory().unwrap();
         let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
@@ -3249,7 +3230,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         })
         .await
         .unwrap();
-        let project = dir.path().to_string_lossy();
         let step = WorkflowStep {
             name: "fallback".into(),
             step_type: StepType::Agent,
