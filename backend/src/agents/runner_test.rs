@@ -9583,6 +9583,69 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn codex_project_trust_override_preserves_paths_and_host_alias() {
+        for (work_dir, host_home, expected) in [
+            (
+                "/Users/alice/probe.repo",
+                None,
+                vec!["/Users/alice/probe.repo"],
+            ),
+            (
+                "/Users/alice/probe.repo",
+                Some("/Users/alice"),
+                vec!["/Users/alice/probe.repo"],
+            ),
+            (
+                "/host-home/repo.v1 with é spaces",
+                Some("/Users/Alice Example"),
+                vec![
+                    "/host-home/repo.v1 with é spaces",
+                    "/Users/Alice Example/repo.v1 with é spaces",
+                ],
+            ),
+            ("/host-home/repo", None, vec!["/host-home/repo"]),
+            (
+                "/host-home/repo",
+                Some("/host-home"),
+                vec!["/host-home/repo"],
+            ),
+            (
+                "/host-home-other/repo",
+                Some("/Users/alice"),
+                vec!["/host-home-other/repo"],
+            ),
+            (
+                "/Users/Zoë/a.\"quoted\"\\path=repo",
+                None,
+                vec!["/Users/Zoë/a.\"quoted\"\\path=repo"],
+            ),
+            (r"C:\Users\Zoë\repo.v1", None, vec![r"C:\Users\Zoë\repo.v1"]),
+        ] {
+            let rendered = super::super::codex_project_trust_override(
+                std::path::Path::new(work_dir),
+                host_home,
+            );
+            assert!(rendered.starts_with("projects={"), "{rendered}");
+            let config: toml::Value = toml::from_str(&rendered).expect("valid TOML override");
+            let projects = config["projects"].as_table().unwrap();
+            assert_eq!(projects.len(), expected.len(), "{rendered}");
+            for path in expected {
+                assert!(
+                    projects
+                        .keys()
+                        .any(|key| std::path::Path::new(key) == std::path::Path::new(path)),
+                    "missing {path}: {rendered}"
+                );
+            }
+            for entry in projects.values() {
+                let entry = entry.as_table().unwrap();
+                assert_eq!(entry.len(), 1, "{rendered}");
+                assert_eq!(entry["trust_level"].as_str(), Some("trusted"), "{rendered}");
+            }
+        }
+    }
+
+    #[test]
     fn codex_task_worker_forces_workspace_write_despite_full_access() {
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
             &AgentType::Codex,

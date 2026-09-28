@@ -13,6 +13,7 @@ async fn workflow_read_only_repos_live_probe() {
         // where Claude's read block applies, rather than an exempt OS temp dir.
         let probe_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.kronn/tmp");
         std::fs::create_dir_all(&probe_root).unwrap();
+        let probe_root = probe_root.canonicalize().unwrap();
         let temp = tempfile::tempdir_in(probe_root).unwrap();
         let work = temp.path().join("work");
         let repo = temp.path().join("linked repo");

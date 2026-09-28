@@ -185,6 +185,37 @@ esac
                     adapted == (toggle != Some("0")),
                     "wrong actual dispatch route",
                 );
+                if agent == AgentType::Codex {
+                    let trust_overrides: Vec<_> = args
+                        .windows(2)
+                        .filter(|pair| pair[0] == "-c")
+                        .map(|pair| pair[1])
+                        .filter(|setting| {
+                            setting.starts_with("projects=") || setting.starts_with("projects.")
+                        })
+                        .collect();
+                    check(
+                        trust_overrides.len() == 1,
+                        "Codex must receive exactly one projects trust override",
+                    );
+                    for setting in trust_overrides {
+                        check(
+                            setting.starts_with("projects={"),
+                            "Codex project trust must use an inline table, never a dotted key",
+                        );
+                        let config: toml::Value = toml::from_str(setting).unwrap();
+                        let projects = config["projects"].as_table().unwrap();
+                        check(projects.len() == 1, "unrelated project was trusted");
+                        check(
+                            projects
+                                .get(project.to_str().unwrap())
+                                .and_then(|entry| entry.get("trust_level"))
+                                .and_then(toml::Value::as_str)
+                                == Some("trusted"),
+                            "working directory trust is missing",
+                        );
+                    }
+                }
                 if adapted && agent == AgentType::Codex {
                     let mut options = HashSet::new();
                     let mut config_keys = HashSet::new();

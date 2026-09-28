@@ -48,8 +48,29 @@ Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:3747]
-[src: file: backend/src/agents/runner.rs:11042]
+[src: file: backend/src/agents/runner.rs:11065]
 [src: file: backend/src/acp/codex_adapter.rs:404]
+
+All Codex `exec` launches, with or without `--strict-config`, receive one
+`-c projects={...}` inline table containing the working directory and, when
+applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
+handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
+as TOML; identical aliases are deduplicated.
+[src: file: backend/src/agents/runner.rs:11007]
+[src: file: backend/src/agents/runner.rs:11076]
+
+The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
+dotted `projects."<path>".trust_level` override under `--strict-config`, even
+with a canonical path. The inline table passed configuration loading in both
+strict and non-strict modes; the intentionally invalid model then failed at
+the API. This verifies configuration loading, not sandbox enforcement.
+[src: user: 2026-09-28: KT-806 request_changes review of bf00da66]
+[Codex CLI override values use TOML](https://learn.chatgpt.com/docs/config-file/config-advanced#one-off-overrides-from-the-cli)
+
+Hypothesis (unverified): non-strict Codex may have silently ignored the old
+dotted path override, so earlier launches may never have applied that trust
+setting. The principal's checks do not establish this behavior.
+[src: user: 2026-09-28: KT-806 request_changes review of bf00da66]
 
 Workflow prompts state that repository paths are locations, not permission
 grants, and list the repositories declared by the current step. This corrects
@@ -77,8 +98,12 @@ vendor sandbox enforcement.
 The dispatch regression checks initial and resumed Codex adapter arguments:
 options occur once, repeated `-c` flags have distinct keys, the project MCP
 override remains present once, and the read-only permissions profile is selected
-without a conflicting `--sandbox` flag.
+without a conflicting `--sandbox` flag. Every Codex dispatch case also checks
+for exactly one inline `projects` override and rejects dotted trust keys,
+including ordinary non-strict and direct launches. Unit coverage checks host
+aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:188]
+[src: file: backend/src/agents/runner_test.rs:7933]
 [src: file: backend/src/acp/codex_adapter.rs:374]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations
@@ -88,16 +113,18 @@ and OS sandbox privileges:
 cargo test --manifest-path backend/Cargo.toml --test workflow_read_only_repos_probe -- --ignored --nocapture
 ```
 
-It creates disposable repositories, checks externally read values from Read
-(or the Codex equivalent), Git history, head and grep, records the OS rejection
-of a subprocess write, checks a protected file is unchanged, and verifies a
-worktree write. Review the printed receipt for the built-in Edit/Write denial.
+It canonicalizes the probe root before creating disposable repositories,
+checks externally read values from Read (or the Codex equivalent), Git history,
+head and grep, records the OS rejection of a subprocess write, checks a protected
+file is unchanged, and verifies a worktree write. Review the printed receipt
+for the built-in Edit/Write denial.
 [src: file: backend/tests/workflow_read_only_repos_probe.rs:1]
 
 The KT-806 worker could not run a nested macOS sandbox: invoking
 `codex sandbox macos --help` returned `sandbox-exec: sandbox_apply: Operation not
 permitted`. The principal subsequently reported a successful Claude host probe;
-Codex failed before execution because of a duplicate `--skip-git-repo-check`.
-That argument regression is now covered; the corrected Codex host probe and the
-stored autoCode prompt update still require principal qualification.
-[src: user: 2026-09-28: KT-806 request_changes review of the host probe]
+Codex failed first on a duplicate `--skip-git-repo-check`, then on the dotted
+trust override. Both argument regressions are now covered. The principal still
+needs to rerun the Codex host probe after the inline-table fix and update the
+stored autoCode prompt.
+[src: user: 2026-09-28: KT-806 request_changes reviews of f474ecd2 and bf00da66]

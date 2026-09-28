@@ -12296,6 +12296,27 @@ fn claude_auto_memory_kept(
         && workflow_step_context.is_none()
 }
 
+fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> String {
+    let mut paths = vec![work_dir.to_path_buf()];
+    if let (Ok(relative), Some(host_home)) = (work_dir.strip_prefix("/host-home"), host_home) {
+        paths.push(Path::new(host_home).join(relative));
+    }
+    let projects = paths
+        .into_iter()
+        .map(|path| {
+            (
+                path.display().to_string(),
+                toml::Value::Table(toml::Table::from_iter([(
+                    "trust_level".into(),
+                    toml::Value::String("trusted".into()),
+                )])),
+            )
+        })
+        .collect();
+    // Codex's strict override parser rejects quoted path keys in dotted syntax.
+    format!("projects={}", toml::Value::Table(projects))
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
@@ -12345,27 +12366,19 @@ pub(crate) fn try_spawn(
         claude_task_worker_platform_check(cfg!(windows), resolved_via_wsl)?;
     }
 
-    // Force current workspace as trusted for Codex sessions inside Docker.
-    // This avoids path-style mismatch issues (/Users/... vs /host-home/...).
+    // Trust the workspace and its optional host alias in one inline table,
+    // including ordinary launches without --strict-config.
     let is_codex = binary == "codex" || npx_package == Some("@openai/codex");
     if is_codex {
         if let Some(exec_idx) = cmd_args.iter().position(|a| a == "exec") {
-            let workdir_s = work_dir.display().to_string();
-            let mut overrides = vec![
-                "-c".to_string(),
-                format!("projects.\"{}\".trust_level=\"trusted\"", workdir_s),
-            ];
-            if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
-                if let Some(relative) = workdir_s.strip_prefix("/host-home") {
-                    overrides.push("-c".to_string());
-                    let host_path = format!("{}{}", host_home, relative);
-                    overrides.push(format!(
-                        "projects.\"{}\".trust_level=\"trusted\"",
-                        host_path,
-                    ));
-                }
-            }
-            cmd_args.splice(exec_idx + 1..exec_idx + 1, overrides);
+            let host_home = std::env::var("KRONN_HOST_HOME").ok();
+            cmd_args.splice(
+                exec_idx + 1..exec_idx + 1,
+                [
+                    "-c".into(),
+                    codex_project_trust_override(work_dir, host_home.as_deref()),
+                ],
+            );
         }
     }
     // INFO never carries argv: prompts may contain user data and, historically,
