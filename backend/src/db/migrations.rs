@@ -767,6 +767,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "199_model_catalog_resolved_identity",
         include_str!("sql/199_model_catalog_resolved_identity.sql"),
     ),
+    (
+        "200_repository_resource_alignment",
+        include_str!("sql/200_repository_resource_alignment.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

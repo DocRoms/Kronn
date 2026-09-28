@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, FileCode2, FolderTree, Loader2, Package, Workflow, Zap } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, Check, Download, FileCode2, FolderTree, Loader2, Package, ShieldCheck, Upload, Workflow, Zap } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import {
   readProjectRepositoryResourcesTab,
   rememberProjectRepositoryResourcesTab,
@@ -44,6 +45,15 @@ const skillIsPublished = (skill: ProjectRepositorySkill) => (
   skill.repository_paths.includes(skill.publication_path)
 );
 
+type ResourceAction = (
+  projectId: string,
+  mode: 'publish' | 'import' | 'approve',
+  kind: ProjectRepositoryResourceKind,
+  id: string,
+  slug: string,
+  overwrite?: boolean,
+) => Promise<void | undefined>;
+
 export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
   const { t } = useT();
   const [data, setData] = useState<ProjectRepositoryResources | null>(null);
@@ -52,6 +62,19 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
     readProjectRepositoryResourcesTab,
   );
   const [error, setError] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  const applyResult = useCallback((result: ProjectRepositoryResources) => {
+    setData(result);
+    setSelected(new Set([
+      ...result.resources
+        .filter(resource => resource.status !== 'not_published')
+        .map(resourceKey),
+      ...result.skills_present
+        .filter(skill => skillIsPublished(skill) || (skill.status && skill.status !== 'not_published'))
+        .map(skillKey),
+    ]));
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -59,20 +82,43 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
     setError(null);
     projectsApi.repositoryResources(projectId).then(result => {
       if (!active) return;
-      setData(result);
-      setSelected(new Set([
-        ...result.resources
-          .filter(resource => resource.status !== 'not_published')
-          .map(resourceKey),
-        ...result.skills_present
-          .filter(skill => skillIsPublished(skill) || (skill.status && skill.status !== 'not_published'))
-          .map(skillKey),
-      ]));
+      applyResult(result);
     }).catch(reason => {
       if (active) setError(userError(reason));
     });
     return () => { active = false; };
-  }, [projectId]);
+  }, [projectId, applyResult]);
+
+  const runAction: ResourceAction = useAsyncGuard(async (
+    targetProjectId,
+    mode,
+    kind,
+    id,
+    slug,
+    overwrite = false,
+  ) => {
+    const key = `${mode}:${kind}:${id}`;
+    setBusyKey(key);
+    setError(null);
+    try {
+      if (mode === 'publish') {
+        await projectsApi.publishRepositoryResource(targetProjectId, {
+          kind,
+          id,
+          overwrite_repository_changes: overwrite,
+        });
+      } else if (mode === 'import') {
+        await projectsApi.importRepositoryResource(targetProjectId, { kind, slug });
+      } else {
+        await projectsApi.approveRepositoryResource(targetProjectId, { kind, id });
+      }
+      applyResult(await projectsApi.repositoryResources(targetProjectId));
+    } catch (reason) {
+      setError(userError(reason));
+    } finally {
+      setBusyKey(null);
+    }
+  });
 
   const automationResources = useMemo(
     () => data?.resources.filter(resource => resource.kind !== 'artifact') ?? [],
@@ -100,6 +146,36 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
     ];
   }, [data]);
   const repositoryScaffoldIncluded = Boolean(data?.kronn_exists || selected.size > 0);
+  const selectedForPublication = data ? [
+    ...data.resources
+      .filter(resource => resource.status === 'not_published' && selected.has(resourceKey(resource)))
+      .map(resource => ({ kind: resource.kind, id: resource.id, slug: resource.slug })),
+    ...data.skills_present
+      .filter(skill => skill.status === 'not_published' && selected.has(skillKey(skill)))
+      .map(skill => ({ kind: 'skill' as const, id: skill.id, slug: skill.slug })),
+  ] : [];
+
+  const publishSelected = useAsyncGuard(async (
+    targetProjectId: string,
+    resources: Array<{ kind: ProjectRepositoryResourceKind; id: string; slug: string }>,
+  ) => {
+    setBusyKey('publish:selected');
+    setError(null);
+    try {
+      for (const resource of resources) {
+        await projectsApi.publishRepositoryResource(targetProjectId, {
+          kind: resource.kind,
+          id: resource.id,
+          overwrite_repository_changes: false,
+        });
+      }
+      applyResult(await projectsApi.repositoryResources(targetProjectId));
+    } catch (reason) {
+      setError(userError(reason));
+    } finally {
+      setBusyKey(null);
+    }
+  });
 
   const selectTab = (tab: ProjectRepositoryResourcesTab) => {
     setActiveTab(tab);
@@ -143,6 +219,18 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
           <FolderTree size={16} /> {t('projects.repositoryResources.kronnMissing')}
         </div>
       )}
+      {selectedForPublication.length > 0 && (
+        <div className="project-repository-resources-actions">
+          <button
+            type="button"
+            disabled={busyKey !== null}
+            onClick={() => publishSelected(projectId, selectedForPublication)}
+          >
+            {busyKey === 'publish:selected' ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+            {t('projects.repositoryResources.publishSelected', selectedForPublication.length)}
+          </button>
+        </div>
+      )}
       <div className="project-repository-resources-columns">
         <div className="project-repository-resources-list" role="tabpanel">
           {activeTab === 'skills' && (
@@ -151,6 +239,9 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
               available={data.skills_available}
               selected={selected}
               onToggle={toggleSelected}
+              onAction={runAction}
+              projectId={projectId}
+              busyKey={busyKey}
               t={t}
             />
           )}
@@ -159,6 +250,9 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
               resources={automationResources}
               selected={selected}
               onToggle={toggleSelected}
+              onAction={runAction}
+              projectId={projectId}
+              busyKey={busyKey}
               t={t}
             />
           )}
@@ -167,6 +261,9 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
               resources={artifacts}
               selected={selected}
               onToggle={toggleSelected}
+              onAction={runAction}
+              projectId={projectId}
+              busyKey={busyKey}
               emptyKey="projects.repositoryResources.emptyArtifacts"
               t={t}
             />
@@ -222,11 +319,14 @@ interface ResourceListProps {
   resources: ProjectRepositoryResource[];
   selected: Set<string>;
   onToggle: (key: string) => void;
+  onAction: ResourceAction;
+  projectId: string;
+  busyKey: string | null;
   emptyKey: string;
   t: Translate;
 }
 
-function ResourceList({ resources, selected, onToggle, emptyKey, t }: ResourceListProps) {
+function ResourceList({ resources, selected, onToggle, onAction, projectId, busyKey, emptyKey, t }: ResourceListProps) {
   if (resources.length === 0) return <p>{t(emptyKey)}</p>;
   return <>{resources.map(resource => (
     <ResourceRow
@@ -234,19 +334,26 @@ function ResourceList({ resources, selected, onToggle, emptyKey, t }: ResourceLi
       resource={resource}
       checked={selected.has(resourceKey(resource))}
       onToggle={() => onToggle(resourceKey(resource))}
+      onAction={onAction}
+      projectId={projectId}
+      busyKey={busyKey}
       t={t}
     />
   ))}</>;
 }
 
-function ResourceRow({ resource, checked, onToggle, t }: {
+function ResourceRow({ resource, checked, onToggle, onAction, projectId, busyKey, t }: {
   resource: ProjectRepositoryResource;
   checked: boolean;
   onToggle: () => void;
+  onAction: ResourceAction;
+  projectId: string;
+  busyKey: string | null;
   t: Translate;
 }) {
+  const actionBusy = busyKey?.endsWith(`:${resource.kind}:${resource.id}`) ?? false;
   return (
-    <label className="project-repository-resource-row">
+    <div className="project-repository-resource-row">
       <input
         type="checkbox"
         checked={checked}
@@ -263,11 +370,19 @@ function ResourceRow({ resource, checked, onToggle, t }: {
         {resource.status === 'up_to_date' && <Check size={12} aria-hidden="true" />}
         {statusLabel(t, resource.status)}
       </span>
-    </label>
+      <ResourceActions
+        status={resource.status}
+        approvalRequired={resource.approval_required}
+        diff={resource.diff}
+        busy={actionBusy}
+        onAction={(mode, overwrite) => onAction(projectId, mode, resource.kind, resource.id, resource.slug, overwrite)}
+        t={t}
+      />
+    </div>
   );
 }
 
-function AutomationTab({ resources, selected, onToggle, t }: Omit<ResourceListProps, 'emptyKey'>) {
+function AutomationTab({ resources, selected, onToggle, onAction, projectId, busyKey, t }: Omit<ResourceListProps, 'emptyKey'>) {
   if (resources.length === 0) return <p>{t('projects.repositoryResources.emptyAutomation')}</p>;
   return <div className="project-repository-resource-groups">
     {AUTOMATION_KINDS.map(kind => {
@@ -275,17 +390,20 @@ function AutomationTab({ resources, selected, onToggle, t }: Omit<ResourceListPr
       if (group.length === 0) return null;
       return <section key={kind} data-resource-kind={kind}>
         <h3>{kindLabel(t, kind)} <span>{group.length}</span></h3>
-        <ResourceList resources={group} selected={selected} onToggle={onToggle} emptyKey="" t={t} />
+        <ResourceList resources={group} selected={selected} onToggle={onToggle} onAction={onAction} projectId={projectId} busyKey={busyKey} emptyKey="" t={t} />
       </section>;
     })}
   </div>;
 }
 
-function SkillsTab({ present, available, selected, onToggle, t }: {
+function SkillsTab({ present, available, selected, onToggle, onAction, projectId, busyKey, t }: {
   present: ProjectRepositorySkill[];
   available: ProjectRepositorySkill[];
   selected: Set<string>;
   onToggle: (key: string) => void;
+  onAction: ResourceAction;
+  projectId: string;
+  busyKey: string | null;
   t: Translate;
 }) {
   return <div className="project-repository-skill-groups">
@@ -295,7 +413,7 @@ function SkillsTab({ present, available, selected, onToggle, t }: {
       {present.map(skill => {
         const key = skillKey(skill);
         const published = skillIsPublished(skill);
-        return <label key={key} className="project-repository-resource-row">
+        return <div key={key} className="project-repository-resource-row">
           <input
             type="checkbox"
             checked={selected.has(key)}
@@ -315,7 +433,17 @@ function SkillsTab({ present, available, selected, onToggle, t }: {
               {statusLabel(t, skill.status)}
             </span>
           )}
-        </label>;
+          {skill.status && (
+            <ResourceActions
+              status={skill.status}
+              approvalRequired={skill.approval_required}
+              diff={skill.diff}
+              busy={busyKey?.endsWith(`:skill:${skill.id}`) ?? false}
+              onAction={(mode, overwrite) => onAction(projectId, mode, 'skill', skill.id, skill.slug, overwrite)}
+              t={t}
+            />
+          )}
+        </div>;
       })}
     </section>
     <section>
@@ -332,6 +460,46 @@ function SkillsTab({ present, available, selected, onToggle, t }: {
         </div>
       ))}
     </section>
+  </div>;
+}
+
+function ResourceActions({ status, approvalRequired, diff, busy, onAction, t }: {
+  status: ProjectRepositoryResourceStatus;
+  approvalRequired: boolean;
+  diff?: string;
+  busy: boolean;
+  onAction: (mode: 'publish' | 'import' | 'approve', overwrite?: boolean) => Promise<void | undefined>;
+  t: Translate;
+}) {
+  return <div className="project-repository-resource-actions">
+    {busy && <Loader2 size={13} className="animate-spin" aria-label={t('common.loading')} />}
+    {!busy && status === 'repository_modified' && (
+      <button type="button" onClick={() => onAction('import')}>
+        <Download size={12} /> {t('projects.repositoryResources.import')}
+      </button>
+    )}
+    {!busy && status === 'kronn_modified' && (
+      <button type="button" onClick={() => onAction('publish')}>
+        <Upload size={12} /> {t('projects.repositoryResources.publish')}
+      </button>
+    )}
+    {!busy && status === 'conflict' && <>
+      <details>
+        <summary>{t('projects.repositoryResources.showDiff')}</summary>
+        <pre>{diff}</pre>
+      </details>
+      <button type="button" onClick={() => onAction('import')}>
+        <Download size={12} /> {t('projects.repositoryResources.keepRepository')}
+      </button>
+      <button type="button" onClick={() => onAction('publish', true)}>
+        <Upload size={12} /> {t('projects.repositoryResources.keepKronn')}
+      </button>
+    </>}
+    {!busy && approvalRequired && status === 'up_to_date' && (
+      <button type="button" onClick={() => onAction('approve')}>
+        <ShieldCheck size={12} /> {t('projects.repositoryResources.approve')}
+      </button>
+    )}
   </div>;
 }
 

@@ -579,6 +579,32 @@ async fn execute_run_with_notify_policy(
     inherited_workspace: Option<String>,
     notify_security_policy: NotifySecurityPolicy,
 ) -> Result<()> {
+    let approval_workflow = workflow.clone();
+    state
+        .db
+        .with_read_conn(move |conn| {
+            let Some(alignment) = crate::db::repository_resources::find_alignment_by_target(
+                conn,
+                "workflow",
+                &approval_workflow.id,
+            )?
+            else {
+                return Ok(());
+            };
+            let rendered = crate::core::repository_resources::render_workflow(
+                &approval_workflow,
+                &alignment.slug,
+            )
+            .map_err(anyhow::Error::msg)?;
+            crate::core::repository_resources::ensure_execution_approved(
+                conn,
+                "workflow",
+                &approval_workflow.id,
+                &crate::core::repository_resources::approval_hash(&rendered.document),
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await?;
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
     // SSE is an optional live projection, never part of the execution

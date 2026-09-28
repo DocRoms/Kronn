@@ -45,12 +45,33 @@ pub fn upsert(
     slug: &str,
     target_id: &str,
 ) -> Result<()> {
+    upsert_at(
+        conn,
+        project_key,
+        kind,
+        slug,
+        target_id,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+}
+
+/// Same stable identity upsert, using the resource timestamp carried by a
+/// repository document. Import and publication use this to keep the file and
+/// local baseline on the same explicit clock value.
+pub fn upsert_at(
+    conn: &Connection,
+    project_key: &str,
+    kind: &str,
+    slug: &str,
+    target_id: &str,
+    updated_at: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO resource_identities (project_key, kind, slug, target_id, updated_at)
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(project_key, kind, slug) DO UPDATE SET
             target_id = excluded.target_id, updated_at = excluded.updated_at",
-        rusqlite::params![project_key, kind, slug, target_id],
+        rusqlite::params![project_key, kind, slug, target_id, updated_at],
     )?;
     Ok(())
 }

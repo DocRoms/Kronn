@@ -1,17 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use axum::{
     extract::{Path as AxumPath, State},
     Json,
 };
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::models::{
-    ApiErrorCode, ApiResponse, ProjectRepositoryResource, ProjectRepositoryResourceKind,
-    ProjectRepositoryResourceLevel, ProjectRepositoryResourceStatus, ProjectRepositoryResources,
-    ProjectRepositorySkill, ProjectRepositorySkillProvenance, Skill,
+    ApiErrorCode, ApiResponse, ApproveProjectRepositoryResourceRequest, ArtifactBundlePage,
+    CreateLivePageDataset, ImportProjectRepositoryResourceRequest, LivePage, LivePageRevision,
+    ProjectRepositoryResource, ProjectRepositoryResourceKind, ProjectRepositoryResourceLevel,
+    ProjectRepositoryResourceMutation, ProjectRepositoryResourceStatus, ProjectRepositoryResources,
+    ProjectRepositorySkill, ProjectRepositorySkillProvenance,
+    PublishProjectRepositoryResourceRequest, QuickApi, QuickExec, QuickPrompt, Skill,
+    UpdateLivePageRequest, Workflow,
 };
 use crate::AppState;
 
@@ -35,12 +39,90 @@ struct ResourceSeed {
     name: String,
     slug: Option<String>,
     kind: ProjectRepositoryResourceKind,
-    updated_at: DateTime<Utc>,
+}
+
+fn render_database_resource(
+    conn: &rusqlite::Connection,
+    kind: ProjectRepositoryResourceKind,
+    id: &str,
+    slug: &str,
+    skill_updated_at: Option<DateTime<Utc>>,
+) -> anyhow::Result<crate::core::repository_resources::RenderedRepositoryResource> {
+    let rendered = match kind {
+        ProjectRepositoryResourceKind::Skill => {
+            let skill = crate::core::skills::get_skill(id)
+                .ok_or_else(|| anyhow::anyhow!("Skill not found: {id}"))?;
+            crate::core::repository_resources::render_skill(
+                &skill,
+                skill_updated_at.unwrap_or_else(Utc::now),
+                slug,
+            )
+        }
+        ProjectRepositoryResourceKind::Workflow => {
+            let workflow = crate::db::workflows::get_workflow(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Workflow not found: {id}"))?;
+            crate::core::repository_resources::render_workflow(&workflow, slug)
+        }
+        ProjectRepositoryResourceKind::QuickPrompt => {
+            let prompt = crate::db::quick_prompts::get_quick_prompt(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found: {id}"))?;
+            crate::core::repository_resources::render_quick_prompt(&prompt, slug)
+        }
+        ProjectRepositoryResourceKind::QuickApi => {
+            let api = crate::db::quick_apis::get_quick_api(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick API not found: {id}"))?;
+            crate::core::repository_resources::render_quick_api(&api, slug)
+        }
+        ProjectRepositoryResourceKind::QuickExec => {
+            let exec = crate::db::quick_execs::get_quick_exec(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick Exec not found: {id}"))?;
+            crate::core::repository_resources::render_quick_exec(&exec, slug)
+        }
+        ProjectRepositoryResourceKind::Artifact => {
+            let detail = crate::db::live_pages::get_live_page(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Artifact not found: {id}"))?;
+            let artifact = crate::api::artifact_portability::export_page(conn, id)?;
+            crate::core::repository_resources::render_artifact(
+                &artifact,
+                detail.page.updated_at,
+                slug,
+            )
+        }
+    }
+    .map_err(anyhow::Error::msg)?;
+    Ok(rendered)
+}
+
+fn lock_entry(
+    lock: Option<&crate::core::repository_resources::RepositoryLock>,
+    kind: ProjectRepositoryResourceKind,
+    slug: &str,
+    name: &str,
+    paths: &[String],
+) -> crate::core::repository_resources::RepositoryLockResource {
+    lock.and_then(|lock| {
+        lock.resources
+            .iter()
+            .find(|entry| entry.kind == kind && entry.slug == slug)
+            .cloned()
+    })
+    .unwrap_or_else(
+        || crate::core::repository_resources::RepositoryLockResource {
+            kind,
+            slug: slug.to_string(),
+            name: name.to_string(),
+            level: String::new(),
+            paths: paths.to_vec(),
+            sha256: String::new(),
+            required_secrets: Vec::new(),
+        },
+    )
 }
 
 impl ProjectRepositoryResourceKind {
     fn identity_kind(self) -> &'static str {
         match self {
+            Self::Skill => "skill",
             Self::Workflow => "workflow",
             Self::QuickPrompt => "quick_prompt",
             Self::QuickApi => "quick_api",
@@ -51,7 +133,7 @@ impl ProjectRepositoryResourceKind {
 
     fn level(self) -> ProjectRepositoryResourceLevel {
         match self {
-            Self::QuickPrompt | Self::QuickExec => {
+            Self::Skill | Self::QuickPrompt | Self::QuickExec => {
                 ProjectRepositoryResourceLevel::UsableWithoutKronn
             }
             Self::Workflow | Self::QuickApi | Self::Artifact => {
@@ -62,6 +144,7 @@ impl ProjectRepositoryResourceKind {
 
     fn paths(self, slug: &str) -> Vec<String> {
         match self {
+            Self::Skill => vec![format!("kronn/skills/{slug}/SKILL.md")],
             Self::Workflow => vec![format!("kronn/workflows/{slug}.yaml")],
             Self::QuickPrompt => vec![format!("kronn/prompts/{slug}.md")],
             Self::QuickApi => vec![format!("kronn/quick-apis/{slug}.yaml")],
@@ -78,47 +161,66 @@ fn parse_identity_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .ok()
-        .or_else(|| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-                .ok()
-                .map(|value| value.and_utc())
-        })
 }
 
-fn repository_changed(root: &Path, paths: &[String], baseline: DateTime<Utc>) -> bool {
-    paths.iter().any(|relative| {
-        let Ok(metadata) = std::fs::metadata(root.join(relative)) else {
-            return true;
-        };
-        metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|modified| modified.as_secs() > baseline.timestamp().max(0) as u64)
-            .unwrap_or(false)
-    })
+struct AlignmentView {
+    status: ProjectRepositoryResourceStatus,
+    approval_required: bool,
+    approved: bool,
+    diff: Option<String>,
 }
 
 fn alignment_status(
+    conn: &rusqlite::Connection,
     root: &Path,
-    paths: &[String],
-    resource_updated_at: DateTime<Utc>,
-    identity_updated_at: Option<&str>,
-) -> ProjectRepositoryResourceStatus {
-    let Some(baseline) = identity_updated_at.and_then(parse_identity_time) else {
-        return ProjectRepositoryResourceStatus::NotPublished;
+    entry: &crate::core::repository_resources::RepositoryLockResource,
+    rendered: &crate::core::repository_resources::RenderedRepositoryResource,
+    alignment: Option<&crate::db::repository_resources::ResourceAlignment>,
+) -> anyhow::Result<AlignmentView> {
+    let repository = crate::core::repository_resources::read_resource(root, entry).ok();
+    let repository_hash = repository.as_ref().map(|(_, hash)| hash.as_str());
+    let status = match alignment {
+        None if repository_hash.is_some() => ProjectRepositoryResourceStatus::RepositoryModified,
+        None => ProjectRepositoryResourceStatus::NotPublished,
+        Some(alignment) => {
+            let repository_changed = repository_hash != Some(alignment.repository_hash.as_str());
+            let database_changed = rendered.hash != alignment.database_hash;
+            match (repository_changed, database_changed) {
+                (false, false) => ProjectRepositoryResourceStatus::UpToDate,
+                (true, false) => ProjectRepositoryResourceStatus::RepositoryModified,
+                (false, true) => ProjectRepositoryResourceStatus::KronnModified,
+                (true, true) => ProjectRepositoryResourceStatus::Conflict,
+            }
+        }
     };
-    if !paths.iter().any(|relative| root.join(relative).is_file()) {
-        return ProjectRepositoryResourceStatus::NotPublished;
-    }
-    let db_changed = resource_updated_at > baseline;
-    let repo_changed = repository_changed(root, paths, baseline);
-    match (repo_changed, db_changed) {
-        (false, false) => ProjectRepositoryResourceStatus::UpToDate,
-        (true, false) => ProjectRepositoryResourceStatus::RepositoryModified,
-        (false, true) => ProjectRepositoryResourceStatus::KronnModified,
-        (true, true) => ProjectRepositoryResourceStatus::Conflict,
-    }
+    let approved = match alignment {
+        Some(alignment) if alignment.imported => crate::db::repository_resources::is_approved(
+            conn,
+            &alignment.project_key,
+            &alignment.kind,
+            &alignment.slug,
+            &crate::core::repository_resources::approval_hash(&rendered.document),
+        )?,
+        Some(_) => true,
+        None => false,
+    };
+    let diff = (status == ProjectRepositoryResourceStatus::Conflict)
+        .then(|| {
+            let path = entry.paths.first()?;
+            let repository = std::fs::read(root.join(path)).ok()?;
+            let kronn = rendered.files.values().next()?;
+            Some(crate::core::repository_resources::simple_diff(
+                &repository,
+                kronn,
+            ))
+        })
+        .flatten();
+    Ok(AlignmentView {
+        status,
+        approval_required: alignment.is_some_and(|alignment| alignment.imported) && !approved,
+        approved,
+        diff,
+    })
 }
 
 fn skill_display_name(path: &Path, fallback: &str) -> String {
@@ -164,6 +266,9 @@ fn discover_repository_skills(root: &Path) -> BTreeMap<String, RepositorySkillSe
             if slug.is_empty() {
                 continue;
             }
+            if *relative_root == ".agents/skills" && slug == "kronn" {
+                continue;
+            }
             let skill_path = entry.path().join("SKILL.md");
             if !skill_path.is_file() {
                 continue;
@@ -206,9 +311,7 @@ fn take_repository_skill(
 }
 
 fn project_skills(
-    conn: &rusqlite::Connection,
     project_id: &str,
-    project_key: &str,
     root: &Path,
     linked_skill_ids: &[String],
 ) -> anyhow::Result<(Vec<ProjectRepositorySkill>, Vec<ProjectRepositorySkill>)> {
@@ -248,28 +351,11 @@ fn project_skills(
             (true, false) => ProjectRepositorySkillProvenance::Repository,
             (false, _) => ProjectRepositorySkillProvenance::Kronn,
         };
-        let status = if is_linked {
-            let identity = crate::db::resource_identities::find_by_target(
-                conn,
-                project_key,
-                "skill",
-                &skill.id,
-            )?;
-            match identity {
-                Some(identity) => Some(alignment_status(
-                    root,
-                    std::slice::from_ref(&publication_path),
-                    parse_identity_time(&identity.updated_at).unwrap_or_else(Utc::now),
-                    Some(&identity.updated_at),
-                )),
-                None if !root.join(&publication_path).is_file() => {
-                    Some(ProjectRepositoryResourceStatus::NotPublished)
-                }
-                None => None,
-            }
+        let status = is_linked.then_some(if root.join(&publication_path).is_file() {
+            ProjectRepositoryResourceStatus::RepositoryModified
         } else {
-            None
-        };
+            ProjectRepositoryResourceStatus::NotPublished
+        });
         let item = project_skill_item(
             skill,
             provenance,
@@ -308,6 +394,9 @@ fn project_skills(
             is_builtin: None,
             status: (!root.join(&publication_path).is_file())
                 .then_some(ProjectRepositoryResourceStatus::NotPublished),
+            approval_required: false,
+            approved: false,
+            diff: None,
             repository_paths: repository
                 .map(|seed| seed.repository_paths)
                 .unwrap_or_default(),
@@ -327,6 +416,9 @@ fn project_skills(
             provenance: ProjectRepositorySkillProvenance::Repository,
             is_builtin: None,
             status: None,
+            approval_required: false,
+            approved: false,
+            diff: None,
             repository_paths: seed.repository_paths,
             publication_path: format!("kronn/skills/{slug}/SKILL.md"),
             slug,
@@ -359,6 +451,9 @@ fn project_skill_item(
         provenance,
         is_builtin: Some(skill.is_builtin),
         status,
+        approval_required: false,
+        approved: false,
+        diff: None,
         repository_paths,
         publication_path,
     }
@@ -386,7 +481,6 @@ pub async fn repository_resources(
                         name: item.name,
                         slug: None,
                         kind: ProjectRepositoryResourceKind::Workflow,
-                        updated_at: item.updated_at,
                     }),
             );
             seeds.extend(
@@ -398,7 +492,6 @@ pub async fn repository_resources(
                         name: item.name,
                         slug: None,
                         kind: ProjectRepositoryResourceKind::QuickPrompt,
-                        updated_at: item.updated_at,
                     }),
             );
             seeds.extend(
@@ -410,7 +503,6 @@ pub async fn repository_resources(
                         name: item.name,
                         slug: None,
                         kind: ProjectRepositoryResourceKind::QuickApi,
-                        updated_at: item.updated_at,
                     }),
             );
             seeds.extend(
@@ -422,7 +514,6 @@ pub async fn repository_resources(
                         name: item.name,
                         slug: None,
                         kind: ProjectRepositoryResourceKind::QuickExec,
-                        updated_at: item.updated_at,
                     }),
             );
             seeds.extend(
@@ -433,18 +524,51 @@ pub async fn repository_resources(
                         name: item.title,
                         slug: Some(item.slug),
                         kind: ProjectRepositoryResourceKind::Artifact,
-                        updated_at: item.updated_at,
                     }),
             );
 
             let root = PathBuf::from(&project.path);
-            let (skills_present, skills_available) = project_skills(
-                conn,
-                &project_id,
-                &project_key,
-                &root,
-                &project.default_skill_ids,
-            )?;
+            let lock =
+                crate::core::repository_resources::load_lock(&root).map_err(anyhow::Error::msg)?;
+            let (mut skills_present, skills_available) =
+                project_skills(&project_id, &root, &project.default_skill_ids)?;
+            for skill in &mut skills_present {
+                let Some(entry) = lock.as_ref().and_then(|lock| {
+                    lock.resources.iter().find(|entry| {
+                        entry.kind == ProjectRepositoryResourceKind::Skill
+                            && entry.slug == skill.slug
+                    })
+                }) else {
+                    continue;
+                };
+                if skill.id.starts_with("repository:") {
+                    skill.status = Some(ProjectRepositoryResourceStatus::RepositoryModified);
+                    skill.repository_paths = entry.paths.clone();
+                    continue;
+                }
+                let alignment = crate::db::repository_resources::find_alignment(
+                    conn,
+                    &project_key,
+                    "skill",
+                    &skill.slug,
+                )?;
+                let timestamp = alignment
+                    .as_ref()
+                    .and_then(|alignment| parse_identity_time(&alignment.aligned_at));
+                let rendered = render_database_resource(
+                    conn,
+                    ProjectRepositoryResourceKind::Skill,
+                    &skill.id,
+                    &skill.slug,
+                    timestamp,
+                )?;
+                let view = alignment_status(conn, &root, entry, &rendered, alignment.as_ref())?;
+                skill.status = Some(view.status);
+                skill.approval_required = view.approval_required;
+                skill.approved = view.approved;
+                skill.diff = view.diff;
+                skill.repository_paths = entry.paths.clone();
+            }
             let mut resources = Vec::with_capacity(seeds.len());
             for seed in seeds {
                 let identity = crate::db::resource_identities::find_by_target(
@@ -468,21 +592,56 @@ pub async fn repository_resources(
                     .or(seed.slug)
                     .unwrap_or_else(generated_slug);
                 let repository_paths = seed.kind.paths(&slug);
-                let status = alignment_status(
-                    &root,
+                let rendered = render_database_resource(conn, seed.kind, &seed.id, &slug, None)?;
+                let alignment = crate::db::repository_resources::find_alignment(
+                    conn,
+                    &project_key,
+                    seed.kind.identity_kind(),
+                    &slug,
+                )?;
+                let entry = lock_entry(
+                    lock.as_ref(),
+                    seed.kind,
+                    &slug,
+                    &seed.name,
                     &repository_paths,
-                    seed.updated_at,
-                    identity.as_ref().map(|item| item.updated_at.as_str()),
                 );
+                let view = alignment_status(conn, &root, &entry, &rendered, alignment.as_ref())?;
                 resources.push(ProjectRepositoryResource {
                     id: seed.id,
                     name: seed.name,
                     slug,
                     kind: seed.kind,
                     level: seed.kind.level(),
-                    status,
-                    repository_paths,
+                    status: view.status,
+                    approval_required: view.approval_required,
+                    approved: view.approved,
+                    diff: view.diff,
+                    repository_paths: entry.paths,
                 });
+            }
+            if let Some(lock) = lock.as_ref() {
+                for entry in &lock.resources {
+                    if entry.kind == ProjectRepositoryResourceKind::Skill
+                        || resources.iter().any(|resource| {
+                            resource.kind == entry.kind && resource.slug == entry.slug
+                        })
+                    {
+                        continue;
+                    }
+                    resources.push(ProjectRepositoryResource {
+                        id: format!("repository:{}:{}", entry.kind.identity_kind(), entry.slug),
+                        name: entry.name.clone(),
+                        slug: entry.slug.clone(),
+                        kind: entry.kind,
+                        level: entry.kind.level(),
+                        status: ProjectRepositoryResourceStatus::RepositoryModified,
+                        approval_required: false,
+                        approved: false,
+                        diff: None,
+                        repository_paths: entry.paths.clone(),
+                    });
+                }
             }
             resources.sort_by_key(|resource| resource.name.to_lowercase());
             Ok(Some(ProjectRepositoryResources {
@@ -507,97 +666,547 @@ pub async fn repository_resources(
     }
 }
 
+fn imported_artifact(
+    conn: &rusqlite::Connection,
+    document: &crate::core::repository_resources::RepositoryDocument,
+    project_id: &str,
+    existing_id: Option<&str>,
+) -> anyhow::Result<String> {
+    let exported: ArtifactBundlePage = serde_json::from_value(document.resource.clone())?;
+    let page_id = existing_id
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let datasets = exported
+        .datasets
+        .iter()
+        .map(|dataset| CreateLivePageDataset {
+            name: dataset.name.clone(),
+            kind: dataset.kind,
+            initial: if dataset.kind == crate::models::LivePageDatasetKind::TimeSeries {
+                Some(serde_json::Value::Array(
+                    dataset
+                        .points
+                        .iter()
+                        .map(|point| point.payload.clone())
+                        .collect(),
+                ))
+            } else {
+                dataset.has_current.then(|| dataset.current.clone())
+            },
+            schema: dataset.schema.clone(),
+            max_points: Some(dataset.max_points),
+            max_age_days: dataset.max_age_days,
+        })
+        .collect::<Vec<_>>();
+    if existing_id.is_some() {
+        crate::db::live_pages::update_live_page(
+            conn,
+            &page_id,
+            &UpdateLivePageRequest {
+                title: Some(exported.title.clone()),
+                pinned: None,
+                archived: Some(false),
+            },
+        )?;
+        crate::db::live_pages::update_live_page_html(
+            conn,
+            &page_id,
+            &exported.html,
+            exported.created_by_agent.as_deref(),
+        )?;
+        conn.execute(
+            "DELETE FROM live_page_datasets WHERE page_id = ?1",
+            [&page_id],
+        )?;
+        for dataset in &datasets {
+            crate::db::live_pages::add_live_page_dataset(conn, &page_id, dataset)?;
+        }
+        conn.execute(
+            "UPDATE live_pages SET project_id = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![project_id, document.updated_at.to_rfc3339(), page_id],
+        )?;
+    } else {
+        let revision_id = Uuid::new_v4().to_string();
+        let page = LivePage {
+            id: page_id.clone(),
+            project_id: Some(project_id.to_string()),
+            title: exported.title,
+            slug: document.slug.clone(),
+            current_revision_id: revision_id.clone(),
+            data_revision: 0,
+            created_at: document.updated_at,
+            updated_at: document.updated_at,
+            last_published_at: None,
+            pinned: false,
+            archived: false,
+        };
+        let revision = LivePageRevision {
+            id: revision_id,
+            page_id: page_id.clone(),
+            revision: 1,
+            html: exported.html,
+            created_by_agent: exported.created_by_agent,
+            created_at: document.updated_at,
+        };
+        crate::db::live_pages::create_live_page(conn, &page, &revision, &datasets, None)?;
+    }
+    Ok(page_id)
+}
+
+fn import_document(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    project_key: &str,
+    document: &crate::core::repository_resources::RepositoryDocument,
+) -> anyhow::Result<String> {
+    let kind = document.kind.identity_kind();
+    let existing_id =
+        crate::db::resource_identities::lookup(conn, project_key, kind, &document.slug)?;
+    let now = document.updated_at;
+    let target_id = match document.kind {
+        ProjectRepositoryResourceKind::Skill => {
+            let skill: Skill = serde_json::from_value(document.resource.clone())?;
+            let target_id = match existing_id.as_deref() {
+                Some(id) if id.starts_with("custom-") => crate::core::skills::update_custom_skill(
+                    id,
+                    &skill.name,
+                    &skill.description,
+                    &skill.icon,
+                    &skill.category,
+                    &skill.content,
+                    skill.license.as_deref(),
+                    skill.allowed_tools.as_deref(),
+                )
+                .map_err(anyhow::Error::msg)?,
+                _ => crate::core::skills::save_custom_skill(
+                    &skill.name,
+                    &skill.description,
+                    &skill.icon,
+                    &skill.category,
+                    &skill.content,
+                    skill.license.as_deref(),
+                    skill.allowed_tools.as_deref(),
+                )
+                .map_err(anyhow::Error::msg)?,
+            };
+            let project = crate::db::projects::get_project(conn, project_id)?
+                .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+            let mut skill_ids = project.default_skill_ids;
+            if !skill_ids.contains(&target_id) {
+                skill_ids.push(target_id.clone());
+                crate::db::projects::update_project_default_skills(conn, project_id, &skill_ids)?;
+            }
+            target_id
+        }
+        ProjectRepositoryResourceKind::Workflow => {
+            let mut resource: Workflow = serde_json::from_value(document.resource.clone())?;
+            resource.id = existing_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            resource.project_id = Some(project_id.to_string());
+            resource.updated_at = now;
+            resource.enabled = false;
+            for step in resource
+                .steps
+                .iter_mut()
+                .chain(resource.on_failure.iter_mut())
+            {
+                step.gate_notify_url = None;
+                if let Some(config) = step.notify_config.as_mut() {
+                    if config.url.starts_with("secret://") {
+                        step.notify_config = None;
+                    }
+                }
+            }
+            crate::api::workflows::rebind_api_configs(conn, &mut resource.steps, Some(project_id));
+            crate::api::workflows::rebind_api_configs(
+                conn,
+                &mut resource.on_failure,
+                Some(project_id),
+            );
+            if existing_id.is_some() {
+                crate::db::workflows::update_workflow(conn, &resource)?;
+            } else {
+                resource.created_at = now;
+                crate::db::workflows::insert_workflow(conn, &resource)?;
+            }
+            resource.id
+        }
+        ProjectRepositoryResourceKind::QuickPrompt => {
+            let mut resource: QuickPrompt = serde_json::from_value(document.resource.clone())?;
+            resource.id = existing_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            resource.project_id = Some(project_id.to_string());
+            resource.updated_at = now;
+            if existing_id.is_some() {
+                crate::db::quick_prompts::update_quick_prompt(conn, &resource)?;
+            } else {
+                resource.created_at = now;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &resource)?;
+            }
+            resource.id
+        }
+        ProjectRepositoryResourceKind::QuickApi => {
+            let mut resource: QuickApi = serde_json::from_value(document.resource.clone())?;
+            resource.id = existing_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            resource.project_id = Some(project_id.to_string());
+            resource.updated_at = now;
+            crate::api::workflows::rebind_quick_api_config(conn, &mut resource, Some(project_id));
+            if existing_id.is_some() {
+                crate::db::quick_apis::update_quick_api(conn, &resource)?;
+            } else {
+                resource.created_at = now;
+                crate::db::quick_apis::insert_quick_api(conn, &resource)?;
+            }
+            resource.id
+        }
+        ProjectRepositoryResourceKind::QuickExec => {
+            let mut resource: QuickExec = serde_json::from_value(document.resource.clone())?;
+            resource.id = existing_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            resource.project_id = Some(project_id.to_string());
+            resource.updated_at = now;
+            if existing_id.is_some() {
+                crate::db::quick_execs::update_quick_exec(conn, &resource)?;
+            } else {
+                resource.created_at = now;
+                crate::db::quick_execs::insert_quick_exec(conn, &resource)?;
+            }
+            resource.id
+        }
+        ProjectRepositoryResourceKind::Artifact => {
+            imported_artifact(conn, document, project_id, existing_id.as_deref())?
+        }
+    };
+    crate::db::resource_identities::upsert_at(
+        conn,
+        project_key,
+        kind,
+        &document.slug,
+        &target_id,
+        &document.updated_at.to_rfc3339(),
+    )?;
+    Ok(target_id)
+}
+
+fn publish_one(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    request: PublishProjectRepositoryResourceRequest,
+) -> anyhow::Result<ProjectRepositoryResourceMutation> {
+    let project = crate::db::projects::get_project(conn, project_id)?
+        .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+    let project_key = crate::db::resource_identities::project_key(conn, Some(project_id))?;
+    let identity = crate::db::resource_identities::find_by_target(
+        conn,
+        &project_key,
+        request.kind.identity_kind(),
+        &request.id,
+    )?;
+    let slug = identity.map(|identity| identity.slug).unwrap_or_else(|| {
+        if request.kind == ProjectRepositoryResourceKind::Skill {
+            return crate::core::native_files::slug(&request.id);
+        }
+        let name = match request.kind {
+            ProjectRepositoryResourceKind::Skill => {
+                crate::core::skills::get_skill(&request.id).map(|skill| skill.name)
+            }
+            ProjectRepositoryResourceKind::Workflow => {
+                crate::db::workflows::get_workflow(conn, &request.id)
+                    .ok()
+                    .flatten()
+                    .map(|resource| resource.name)
+            }
+            ProjectRepositoryResourceKind::QuickPrompt => {
+                crate::db::quick_prompts::get_quick_prompt(conn, &request.id)
+                    .ok()
+                    .flatten()
+                    .map(|resource| resource.name)
+            }
+            ProjectRepositoryResourceKind::QuickApi => {
+                crate::db::quick_apis::get_quick_api(conn, &request.id)
+                    .ok()
+                    .flatten()
+                    .map(|resource| resource.name)
+            }
+            ProjectRepositoryResourceKind::QuickExec => {
+                crate::db::quick_execs::get_quick_exec(conn, &request.id)
+                    .ok()
+                    .flatten()
+                    .map(|resource| resource.name)
+            }
+            ProjectRepositoryResourceKind::Artifact => {
+                crate::db::live_pages::get_live_page(conn, &request.id)
+                    .ok()
+                    .flatten()
+                    .map(|resource| resource.page.title)
+            }
+        }
+        .unwrap_or_else(|| request.id.clone());
+        let slug = crate::core::mcp_scanner::slugify_label(&name);
+        if slug.is_empty() {
+            format!(
+                "resource-{}",
+                request.id.chars().take(8).collect::<String>()
+            )
+        } else {
+            slug
+        }
+    });
+    let skill_updated_at = (request.kind == ProjectRepositoryResourceKind::Skill).then(Utc::now);
+    let rendered =
+        render_database_resource(conn, request.kind, &request.id, &slug, skill_updated_at)?;
+    let entry = crate::core::repository_resources::publish(
+        Path::new(&project.path),
+        &project_key,
+        rendered,
+        request.overwrite_repository_changes,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let rendered =
+        render_database_resource(conn, request.kind, &request.id, &slug, skill_updated_at)?;
+    crate::db::resource_identities::upsert_at(
+        conn,
+        &project_key,
+        request.kind.identity_kind(),
+        &slug,
+        &request.id,
+        &rendered.document.updated_at.to_rfc3339(),
+    )?;
+    crate::db::repository_resources::upsert_alignment(
+        conn,
+        &project_key,
+        request.kind.identity_kind(),
+        &slug,
+        &request.id,
+        &entry.sha256,
+        &rendered.hash,
+        &rendered.document.updated_at.to_rfc3339(),
+        false,
+    )?;
+    Ok(ProjectRepositoryResourceMutation {
+        kind: request.kind,
+        id: request.id,
+        slug,
+        status: ProjectRepositoryResourceStatus::UpToDate,
+        approved: true,
+    })
+}
+
+/// POST /api/projects/:id/repository-resources/publish
+pub async fn publish_repository_resource(
+    State(state): State<AppState>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<PublishProjectRepositoryResourceRequest>,
+) -> Json<ApiResponse<ProjectRepositoryResourceMutation>> {
+    match state
+        .db
+        .with_conn(move |conn| publish_one(conn, &project_id, request))
+        .await
+    {
+        Ok(result) => Json(ApiResponse::ok(result)),
+        Err(error) => Json(ApiResponse::err(format!(
+            "Unable to publish resource: {error}"
+        ))),
+    }
+}
+
+/// POST /api/projects/:id/repository-resources/import
+pub async fn import_repository_resource(
+    State(state): State<AppState>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<ImportProjectRepositoryResourceRequest>,
+) -> Json<ApiResponse<ProjectRepositoryResourceMutation>> {
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let project = crate::db::projects::get_project(conn, &project_id)?
+                .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+            let project_key = crate::db::resource_identities::project_key(conn, Some(&project_id))?;
+            let root = Path::new(&project.path);
+            let lock = crate::core::repository_resources::load_lock(root)
+                .map_err(anyhow::Error::msg)?
+                .ok_or_else(|| anyhow::anyhow!("kronn/kronn.lock not found"))?;
+            let entry = lock
+                .resources
+                .iter()
+                .find(|entry| entry.kind == request.kind && entry.slug == request.slug)
+                .ok_or_else(|| anyhow::anyhow!("Resource not found in kronn.lock"))?;
+            let (document, repository_hash) =
+                crate::core::repository_resources::read_resource(root, entry)
+                    .map_err(anyhow::Error::msg)?;
+            let target_id = import_document(conn, &project_id, &project_key, &document)?;
+            let rendered = render_database_resource(
+                conn,
+                request.kind,
+                &target_id,
+                &request.slug,
+                Some(document.updated_at),
+            )?;
+            crate::db::repository_resources::upsert_alignment(
+                conn,
+                &project_key,
+                request.kind.identity_kind(),
+                &request.slug,
+                &target_id,
+                &repository_hash,
+                &rendered.hash,
+                &document.updated_at.to_rfc3339(),
+                true,
+            )?;
+            Ok(ProjectRepositoryResourceMutation {
+                kind: request.kind,
+                id: target_id,
+                slug: request.slug,
+                status: ProjectRepositoryResourceStatus::UpToDate,
+                approved: false,
+            })
+        })
+        .await;
+    match result {
+        Ok(result) => Json(ApiResponse::ok(result)),
+        Err(error) => Json(ApiResponse::err(format!(
+            "Unable to import resource: {error}"
+        ))),
+    }
+}
+
+/// POST /api/projects/:id/repository-resources/approve
+pub async fn approve_repository_resource(
+    State(state): State<AppState>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<ApproveProjectRepositoryResourceRequest>,
+) -> Json<ApiResponse<ProjectRepositoryResourceMutation>> {
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let project_key = crate::db::resource_identities::project_key(conn, Some(&project_id))?;
+            let alignment = crate::db::repository_resources::find_alignment_by_target(
+                conn,
+                request.kind.identity_kind(),
+                &request.id,
+            )?
+            .filter(|alignment| alignment.project_key == project_key)
+            .ok_or_else(|| anyhow::anyhow!("Imported resource alignment not found"))?;
+            let timestamp = parse_identity_time(&alignment.aligned_at);
+            let rendered = render_database_resource(
+                conn,
+                request.kind,
+                &request.id,
+                &alignment.slug,
+                timestamp,
+            )?;
+            crate::db::repository_resources::approve(
+                conn,
+                &project_key,
+                request.kind.identity_kind(),
+                &alignment.slug,
+                &crate::core::repository_resources::approval_hash(&rendered.document),
+            )?;
+            Ok(ProjectRepositoryResourceMutation {
+                kind: request.kind,
+                id: request.id,
+                slug: alignment.slug,
+                status: ProjectRepositoryResourceStatus::UpToDate,
+                approved: true,
+            })
+        })
+        .await;
+    match result {
+        Ok(result) => Json(ApiResponse::ok(result)),
+        Err(error) => Json(ApiResponse::err(format!(
+            "Unable to approve resource: {error}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use std::fs::File;
-    use std::time::Duration;
-
-    fn set_modified(path: &Path, seconds: u64) {
-        let file = File::options().write(true).open(path).unwrap();
-        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
-            .unwrap();
-    }
 
     #[test]
-    fn unpublished_resource_has_no_alignment_baseline() {
+    fn hash_alignment_distinguishes_all_four_published_states() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let base = QuickExec {
+            id: "qe-1".into(),
+            name: "Lint".into(),
+            icon: "terminal".into(),
+            description: String::new(),
+            project_id: Some("project-1".into()),
+            command: "cargo".into(),
+            args: vec!["check".into()],
+            timeout_secs: 30,
+            output_format: Default::default(),
+            variables: Vec::new(),
+            pinned: false,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        let rendered = crate::core::repository_resources::render_quick_exec(&base, "lint").unwrap();
+        let entry = crate::core::repository_resources::publish(
+            root.path(),
+            "repo",
+            rendered.clone(),
+            false,
+        )
+        .unwrap();
+        crate::db::repository_resources::upsert_alignment(
+            &conn,
+            "repo",
+            "quick_exec",
+            "lint",
+            "qe-1",
+            &entry.sha256,
+            &rendered.hash,
+            &timestamp.to_rfc3339(),
+            false,
+        )
+        .unwrap();
+        let alignment =
+            crate::db::repository_resources::find_alignment(&conn, "repo", "quick_exec", "lint")
+                .unwrap()
+                .unwrap();
         assert_eq!(
-            alignment_status(
-                Path::new("/missing"),
-                &["kronn/x.yaml".into()],
-                Utc::now(),
-                None
-            ),
-            ProjectRepositoryResourceStatus::NotPublished,
-        );
-    }
-
-    #[test]
-    fn imported_identity_without_repository_files_is_still_unpublished() {
-        let baseline = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-        assert_eq!(
-            alignment_status(
-                Path::new("/missing"),
-                &["kronn/x.yaml".into()],
-                baseline,
-                Some(&baseline.to_rfc3339()),
-            ),
-            ProjectRepositoryResourceStatus::NotPublished,
-        );
-    }
-
-    #[test]
-    fn alignment_status_distinguishes_repository_kronn_and_conflicting_changes() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let relative = "kronn/workflows/report.yaml";
-        let path = directory.path().join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "name: report\n").unwrap();
-
-        let baseline_seconds = 1_700_000_000;
-        let baseline = Utc.timestamp_opt(baseline_seconds, 0).unwrap();
-        let changed = Utc.timestamp_opt(baseline_seconds + 10, 0).unwrap();
-        let identity = baseline.to_rfc3339();
-
-        set_modified(&path, baseline_seconds as u64);
-        assert_eq!(
-            alignment_status(
-                directory.path(),
-                &[relative.into()],
-                baseline,
-                Some(&identity)
-            ),
-            ProjectRepositoryResourceStatus::UpToDate,
-        );
-        assert_eq!(
-            alignment_status(
-                directory.path(),
-                &[relative.into()],
-                changed,
-                Some(&identity)
-            ),
-            ProjectRepositoryResourceStatus::KronnModified,
+            alignment_status(&conn, root.path(), &entry, &rendered, Some(&alignment))
+                .unwrap()
+                .status,
+            ProjectRepositoryResourceStatus::UpToDate
         );
 
-        set_modified(&path, (baseline_seconds + 10) as u64);
+        let path = root.path().join(&entry.paths[0]);
+        let original = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"repository edit").unwrap();
         assert_eq!(
-            alignment_status(
-                directory.path(),
-                &[relative.into()],
-                baseline,
-                Some(&identity)
-            ),
-            ProjectRepositoryResourceStatus::RepositoryModified,
+            alignment_status(&conn, root.path(), &entry, &rendered, Some(&alignment))
+                .unwrap()
+                .status,
+            ProjectRepositoryResourceStatus::RepositoryModified
         );
+
+        std::fs::write(&path, original).unwrap();
+        let mut changed = base;
+        changed.description = "database edit".into();
+        let changed =
+            crate::core::repository_resources::render_quick_exec(&changed, "lint").unwrap();
         assert_eq!(
-            alignment_status(
-                directory.path(),
-                &[relative.into()],
-                changed,
-                Some(&identity)
-            ),
-            ProjectRepositoryResourceStatus::Conflict,
+            alignment_status(&conn, root.path(), &entry, &changed, Some(&alignment))
+                .unwrap()
+                .status,
+            ProjectRepositoryResourceStatus::KronnModified
         );
+
+        std::fs::write(&path, b"repository edit").unwrap();
+        let view =
+            alignment_status(&conn, root.path(), &entry, &changed, Some(&alignment)).unwrap();
+        assert_eq!(view.status, ProjectRepositoryResourceStatus::Conflict);
+        assert!(view.diff.unwrap().contains("--- repository"));
     }
 }

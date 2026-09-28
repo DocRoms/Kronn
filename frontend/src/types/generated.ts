@@ -513,6 +513,8 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
  */
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
 
+export type ApproveProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, id: string, };
+
 export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>,
 /**
  * Literal credentials replaced before export; locations only, never values.
@@ -3362,6 +3364,8 @@ imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
 
+export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string, };
+
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
  */
@@ -5192,11 +5196,13 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
-export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, status: ProjectRepositoryResourceStatus, repository_paths: Array<string>, };
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, };
 
-export type ProjectRepositoryResourceKind = "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
+export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
 
 export type ProjectRepositoryResourceLevel = "usable_without_kronn" | "kronn_required";
+
+export type ProjectRepositoryResourceMutation = { kind: ProjectRepositoryResourceKind, id: string, slug: string, status: ProjectRepositoryResourceStatus, approved: boolean, };
 
 /**
  * Read-only projection of the skills, automations and artifacts attached to a
@@ -5206,7 +5212,7 @@ export type ProjectRepositoryResources = { kronn_exists: boolean, skills_present
 
 export type ProjectRepositoryResourceStatus = "not_published" | "up_to_date" | "repository_modified" | "kronn_modified" | "conflict";
 
-export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, repository_paths: Array<string>, publication_path: string, };
+export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, publication_path: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
@@ -5374,6 +5380,12 @@ observed_at?: string | null,
  * `<run_id>:<write_index>` afin qu'une reprise ne duplique pas les points.
  */
 dedupe_key?: string | null, key_field?: string | null, };
+
+export type PublishProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, id: string,
+/**
+ * Required when the repository side also moved since the baseline.
+ */
+overwrite_repository_changes?: boolean, };
 
 /**
  * The sole accepted input for a local Ollama pull.  The endpoint never

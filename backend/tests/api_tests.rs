@@ -3217,6 +3217,193 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
 }
 
 #[tokio::test]
+async fn repository_resource_publish_align_import_and_hash_approval_round_trip() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![
+                        "portable-project",
+                        "Portable project",
+                        project_path,
+                        now.to_rfc3339(),
+                    ],
+                )?;
+                kronn::db::quick_execs::insert_quick_exec(
+                    conn,
+                    &kronn::models::QuickExec {
+                        id: "qe-portable".into(),
+                        name: "Deploy".into(),
+                        icon: "terminal".into(),
+                        description: String::new(),
+                        project_id: Some("portable-project".into()),
+                        command: "deploy".into(),
+                        args: vec!["--token".into(), "literal-secret-value".into()],
+                        timeout_secs: 30,
+                        output_format: Default::default(),
+                        variables: Vec::new(),
+                        pinned: false,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, before) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(before["data"]["kronn_exists"], false);
+    assert!(!project_directory.path().join("kronn").exists());
+
+    let (_, published) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/publish",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "id": "qe-portable",
+            "overwrite_repository_changes": false,
+        }),
+    )
+    .await;
+    assert_eq!(published["success"], true, "{published}");
+    let resource_path = project_directory
+        .path()
+        .join("kronn/quick-execs/deploy.yaml");
+    let published_text = std::fs::read_to_string(&resource_path).unwrap();
+    assert!(!published_text.contains("literal-secret-value"));
+    assert!(published_text.contains("secret://KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
+    let config_text = std::fs::read_to_string(project_directory.path().join("kronn/kronn.toml"))
+        .unwrap();
+    assert!(config_text.contains("KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
+    assert!(!config_text.contains("literal-secret-value"));
+    for relative in [
+        "kronn/kronn.lock",
+        "kronn/kronn.toml",
+        "kronn/INDEX.md",
+        ".agents/skills/kronn/SKILL.md",
+        "docs/AGENTS.md",
+    ] {
+        assert!(
+            project_directory.path().join(relative).is_file(),
+            "{relative}"
+        );
+    }
+
+    let (_, aligned) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(aligned["data"]["resources"][0]["status"], "up_to_date");
+
+    std::fs::write(&resource_path, format!("{published_text}\n")).unwrap();
+    let (_, repository_changed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(
+        repository_changed["data"]["resources"][0]["status"],
+        "repository_modified"
+    );
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
+            item.description = "Kronn edit".into();
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, conflict) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(conflict["data"]["resources"][0]["status"], "conflict");
+    assert!(conflict["data"]["resources"][0]["diff"]
+        .as_str()
+        .unwrap()
+        .contains("--- repository"));
+
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/import",
+        serde_json::json!({ "kind": "quick_exec", "slug": "deploy" }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let (_, awaiting) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(awaiting["data"]["resources"][0]["status"], "up_to_date");
+    assert_eq!(awaiting["data"]["resources"][0]["approval_required"], true);
+
+    let (_, blocked) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(blocked["data"]["success"], false, "{blocked}");
+    assert!(blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+
+    let (_, approved) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/approve",
+        serde_json::json!({ "kind": "quick_exec", "id": "qe-portable" }),
+    )
+    .await;
+    assert_eq!(approved["success"], true, "{approved}");
+    assert_eq!(approved["data"]["approved"], true);
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item = kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?
+                .expect("quick exec");
+            item.args.push("--dry-run".into());
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, changed_hash_blocked) = post_json(
+        app,
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(changed_hash_blocked["data"]["success"], false);
+    assert!(changed_hash_blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+}
+
+#[tokio::test]
 async fn project_repository_resources_classifies_repository_and_kronn_skills() {
     let state = test_state();
     let project_directory = tempfile::TempDir::new().unwrap();

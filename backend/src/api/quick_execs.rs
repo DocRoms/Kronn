@@ -207,6 +207,55 @@ pub async fn run(
         }
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
+    let approval_item = item.clone();
+    let approval = state
+        .db
+        .with_read_conn(move |conn| {
+            let Some(alignment) = crate::db::repository_resources::find_alignment_by_target(
+                conn,
+                "quick_exec",
+                &approval_item.id,
+            )?
+            else {
+                return Ok(());
+            };
+            let rendered = crate::core::repository_resources::render_quick_exec(
+                &approval_item,
+                &alignment.slug,
+            )
+            .map_err(anyhow::Error::msg)?;
+            crate::core::repository_resources::ensure_execution_approved(
+                conn,
+                "quick_exec",
+                &approval_item.id,
+                &crate::core::repository_resources::approval_hash(&rendered.document),
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await;
+    if let Err(error) = approval {
+        let response = RunQuickExecResponse {
+            exit_code: None,
+            run_id: run_id.clone(),
+            success: false,
+            duration_ms: 0,
+            data: None,
+            stdout: None,
+            stderr: None,
+            error: Some(error.to_string()),
+        };
+        let _ = persist_quick_exec_terminal(
+            &state,
+            &id,
+            item.project_id.clone(),
+            launch.discussion_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::PreflightFailed,
+        )
+        .await;
+        return Json(ApiResponse::ok(response));
+    }
     // A GLOBAL Quick Exec launched from a project-scoped discussion resolves
     // that project's environment/worktree exactly like one declared on the
     // project directly (KT-476 LaunchContext).

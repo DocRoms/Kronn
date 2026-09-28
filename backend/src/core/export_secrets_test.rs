@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::{QuickApi, QuickExec, WorkflowStep};
+use crate::models::{NotifyConfig, QuickApi, QuickExec, WorkflowStep};
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -185,6 +185,34 @@ fn masks_api_call_step_headers_in_workflows() {
     assert_eq!(step.api_headers.unwrap()["Authorization"], REDACTED);
     assert_eq!(found[0].kind, "workflow_step");
     assert_eq!(found[0].name, "Nightly › fetch");
+}
+
+#[test]
+fn masks_notify_and_gate_urls_in_workflows() {
+    let mut step = WorkflowStep {
+        name: "notify".into(),
+        notify_config: Some(NotifyConfig {
+            url: "https://hooks.example.test/services/private-token".into(),
+            method: "POST".into(),
+            headers: HashMap::from([("Authorization".into(), "Bearer literal-token".into())]),
+            body_template: "done".into(),
+        }),
+        gate_notify_url: Some("https://hooks.example.test/gate/private-token".into()),
+        ..WorkflowStep::default()
+    };
+    let mut found = vec![];
+    redact_steps("wf-1", "Nightly", std::iter::once(&mut step), &mut found);
+    let notify = step.notify_config.unwrap();
+    assert_eq!(notify.url, REDACTED);
+    assert_eq!(notify.headers["Authorization"], REDACTED);
+    assert_eq!(step.gate_notify_url.as_deref(), Some(REDACTED));
+    let fields = found
+        .into_iter()
+        .map(|field| field.field)
+        .collect::<Vec<_>>();
+    assert!(fields.contains(&"notify_config.url".to_string()));
+    assert!(fields.contains(&"notify_config.headers.Authorization".to_string()));
+    assert!(fields.contains(&"gate_notify_url".to_string()));
 }
 
 #[test]

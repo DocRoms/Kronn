@@ -11,7 +11,11 @@ import type {
   ApiKeyDisplay,
   ApiKeysResponse,
   Project,
+  ApproveProjectRepositoryResourceRequest,
+  ImportProjectRepositoryResourceRequest,
+  ProjectRepositoryResourceMutation,
   ProjectRepositoryResources,
+  PublishProjectRepositoryResourceRequest,
   ProjectDockerAction,
   ProjectDockerLogs,
   ProjectDockerRunningSummary,
@@ -896,6 +900,12 @@ export const projects = {
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
   repositoryResources: (id: string) =>
     api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
+  publishRepositoryResource: (id: string, request: PublishProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/publish`, request),
+  importRepositoryResource: (id: string, request: ImportProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/import`, request),
+  approveRepositoryResource: (id: string, request: ApproveProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/approve`, request),
   dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
   dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
   dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>

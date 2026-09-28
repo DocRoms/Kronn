@@ -114,6 +114,13 @@ pub struct ProjectRepositorySkill {
     pub is_builtin: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProjectRepositoryResourceStatus>,
+    #[serde(default)]
+    pub approval_required: bool,
+    #[serde(default)]
+    pub approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diff: Option<String>,
     pub repository_paths: Vec<String>,
     pub publication_path: String,
 }
@@ -136,13 +143,55 @@ pub struct ProjectRepositoryResource {
     pub kind: ProjectRepositoryResourceKind,
     pub level: ProjectRepositoryResourceLevel,
     pub status: ProjectRepositoryResourceStatus,
+    #[serde(default)]
+    pub approval_required: bool,
+    #[serde(default)]
+    pub approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diff: Option<String>,
     pub repository_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct PublishProjectRepositoryResourceRequest {
+    pub kind: ProjectRepositoryResourceKind,
+    pub id: String,
+    /// Required when the repository side also moved since the baseline.
+    #[serde(default)]
+    pub overwrite_repository_changes: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportProjectRepositoryResourceRequest {
+    pub kind: ProjectRepositoryResourceKind,
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ApproveProjectRepositoryResourceRequest {
+    pub kind: ProjectRepositoryResourceKind,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ProjectRepositoryResourceMutation {
+    pub kind: ProjectRepositoryResourceKind,
+    pub id: String,
+    pub slug: String,
+    pub status: ProjectRepositoryResourceStatus,
+    pub approved: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum ProjectRepositoryResourceKind {
+    Skill,
     Workflow,
     QuickPrompt,
     QuickApi,
