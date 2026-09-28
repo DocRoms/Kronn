@@ -277,12 +277,17 @@ async fn execute_claimed_action(
                 Some(result) if response.success => {
                     let deep_link = format!("automation:quick_api:{}", result.run_id);
                     let diagnostic = result.error.clone();
+                    let preflight_failed = diagnostic
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("preflight_failed:"));
                     persist_completion(
                         &state,
                         action.id,
                         ActionCompletion {
                             state: if result.success {
                                 DiscussionActionState::Succeeded
+                            } else if preflight_failed {
+                                DiscussionActionState::PreflightFailed
                             } else {
                                 DiscussionActionState::Failed
                             },

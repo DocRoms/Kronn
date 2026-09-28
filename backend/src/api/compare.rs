@@ -676,6 +676,11 @@ pub async fn start_improvement(
                     .context("Les discussions ne proviennent pas toutes du même Quick Prompt")?;
             let current_qp = crate::db::quick_prompts::get_quick_prompt(conn, &qp_id)?
                 .context("Quick Prompt not found")?;
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn,
+                &current_qp,
+            )
+            .map_err(anyhow::Error::msg)?;
             let current_version = crate::db::quick_prompts::current_version_index(conn, &qp_id)?
                 .context("Quick Prompt has no version snapshot")?;
             let evaluated_version = evaluated_version_index.and_then(|wanted| {

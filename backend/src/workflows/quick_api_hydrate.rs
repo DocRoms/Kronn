@@ -43,7 +43,14 @@ pub async fn hydrate_step_from_quick_api(
 
     let qa_lookup = qa_id.clone();
     let qa = match db
-        .with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_lookup))
+        .with_read_conn(move |conn| {
+            let api = crate::db::quick_apis::get_quick_api(conn, &qa_lookup)?;
+            if let Some(api) = &api {
+                crate::core::repository_resources::ensure_quick_api_execution_approved(conn, api)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            Ok(api)
+        })
         .await
     {
         Ok(Some(q)) => q,
@@ -53,7 +60,7 @@ pub async fn hydrate_step_from_quick_api(
                 kind, qa_id
             ));
         }
-        Err(e) => return Err(format!("DB error loading QuickApi: {}", e)),
+        Err(e) => return Err(format!("QuickApi preflight failed: {}", e)),
     };
 
     // Per-field override : la valeur du step gagne si présente, sinon fallback

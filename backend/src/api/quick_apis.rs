@@ -418,6 +418,40 @@ pub async fn run_qa(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    let approval_api = qa.clone();
+    if let Err(error) = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_api_execution_approved(
+                conn,
+                &approval_api,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+    {
+        let response = RunQuickApiResponse {
+            run_id: run_id.clone(),
+            success: false,
+            duration_ms: 0,
+            envelope: None,
+            error: Some(format!("preflight_failed:{error}")),
+        };
+        if let Err(persist_error) = persist_quick_api_terminal(
+            &state,
+            &id,
+            qa.project_id.clone(),
+            launch.discussion_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::PreflightFailed,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {persist_error}")));
+        }
+        return Json(ApiResponse::ok(response));
+    }
     // A GLOBAL Quick API launched from a project-scoped discussion resolves
     // that project's environment/broker config exactly like one declared on
     // the project directly (KT-476 LaunchContext).
@@ -809,6 +843,39 @@ pub async fn batch_run_qa(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    let approval_api = qa.clone();
+    if let Err(error) = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_api_execution_approved(
+                conn,
+                &approval_api,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+    {
+        let response = BatchRunQuickApiResponse {
+            run_id: run_id.clone(),
+            status: "ERROR".into(),
+            duration_ms: 0,
+            envelope: None,
+            error: Some(format!("preflight_failed:{error}")),
+        };
+        if let Err(persist_error) = persist_batch_qa_terminal(
+            &state,
+            &id,
+            qa.project_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::PreflightFailed,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {persist_error}")));
+        }
+        return Json(ApiResponse::ok(response));
+    }
     let shared_project_id = qa.project_id.clone();
 
     // Validate items shape early so the user gets a clear "no items" error

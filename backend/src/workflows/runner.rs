@@ -583,24 +583,9 @@ async fn execute_run_with_notify_policy(
     state
         .db
         .with_read_conn(move |conn| {
-            let Some(alignment) = crate::db::repository_resources::find_alignment_by_target(
+            crate::core::repository_resources::ensure_workflow_execution_approved(
                 conn,
-                "workflow",
-                &approval_workflow.id,
-            )?
-            else {
-                return Ok(());
-            };
-            let rendered = crate::core::repository_resources::render_workflow(
                 &approval_workflow,
-                &alignment.slug,
-            )
-            .map_err(anyhow::Error::msg)?;
-            crate::core::repository_resources::ensure_execution_approved(
-                conn,
-                "workflow",
-                &approval_workflow.id,
-                &crate::core::repository_resources::approval_hash(&rendered.document),
             )
             .map_err(anyhow::Error::msg)
         })

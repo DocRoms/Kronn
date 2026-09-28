@@ -294,6 +294,20 @@ pub async fn create(
             Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
             Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
         };
+        let approval_prompt = qp.clone();
+        if let Err(error) = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                    conn,
+                    &approval_prompt,
+                )
+                .map_err(anyhow::Error::msg)
+            })
+            .await
+        {
+            return Json(ApiResponse::err(format!("preflight_failed:{error}")));
+        }
         let (secret, retention_days) = {
             let config = state.config.read().await;
             let Some(secret) = config.encryption_secret.clone() else {

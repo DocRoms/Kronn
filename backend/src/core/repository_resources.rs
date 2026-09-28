@@ -761,6 +761,61 @@ pub fn ensure_execution_approved(
     }
 }
 
+fn ensure_rendered_execution_approved(
+    conn: &rusqlite::Connection,
+    kind: &str,
+    target_id: &str,
+    render: impl FnOnce(&str) -> Result<RenderedRepositoryResource, String>,
+) -> Result<(), String> {
+    let alignment =
+        crate::db::repository_resources::find_alignment_by_target(conn, kind, target_id)
+            .map_err(|error| error.to_string())?;
+    let Some(alignment) = alignment else {
+        return Ok(());
+    };
+    if !alignment.imported {
+        return Ok(());
+    }
+    let rendered = render(&alignment.slug)?;
+    ensure_execution_approved(conn, kind, target_id, &approval_hash(&rendered.document))
+}
+
+pub fn ensure_workflow_execution_approved(
+    conn: &rusqlite::Connection,
+    workflow: &Workflow,
+) -> Result<(), String> {
+    ensure_rendered_execution_approved(conn, "workflow", &workflow.id, |slug| {
+        render_workflow(workflow, slug)
+    })
+}
+
+pub fn ensure_quick_prompt_execution_approved(
+    conn: &rusqlite::Connection,
+    prompt: &QuickPrompt,
+) -> Result<(), String> {
+    ensure_rendered_execution_approved(conn, "quick_prompt", &prompt.id, |slug| {
+        render_quick_prompt(prompt, slug)
+    })
+}
+
+pub fn ensure_quick_api_execution_approved(
+    conn: &rusqlite::Connection,
+    api: &QuickApi,
+) -> Result<(), String> {
+    ensure_rendered_execution_approved(conn, "quick_api", &api.id, |slug| {
+        render_quick_api(api, slug)
+    })
+}
+
+pub fn ensure_quick_exec_execution_approved(
+    conn: &rusqlite::Connection,
+    exec: &QuickExec,
+) -> Result<(), String> {
+    ensure_rendered_execution_approved(conn, "quick_exec", &exec.id, |slug| {
+        render_quick_exec(exec, slug)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,6 +860,103 @@ mod tests {
             created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             updated_at: Utc.timestamp_opt(1_700_000_010, 0).unwrap(),
         }
+    }
+
+    fn sample_api(path: &str) -> QuickApi {
+        QuickApi {
+            id: "qa-1".into(),
+            name: "Deploy API".into(),
+            icon: "api".into(),
+            description: String::new(),
+            project_id: Some("project-1".into()),
+            api_plugin_slug: "api-deploy".into(),
+            api_config_id: "config-1".into(),
+            api_endpoint_path: path.into(),
+            api_method: Some("POST".into()),
+            api_query: None,
+            api_path_params: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            variables: Vec::new(),
+            profile_ids: Vec::new(),
+            directive_ids: Vec::new(),
+            pinned: false,
+            created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            updated_at: Utc.timestamp_opt(1_700_000_010, 0).unwrap(),
+        }
+    }
+
+    fn mark_imported(conn: &rusqlite::Connection, kind: &str, slug: &str, target_id: &str) {
+        crate::db::repository_resources::upsert_alignment(
+            conn,
+            "repo-1",
+            kind,
+            slug,
+            target_id,
+            "repository-hash",
+            "database-hash",
+            "2026-09-28T00:00:00Z",
+            true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn quick_prompt_execution_requires_approval_for_the_current_fingerprint_only() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+
+        let local = sample_prompt("local prompt");
+        assert!(ensure_quick_prompt_execution_approved(&conn, &local).is_ok());
+
+        let imported = sample_prompt("imported prompt");
+        mark_imported(&conn, "quick_prompt", "deploy-prompt", &imported.id);
+        assert!(ensure_quick_prompt_execution_approved(&conn, &imported).is_err());
+
+        let rendered = render_quick_prompt(&imported, "deploy-prompt").unwrap();
+        crate::db::repository_resources::approve(
+            &conn,
+            "repo-1",
+            "quick_prompt",
+            "deploy-prompt",
+            &approval_hash(&rendered.document),
+        )
+        .unwrap();
+        assert!(ensure_quick_prompt_execution_approved(&conn, &imported).is_ok());
+
+        let changed = sample_prompt("changed after approval");
+        assert!(ensure_quick_prompt_execution_approved(&conn, &changed).is_err());
+    }
+
+    #[test]
+    fn quick_api_execution_requires_approval_for_the_current_fingerprint_only() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+
+        let local = sample_api("/local");
+        assert!(ensure_quick_api_execution_approved(&conn, &local).is_ok());
+
+        let imported = sample_api("/imported");
+        mark_imported(&conn, "quick_api", "deploy-api", &imported.id);
+        assert!(ensure_quick_api_execution_approved(&conn, &imported).is_err());
+
+        let rendered = render_quick_api(&imported, "deploy-api").unwrap();
+        crate::db::repository_resources::approve(
+            &conn,
+            "repo-1",
+            "quick_api",
+            "deploy-api",
+            &approval_hash(&rendered.document),
+        )
+        .unwrap();
+        assert!(ensure_quick_api_execution_approved(&conn, &imported).is_ok());
+
+        let changed = sample_api("/changed-after-approval");
+        assert!(ensure_quick_api_execution_approved(&conn, &changed).is_err());
     }
 
     #[test]

@@ -3404,6 +3404,301 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
 }
 
 #[tokio::test]
+async fn imported_quick_prompt_and_api_execution_require_current_hash_approval() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let now = chrono::Utc::now();
+    let imported_prompt = kronn::models::QuickPrompt {
+        id: "qp-repository-import".into(),
+        name: "Repository prompt".into(),
+        icon: "prompt".into(),
+        prompt_template: "Review this repository".into(),
+        variables: Vec::new(),
+        agent: kronn::models::AgentType::ClaudeCode,
+        connection_id: None,
+        project_id: None,
+        skill_ids: Vec::new(),
+        profile_ids: Vec::new(),
+        directive_ids: Vec::new(),
+        tier: kronn::models::ModelTier::default(),
+        agent_settings: None,
+        description: String::new(),
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let mut local_prompt = imported_prompt.clone();
+    local_prompt.id = "qp-local".into();
+    local_prompt.name = "Local prompt".into();
+    let imported_api = kronn::models::QuickApi {
+        id: "qa-repository-import".into(),
+        name: "Repository API".into(),
+        icon: "api".into(),
+        description: String::new(),
+        project_id: None,
+        api_plugin_slug: "missing-test-plugin".into(),
+        api_config_id: "missing-test-config".into(),
+        api_endpoint_path: "/imported".into(),
+        api_method: Some("GET".into()),
+        api_query: None,
+        api_path_params: None,
+        api_headers: None,
+        api_body: None,
+        api_extract: None,
+        api_pagination: None,
+        api_timeout_ms: None,
+        api_max_retries: None,
+        variables: Vec::new(),
+        profile_ids: Vec::new(),
+        directive_ids: Vec::new(),
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let mut local_api = imported_api.clone();
+    local_api.id = "qa-local".into();
+    local_api.name = "Local API".into();
+
+    state
+        .db
+        .with_conn({
+            let imported_prompt = imported_prompt.clone();
+            let local_prompt = local_prompt.clone();
+            let imported_api = imported_api.clone();
+            let local_api = local_api.clone();
+            move |conn| {
+                kronn::db::quick_prompts::insert_quick_prompt(conn, &imported_prompt)?;
+                kronn::db::quick_prompts::insert_quick_prompt(conn, &local_prompt)?;
+                kronn::db::quick_apis::insert_quick_api(conn, &imported_api)?;
+                kronn::db::quick_apis::insert_quick_api(conn, &local_api)?;
+                kronn::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repository-test",
+                    "quick_prompt",
+                    "repository-prompt",
+                    &imported_prompt.id,
+                    "repository-hash",
+                    "database-hash",
+                    &now.to_rfc3339(),
+                    true,
+                )?;
+                kronn::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repository-test",
+                    "quick_api",
+                    "repository-api",
+                    &imported_api.id,
+                    "repository-hash",
+                    "database-hash",
+                    &now.to_rfc3339(),
+                    true,
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, blocked_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(blocked_prompt["success"], false, "{blocked_prompt}");
+    assert!(blocked_prompt["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let (_, blocked_prompt_batch) = post_json(
+        app.clone(),
+        "/api/mcp/qp-batch-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "items": [{"vars": {}}]}),
+    )
+    .await;
+    assert_eq!(blocked_prompt_batch["success"], false);
+    assert!(blocked_prompt_batch["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+    let (_, blocked_ui_prompt_batch) = post_json(
+        app.clone(),
+        "/api/quick-prompts/qp-repository-import/batch",
+        serde_json::json!({
+            "items": [{"title": "Blocked", "variables": {}}],
+            "batch_name": "Blocked repository prompt",
+        }),
+    )
+    .await;
+    assert_eq!(blocked_ui_prompt_batch["success"], false);
+    assert!(blocked_ui_prompt_batch["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+
+    let (_, blocked_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(blocked_api["data"]["success"], false, "{blocked_api}");
+    assert!(blocked_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let blocked_api_run_id = blocked_api["data"]["run_id"].as_str().unwrap().to_string();
+    let blocked_status = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &blocked_api_run_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        blocked_status.status,
+        kronn::models::SharedRunStatus::PreflightFailed
+    ));
+    let (_, blocked_api_batch) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/batch",
+        serde_json::json!({"items": ["one"]}),
+    )
+    .await;
+    assert!(blocked_api_batch["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+
+    state
+        .db
+        .with_conn({
+            let imported_prompt = imported_prompt.clone();
+            let imported_api = imported_api.clone();
+            move |conn| {
+                let prompt = kronn::core::repository_resources::render_quick_prompt(
+                    &imported_prompt,
+                    "repository-prompt",
+                )
+                .map_err(anyhow::Error::msg)?;
+                kronn::db::repository_resources::approve(
+                    conn,
+                    "repository-test",
+                    "quick_prompt",
+                    "repository-prompt",
+                    &kronn::core::repository_resources::approval_hash(&prompt.document),
+                )?;
+                let api = kronn::core::repository_resources::render_quick_api(
+                    &imported_api,
+                    "repository-api",
+                )
+                .map_err(anyhow::Error::msg)?;
+                kronn::db::repository_resources::approve(
+                    conn,
+                    "repository-test",
+                    "quick_api",
+                    "repository-api",
+                    &kronn::core::repository_resources::approval_hash(&api.document),
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let (_, approved_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(approved_prompt["success"], true, "{approved_prompt}");
+    let (_, approved_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(approved_api["success"], true, "{approved_api}");
+    assert!(approved_api["data"]["run_id"].is_string());
+    assert!(!approved_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let approved_api_run_id = approved_api["data"]["run_id"].as_str().unwrap().to_string();
+    let approved_status = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &approved_api_run_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(
+        approved_status.status,
+        kronn::models::SharedRunStatus::PreflightFailed
+    ));
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut prompt =
+                kronn::db::quick_prompts::get_quick_prompt(conn, "qp-repository-import")?.unwrap();
+            prompt.prompt_template = "Changed after approval".into();
+            prompt.updated_at = chrono::Utc::now();
+            kronn::db::quick_prompts::update_quick_prompt(conn, &prompt)?;
+            let mut api =
+                kronn::db::quick_apis::get_quick_api(conn, "qa-repository-import")?.unwrap();
+            api.api_endpoint_path = "/changed-after-approval".into();
+            api.updated_at = chrono::Utc::now();
+            kronn::db::quick_apis::update_quick_api(conn, &api)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, changed_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": "qp-repository-import", "vars": {}}),
+    )
+    .await;
+    assert_eq!(changed_prompt["success"], false);
+    assert!(changed_prompt["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+    let (_, changed_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert!(changed_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+
+    let (_, local_prompt_run) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": local_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(local_prompt_run["success"], true, "{local_prompt_run}");
+    let (_, local_api_run) = post_json(
+        app,
+        "/api/quick-apis/qa-local/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(local_api_run["success"], true, "{local_api_run}");
+    assert!(local_api_run["data"]["run_id"].is_string());
+    assert!(!local_api_run["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+}
+
+#[tokio::test]
 async fn project_repository_resources_classifies_repository_and_kronn_skills() {
     let state = test_state();
     let project_directory = tempfile::TempDir::new().unwrap();

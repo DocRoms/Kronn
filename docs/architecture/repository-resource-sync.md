@@ -10,4 +10,4 @@ Alignment baselines and approvals are local SQLite state rather than repository 
 
 The executable fingerprint excludes local identifiers, timestamps, favorites, and workflow activation state while retaining the portable definition. [src: file: backend/src/core/repository_resources.rs:95]
 
-Imported Quick Execs and workflows are checked against that fingerprint at their centralized execution entry points. [src: file: backend/src/api/quick_execs.rs:210] [src: file: backend/src/workflows/runner.rs:582]
+Imported workflows, Quick Prompts, Quick APIs, and Quick Execs share the same fingerprint-bound execution check. Standalone launches report approval failures as preflight failures, while workflow references are checked while hydrating the saved resource before any agent or plugin execution. [src: file: backend/src/core/repository_resources.rs:731-817] [src: file: backend/src/api/quick_apis.rs:421-453] [src: file: backend/src/api/mcp_remote.rs:442-454] [src: file: backend/src/workflows/quick_prompt_hydrate.rs:43-63] [src: file: backend/src/workflows/quick_api_hydrate.rs:45-63]

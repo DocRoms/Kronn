@@ -211,24 +211,9 @@ pub async fn run(
     let approval = state
         .db
         .with_read_conn(move |conn| {
-            let Some(alignment) = crate::db::repository_resources::find_alignment_by_target(
+            crate::core::repository_resources::ensure_quick_exec_execution_approved(
                 conn,
-                "quick_exec",
-                &approval_item.id,
-            )?
-            else {
-                return Ok(());
-            };
-            let rendered = crate::core::repository_resources::render_quick_exec(
                 &approval_item,
-                &alignment.slug,
-            )
-            .map_err(anyhow::Error::msg)?;
-            crate::core::repository_resources::ensure_execution_approved(
-                conn,
-                "quick_exec",
-                &approval_item.id,
-                &crate::core::repository_resources::approval_hash(&rendered.document),
             )
             .map_err(anyhow::Error::msg)
         })

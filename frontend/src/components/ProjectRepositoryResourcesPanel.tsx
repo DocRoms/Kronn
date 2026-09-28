@@ -52,7 +52,7 @@ type ResourceAction = (
   id: string,
   slug: string,
   overwrite?: boolean,
-) => Promise<void | undefined>;
+) => Promise<unknown>;
 
 export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
   const { t } = useT();
@@ -468,7 +468,7 @@ function ResourceActions({ status, approvalRequired, diff, busy, onAction, t }: 
   approvalRequired: boolean;
   diff?: string;
   busy: boolean;
-  onAction: (mode: 'publish' | 'import' | 'approve', overwrite?: boolean) => Promise<void | undefined>;
+  onAction: (mode: 'publish' | 'import' | 'approve', overwrite?: boolean) => Promise<unknown>;
   t: Translate;
 }) {
   return <div className="project-repository-resource-actions">
