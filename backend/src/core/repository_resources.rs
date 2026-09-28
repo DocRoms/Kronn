@@ -406,7 +406,23 @@ pub fn render_skill(
     Ok(rendered(document, skill.name.clone(), files, secrets))
 }
 
+/// Refuses a `kronn` path that exists but is not a directory (e.g. a launcher
+/// script): the repository then has no `kronn/` resources and cannot host one.
+fn ensure_kronn_dir_available(root: &Path) -> Result<(), String> {
+    let dir = root.join("kronn");
+    if dir.exists() && !dir.is_dir() {
+        return Err(format!(
+            "{} exists and is not a directory; resources cannot be published into kronn/",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
 pub fn load_lock(root: &Path) -> Result<Option<RepositoryLock>, String> {
+    if !root.join("kronn").is_dir() {
+        return Ok(None);
+    }
     let path = root.join(LOCK_PATH);
     crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
     let bytes = match std::fs::read(&path) {
@@ -653,6 +669,7 @@ pub fn publish(
     resource: RenderedRepositoryResource,
     allow_changed_owned: bool,
 ) -> Result<RepositoryLockResource, String> {
+    ensure_kronn_dir_available(root)?;
     let previous = load_lock(root)?.unwrap_or_default();
     let mut next = previous.clone();
     next.updated_at = Utc::now();
@@ -1049,5 +1066,16 @@ mod tests {
             std::fs::read_to_string(root.path().join("kronn/quick-execs/deploy.yaml")).unwrap(),
             "human content"
         );
+    }
+
+    #[test]
+    fn a_kronn_file_means_no_resources_and_refuses_publication() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("kronn"), "#!/bin/sh\n").unwrap();
+        assert!(load_lock(root.path()).unwrap().is_none());
+        let rendered = render_quick_prompt(&sample_prompt("body"), "deploy-prompt").unwrap();
+        let error = publish(root.path(), "repo", rendered, false).unwrap_err();
+        assert!(error.contains("is not a directory"), "{error}");
+        assert!(root.path().join("kronn").is_file(), "the launcher must stay untouched");
     }
 }
