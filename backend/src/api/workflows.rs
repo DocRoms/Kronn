@@ -2594,6 +2594,28 @@ pub(crate) async fn create_manual_run(
     initial_state: std::collections::HashMap<String, String>,
     launch: crate::core::launch_context::LaunchContext,
 ) -> Result<(Workflow, WorkflowRun), String> {
+    create_manual_run_with_id(
+        state,
+        workflow_id,
+        provided_vars,
+        initial_state,
+        launch,
+        Uuid::new_v4().to_string(),
+    )
+    .await
+}
+
+/// Same admission path as [`create_manual_run`], with a caller-reserved run id.
+/// Question resumption claims this id before crossing the async launch boundary,
+/// so an idempotent resolution retry cannot create a second workflow run.
+pub(crate) async fn create_manual_run_with_id(
+    state: &AppState,
+    workflow_id: &str,
+    provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
+    launch: crate::core::launch_context::LaunchContext,
+    run_id: String,
+) -> Result<(Workflow, WorkflowRun), String> {
     validate_initial_run_state(&initial_state)?;
     let lookup_id = workflow_id.to_string();
     let mut wf = state
@@ -2620,7 +2642,6 @@ pub(crate) async fn create_manual_run(
             .ok_or_else(|| "Variable preflight unavailable: encryption key missing".to_string())?;
         (secret, config.server.execution_variable_retention_days)
     };
-    let run_id = Uuid::new_v4().to_string();
     let declarations = wf.variables.clone();
     let project_id = wf.project_id.clone();
     let launch_context = launch.context.clone();

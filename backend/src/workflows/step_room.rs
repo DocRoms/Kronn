@@ -70,17 +70,15 @@ impl WorkflowStepRooms {
             .unwrap_or_default()
     }
 
-    fn release(&self, run_id: &str, capability_hash: &str) -> Vec<i64> {
+    fn release(&self, run_id: &str, capability_hash: &str) -> Option<Vec<i64>> {
         let mut live = self.live();
         if live
             .get(run_id)
             .is_some_and(|entry| entry.capability_hash == capability_hash)
         {
-            live.remove(run_id)
-                .map(|entry| entry.sessions)
-                .unwrap_or_default()
+            live.remove(run_id).map(|entry| entry.sessions)
         } else {
-            Vec::new()
+            None
         }
     }
 }
@@ -103,10 +101,12 @@ impl StepRoomActivation {
     /// End the membership now and wait for it, rather than from `Drop`.
     pub async fn finish(mut self) {
         self.released = true;
-        let sessions = self
+        let released = self
             .rooms
             .release(&self.context.run_id, &self.capability_hash);
-        revoke(&self.db, sessions).await;
+        if let Some(sessions) = released {
+            finish_activity(&self.db, self.context.clone(), sessions).await;
+        }
     }
 }
 
@@ -115,21 +115,42 @@ impl Drop for StepRoomActivation {
         if self.released {
             return;
         }
-        let sessions = self
+        let released = self
             .rooms
             .release(&self.context.run_id, &self.capability_hash);
-        if sessions.is_empty() {
+        let Some(sessions) = released else {
             return;
-        }
+        };
+        let context = self.context.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                handle.spawn(revoke(self.db.clone(), sessions));
+                handle.spawn(finish_activity(self.db.clone(), context, sessions));
             }
             Err(_) => tracing::warn!(
                 run_id = %self.context.run_id,
-                "workflow step room sessions left active: no runtime to revoke them"
+                "workflow step room activity left active: no runtime to finish it"
             ),
         }
+    }
+}
+
+async fn finish_activity(
+    db: impl AsRef<Database>,
+    context: WorkflowStepBridgeContext,
+    sessions: Vec<i64>,
+) {
+    let run_id = context.run_id.clone();
+    let step_key = context.step_key.clone();
+    if let Err(error) = db
+        .as_ref()
+        .with_conn(move |conn| {
+            crate::db::workflow_step_rooms::finish_activity(conn, &run_id, &step_key)?;
+            crate::db::workflow_step_rooms::revoke(conn, &sessions)?;
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!(%error, "could not finish a workflow step's room activity");
     }
 }
 
@@ -219,6 +240,29 @@ pub async fn activate(
             sessions: Vec::new(),
         },
     );
+    let activity = {
+        let run_id = run_id.to_string();
+        let step_key = context.step_key.clone();
+        let step_name = step.name.clone();
+        let disc_id = context.discussion_id.clone();
+        let agent_type = format!("{:?}", step.agent);
+        db.with_conn(move |conn| {
+            crate::db::workflow_step_rooms::begin_activity(
+                conn,
+                &run_id,
+                &step_key,
+                &step_name,
+                &disc_id,
+                &agent_type,
+            )
+        })
+        .await
+    };
+    if let Err(error) = activity {
+        let _ = rooms.release(run_id, &capability_hash);
+        revoke(db.clone(), replaced).await;
+        return Err(format!("room_id: could not record step activity: {error}"));
+    }
     revoke(db.clone(), replaced).await;
     Ok(Some(StepRoomActivation {
         rooms: rooms.clone(),
@@ -271,6 +315,17 @@ mod tests {
                  VALUES ('room-a', 'A', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
                 [],
             )?;
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('workflow-1', 'Implementation', '{}', '[]',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, status, started_at)
+                 VALUES ('run-1', 'workflow-1', 'Running', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
             Ok(())
         })
         .await
@@ -307,6 +362,15 @@ mod tests {
         assert_eq!(context.discussion_id, "room-a");
         assert_eq!(context.step_key, "orchestrate");
         assert!(rooms.authorize(&context));
+        let visible = db
+            .with_read_conn(|conn| {
+                crate::db::workflow_step_rooms::list_active_for_discussion(conn, "room-a")
+            })
+            .await
+            .unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].identity.workflow_name, "Implementation");
+        assert_eq!(visible[0].identity.step_name, "orchestrate");
         assert!(
             !format!("{context:?}").contains(&context.capability),
             "the capability never reaches a log line"
@@ -340,6 +404,13 @@ mod tests {
         next.finish().await;
         assert!(!rooms.authorize(&finished), "a finished step holds nothing");
         assert!(!rooms.attach(&finished, 1), "nor can it attach a session");
+        assert!(db
+            .with_read_conn(|conn| {
+                crate::db::workflow_step_rooms::list_active_for_discussion(conn, "room-a")
+            })
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

@@ -37,6 +37,16 @@ required; choices, context, recommendations, multiple selection and task
 reference are optional. Free-text answers are always available. A recommendation
 is not a preselected answer or consent.
 
+A question authored by a workflow Agent step may also declare
+`"resume":{"workflow_id":"<workflow id>","variables":{"name":"value"}}`.
+Answering or declining such a question starts that workflow once; commenting
+does not resolve the question and does not start it. The declaration accepts at
+most 16 variables. Workflow ids are non-empty and at most 128 characters;
+variable names are 1–64 ASCII letters, digits, `_`, `-`, or `.`, and each value
+is a control-free string of at most 8,000 characters.
+`[src: file: backend/src/db/discussion_questions.rs:231]`
+`[src: file: backend/src/api/discussion_questions.rs:64]`
+
 Pause execution, delegation and completion of the affected lot until the human
 answers. Continue unrelated tasks and keep listening with `disc_wait_for_peer`.
 This is a scoped agent protocol, not a global scheduler stop: `task_ref` does not

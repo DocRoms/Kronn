@@ -200,4 +200,36 @@ describe('findFenceProblem', () => {
     expect(findFenceProblem(fence({ multiple: 'true' })))
       .toEqual({ key: 'disc.question.invalidMultiple' });
   });
+
+  it('mirrors the optional workflow resume contract', () => {
+    expect(findFenceProblem(fence({
+      resume: {
+        workflow_id: 'autocode-implementation',
+        variables: { ticket: 'KT-883', 'resume.reason': 'human-answer' },
+      },
+    }))).toBeNull();
+    expect(findFenceProblem(fence({ resume: null }))).toBeNull();
+    expect(findFenceProblem(fence({ resume: { workflow_id: '' } })))
+      .toEqual({ key: 'disc.question.invalidResume' });
+    expect(findFenceProblem(fence({
+      resume: {
+        workflow_id: 'autocode-implementation',
+        variables: Object.fromEntries(
+          Array.from({ length: 17 }, (_, index) => [`variable-${index}`, 'value']),
+        ),
+      },
+    }))).toEqual({ key: 'disc.question.invalidResume' });
+    expect(findFenceProblem(fence({
+      resume: {
+        workflow_id: 'autocode-implementation',
+        variables: { 'not a stable key': 'value' },
+      },
+    }))).toEqual({ key: 'disc.question.invalidResume' });
+    expect(findFenceProblem(fence({
+      resume: {
+        workflow_id: 'autocode-implementation',
+        variables: { ticket: 'line one\nline two' },
+      },
+    }))).toEqual({ key: 'disc.question.invalidResume' });
+  });
 });

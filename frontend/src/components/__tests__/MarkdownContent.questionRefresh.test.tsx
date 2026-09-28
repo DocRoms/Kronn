@@ -22,6 +22,7 @@ const question: DiscussionQuestion = {
   options: [{ id: 'a', label: 'Continuer', description: null }],
   items: [],
   multiple: false, recommended_option_ids: [], task_ref: null,
+  requester_workflow_step: null, resume: null,
   state: 'pending', answer: null,
   created_at: '2026-09-08T15:00:00Z', updated_at: '2026-09-08T15:00:00Z',
 };

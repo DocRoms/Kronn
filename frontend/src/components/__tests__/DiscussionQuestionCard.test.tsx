@@ -59,6 +59,27 @@ const renderCard = (fenceIndex: number | undefined = 0, messageId = 'm-1') => re
 );
 
 describe('DiscussionQuestionCard', () => {
+  it('warns when the workflow step that asked has already finished', async () => {
+    questionsMock.mockResolvedValue({
+      questions: [question({
+        requester_workflow_step: {
+          run_id: 'run-1',
+          workflow_id: 'workflow-1',
+          workflow_name: 'Implementation',
+          step_key: 'orchestrate',
+          step_name: 'Orchestrate',
+          active: false,
+        },
+      })],
+      pending_count: 1,
+    });
+
+    renderCard();
+    expect(await screen.findByTestId('disc-question-finished-step-warning')).toHaveTextContent(
+      'disc.question.finishedStepWarning Implementation Orchestrate',
+    );
+  });
+
   it('refreshes an initially empty room when its first question message arrives', async () => {
     questionsMock.mockResolvedValueOnce({ questions: [], pending_count: 0 });
     const view = render(<DiscussionQuestionBanner discussionId="d-1" messageRevision="m-0" />);

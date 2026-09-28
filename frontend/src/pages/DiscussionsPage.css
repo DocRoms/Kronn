@@ -3993,6 +3993,25 @@ button.disc-contact-open {
   gap: var(--kr-sp-3);
 }
 
+.disc-workflow-step-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.35rem 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-workflow-step-run {
+  opacity: 0.7;
+}
+
+.disc-msg-workflow-step {
+  opacity: 0.75;
+  font-weight: 600;
+}
+
 .disc-pending-agent-status {
   display: flex;
   align-items: center;

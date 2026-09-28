@@ -759,6 +759,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "197_mcp_probe_results",
         include_str!("sql/197_mcp_probe_results.sql"),
     ),
+    (
+        "198_workflow_step_room_activity",
+        include_str!("sql/198_workflow_step_room_activity.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

@@ -87,6 +87,42 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     expect(document.querySelector('[data-testid="disc-participant-details"]')).toBeNull();
   });
 
+  it('presents a workflow-step session as a discussion agent with durable provenance', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([{
+      id: 7,
+      agent_type: 'ClaudeCode',
+      session_id: 'step-session',
+      role: 'agent',
+      status: 'active',
+      presence_state: 'running',
+      wake_mode: 'native_dispatch',
+      conversation_id: 'should-not-offer-resume',
+      workflow_step: {
+        run_id: 'run-1',
+        workflow_id: 'workflow-1',
+        workflow_name: 'Implementation',
+        step_key: 'orchestrate',
+        step_name: 'Orchestrate',
+      },
+    }]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-step" t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector('[data-testid="workflow-step-participant"]'))
+      .toHaveTextContent('Implementation › Orchestrate');
+    await openParticipant();
+    const details = document.querySelector('.disc-participant-details');
+    expect(details).toHaveTextContent('disc.targetDiscussionAgent');
+    expect(details).toHaveTextContent('disc.workflowStepAgent');
+    expect(details).toHaveTextContent('Implementation');
+    expect(details).toHaveTextContent('Orchestrate');
+    expect(details).not.toHaveTextContent('disc.targetCli');
+    expect(details?.querySelector('.disc-participant-resume')).toBeNull();
+  });
+
   it('shows only an explicitly declared JOIN model and labels it as join metadata', async () => {
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
       {

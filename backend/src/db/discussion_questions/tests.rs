@@ -53,6 +53,57 @@ fn insert(conn: &Connection, id: &str, value: serde_json::Value) {
     .unwrap();
 }
 
+fn finished_step_question(value: serde_json::Value) -> Connection {
+    let conn = database();
+    conn.execute(
+        "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+         VALUES ('source-workflow', 'Implementation', '{}', '[]', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO workflow_runs (id, workflow_id, status, started_at)
+         VALUES ('source-run', 'source-workflow', 'Running', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflow_step_rooms::begin_activity(
+        &conn,
+        "source-run",
+        "orchestrate",
+        "Orchestrate",
+        "d",
+        "Codex",
+    )
+    .unwrap();
+    let session = crate::db::workflow_step_rooms::join(
+        &conn,
+        "source-run",
+        "orchestrate",
+        "d",
+        "Codex",
+        "step-session",
+    )
+    .unwrap();
+    crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
+        &conn,
+        "d",
+        &message("step-question", format!("```kronn-question\n{value}\n```")),
+        &[],
+        &[],
+        session.session_pk,
+    )
+    .unwrap();
+    crate::db::workflow_step_rooms::finish_activity(&conn, "source-run", "orchestrate").unwrap();
+    crate::db::workflow_step_rooms::revoke(&conn, &[session.session_pk]).unwrap();
+    conn.execute(
+        "UPDATE workflow_runs SET status='Success', finished_at='now' WHERE id='source-run'",
+        [],
+    )
+    .unwrap();
+    conn
+}
+
 fn request() -> AnswerDiscussionQuestionRequest {
     AnswerDiscussionQuestionRequest {
         selected_option_ids: vec!["retry".into()],
@@ -848,4 +899,123 @@ fn a_comment_reaches_the_asker_and_leaves_the_question_waiting() {
         comment(&conn, "d", "question:m:0", &late, "Romu", None),
         Err(AnswerError::Conflict)
     ));
+}
+
+#[test]
+fn every_reply_to_a_finished_workflow_step_says_nobody_reads_it_now() {
+    let warning = "L'étape qui a posé cette question est terminée";
+
+    let answered = finished_step_question(payload());
+    let source = list(&answered, "d").unwrap().questions.remove(0);
+    let step = source
+        .requester_workflow_step
+        .expect("the question keeps workflow-step provenance");
+    assert_eq!(step.identity.workflow_name, "Implementation");
+    assert_eq!(step.identity.step_name, "Orchestrate");
+    assert!(!step.active);
+    let answer = answer(
+        &answered,
+        "d",
+        "question:step-question:0",
+        &request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+    let answer_content: String = answered
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [answer.answer.unwrap().message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(answer_content.contains(warning), "{answer_content}");
+
+    let declined = finished_step_question(payload());
+    let refusal = decline(
+        &declined,
+        "d",
+        "question:step-question:0",
+        &decline_request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+    let refusal_content: String = declined
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [refusal.answer.unwrap().message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(refusal_content.contains(warning), "{refusal_content}");
+
+    let commented = finished_step_question(payload());
+    let remark = CommentDiscussionQuestionRequest {
+        idempotency_key: "finished-comment".into(),
+        text: "Peux-tu préciser ?".into(),
+    };
+    comment(
+        &commented,
+        "d",
+        "question:step-question:0",
+        &remark,
+        "Romu",
+        None,
+    )
+    .unwrap();
+    let comment_content: String = commented
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            ["question-comment:question:step-question:0:finished-comment"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(comment_content.contains(warning), "{comment_content}");
+
+    for conn in [&answered, &declined, &commented] {
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0,
+            "a revoked step session has no native dispatch to wake"
+        );
+    }
+}
+
+#[test]
+fn a_resolved_step_question_claims_exactly_one_resume_run() {
+    let mut resumable = payload();
+    resumable["resume"] = serde_json::json!({
+        "workflow_id": "resume-workflow",
+        "variables": {"ticket": "KT-883"}
+    });
+    let conn = finished_step_question(resumable);
+    conn.execute(
+        "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+         VALUES ('resume-workflow', 'Resume', '{}', '[]', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    answer(
+        &conn,
+        "d",
+        "question:step-question:0",
+        &request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+
+    let claim = claim_resume(&conn, "d", "question:step-question:0")
+        .unwrap()
+        .expect("the first resolution caller claims the resume");
+    assert_eq!(claim.workflow_id, "resume-workflow");
+    assert_eq!(claim.variables["ticket"], "KT-883");
+    assert_eq!(claim.source_run_id, "source-run");
+    assert!(claim_resume(&conn, "d", "question:step-question:0")
+        .unwrap()
+        .is_none());
 }

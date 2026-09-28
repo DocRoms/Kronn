@@ -20,9 +20,10 @@ export interface FenceProblem {
 /// `deny_unknown_fields`: anything else and the whole fence is refused.
 const SPEC_FIELDS = new Set([
   'version', 'key', 'question', 'context',
-  'options', 'items', 'multiple', 'recommended_option_ids', 'task_ref',
+  'options', 'items', 'multiple', 'recommended_option_ids', 'task_ref', 'resume',
 ]);
 const OPTION_FIELDS = new Set(['id', 'label', 'description']);
+const RESUME_FIELDS = new Set(['workflow_id', 'variables']);
 
 /// `parse_spec` refuses a body over this many BYTES before parsing it at all.
 const MAX_FENCE_BYTES = 24_000;
@@ -89,6 +90,27 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   if (!isOptionalText(spec.context, 4000)) return { key: 'disc.question.invalidContext' };
   if (spec.task_ref != null && !isFilled(spec.task_ref, 100)) {
     return { key: 'disc.question.invalidTaskRef' };
+  }
+  if (spec.resume != null) {
+    if (typeof spec.resume !== 'object' || Array.isArray(spec.resume)) {
+      return { key: 'disc.question.invalidResume' };
+    }
+    const resume = spec.resume as Record<string, unknown>;
+    if (Object.keys(resume).some(field => !RESUME_FIELDS.has(field))
+      || !isFilled(resume.workflow_id, 128)) {
+      return { key: 'disc.question.invalidResume' };
+    }
+    const variables = 'variables' in resume ? resume.variables : {};
+    if (typeof variables !== 'object' || variables === null || Array.isArray(variables)
+      || Object.keys(variables).length > 16
+      || Object.entries(variables).some(([key, value]) => (
+        !/^[A-Za-z0-9_.-]{1,64}$/.test(key)
+        || typeof value !== 'string'
+        || [...value].length > 8000
+        || [...value].some(character => /\p{Cc}/u.test(character))
+      ))) {
+      return { key: 'disc.question.invalidResume' };
+    }
   }
 
   // `#[serde(default)]` supplies a value for a key that is ABSENT. A key that

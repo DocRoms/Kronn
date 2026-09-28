@@ -185,6 +185,8 @@ class DiscussionQuestionReadTests(unittest.TestCase):
         self.assertNotIn("disc_question_answer", names)
         self.assertIn("kronn-question", self.mod.TOOL_MANUALS["disc_question_list"])
         self.assertIn("state=answered", self.mod.TOOL_MANUALS["disc_question_list"])
+        self.assertIn("workflow Agent step", self.mod.TOOL_MANUALS["disc_question_list"])
+        self.assertIn('resume `{"workflow_id"', self.mod.TOOL_MANUALS["disc_question_list"])
 
 
 class CurrentDiscMetaCacheTests(unittest.TestCase):

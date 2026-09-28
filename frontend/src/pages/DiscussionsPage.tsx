@@ -3,6 +3,7 @@ import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
 import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
+import { WorkflowStepActivityBubble } from '../components/WorkflowStepActivityBubble';
 import { ImportantMessagesBar } from '../components/ImportantMessageCard';
 import { ImportantMessageForm } from '../components/ImportantMessageForm';
 import { submitImportantMessage } from '../lib/submitImportantMessage';
@@ -79,7 +80,14 @@ import {
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
-  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response' | 'default_targets'>>;
+  & Partial<Pick<DiscussionDetail,
+    'active_agent_dispatches'
+    | 'active_workflow_steps'
+    | 'workflow_step_authors'
+    | 'message_targets'
+    | 'partial_response'
+    | 'default_targets'
+  >>;
 
 type InterruptedStreamState = {
   text: string;
@@ -3896,6 +3904,7 @@ export function DiscussionsPage({
               {separator}
               <MessageBubble
                 msg={msg}
+                workflowStep={activeDiscussion.workflow_step_authors?.[msg.id]}
                 targets={activeDiscussion.message_targets?.[msg.id] ?? EMPTY_TARGETS}
                 defaultTargets={activeDiscussion.default_targets ?? EMPTY_TARGETS}
                 idx={idx}
@@ -4531,6 +4540,13 @@ export function DiscussionsPage({
               onScroll={handleMessagesScroll}
             >
               {transcriptElements}
+
+              {(activeDiscussion.active_workflow_steps ?? []).map(step => (
+                <WorkflowStepActivityBubble
+                  key={`${step.run_id}:${step.step_key}`}
+                  step={step}
+                />
+              ))}
 
               {/* Streaming: orchestration mode */}
               {orchState[activeDiscussion.id] && (() => {

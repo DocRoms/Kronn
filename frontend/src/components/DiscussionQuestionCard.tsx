@@ -247,6 +247,20 @@ function QuestionBody({
 
       <p className="disc-question-text">{question.question}</p>
       {question.context && <p className="disc-question-context">{question.context}</p>}
+      {question.requester_workflow_step && !question.requester_workflow_step.active && (
+        <p
+          className="disc-question-unread-warning"
+          data-testid="disc-question-finished-step-warning"
+          role="status"
+        >
+          <AlertOctagon size={13} aria-hidden="true" />
+          {t(
+            'disc.question.finishedStepWarning',
+            question.requester_workflow_step.workflow_name,
+            question.requester_workflow_step.step_name,
+          )}
+        </p>
+      )}
 
       {question.answer ? (
         <AnsweredSummary question={question} answer={question.answer} declined={declined} />

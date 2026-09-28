@@ -9606,6 +9606,12 @@ TOOL_MANUALS = {
         "(<=1000). Optional: context (<=4000), task_ref, multiple (default false), "
         "0-8 options with unique id, label (<=250), description (<=1000). "
         "Free text is always allowed. Recommendations never select or approve. "
+        "A question authored by a workflow Agent step may add optional resume "
+        '`{"workflow_id":"<workflow id>","variables":{"name":"value"}}`; '
+        "answering or declining starts that workflow once, while commenting does not. "
+        "Resume accepts at most 16 variables; workflow_id is 1-128 characters, variable "
+        "names are 1-64 ASCII letters/digits/-_., and values are control-free strings "
+        "of at most 8000 characters. "
         "Same key in a room keeps ONE immutable card; reuse it on retry. "
         "Read pending cards before asking; pass key to recover a prior answer "
         "after reconnect or handoff. After disc_append, read back this exact key "

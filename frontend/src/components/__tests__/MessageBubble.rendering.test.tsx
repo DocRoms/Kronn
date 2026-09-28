@@ -636,6 +636,30 @@ describe('MessageBubble — agent label + copy buttons', () => {
     );
   });
 
+  it('renders a workflow-step response as a discussion agent and never as a CLI ordinal', () => {
+    const { container } = renderBubble(
+      makeMessage({
+        role: 'Agent',
+        agent_type: 'Codex',
+        source_msg_id: 'workflow-cli-message',
+        author_cli_ordinal: 3,
+      }),
+      {
+        workflowStep: {
+          run_id: 'run-1',
+          workflow_id: 'workflow-1',
+          workflow_name: 'Implementation',
+          step_key: 'orchestrate',
+          step_name: 'Orchestrate',
+        },
+      },
+    );
+    const label = container.querySelector('.disc-msg-agent-label');
+    expect(label).toHaveTextContent('@codex · disc.targetDiscussionAgent');
+    expect(label).toHaveTextContent('Implementation › Orchestrate');
+    expect(label).not.toHaveTextContent('CLI 3');
+  });
+
   it('labels the agentless guided-tour document as preloaded Kronn content', () => {
     const { container } = renderBubble(
       makeMessage({

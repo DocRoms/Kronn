@@ -31,6 +31,8 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
+export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
  */
@@ -2182,6 +2184,18 @@ paid_limit: number | null, };
 
 export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispatch>,
 /**
+ * Workflow Agent steps currently attached to this room. They have no
+ * native discussion dispatch, so this separate projection keeps their
+ * activity visible without pretending they are host-launched CLIs.
+ */
+active_workflow_steps: Array<ActiveWorkflowStep>,
+/**
+ * Historical step identity keyed by the messages its session authored.
+ * Finished activities remain here so an old message never falls back to
+ * a misleading `CLI N` label after the step exits.
+ */
+workflow_step_authors: { [key in string]: WorkflowStepIdentity },
+/**
  * Durable routing intent keyed by the user-message id. Keeping it next
  * to the transcript lets the UI show what was requested even when the
  * concrete model that eventually answered differs.
@@ -2631,7 +2645,7 @@ stats: PlanningPlanStats, };
  */
 export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
 
-export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
+export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
 export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
 
@@ -2643,7 +2657,13 @@ export type DiscussionQuestionList = { questions: Array<DiscussionQuestion>, pen
 
 export type DiscussionQuestionOption = { id: string, label: string, description: string | null, };
 
+export type DiscussionQuestionResume = { workflow_id: string, variables: Record<string, string>, state: DiscussionQuestionResumeState, run_id: string | null, error: string | null, };
+
+export type DiscussionQuestionResumeState = "pending" | "launching" | "launched" | "failed";
+
 export type DiscussionQuestionState = "pending" | "answered" | "declined";
+
+export type DiscussionQuestionWorkflowStep = { active: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -4658,7 +4678,12 @@ conversation_id: string | null,
  * `@claude-cli-2` and the "CLI 2" header label, computed once here so the
  * front never re-derives (and diverges from) it.
  */
-cli_ordinal: number | null, };
+cli_ordinal: number | null,
+/**
+ * Present for a Kronn-owned workflow Agent step. The UI renders this as a
+ * discussion agent with workflow/step provenance, never as `CLI N`.
+ */
+workflow_step: WorkflowStepIdentity | null, };
 
 /**
  * One finding as the agent sees it.
@@ -8187,6 +8212,14 @@ multi_agent_review?: MultiAgentReviewConfig | null,
  * on every launch and every resume of the step.
  */
 room_id?: string | null, };
+
+/**
+ * Durable identity of an Agent step that joined a discussion room.
+ *
+ * This is not a host-launched CLI identity: the workflow and step own the
+ * process, while the provider only describes which runtime executes it.
+ */
+export type WorkflowStepIdentity = { run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 export type WorkflowSuggestion = { id: string, title: string, description: string, reason: string, required_mcps: Array<string>, audience: string, complexity: string, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, };
 

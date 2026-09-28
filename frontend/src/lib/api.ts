@@ -1579,7 +1579,13 @@ export const discussions = {
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
   getRunning: () => api<string[]>('GET', '/discussions/running'),
-  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>>(
+  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail,
+    'active_agent_dispatches'
+    | 'active_workflow_steps'
+    | 'workflow_step_authors'
+    | 'message_targets'
+    | 'partial_response'
+  >>>(
     'GET',
     `/discussions/${id}`,
   ),
