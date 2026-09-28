@@ -32,11 +32,14 @@ const AUTOMATION_KINDS: ProjectRepositoryResourceKind[] = [
 ];
 
 const STATUS_MARKER: Record<ProjectRepositoryResourceStatus, string> = {
-  not_published: '+',
+  kronn_only: '+',
   up_to_date: '',
-  repository_modified: '~',
-  kronn_modified: '~',
+  repository_only: '~',
+  repository_newer: '~',
+  kronn_newer: '~',
   conflict: '!',
+  approval_required: '',
+  native_skill: '',
 };
 
 const resourceKey = (resource: ProjectRepositoryResource) => `${resource.kind}:${resource.id}`;
@@ -68,10 +71,10 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
     setData(result);
     setSelected(new Set([
       ...result.resources
-        .filter(resource => resource.status !== 'not_published')
+        .filter(resource => resource.status !== 'kronn_only')
         .map(resourceKey),
       ...result.skills_present
-        .filter(skill => skillIsPublished(skill) || (skill.status && skill.status !== 'not_published'))
+        .filter(skill => skillIsPublished(skill) || (skill.status && skill.status !== 'kronn_only' && skill.status !== 'native_skill'))
         .map(skillKey),
     ]));
   }, []);
@@ -108,7 +111,11 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
           overwrite_repository_changes: overwrite,
         });
       } else if (mode === 'import') {
-        await projectsApi.importRepositoryResource(targetProjectId, { kind, slug });
+        await projectsApi.importRepositoryResource(targetProjectId, {
+          kind,
+          slug,
+          overwrite_kronn_changes: overwrite,
+        });
       } else {
         await projectsApi.approveRepositoryResource(targetProjectId, { kind, id });
       }
@@ -150,10 +157,10 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
   const repositoryScaffoldIncluded = Boolean(data?.kronn_exists || selected.size > 0);
   const selectedForPublication = data ? [
     ...data.resources
-      .filter(resource => resource.status === 'not_published' && selected.has(resourceKey(resource)))
+      .filter(resource => resource.status === 'kronn_only' && selected.has(resourceKey(resource)))
       .map(resource => ({ kind: resource.kind, id: resource.id, slug: resource.slug })),
     ...data.skills_present
-      .filter(skill => skill.status === 'not_published' && selected.has(skillKey(skill)))
+      .filter(skill => skill.status === 'kronn_only' && selected.has(skillKey(skill)))
       .map(skill => ({ kind: 'skill' as const, id: skill.id, slug: skill.slug })),
   ] : [];
 
@@ -383,7 +390,7 @@ function ResourceRow({ resource, checked, onToggle, onAction, projectId, busyKey
       <input
         type="checkbox"
         checked={checked}
-        disabled={resource.status !== 'not_published'}
+        disabled={resource.status !== 'kronn_only'}
         onChange={onToggle}
         aria-label={t('projects.repositoryResources.include', resource.name)}
       />
@@ -499,12 +506,12 @@ function ResourceActions({ status, approvalRequired, diff, busy, onAction, t }: 
 }) {
   return <div className="project-repository-resource-actions">
     {busy && <Loader2 size={13} className="animate-spin" aria-label={t('common.loading')} />}
-    {!busy && status === 'repository_modified' && (
+    {!busy && (status === 'repository_only' || status === 'repository_newer') && (
       <button type="button" onClick={() => onAction('import')}>
         <Download size={12} /> {t('projects.repositoryResources.import')}
       </button>
     )}
-    {!busy && status === 'kronn_modified' && (
+    {!busy && status === 'kronn_newer' && (
       <button type="button" onClick={() => onAction('publish')}>
         <Upload size={12} /> {t('projects.repositoryResources.publish')}
       </button>
@@ -514,14 +521,14 @@ function ResourceActions({ status, approvalRequired, diff, busy, onAction, t }: 
         <summary>{t('projects.repositoryResources.showDiff')}</summary>
         <pre>{diff}</pre>
       </details>
-      <button type="button" onClick={() => onAction('import')}>
+      <button type="button" onClick={() => onAction('import', true)}>
         <Download size={12} /> {t('projects.repositoryResources.keepRepository')}
       </button>
       <button type="button" onClick={() => onAction('publish', true)}>
         <Upload size={12} /> {t('projects.repositoryResources.keepKronn')}
       </button>
     </>}
-    {!busy && approvalRequired && status === 'up_to_date' && (
+    {!busy && approvalRequired && status === 'approval_required' && (
       <button type="button" onClick={() => onAction('approve')}>
         <ShieldCheck size={12} /> {t('projects.repositoryResources.approve')}
       </button>

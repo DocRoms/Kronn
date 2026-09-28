@@ -50,8 +50,9 @@
 .project-repository-tree-entry { display: flex; gap: 8px; padding: 3px 12px 3px 27px; font: 11px/1.5 var(--kr-font-mono); }
 .project-repository-tree-entry[data-excluded='true'] { color: var(--kr-text-ghost); }
 .project-repository-tree-marker { width: 10px; color: var(--kr-success); font-weight: 700; }
-.project-repository-tree-marker[data-status='repository_modified'],
-.project-repository-tree-marker[data-status='kronn_modified'] { color: var(--kr-warning); }
+.project-repository-tree-marker[data-status='repository_only'],
+.project-repository-tree-marker[data-status='repository_newer'],
+.project-repository-tree-marker[data-status='kronn_newer'] { color: var(--kr-warning); }
 .project-repository-tree-marker[data-status='conflict'] { color: var(--kr-error); }
 .project-repository-resources-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 12px; padding-top: 8px; border-top: 1px solid var(--kr-border); color: var(--kr-text-muted); font-size: 10px; }
 .project-repository-resources-excluded { color: var(--kr-text-ghost); }

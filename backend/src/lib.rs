@@ -932,6 +932,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/repository-resources/approve",
             post(api::projects::approve_repository_resource),
         )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/use",
+            post(api::projects::use_native_skill),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/copy",
+            post(api::projects::copy_native_skill),
+        )
         .route("/api/projects/{id}", delete(api::projects::delete))
         // KT-194 — what each agent actually loads in this project, and which
         // sections could leave the always-loaded tier. Read-only: the audit

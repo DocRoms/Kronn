@@ -39,6 +39,7 @@ pub mod model_catalog;
 pub mod orchestration;
 pub mod planning;
 pub mod planning_proposals;
+pub mod project_skill_references;
 pub mod projects;
 pub mod quick_apis;
 pub mod quick_exec_runs;

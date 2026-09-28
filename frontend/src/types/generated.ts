@@ -3364,7 +3364,12 @@ imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
 
-export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string, };
+export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
+/**
+ * Replace the Kronn copy even when it holds edits the repository does
+ * not have. Without it such an import is refused.
+ */
+overwrite_kronn_changes?: boolean, };
 
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
@@ -5196,7 +5201,31 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
-export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, };
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, adr_level: ResourceAdrLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean,
+/**
+ * Real unified diff of the resource's main file (the rendered HTML for
+ * an artifact). Present only for `repository_newer`, `kronn_newer` and
+ * `conflict`; `file_diffs` carries every file.
+ */
+diff?: string,
+/**
+ * One unified diff per differing file — an artifact's `artifact.yaml`
+ * and `index.html` each get their own entry.
+ */
+file_diffs: Array<RepositoryResourceFileDiff>,
+/**
+ * Field-by-field diff of the resource definition (trigger, commands,
+ * agents, models…). Populated for workflow, Quick API and Quick Exec,
+ * for the same three states as `diff`.
+ */
+field_diff: Array<RepositoryResourceFieldDiff>, repository_paths: Array<string>,
+/**
+ * Every path publishing this resource would write, including the
+ * shared scaffold (`kronn/INDEX.md`, `kronn/kronn.toml`, the router
+ * skill) and `docs/AGENTS.md` when its Kronn line is still missing.
+ * Empty for a repository-only resource: there is nothing to publish.
+ */
+write_preview: Array<string>, required_secrets: Array<RequiredSecretStatus>, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string, };
 
 export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
 
@@ -5212,11 +5241,47 @@ export type ProjectRepositoryResources = { kronn_exists: boolean,
 /**
  * Native skill folders found in the repository, `kronn/skills` included.
  */
-skill_roots: Array<ProjectSkillRoot>, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>, };
+skill_roots: Array<ProjectSkillRoot>, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>,
+/**
+ * Whether a publish can write into this repository right now, and why
+ * not otherwise (e.g. a `kronn` file occupying the directory slot).
+ */
+can_write_repository: boolean, can_write_repository_reason?: string,
+/**
+ * Repository-relative paths Kronn wrote (per `kronn.lock`) that `git
+ * status` reports as modified or untracked — the banner's "N files
+ * changed, not committed" count.
+ */
+uncommitted_managed_paths: Array<string>, };
 
-export type ProjectRepositoryResourceStatus = "not_published" | "up_to_date" | "repository_modified" | "kronn_modified" | "conflict";
+/**
+ * Synchronization state between the repository and Kronn's database for one
+ * resource, following the same vocabulary for every kind (skills included).
+ * Exactly one is true at a time so the UI shows exactly one primary action.
+ */
+export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
 
-export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, publication_path: string, };
+export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, approval_required: boolean, approved: boolean, diff?: string,
+/**
+ * One unified diff per differing file, for the same states as `diff`.
+ */
+file_diffs: Array<RepositoryResourceFileDiff>, repository_paths: Array<string>,
+/**
+ * True when this slug is present under more than one native skill root
+ * (`.claude/skills`, `.agents/skills`…) and those copies are not
+ * byte-identical — the UI must not silently pick one.
+ */
+repository_paths_diverge: boolean, publication_path: string,
+/**
+ * Every path publishing this skill would write, `docs/AGENTS.md`
+ * included when its Kronn line is still missing.
+ */
+write_preview: Array<string>,
+/**
+ * True once "Use in Kronn" attached this native skill by path reference
+ * (read-only, tracked at the source, no `kronn.lock` entry).
+ */
+referenced: boolean, required_secrets: Array<RequiredSecretStatus>, adr_level: ResourceAdrLevel, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
@@ -5657,7 +5722,47 @@ unmeasured: Array<string>,
  */
 messages_stamped: number, };
 
+/**
+ * A native `SKILL.md` found outside `kronn/` (`.claude/skills`,
+ * `.agents/skills`…), addressed by its repository-relative path.
+ */
+export type RepositoryNativeSkillRequest = { relative_path: string,
+/**
+ * "Copy into Kronn" only: replace an existing Kronn copy that differs
+ * from the repository file. Without it, that copy is never overwritten.
+ */
+overwrite_kronn_changes?: boolean, };
+
+/**
+ * One differing field between the repository and Kronn definitions of a
+ * resource, addressed by a dotted path into the resource JSON (e.g.
+ * `steps.0.agent`). Either side may be absent when the field only exists on
+ * one of them.
+ */
+export type RepositoryResourceFieldDiff = { field: string, repository?: any, kronn?: any, };
+
+/**
+ * The unified diff (repository side against Kronn side) of one file a
+ * resource is written to.
+ */
+export type RepositoryResourceFileDiff = { path: string, diff: string, };
+
 export type RepoSource = { id: string, label: string, provider: string, };
+
+/**
+ * A secret name a resource requires (`secret://NAME` in its file, listed in
+ * `kronn/kronn.toml`), with whether Kronn's encrypted store holds it: the
+ * name is a stored env key of a config this project can use. Names only —
+ * no value is ever read.
+ */
+export type RequiredSecretStatus = { name: string, configured: boolean, };
+
+/**
+ * ADR-005 portability tier. Deliberately serialized as the literal `N0` /
+ * `N1` / `N2` used throughout the ADR and `kronn/INDEX.md`, not
+ * `snake_case`, so the API value matches the vocabulary humans read.
+ */
+export type ResourceAdrLevel = "N0" | "N1" | "N2";
 
 /**
  * One timestamped response from a vendor transcript, as the bridge reports it.

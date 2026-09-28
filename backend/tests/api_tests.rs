@@ -3206,7 +3206,7 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
     let resources = response["data"]["resources"].as_array().unwrap();
     assert_eq!(resources.len(), 1);
     assert_eq!(resources[0]["kind"], "artifact");
-    assert_eq!(resources[0]["status"], "not_published");
+    assert_eq!(resources[0]["status"], "kronn_only");
     assert_eq!(
         resources[0]["repository_paths"],
         serde_json::json!([
@@ -3319,7 +3319,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     .await;
     assert_eq!(
         repository_changed["data"]["resources"][0]["status"],
-        "repository_modified"
+        "repository_newer"
     );
 
     state
@@ -3344,10 +3344,25 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         .unwrap()
         .contains("--- repository"));
 
-    let (_, imported) = post_json(
+    let (_, refused) = post_json(
         app.clone(),
         "/api/projects/portable-project/repository-resources/import",
         serde_json::json!({ "kind": "quick_exec", "slug": "deploy" }),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("confirm"),
+        "an import must not silently replace Kronn's edits: {refused}"
+    );
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/import",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "slug": "deploy",
+            "overwrite_kronn_changes": true,
+        }),
     )
     .await;
     assert_eq!(imported["success"], true, "{imported}");
@@ -3356,7 +3371,10 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         "/api/projects/portable-project/repository-resources",
     )
     .await;
-    assert_eq!(awaiting["data"]["resources"][0]["status"], "up_to_date");
+    assert_eq!(
+        awaiting["data"]["resources"][0]["status"],
+        "approval_required"
+    );
     assert_eq!(awaiting["data"]["resources"][0]["approval_required"], true);
 
     let (_, blocked) = post_json(
@@ -3440,6 +3458,13 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     .await;
     assert_eq!(approved["success"], true, "{approved}");
     assert_eq!(approved["data"]["approved"], true);
+    let (_, settled) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(settled["data"]["resources"][0]["status"], "up_to_date");
+    assert_eq!(settled["data"]["resources"][0]["approval_required"], false);
 
     let (_, accepted) = post_json(
         app.clone(),
@@ -3840,7 +3865,7 @@ async fn project_repository_resources_classifies_repository_and_kronn_skills() {
         .find(|skill| skill["id"] == "python")
         .expect("attached Kronn-only skill");
     assert_eq!(attached["provenance"], "kronn");
-    assert_eq!(attached["status"], "not_published");
+    assert_eq!(attached["status"], "kronn_only");
     let detected = present
         .iter()
         .find(|skill| skill["id"] == "go")

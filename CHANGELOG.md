@@ -11,6 +11,44 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- The project's repository resources (`GET /api/projects/:id/repository-resources`)
+  now describe both sides of every item. Its `status` is one of
+  `repository_only`, `kronn_only`, `up_to_date`, `repository_newer`,
+  `kronn_newer`, `conflict`, `approval_required` (or `native_skill` for a skill
+  found outside `kronn/`). Each item carries the repository date (last commit's
+  author and date, else the file's mtime), the Kronn date and `aligned_at`; its
+  `required_secrets` with whether Kronn's stored configs hold each name; its
+  ADR-005 level; a unified diff per file (`file_diffs`, the artifact's HTML
+  included) and, for workflows, Quick APIs and Quick Execs, a field-by-field
+  diff, both for the three states where the sides differ; and `write_preview`,
+  every path a publish would write, `docs/AGENTS.md` and the router skill
+  included. The listing also reports `can_write_repository` with its reason
+  and `uncommitted_managed_paths`.
+- A native skill outside `kronn/` can be used in Kronn without `kronn.lock`
+  (`POST .../repository-resources/skills/use`: a read-only reference to its
+  path) or copied into Kronn as a managed skill
+  (`POST .../repository-resources/skills/copy`, which writes nothing into the
+  repository and replaces an edited copy only with `overwrite_kronn_changes`).
+  The same skill under several skill folders is grouped by slug, every path
+  kept, and flagged when the copies differ.
+
+### Changed
+
+- `not_published`, `repository_modified` and `kronn_modified` are now
+  `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
+  only in the repository is `repository_only`. A resource that exists on both
+  sides but was never aligned is `up_to_date` when identical and `conflict`
+  otherwise. `approval_required` is a status of its own, and only for the
+  kinds Kronn can execute.
+- Importing a repository resource no longer silently replaces a Kronn copy
+  that holds edits the repository lacks: the import is refused unless the
+  request sets `overwrite_kronn_changes` (the "keep repository version" choice
+  on a conflict does).
+- The lock records `N2` rather than `N0` for a workflow or a Quick API, and
+  `N1` for prompts, skills and Quick Execs.
+
 ## [0.14.1] - 2026-09-26
 
 ### Added

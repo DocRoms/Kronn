@@ -92,19 +92,23 @@ pub fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Top-level resource fields that belong to one Kronn instance, not to the
+/// definition: identity, timestamps, favorites and the workflow toggle.
+const INSTANCE_LOCAL_FIELDS: [&str; 6] = [
+    "id",
+    "project_id",
+    "created_at",
+    "updated_at",
+    "pinned",
+    "enabled",
+];
+
 /// Fingerprint the executable definition while excluding instance-local
 /// identity, timestamps, favorites and the workflow activation toggle.
 pub fn approval_hash(document: &RepositoryDocument) -> String {
     let mut resource = document.resource.clone();
     if let Some(object) = resource.as_object_mut() {
-        for key in [
-            "id",
-            "project_id",
-            "created_at",
-            "updated_at",
-            "pinned",
-            "enabled",
-        ] {
+        for key in INSTANCE_LOCAL_FIELDS {
             object.remove(key);
         }
     }
@@ -644,23 +648,197 @@ fn router_skill() -> Vec<u8> {
     b"---\nname: kronn\ndescription: Discover the Kronn resources published by this repository.\n---\n\nRead `kronn/INDEX.md`, then open only the resource needed for the task.\n".to_vec()
 }
 
+/// Whether `docs/AGENTS.md` already carries the Kronn pointer line — a
+/// missing read is treated the same as an absent line, never as "present".
+fn agents_line_present(root: &Path) -> bool {
+    std::fs::read_to_string(root.join(AGENTS_PATH))
+        .is_ok_and(|current| current.lines().any(|line| line.trim() == AGENTS_LINE))
+}
+
 fn ensure_agents_line(root: &Path) -> Result<(), String> {
     let path = root.join(AGENTS_PATH);
     crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
+    if agents_line_present(root) {
+        return Ok(());
+    }
     let current = match std::fs::read_to_string(&path) {
         Ok(current) => current,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
     };
-    if current.lines().any(|line| line.trim() == AGENTS_LINE) {
-        return Ok(());
-    }
     let next = if current.is_empty() {
         format!("{AGENTS_LINE}\n")
     } else {
         format!("{AGENTS_LINE}\n\n{current}")
     };
     write_atomic(root, AGENTS_PATH, next.as_bytes())
+}
+
+/// Every path a publish writes beyond the resource's own files: the
+/// generated index, config and router skill, plus the `docs/AGENTS.md` line
+/// when it is not already there.
+pub fn publish_side_effect_paths(root: &Path) -> Vec<String> {
+    let mut paths = vec![
+        INDEX_PATH.to_string(),
+        CONFIG_PATH.to_string(),
+        ROUTER_PATH.to_string(),
+    ];
+    if !agents_line_present(root) {
+        paths.push(AGENTS_PATH.to_string());
+    }
+    paths
+}
+
+/// Whether a publish can write into this repository right now, and why not
+/// otherwise. Checked ahead of time so a write attempt never surfaces as a
+/// mid-publish error for a condition that was already knowable.
+pub fn can_write_repository(root: &Path) -> (bool, Option<String>) {
+    if let Err(reason) = ensure_kronn_dir_available(root) {
+        return (false, Some(reason));
+    }
+    match std::fs::metadata(root) {
+        Ok(metadata) if metadata.permissions().readonly() => {
+            (false, Some(format!("{} is read-only", root.display())))
+        }
+        Ok(_) => (true, None),
+        Err(error) => (
+            false,
+            Some(format!("cannot inspect {}: {error}", root.display())),
+        ),
+    }
+}
+
+/// Repository-relative paths Kronn wrote (per `kronn.lock`) that `git status`
+/// reports as modified or untracked. Best-effort: any git failure (no repo,
+/// no binary) reports no uncommitted paths rather than failing the caller.
+pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<String> {
+    if lock.files.is_empty() {
+        return Vec::new();
+    }
+    let output = crate::core::cmd::sync_cmd("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain", "-uall", "--"])
+        .args(lock.files.keys())
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The repository's own account of when a managed path last changed: the
+/// author and date of its last commit when the file is tracked and git is
+/// available, else the filesystem mtime (checkout/pull do not preserve
+/// commit dates, so the commit date is always preferred when it is known).
+pub fn repository_file_updated_at(
+    root: &Path,
+    relative: &str,
+) -> (Option<DateTime<Utc>>, Option<String>) {
+    let output = crate::core::cmd::sync_cmd("git")
+        .arg("-C")
+        .arg(root)
+        .args(["log", "-1", "--format=%aI%x1f%an", "--", relative])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let text = text.trim();
+            if let Some((date, author)) = text.split_once('\u{1f}') {
+                if let Some(date) = parse_rfc3339(date) {
+                    return (Some(date), Some(author.to_string()));
+                }
+            }
+        }
+    }
+    let modified = std::fs::metadata(root.join(relative))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(DateTime::<Utc>::from);
+    (modified, None)
+}
+
+fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .ok()
+}
+
+/// Required secret names with whether Kronn's encrypted store holds each one
+/// (`configured` is the set from `configured_secret_names`).
+pub fn required_secret_statuses(
+    names: &[String],
+    configured: &BTreeSet<String>,
+) -> Vec<crate::models::RequiredSecretStatus> {
+    names
+        .iter()
+        .map(|name| crate::models::RequiredSecretStatus {
+            name: name.clone(),
+            configured: configured.contains(name),
+        })
+        .collect()
+}
+
+/// Env-key names held by the MCP/API configs a project can use (its own and
+/// the global ones): the store ADR-005 resolves `secret://NAME` against.
+/// Only the key names are read, never a value.
+pub fn configured_secret_names(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    Ok(crate::db::mcps::configs_for_project(conn, project_id)?
+        .into_iter()
+        .flat_map(|config| config.env_keys)
+        .collect())
+}
+
+/// ADR-005's portability tier for a resource, from its declared `requires`
+/// and — for artifacts, whose dataset bindings are not visible in `requires`
+/// — whether it reads a Kronn dataset. Workflow and Quick API always declare
+/// `requires: [kronn]` in phase 1 (`document()`), so both land on N2 until a
+/// later phase can tell a portable runbook apart from one that cannot run
+/// without Kronn.
+pub fn resource_adr_level(document: &RepositoryDocument) -> crate::models::ResourceAdrLevel {
+    use crate::models::ResourceAdrLevel;
+    if document.requires.iter().any(|item| item == "kronn") {
+        return ResourceAdrLevel::N2;
+    }
+    match document.kind {
+        ProjectRepositoryResourceKind::Skill
+        | ProjectRepositoryResourceKind::QuickPrompt
+        | ProjectRepositoryResourceKind::QuickExec => ResourceAdrLevel::N1,
+        ProjectRepositoryResourceKind::Artifact => {
+            let reads_dataset = document
+                .resource
+                .get("datasets")
+                .and_then(Value::as_array)
+                .is_some_and(|datasets| !datasets.is_empty());
+            if reads_dataset {
+                ResourceAdrLevel::N2
+            } else {
+                ResourceAdrLevel::N1
+            }
+        }
+        ProjectRepositoryResourceKind::Workflow | ProjectRepositoryResourceKind::QuickApi => {
+            ResourceAdrLevel::N2
+        }
+    }
+}
+
+fn adr_level_str(level: crate::models::ResourceAdrLevel) -> &'static str {
+    use crate::models::ResourceAdrLevel;
+    match level {
+        ResourceAdrLevel::N0 => "N0",
+        ResourceAdrLevel::N1 => "N1",
+        ResourceAdrLevel::N2 => "N2",
+    }
 }
 
 pub fn publish(
@@ -679,16 +857,7 @@ pub fn publish(
         kind: resource.document.kind,
         slug: resource.document.slug.clone(),
         name: resource.name,
-        level: if matches!(
-            resource.document.kind,
-            ProjectRepositoryResourceKind::QuickPrompt
-                | ProjectRepositoryResourceKind::QuickExec
-                | ProjectRepositoryResourceKind::Skill
-        ) {
-            "N1".into()
-        } else {
-            "N0".into()
-        },
+        level: adr_level_str(resource_adr_level(&resource.document)).to_string(),
         paths: resource.files.keys().cloned().collect(),
         sha256: resource.hash,
         required_secrets: resource.required_secrets,
@@ -725,24 +894,220 @@ pub fn publish(
     Ok(entry)
 }
 
-pub fn simple_diff(repository: &[u8], kronn: &[u8]) -> String {
-    let repository = String::from_utf8_lossy(repository);
-    let kronn = String::from_utf8_lossy(kronn);
-    if repository == kronn {
-        return String::new();
+/// Cell budget for the LCS table (`u32` per cell): about 8 MB at the cap.
+/// It bounds the changed middle only, the unchanged head and tail being
+/// trimmed first; above it a rewritten file falls back to a coarser diff
+/// instead of an unbounded-memory comparison.
+const MAX_LCS_CELLS: usize = 2_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffOp {
+    Equal,
+    Delete,
+    Insert,
+}
+
+/// Line-based LCS table: `table[i][j]` is the LCS length of `a[i..]` and
+/// `b[j..]`. `O(n*m)` time and space, bounded by `MAX_LCS_CELLS`.
+fn lcs_diff_ops(a: &[&str], b: &[&str]) -> Vec<(DiffOp, usize, usize)> {
+    let (n, m) = (a.len(), b.len());
+    let mut table = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            table[i][j] = if a[i] == b[j] {
+                table[i + 1][j + 1] + 1
+            } else {
+                table[i + 1][j].max(table[i][j + 1])
+            };
+        }
     }
+    let mut ops = Vec::with_capacity(n + m);
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            ops.push((DiffOp::Equal, i, j));
+            i += 1;
+            j += 1;
+        } else if table[i + 1][j] >= table[i][j + 1] {
+            ops.push((DiffOp::Delete, i, j));
+            i += 1;
+        } else {
+            ops.push((DiffOp::Insert, i, j));
+            j += 1;
+        }
+    }
+    while i < n {
+        ops.push((DiffOp::Delete, i, j));
+        i += 1;
+    }
+    while j < m {
+        ops.push((DiffOp::Insert, i, j));
+        j += 1;
+    }
+    ops
+}
+
+/// One `@@` hunk spanning every change plus three lines of context on each
+/// side. A real `diff -u` splits distant changes into separate hunks; a
+/// single hunk stays correct (right lines, right line numbers) and is far
+/// simpler, which single-resource files do not need the extra split for.
+fn render_unified_diff(a: &[&str], b: &[&str], ops: &[(DiffOp, usize, usize)]) -> String {
+    const CONTEXT: usize = 3;
+    let Some(first_change) = ops.iter().position(|(op, _, _)| *op != DiffOp::Equal) else {
+        return String::new();
+    };
+    let last_change = ops
+        .iter()
+        .rposition(|(op, _, _)| *op != DiffOp::Equal)
+        .unwrap_or(first_change);
+    let start = first_change.saturating_sub(CONTEXT);
+    let end = (last_change + 1 + CONTEXT).min(ops.len());
+    let window = &ops[start..end];
+
+    let a_start = window.first().map_or(0, |(_, i, _)| *i);
+    let b_start = window.first().map_or(0, |(_, _, j)| *j);
+    let a_count = window
+        .iter()
+        .filter(|(op, _, _)| *op != DiffOp::Insert)
+        .count();
+    let b_count = window
+        .iter()
+        .filter(|(op, _, _)| *op != DiffOp::Delete)
+        .count();
+
     let mut output = String::from("--- repository\n+++ Kronn\n");
-    for line in repository.lines().take(80) {
+    output.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        a_start + 1,
+        a_count,
+        b_start + 1,
+        b_count
+    ));
+    for (op, i, j) in window {
+        match op {
+            DiffOp::Equal => {
+                output.push(' ');
+                output.push_str(a[*i]);
+            }
+            DiffOp::Delete => {
+                output.push('-');
+                output.push_str(a[*i]);
+            }
+            DiffOp::Insert => {
+                output.push('+');
+                output.push_str(b[*j]);
+            }
+        }
+        output.push('\n');
+    }
+    output
+}
+
+fn truncated_diff(a: &[&str], b: &[&str]) -> String {
+    let mut output = String::from("--- repository\n+++ Kronn\n");
+    for line in a.iter().take(80) {
         output.push('-');
         output.push_str(line);
         output.push('\n');
     }
-    for line in kronn.lines().take(80) {
+    for line in b.iter().take(80) {
         output.push('+');
         output.push_str(line);
         output.push('\n');
     }
     output
+}
+
+/// A real unified diff between two file contents (the repository's and
+/// Kronn's), line by line — the artifact HTML included. Built in-house on a
+/// plain LCS rather than pulling in a diff crate: no dependency is worth
+/// adding for what a bounded dynamic program already gives us.
+pub fn unified_diff(repository: &[u8], kronn: &[u8]) -> String {
+    let repository = String::from_utf8_lossy(repository);
+    let kronn = String::from_utf8_lossy(kronn);
+    if repository == kronn {
+        return String::new();
+    }
+    let a: Vec<&str> = repository.lines().collect();
+    let b: Vec<&str> = kronn.lines().collect();
+    let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let tail = a[head..]
+        .iter()
+        .rev()
+        .zip(b[head..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let (a_mid, b_mid) = (&a[head..a.len() - tail], &b[head..b.len() - tail]);
+    if a_mid.len().saturating_mul(b_mid.len()) > MAX_LCS_CELLS {
+        return truncated_diff(&a, &b);
+    }
+    let mut ops: Vec<(DiffOp, usize, usize)> = (0..head).map(|i| (DiffOp::Equal, i, i)).collect();
+    ops.extend(
+        lcs_diff_ops(a_mid, b_mid)
+            .into_iter()
+            .map(|(op, i, j)| (op, i + head, j + head)),
+    );
+    ops.extend((0..tail).map(|k| (DiffOp::Equal, a.len() - tail + k, b.len() - tail + k)));
+    render_unified_diff(&a, &b, &ops)
+}
+
+fn flatten_json(value: &Value, prefix: String, out: &mut BTreeMap<String, Value>) {
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            for (key, item) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_json(item, path, out);
+            }
+        }
+        Value::Array(items) if !items.is_empty() => {
+            for (index, item) in items.iter().enumerate() {
+                flatten_json(item, format!("{prefix}.{index}"), out);
+            }
+        }
+        _ => {
+            out.insert(prefix, value.clone());
+        }
+    }
+}
+
+/// Field-by-field diff of a resource's definition: nested JSON flattened to
+/// dotted-path leaves (`steps.0.agent`, `trigger.cron`) so a workflow's
+/// trigger, an exec's command or a step's agent/model each surface as its
+/// own row instead of one opaque "the file changed".
+pub fn field_diff(
+    repository: &Value,
+    kronn: &Value,
+) -> Vec<crate::models::RepositoryResourceFieldDiff> {
+    let mut repository_flat = BTreeMap::new();
+    flatten_json(repository, String::new(), &mut repository_flat);
+    let mut kronn_flat = BTreeMap::new();
+    flatten_json(kronn, String::new(), &mut kronn_flat);
+    let mut fields: BTreeSet<String> = repository_flat.keys().cloned().collect();
+    fields.extend(kronn_flat.keys().cloned());
+    fields
+        .into_iter()
+        .filter(|field| !field.is_empty())
+        .filter(|field| {
+            !INSTANCE_LOCAL_FIELDS
+                .iter()
+                .any(|local| field.split('.').next() == Some(*local))
+        })
+        .filter_map(|field| {
+            let repository_value = repository_flat.get(&field).cloned();
+            let kronn_value = kronn_flat.get(&field).cloned();
+            (repository_value != kronn_value).then_some(
+                crate::models::RepositoryResourceFieldDiff {
+                    field,
+                    repository: repository_value,
+                    kronn: kronn_value,
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn ensure_execution_approved(
@@ -1076,6 +1441,178 @@ mod tests {
         let rendered = render_quick_prompt(&sample_prompt("body"), "deploy-prompt").unwrap();
         let error = publish(root.path(), "repo", rendered, false).unwrap_err();
         assert!(error.contains("is not a directory"), "{error}");
-        assert!(root.path().join("kronn").is_file(), "the launcher must stay untouched");
+        assert!(
+            root.path().join("kronn").is_file(),
+            "the launcher must stay untouched"
+        );
+    }
+
+    #[test]
+    fn can_write_repository_reports_the_kronn_file_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let (writable, reason) = can_write_repository(root.path());
+        assert!(writable);
+        assert!(reason.is_none());
+
+        std::fs::write(root.path().join("kronn"), "#!/bin/sh\n").unwrap();
+        let (writable, reason) = can_write_repository(root.path());
+        assert!(!writable);
+        assert!(reason.unwrap().contains("is not a directory"));
+    }
+
+    #[test]
+    fn publish_side_effect_paths_drops_the_agents_line_once_present() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = publish_side_effect_paths(root.path());
+        assert!(
+            paths.contains(&AGENTS_PATH.to_string()),
+            "missing docs/AGENTS.md must be previewed"
+        );
+        assert!(paths.contains(&INDEX_PATH.to_string()));
+        assert!(paths.contains(&ROUTER_PATH.to_string()));
+
+        std::fs::create_dir_all(root.path().join("docs")).unwrap();
+        std::fs::write(root.path().join(AGENTS_PATH), format!("{AGENTS_LINE}\n")).unwrap();
+        let paths = publish_side_effect_paths(root.path());
+        assert!(
+            !paths.contains(&AGENTS_PATH.to_string()),
+            "an already-present line must not be previewed as a write"
+        );
+    }
+
+    #[test]
+    fn uncommitted_managed_paths_lists_only_dirty_lock_files() {
+        let root = tempfile::tempdir().unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        let rendered = render_quick_exec(&sample_exec("literal-token"), "deploy").unwrap();
+        publish(root.path(), "repo", rendered, false).unwrap();
+        let lock = load_lock(root.path()).unwrap().unwrap();
+        // Freshly written, nothing committed yet: every managed path is dirty
+        // (git reports untracked files the same as modified ones here).
+        let dirty = uncommitted_managed_paths(root.path(), &lock);
+        assert!(dirty.contains(&"kronn/quick-execs/deploy.yaml".to_string()));
+
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["add", "-A"])
+            .status()
+            .unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args([
+                "-c",
+                "user.email=t@t.io",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .status()
+            .unwrap();
+        let dirty = uncommitted_managed_paths(root.path(), &lock);
+        assert!(
+            dirty.is_empty(),
+            "a committed managed path must not be reported: {dirty:?}"
+        );
+    }
+
+    #[test]
+    fn resource_adr_level_matches_the_adr_005_table() {
+        use crate::models::ResourceAdrLevel;
+        let exec = render_quick_exec(&sample_exec("token"), "deploy").unwrap();
+        assert_eq!(resource_adr_level(&exec.document), ResourceAdrLevel::N1);
+
+        let api = render_quick_api(&sample_api("/deploy"), "deploy").unwrap();
+        assert_eq!(resource_adr_level(&api.document), ResourceAdrLevel::N2);
+
+        let prompt = render_quick_prompt(&sample_prompt("body"), "deploy-prompt").unwrap();
+        assert_eq!(resource_adr_level(&prompt.document), ResourceAdrLevel::N1);
+    }
+
+    #[test]
+    fn unified_diff_reports_no_difference_when_the_files_agree() {
+        assert_eq!(unified_diff(b"same\ncontent\n", b"same\ncontent\n"), "");
+    }
+
+    #[test]
+    fn unified_diff_produces_a_real_hunk_around_the_changed_line() {
+        let repository = b"one\ntwo\nthree\nfour\nfive\n".to_vec();
+        let kronn = b"one\ntwo\nCHANGED\nfour\nfive\n".to_vec();
+        let diff = unified_diff(&repository, &kronn);
+        assert!(diff.starts_with("--- repository\n+++ Kronn\n@@ "), "{diff}");
+        assert!(diff.contains("-three"), "{diff}");
+        assert!(diff.contains("+CHANGED"), "{diff}");
+        assert!(
+            diff.contains(" two"),
+            "unchanged context lines must stay: {diff}"
+        );
+    }
+
+    #[test]
+    fn field_diff_flattens_nested_paths_and_reports_only_differences() {
+        let repository = serde_json::json!({
+            "steps": [{"agent": "claude", "command": "cargo test"}],
+            "trigger": {"cron": "0 * * * *"},
+        });
+        let kronn = serde_json::json!({
+            "steps": [{"agent": "codex", "command": "cargo test"}],
+            "trigger": {"cron": "0 * * * *"},
+        });
+        let diffs = field_diff(&repository, &kronn);
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        assert_eq!(diffs[0].field, "steps.0.agent");
+        assert_eq!(diffs[0].repository, Some(serde_json::json!("claude")));
+        assert_eq!(diffs[0].kronn, Some(serde_json::json!("codex")));
+    }
+
+    #[test]
+    fn required_secret_statuses_mark_each_name_configured_or_missing() {
+        let names = vec!["FASTLY_TOKEN".to_string(), "SLACK_URL".to_string()];
+        let configured = BTreeSet::from(["FASTLY_TOKEN".to_string()]);
+        let statuses = required_secret_statuses(&names, &configured);
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses[0].configured);
+        assert_eq!(statuses[1].name, "SLACK_URL");
+        assert!(!statuses[1].configured);
+    }
+
+    #[test]
+    fn field_diff_ignores_instance_local_fields() {
+        let repository = serde_json::json!({
+            "id": "source-id", "project_id": "p-source", "updated_at": "2026-01-01",
+            "command": "cargo",
+        });
+        let kronn = serde_json::json!({
+            "id": "local-id", "project_id": "p-local", "updated_at": "2026-09-01",
+            "command": "cargo",
+        });
+        assert!(field_diff(&repository, &kronn).is_empty());
+    }
+
+    #[test]
+    fn unified_diff_stays_real_on_a_large_file_with_a_local_edit() {
+        let lines: Vec<String> = (0..5_000).map(|n| format!("<p>line {n}</p>")).collect();
+        let repository = lines.join("\n");
+        let mut edited = lines.clone();
+        edited[2_500] = "<p>EDITED</p>".to_string();
+        let kronn = edited.join("\n");
+        let diff = unified_diff(repository.as_bytes(), kronn.as_bytes());
+        assert!(diff.contains("-<p>line 2500</p>"), "{diff}");
+        assert!(diff.contains("+<p>EDITED</p>"), "{diff}");
+        assert!(diff.contains("@@ -2498,7 +2498,7 @@"), "{diff}");
+        assert!(
+            diff.lines().count() < 20,
+            "the hunk must stay local: {}",
+            diff.lines().count()
+        );
     }
 }
