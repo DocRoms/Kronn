@@ -3407,7 +3407,8 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         "/api/projects/portable-project/repository-resources",
     )
     .await;
-    assert_eq!(changed["data"]["resources"][0]["status"], "kronn_modified");
+    // An unapproved imported change surfaces as approval_required first.
+    assert_eq!(changed["data"]["resources"][0]["status"], "approval_required");
     assert_eq!(changed["data"]["resources"][0]["approval_required"], true);
 
     let (_, republished) = post_json(
@@ -3430,7 +3431,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     .await;
     assert_eq!(
         republished_state["data"]["resources"][0]["status"],
-        "up_to_date"
+        "approval_required"
     );
     assert_eq!(
         republished_state["data"]["resources"][0]["approval_required"],
