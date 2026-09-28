@@ -7,6 +7,7 @@ import {
   setRetryDelay,
   setStatusTimeout,
 } from '../lib/appBoot';
+import { createLivePageOpenLinkRelay } from '../lib/live-page-sandbox';
 
 // Mock the lazy-loaded pages to avoid loading the full component trees
 vi.mock('../pages/SetupWizard', () => ({
@@ -184,7 +185,7 @@ describe('App', () => {
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 
-  it('reacts to an internal Page hash without reloading the application', async () => {
+  it('opens an internal Live Page link in the current application tab', async () => {
     vi.mocked(setupApi.getStatus).mockResolvedValue({
       is_first_run: false,
       current_step: 'Complete',
@@ -197,12 +198,21 @@ describe('App', () => {
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
 
-    await act(async () => {
-      window.history.pushState(null, '', '#page/page-in-place');
-      window.dispatchEvent(new Event('hashchange'));
+    const postMessage = vi.fn();
+    const openExternal = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', openExternal);
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    port.postMessage({
+      type: 'kronn:page-open-link',
+      version: 1,
+      channel_id: 'channel-1',
+      url: `${window.location.origin}${window.location.pathname}#page/page-in-place`,
     });
 
     expect(await screen.findByTestId('standalone-page')).toHaveTextContent('page-in-place');
+    expect(openExternal).not.toHaveBeenCalled();
+    relay.dispose();
   });
 
   it('opens a direct Page mosaic URL without mounting the dashboard chrome', async () => {

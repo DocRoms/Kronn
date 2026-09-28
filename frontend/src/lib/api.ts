@@ -264,9 +264,14 @@ import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } 
 const _ls: Storage | undefined = typeof localStorage !== 'undefined' ? localStorage : undefined;
 
 const SHARED_GET_WINDOW_MS = 2_000;
+const STARTUP_GET_CACHE_PATHS = new Set([
+  '/config/server',
+  '/skills',
+  '/agents',
+  '/config/agent-access',
+]);
 interface SharedGetEntry {
   promise: Promise<unknown>;
-  expiresAt: number;
 }
 const sharedGets = new Map<string, SharedGetEntry>();
 
@@ -274,25 +279,38 @@ function clearSharedGets(): void {
   sharedGets.clear();
 }
 
-function sharedGet<T>(key: string, request: () => Promise<T>): Promise<T> {
-  const now = Date.now();
+function retainSettledStartupGet(path: string): boolean {
+  return STARTUP_GET_CACHE_PATHS.has(path)
+    || /^\/discussions\/[^/]+\/native-agent$/.test(path);
+}
+
+function sharedGet<T>(
+  key: string,
+  request: () => Promise<T>,
+  retainAfterResolution = false,
+): Promise<T> {
   const existing = sharedGets.get(key);
-  if (existing && existing.expiresAt > now) return existing.promise as Promise<T>;
+  if (existing) return existing.promise as Promise<T>;
 
   const entry: SharedGetEntry = {
     promise: request(),
-    expiresAt: now + SHARED_GET_WINDOW_MS,
   };
   sharedGets.set(key, entry);
   void entry.promise.then(
-    () => undefined,
+    () => {
+      if (sharedGets.get(key) !== entry) return;
+      if (!retainAfterResolution) {
+        sharedGets.delete(key);
+        return;
+      }
+      globalThis.setTimeout(() => {
+        if (sharedGets.get(key) === entry) sharedGets.delete(key);
+      }, SHARED_GET_WINDOW_MS);
+    },
     () => {
       if (sharedGets.get(key) === entry) sharedGets.delete(key);
     },
   );
-  globalThis.setTimeout(() => {
-    if (sharedGets.get(key) === entry) sharedGets.delete(key);
-  }, SHARED_GET_WINDOW_MS);
   return entry.promise as Promise<T>;
 }
 
@@ -678,7 +696,11 @@ async function api<T>(
 
   if (method === 'GET' && !hasBody && !signal) {
     const authorization = headers.Authorization ?? '';
-    return sharedGet(`${_apiBase}/api${path}\n${authorization}`, execute);
+    return sharedGet(
+      `${_apiBase}/api${path}\n${authorization}`,
+      execute,
+      retainSettledStartupGet(path),
+    );
   }
   if (method !== 'GET') clearSharedGets();
   return execute();
@@ -722,10 +744,14 @@ export const health = {
    *  the `api<T>()` `{success,data}` unwrap. */
   get: async (): Promise<HealthInfo> => {
     const headers = { ...authHeaders() };
-    return sharedGet(`${_apiBase}/api/health\n${headers.Authorization ?? ''}`, async () => {
-      const res = await fetch(`${_apiBase}/api/health`, { headers });
-      return res.json() as Promise<HealthInfo>;
-    });
+    return sharedGet(
+      `${_apiBase}/api/health\n${headers.Authorization ?? ''}`,
+      async () => {
+        const res = await fetch(`${_apiBase}/api/health`, { headers });
+        return res.json() as Promise<HealthInfo>;
+      },
+      true,
+    );
   },
 };
 

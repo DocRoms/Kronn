@@ -1,6 +1,13 @@
 /// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { Agent as HttpAgent } from 'node:http';
+import { Agent as HttpsAgent } from 'node:https';
+
+const backendTarget = process.env.KRONN_BACKEND_URL ?? 'http://localhost:3140';
+const backendAgent = new URL(backendTarget).protocol === 'https:'
+  ? new HttpsAgent({ keepAlive: true })
+  : new HttpAgent({ keepAlive: true });
 
 export default defineConfig({
   plugins: [react()],
@@ -43,7 +50,8 @@ export default defineConfig({
       // `pnpm dev`. (Production goes through nginx which handles upgrades
       // transparently — the bug only bit the dev server.)
       '/api': {
-        target: process.env.KRONN_BACKEND_URL ?? 'http://localhost:3140',
+        target: backendTarget,
+        agent: backendAgent,
         changeOrigin: true,
         ws: true,
       },
