@@ -39,12 +39,17 @@ directory. `--strict-config` rejects unsupported Codex settings.
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
 
+Claude's effective settings can still list a linked repository as writable due
+to `--add-dir`; `denyWrite` and `Edit` deny rules take precedence. The principal's
+host probe confirmed that Python, Write and shell redirection were all refused.
+[src: user: 2026-09-28: KT-806 request_changes review of the host probe]
+
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:3747]
 [src: file: backend/src/agents/runner.rs:11042]
-[src: file: backend/src/acp/codex_adapter.rs:400]
+[src: file: backend/src/acp/codex_adapter.rs:404]
 
 Workflow prompts state that repository paths are locations, not permission
 grants, and list the repositories declared by the current step. This corrects
@@ -69,6 +74,13 @@ vendor sandbox enforcement.
 [src: file: backend/src/agents/read_only_repos.rs:208]
 [src: file: backend/tests/adapter_worker_policy.rs:1]
 
+The dispatch regression checks initial and resumed Codex adapter arguments:
+options occur once, repeated `-c` flags have distinct keys, the project MCP
+override remains present once, and the read-only permissions profile is selected
+without a conflicting `--sandbox` flag.
+[src: file: backend/tests/adapter_worker_policy.rs:188]
+[src: file: backend/src/acp/codex_adapter.rs:374]
+
 Run the opt-in host probe with authenticated Claude Code and Codex installations
 and OS sandbox privileges:
 
@@ -84,5 +96,8 @@ worktree write. Review the printed receipt for the built-in Edit/Write denial.
 
 The KT-806 worker could not run a nested macOS sandbox: invoking
 `codex sandbox macos --help` returned `sandbox-exec: sandbox_apply: Operation not
-permitted`. The host probe and the stored autoCode prompt update still require
-principal qualification; neither is claimed as completed by the unit tests.
+permitted`. The principal subsequently reported a successful Claude host probe;
+Codex failed before execution because of a duplicate `--skip-git-repo-check`.
+That argument regression is now covered; the corrected Codex host probe and the
+stored autoCode prompt update still require principal qualification.
+[src: user: 2026-09-28: KT-806 request_changes review of the host probe]

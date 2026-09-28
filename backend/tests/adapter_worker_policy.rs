@@ -1,7 +1,7 @@
-//! KT-652: exercise production dispatch with owned fake CLI processes only.
+//! KT-652 / KT-806: exercise production dispatch and inspect the actual CLI argv.
 #![cfg(unix)]
 
-use std::{ffi::OsString, os::unix::fs::PermissionsExt, time::Duration};
+use std::{collections::HashSet, ffi::OsString, os::unix::fs::PermissionsExt, time::Duration};
 
 use kronn::agents::runner::{start_agent_with_config, AgentStartConfig, TaskWorkerBridgeContext};
 use kronn::models::AgentType;
@@ -65,7 +65,10 @@ async fn default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries() {
             "/scripts/disc-introspection-mcp.py"
         ),
     );
-    let mut registry = serde_json::from_value(serde_json::json!({"mcpServers":{}})).unwrap();
+    let mut registry = serde_json::from_value(serde_json::json!({"mcpServers":{
+        "project-safe": {"command": "safe-server", "args": ["serve"]}
+    }}))
+    .unwrap();
     assert!(kronn::core::mcp_scanner::inject_kronn_internal(
         &mut registry
     ));
@@ -107,9 +110,19 @@ esac
     ] {
         for toggle in [None, Some("0"), Some("1")] {
             env.change(switch, toggle.map(OsString::from));
-            for mode in ["ordinary", "worker", "read-only"] {
+            for mode in [
+                "ordinary",
+                "worker",
+                "read-only",
+                "ordinary-resume",
+                "read-only-resume",
+            ] {
+                let resume = mode.ends_with("-resume");
+                if resume && (agent != AgentType::Codex || toggle == Some("0")) {
+                    continue;
+                }
                 let worker = mode == "worker";
-                let read_only = mode == "read-only";
+                let read_only = mode.starts_with("read-only");
                 let label = format!("{agent:?} toggle={toggle:?} mode={mode}");
                 let argv = dir.path().join(format!("argv-{count}"));
                 let child_env = dir.path().join(format!("env-{count}"));
@@ -130,7 +143,8 @@ esac
                         discussion_id: Some("fixture-discussion"),
                         mcp_context_override: Some(""),
                         // Even an explicit hint must not resume a task worker.
-                        cli_resume_id: worker.then_some("11111111-1111-4111-8111-111111111111"),
+                        cli_resume_id: (worker || resume)
+                            .then_some("11111111-1111-4111-8111-111111111111"),
                         task_worker_context: worker.then_some(&context),
                         ..AgentStartConfig::new(
                             &agent,
@@ -171,6 +185,99 @@ esac
                     adapted == (toggle != Some("0")),
                     "wrong actual dispatch route",
                 );
+                if adapted && agent == AgentType::Codex {
+                    let mut options = HashSet::new();
+                    let mut config_keys = HashSet::new();
+                    let mut configs = Vec::new();
+                    for (index, arg) in args.iter().enumerate() {
+                        if *arg == "-c" {
+                            let setting = args.get(index + 1).expect("-c needs a value");
+                            let (key, _) = setting.split_once('=').expect("-c needs key=value");
+                            check(
+                                config_keys.insert(key),
+                                &format!("duplicate Codex config key: {key}"),
+                            );
+                            configs.push(toml::from_str::<toml::Value>(setting).unwrap());
+                        } else if arg.starts_with('-') && *arg != "-" {
+                            let option = arg.split('=').next().unwrap();
+                            check(
+                                options.insert(option),
+                                &format!("duplicate Codex option: {option}"),
+                            );
+                        }
+                    }
+                    for required in ["--json", "--skip-git-repo-check"] {
+                        check(options.contains(required), &format!("missing {required}"));
+                    }
+                    check(
+                        args.iter().filter(|arg| **arg == "exec").count() == 1,
+                        "exec must occur once",
+                    );
+                    check(
+                        args.iter().filter(|arg| **arg == "resume").count() == usize::from(resume),
+                        "unexpected resume count",
+                    );
+                    if resume {
+                        check(
+                            args.windows(2)
+                                .any(|p| p == ["resume", "11111111-1111-4111-8111-111111111111"]),
+                            "resume lost the supplied thread id",
+                        );
+                    }
+                    check(
+                        options.contains("--sandbox") == (!read_only && !resume),
+                        "sandbox flag must not override the read-only profile or a resumed policy",
+                    );
+                    let mcp: Vec<_> = configs
+                        .iter()
+                        .filter_map(|config| config.get("mcp_servers"))
+                        .collect();
+                    // A dotted env_vars override from the direct builder is
+                    // distinct from the complete, project-scoped MCP table.
+                    check(
+                        config_keys.contains("mcp_servers"),
+                        "complete MCP override missing",
+                    );
+                    let project_mcp: Vec<_> = mcp
+                        .iter()
+                        .filter(|servers| servers.get("project-safe").is_some())
+                        .collect();
+                    check(
+                        project_mcp.len() == usize::from(!worker),
+                        "project MCP registry must occur once for non-workers only",
+                    );
+                    if !worker {
+                        let servers = project_mcp.first().expect("project MCP server missing");
+                        check(
+                            servers["project-safe"]["command"].as_str() == Some("safe-server"),
+                            "project MCP command changed",
+                        );
+                        check(
+                            servers["kronn-internal"]["command"].is_str(),
+                            "internal MCP bridge missing",
+                        );
+                    }
+                    if read_only {
+                        check(
+                            configs.iter().any(|config| {
+                                config
+                                    .get("default_permissions")
+                                    .and_then(toml::Value::as_str)
+                                    == Some("kronn_read_only_repos")
+                            }),
+                            "read-only permissions profile is not selected",
+                        );
+                        check(
+                            configs.iter().any(|config| {
+                                config
+                                    .get("permissions")
+                                    .and_then(|profiles| profiles.get("kronn_read_only_repos"))
+                                    .is_some()
+                            }),
+                            "read-only permissions profile is not defined",
+                        );
+                    }
+                }
                 if adapted && agent == AgentType::ClaudeCode {
                     let registry = args
                         .windows(2)
@@ -305,6 +412,6 @@ esac
             }
         }
     }
-    assert_eq!(count, 18);
+    assert_eq!(count, 22);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

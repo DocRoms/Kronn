@@ -399,8 +399,12 @@ impl AcpTransport for CodexAcpAdapter {
             args.push(thread.clone());
         }
         args.push("--json".into());
-        if self.launch.worker_context.is_none() {
+        // Read-only workflow launches also reuse the direct argv, including
+        // this flag, but still need the project MCP override below.
+        if self.launch.worker_args.is_none() {
             args.push("--skip-git-repo-check".into());
+        }
+        if self.launch.worker_context.is_none() {
             args.push("-c".into());
             args.push(
                 codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
