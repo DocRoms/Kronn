@@ -52,7 +52,7 @@ import uuid
 
 MAX_DISC_APPEND_ATTACHMENTS = 8
 MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
-BRIDGE_TOOL_SURFACE_VERSION = "0.3.9"
+BRIDGE_TOOL_SURFACE_VERSION = "0.3.10"
 
 
 class BridgeStaleError(RuntimeError):
@@ -1006,9 +1006,10 @@ TOOLS = [
     {
         "name": "task_exec_accept_worker_offer",
         "description": (
-            "Attach THIS joined CLI to a task worker offer using only its opaque "
-            "offer_id. The backend verifies the exact session and success rebinds "
-            "this bridge to the child room. See "
+            "Accept a task worker offer for THIS joined CLI using only its opaque "
+            "offer_id. The backend verifies the exact session and grants the worker "
+            "role to that execution without moving this bridge out of its principal "
+            "room. The result carries the worker instructions. See "
             "tool_manual({tool: \"task_exec_accept_worker_offer\"})."
         ),
         "inputSchema": {
@@ -1031,8 +1032,8 @@ TOOLS = [
             "verifies you are the execution's EXACT worker (a different session is "
             "refused). On success the manifest is persisted, the execution flips to "
             "AwaitingReview, and a review request wakes the principal in the parent "
-            "room — call this BEFORE announcing 'ready for review'. This does not "
-            "move your session; you stay in the sub-discussion. A malformed manifest "
+            "room — call this BEFORE announcing 'ready for review'. Your session "
+            "remains in its principal room throughout. A malformed manifest "
             "is refused, not silently accepted."
         ),
         "inputSchema": {
@@ -6089,19 +6090,11 @@ def call_task_exec_reassign(args):
 
 def call_task_exec_accept_worker_offer(args):
     """Accept a task-execution worker control offer targeted at THIS session and
-    attach to its sub-discussion (KT-328 tranche 2). The caller passes ONLY the
-    opaque `offer_id`; both identities are DERIVED by this bridge, and the
-    backend verifies that the live session is the exact target before moving
-    its separate durable room binding.
-
-    On success the backend moves this session origin -> child (durable source
-    binding + `discussion_sessions` membership), posts the work brief in the child,
-    and flips the execution to `Working`. This tool then does the LOCAL half of the
-    move (DoD-3): follow the session into the child so subsequent calls and
-    `disc_wait_for_peer` operate there, and rewrite the durable resume credential to
-    the child so an MCP reload re-attaches. The session row is re-homed WITHOUT
-    rotating its resume credential, so the `resume_token` we already hold still
-    resolves to the session in the child — we reuse it rather than mint a new one."""
+    grant it an execution-scoped worker role. The caller passes ONLY the opaque
+    `offer_id`; both identities are DERIVED by this bridge. The backend verifies
+    the exact live session and its reload-stable principal-room binding without
+    moving either one. The child remains the task/evidence room, while the response
+    carries the work instructions directly to this CLI."""
     _require_fresh_bridge("task_exec_accept_worker_offer")
     offer_id = (args.get("offer_id") or "").strip()
     if not offer_id:
@@ -6109,8 +6102,8 @@ def call_task_exec_accept_worker_offer(args):
     # Offer acceptance crosses two deliberately distinct identity domains.
     # `source_session_id` identifies the active `discussion_sessions` row and
     # must match the exact target PK. `source_binding_session_id` identifies
-    # the reload-stable `disc_source_history` binding that follows that row to
-    # the child. Collapsing them made a real resumed CLI impossible to accept:
+    # the reload-stable `disc_source_history` binding that must remain on the
+    # principal room. Collapsing them made a real resumed CLI impossible to accept:
     # its active identity is `adhoc-*`, while its durable binding is `cli-*`.
     # Both values are bridge-derived and absent from the MCP input schema.
     source_agent, source_session_id = _task_exec_identity(
@@ -6122,9 +6115,10 @@ def call_task_exec_accept_worker_offer(args):
             "task_exec_accept_worker_offer: no durable room identity for this bridge — "
             "join the origin room (disc_join) before accepting an offer"
         )
-    prior_binding = _read_binding()
+    principal_disc_id = _disc_id()
     # `_unwrap` raises on a refused offer, preserving the backend's opaque message
-    # ("not found or not addressed to this session") so no rebind happens on refusal.
+    # ("not found or not addressed to this session"). Acceptance never rewrites the
+    # bridge's current room, read cursor, or durable resume credential.
     result = _unwrap(_http("POST", "/api/orchestration/accept-offer", {
         "offer_id": offer_id,
         "source_agent": source_agent,
@@ -6137,45 +6131,9 @@ def call_task_exec_accept_worker_offer(args):
     if not child_disc_id:
         raise RuntimeError(
             "task_exec_accept_worker_offer: backend accepted but returned no child "
-            "discussion to attach to"
+            "task discussion"
         )
-    # ── Local rebind — follow the server-side move into the child room. ──
-    _set_current_disc_id(child_disc_id)
-    # Seed the child cursor at -1 so the work brief (just posted there, targeted at
-    # this session) is delivered on the next wait rather than skipped.
-    _set_read_cursor(child_disc_id, -1)
-    resume_token = (
-        prior_binding.get("resume_token") if isinstance(prior_binding, dict) else None
-    )
-    if resume_token:
-        same_child_handoff = (
-            isinstance(prior_binding, dict)
-            and prior_binding.get("disc_id") == child_disc_id
-            and prior_binding.get("return_disc_id")
-        )
-        origin_disc_id = (
-            prior_binding.get("return_disc_id") if same_child_handoff
-            else prior_binding.get("disc_id") if isinstance(prior_binding, dict)
-            else None
-        )
-        origin_cursor = (
-            prior_binding.get("return_read_sort_order") if same_child_handoff else None
-        )
-        if origin_cursor is None:
-            origin_cursor = _read_cursor(origin_disc_id) if origin_disc_id else None
-        if origin_cursor is None and isinstance(prior_binding, dict):
-            origin_cursor = prior_binding.get("last_read_sort_order")
-        _write_binding(
-            child_disc_id,
-            resume_token,
-            agent_type=source_agent,
-            last_read_sort_order=_read_cursor(child_disc_id),
-            return_disc_id=(
-                origin_disc_id
-            ),
-            return_read_sort_order=origin_cursor,
-        )
-    result["local_rebound_to"] = child_disc_id
+    result["local_room_preserved"] = principal_disc_id
     return result
 
 
@@ -6187,7 +6145,7 @@ def call_task_exec_deliver(args):
     execution's EXACT worker (a different session is refused). On success the
     manifest is persisted, the execution flips to `AwaitingReview`, and a review
     request is posted to the principal in the parent room. This does NOT move your
-    session — you stay in the sub-discussion. A refused delivery surfaces an opaque
+    session — it remains in the principal room. A refused delivery surfaces an opaque
     reason (not found / not addressed to you) or a specific state (not deliverable,
     invalid manifest). A spawned host worker passes only the semantic projection;
     Kronn derives the execution/task/Git/DoD mechanics from its runner capability."""
@@ -9735,10 +9693,11 @@ TOOL_MANUALS = {
     ),
     "task_exec_accept_worker_offer": (
         "Pass only the opaque `offer_id` from the control message. The backend "
-        "derives identity from this bridge's durable session and refuses another "
-        "session even when it uses the same provider. Success moves the session "
-        "into the child discussion, exposes the work brief and rebinds subsequent "
-        "calls and `disc_wait_for_peer`. Refusals distinguish expired/already "
+        "derives the exact live session plus its reload-stable principal-room binding "
+        "and refuses another session even when it uses the same provider. Success "
+        "grants that `(execution, session)` the worker role, returns the work "
+        "instructions, and leaves subsequent calls and `disc_wait_for_peer` in the "
+        "principal room. Refusals distinguish expired/already "
         "accepted state from an offer that is absent or not addressed to you."
     ),
     "disc_append": (

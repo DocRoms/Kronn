@@ -1738,12 +1738,11 @@ async fn provision_task_execution_inner(
     let target = worker_target_from_execution(&prepared.execution)
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
-    // A joined CLI worker cannot be woken by a native dispatch inside the child (a
-    // session owns exactly one room, and `wait_for_peer` only wakes in that room).
-    // Instead of the native launchable-checkpoint, open a durable CONTROL OFFER in
-    // the ORIGIN room targeted at the exact session and park the execution
-    // `Blocked(awaiting_worker_acceptance)`; acceptance (KT-328 tranche 2) drives it
-    // to Working. Phases A–D already provisioned its sub-disc + worktree.
+    // A joined CLI worker keeps ownership of its principal room. Instead of a native
+    // child-room dispatch, open a durable CONTROL OFFER in that room, targeted at the
+    // exact session, and park the execution `Blocked(awaiting_worker_acceptance)`;
+    // acceptance grants the execution-scoped worker role and drives it to Working.
+    // Phases A–D already provisioned its sub-discussion + worktree.
     if matches!(target.kind, MessageTargetKind::Cli) {
         return open_cli_worker_control_offer(
             db,
@@ -3753,20 +3752,20 @@ async fn open_cli_worker_control_offer(
     .map_err(|e| ProvisionError::Internal(e.to_string()))
 }
 
-/// The verdict of a CLI worker accepting its control offer and attaching to its
-/// sub-discussion (KT-328 tranche 2, commit 2).
+/// The verdict of a CLI worker accepting its control offer without leaving its
+/// principal discussion.
 #[derive(Debug)]
 // Outcome enum: the success payload travels inline rather than boxed, so the
 // nominal path pays no allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum AcceptAttachOutcome {
-    /// The exact target session accepted: its durable binding + membership moved to the
-    /// child, the work brief is posted there (Cli-targeted, no dispatch), the execution
-    /// is `Working`, the task `InProgress`, the offer `accepted`, and the origin room
-    /// carries the durable attach notice. Carries the child disc id + refreshed execution.
+    /// The exact target session accepted. Worker authority is carried by the execution's
+    /// pinned session id while the session's durable binding and live membership stay in
+    /// the principal room. The child remains the durable task/evidence room.
     Attached {
         child_discussion_id: String,
         execution: TaskExecution,
+        worker_instructions: String,
     },
     /// No offer with that opaque id.
     NotFound,
@@ -3787,25 +3786,20 @@ pub enum AcceptAttachOutcome {
     CheckpointRefused(String),
 }
 
-/// Accept a CLI worker control offer and attach the worker to its sub-discussion
-/// (KT-328 tranche 2, commit 2). Both identities are derived by the trusted bridge:
+/// Accept a CLI worker control offer without transferring the caller's room ownership.
+/// Both identities are derived by the trusted bridge:
 /// the live `(source_agent, source_session_id)` resolves the exact target session,
 /// while `source_binding_session_id` names its separate reload-stable room binding.
-/// The model supplies neither. Three durable steps, each idempotent so a crash between
-/// any two resumes cleanly:
+/// The model supplies neither. Two durable steps are idempotent:
 ///   1. stage the accept (CAS `pending → accepting`, commit 1) — reversible, no external
 ///      effect yet;
-///   2. move the worker session origin → child — durable source binding (idempotent,
-///      fail-closed on an ownership race) AND `discussion_sessions` membership, so the
-///      brief targeted at it in the child routes/wakes correctly and the invariant "one
-///      active session = one discussion" holds literally;
-///   3. the final atomic checkpoint (brief in child, `Working`, task `InProgress`, offer
-///      `accepted`, durable attach notice in origin).
+///   2. verify that the execution still owns the exact session, then commit the brief in
+///      the child, `Working`, task `InProgress`, offer `accepted`, and an activation notice
+///      in the origin. The brief content is also returned directly to the accepting CLI.
 ///
-/// The two-phase move (step 2) and checkpoint (step 3) are deliberately separate durable
-/// txns — the server binding and the bridge's local binding/cursor cannot share one — so
-/// a crash after the transfer, before the checkpoint, resumes: the transfer replays as a
-/// no-op and the checkpoint runs from the still-`accepting` offer.
+/// Keeping room ownership unchanged is what lets a CLI principal continue polling its
+/// room and authorizing the other executions it coordinates while this execution grants
+/// it the additional worker role.
 pub async fn accept_worker_offer_and_attach(
     db: &Database,
     offer_id: &str,
@@ -3869,13 +3863,13 @@ pub async fn accept_worker_offer_and_attach(
     let exec_id = offer.task_execution_id.clone();
     let session_pk = offer.target_cli_session_id;
 
-    // ── Rework re-accept fast path (KT-319 tranche 3b, DoD-9). A re-offer sets origin == child
-    // (the worker never left its sub-discussion during the review), so there is NO session to
-    // move and the task is already `InProgress`. Route straight to the rework checkpoint
+    // ── Rework re-accept fast path (KT-319 tranche 3b, DoD-9). A re-offer advances the
+    // attempt number; the task is already `InProgress`. Route straight to the rework checkpoint
     // (`Blocked → Provisioning → Working` + settle the offer), skipping the provisioning
-    // session-move and task-CAS. Idempotent: a resumed already-`accepted` offer converges here
+    // task-CAS. This works for both legacy child-bound workers and principal-room workers.
+    // Idempotent: a resumed already-`accepted` offer converges here
     // to Attached. ──
-    if origin == child && offer.reason.as_deref() != Some("cli_reassignment") {
+    if offer.attempt_no > 0 && offer.reason.as_deref() != Some("cli_reassignment") {
         use crate::db::orchestration::CliReworkOutcome;
         let (eid, oid) = (exec_id.clone(), offer.id.clone());
         let outcome = db
@@ -3891,17 +3885,34 @@ pub async fn accept_worker_offer_and_attach(
             .map_err(|e| ProvisionError::Internal(e.to_string()))?;
         return match outcome {
             CliReworkOutcome::Resumed | CliReworkOutcome::AlreadyResumed => {
-                let eid = exec_id.clone();
-                let execution = db
+                let (eid, child_id) = (exec_id.clone(), child.clone());
+                let (execution, worker_instructions) = db
                     .with_conn(move |conn| {
-                        crate::db::orchestration::get_task_execution(conn, &eid)?
-                            .context("execution vanished right after the rework checkpoint")
+                        let execution = crate::db::orchestration::get_task_execution(conn, &eid)?
+                            .context("execution vanished right after the rework checkpoint")?;
+                        let instructions = conn
+                            .query_row(
+                                "SELECT m.content FROM messages m \
+                                 JOIN message_targets mt ON mt.message_id = m.id \
+                                 WHERE m.discussion_id = ?1 AND mt.target_kind = 'cli' \
+                                   AND mt.cli_session_id = ?2 \
+                                 ORDER BY m.sort_order DESC LIMIT 1",
+                                rusqlite::params![child_id, session_pk],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()?
+                            .unwrap_or_else(|| {
+                                "Rework accepted. Read the execution detail and continue the current attempt."
+                                    .to_string()
+                            });
+                        Ok((execution, instructions))
                     })
                     .await
                     .map_err(|e| ProvisionError::Internal(e.to_string()))?;
                 Ok(AcceptAttachOutcome::Attached {
                     child_discussion_id: child,
                     execution,
+                    worker_instructions,
                 })
             }
             CliReworkOutcome::OfferNotAccepting { status } => {
@@ -3913,49 +3924,30 @@ pub async fn accept_worker_offer_and_attach(
         };
     }
 
-    // ── 2. Move the worker session origin → child (binding + membership). The accepting
-    // caller's LIVE identity IS the target session's (accept verified the pk match).
-    // Transfer its independently-derived DURABLE room binding. Keeping these values
-    // separate is essential after an MCP reload: the active row rotates to `adhoc-*`,
-    // while the source-history owner remains `cli-*`. Idempotent + fail-closed. ──
-    if origin != child {
-        let (o, c) = (origin.clone(), child.clone());
-        let execution_id = exec_id.clone();
-        let (agent, binding_session) = (
-            source_agent.to_string(),
-            source_binding_session_id.to_string(),
-        );
-        db.with_conn(move |conn| {
-            // An accepted offer survives task completion/reassignment. Its
-            // retry must never move a released worker back into the child.
-            // Check on the same write connection as the transfer, not only
-            // before yielding between the acceptance saga's phases.
-            let current = crate::db::orchestration::get_task_execution(conn, &execution_id)?
-                .context("worker transfer execution vanished")?;
-            if current.status.is_terminal()
-                || current.worker_target_kind != Some(MessageTargetKind::Cli)
-                || current.worker_cli_session_id != Some(session_pk)
-                || current.worker_agent_type.as_deref() != Some(agent.as_str())
-            {
-                anyhow::bail!(
-                    "worker transfer refused: execution no longer owns this CLI assignment"
-                );
-            }
-            crate::db::disc_source::transfer_source_binding(
-                conn,
-                &o,
-                &c,
-                &agent,
-                &binding_session,
-            )?;
-            crate::db::discussion_sessions::move_session_to_discussion(conn, session_pk, &c)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| ProvisionError::Internal(format!("session transfer failed: {e}")))?;
-    }
+    // ── 2. Revalidate the execution-scoped worker grant. Acceptance must never move the
+    // live session or its reload-stable source binding: the caller may simultaneously be
+    // the principal of `origin`, and that room ownership is what keeps its waits and other
+    // principal actions alive. The exact `(execution, session_pk)` pair is the worker role.
+    let execution_id = exec_id.clone();
+    let agent = source_agent.to_string();
+    db.with_conn(move |conn| {
+        let current = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+            .context("worker acceptance execution vanished")?;
+        if current.status.is_terminal()
+            || current.worker_target_kind != Some(MessageTargetKind::Cli)
+            || current.worker_cli_session_id != Some(session_pk)
+            || current.worker_agent_type.as_deref() != Some(agent.as_str())
+        {
+            anyhow::bail!(
+                "worker acceptance refused: execution no longer owns this CLI assignment"
+            );
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
-    // CLI reassignment uses the same durable offer + exact-session transfer as
+    // CLI reassignment uses the same durable offer + exact execution/session grant as
     // initial provisioning, but the plan task is already InProgress. Settle a
     // bounded handoff without replaying the task CAS or reposting the original
     // brief.
@@ -3963,7 +3955,7 @@ pub async fn accept_worker_offer_and_attach(
         let eid = exec_id.clone();
         db.with_conn(move |conn| {
             let execution = crate::db::orchestration::get_task_execution(conn, &eid)?
-                .context("execution vanished after reassignment session transfer")?;
+                .context("execution vanished after reassignment acceptance")?;
             let recovery = crate::db::orchestration::get_execution_recovery(conn, &eid)?;
             Ok((execution, recovery))
         })
@@ -3992,6 +3984,7 @@ pub async fn accept_worker_offer_and_attach(
                 recovery.assignment_generation, recovery.recovery_reason
             ),
         );
+        let worker_instructions = handoff.content.clone();
         let (eid, oid, child_id) = (exec_id.clone(), offer.id.clone(), child.clone());
         let outcome = db
             .with_conn(move |conn| {
@@ -4021,6 +4014,7 @@ pub async fn accept_worker_offer_and_attach(
                 Ok(AcceptAttachOutcome::Attached {
                     child_discussion_id: child,
                     execution,
+                    worker_instructions,
                 })
             }
             CliReassignmentOutcome::OfferNotAccepting { status } => {
@@ -4069,6 +4063,7 @@ pub async fn accept_worker_offer_and_attach(
         &branch,
         &base_sha,
     );
+    let worker_instructions = brief.content.clone();
     let notice = build_attach_notice(
         &exec_id,
         execution.attempt_no,
@@ -4120,6 +4115,7 @@ pub async fn accept_worker_offer_and_attach(
             Ok(AcceptAttachOutcome::Attached {
                 child_discussion_id: child,
                 execution,
+                worker_instructions,
             })
         }
         CliCheckpointOutcome::TaskNotStarted(reason) => Ok(AcceptAttachOutcome::CheckpointRefused(
@@ -5069,12 +5065,15 @@ pub async fn decide_review(
             .unwrap_or(fallback)
     };
 
+    // KT-837 keeps an execution-scoped worker in its principal room. That dual room role
+    // must restore review reachability without letting the worker manufacture the separate
+    // principal-only evidence that can override an unmet delivery DoD.
     decide_authorized_review(
         db,
         exec,
         &alias,
         Some(source_session_id.to_string()),
-        is_principal,
+        is_principal && !is_worker,
         decision_json,
     )
     .await
@@ -5376,6 +5375,7 @@ async fn decide_authorized_review(
                         offer_id,
                         new_attempt,
                         worker_target.clone(),
+                        exec.parent_discussion_id.clone(),
                         child.clone(),
                         control_msg,
                     ))
@@ -5418,21 +5418,21 @@ async fn decide_authorized_review(
                     principal_target: target,
                 }
             });
-            let reactivation =
-                reactivation_owned
-                    .as_ref()
-                    .map(|(offer_id, new_attempt, target, child, msg)| {
-                        crate::db::orchestration::ReworkReoffer {
-                            offer_id,
-                            new_attempt_no: *new_attempt,
-                            target_cli_session_id: target
-                                .cli_session_id
-                                .expect("a CLI worker target carries a session pk"),
-                            sub_discussion_id: child,
-                            control_message: msg,
-                            control_target: target,
-                        }
-                    });
+            let reactivation = reactivation_owned.as_ref().map(
+                |(offer_id, new_attempt, target, origin, child, msg)| {
+                    crate::db::orchestration::ReworkReoffer {
+                        offer_id,
+                        new_attempt_no: *new_attempt,
+                        target_cli_session_id: target
+                            .cli_session_id
+                            .expect("a CLI worker target carries a session pk"),
+                        origin_discussion_id: origin,
+                        child_discussion_id: child,
+                        control_message: msg,
+                        control_target: target,
+                    }
+                },
+            );
             let native_dispatch = native_dispatch_owned.as_ref().map(|(job_id, dedupe_key)| {
                 crate::db::orchestration::NativeReworkDispatch { job_id, dedupe_key }
             });
@@ -6321,10 +6321,9 @@ fn build_cli_worker_brief(
     orchestrator_message(format!("orch-brief:{exec_id}:{attempt_no}"), content)
 }
 
-/// The durable "session attached" notice posted in the ORIGIN room at acceptance
-/// (KT-328 DoD-6): the worker session just LEFT this room for the sub-discussion, so
-/// its departure must be visible, never silent. Deterministic id so a resume never
-/// double-posts.
+/// The durable worker-activation notice posted in the origin room at acceptance.
+/// The session remains a member of that room; its additional worker authority is
+/// scoped to the execution and child task room named by the notice.
 fn build_attach_notice(
     exec_id: &str,
     attempt_no: u32,
@@ -6337,9 +6336,9 @@ fn build_attach_notice(
         .map(|a| format!("La session worker `{a}`"))
         .unwrap_or_else(|| "La session worker".to_string());
     let content = format!(
-        "{who} a accepté **{reference} : {title}** et a rejoint sa sous-discussion \
-         `{child}`. Elle n'est plus présente dans cette room ; le suivi de la tâche \
-         se poursuit dans la sous-discussion.",
+        "{who} a accepté **{reference} : {title}** comme worker de la sous-discussion \
+         `{child}`. Elle reste présente dans cette room principale ; son rôle worker \
+         est limité à cette exécution.",
         who = who,
         reference = task_reference,
         title = task_title,
@@ -6790,12 +6789,12 @@ fn build_control_offer_message(
 ) -> DiscussionMessage {
     let content = format!(
         "**Offre de prise en charge — {reference} : {title}**\n\n\
-         Une tâche t'est proposée comme worker. Pour l'accepter et être rattaché à \
-         sa sous-discussion, appelle :\n\n\
+         Une tâche t'est proposée comme worker. Pour l'accepter sans quitter cette \
+         room principale, appelle :\n\n\
          `task_exec_accept_worker_offer({{ offer_id: \"{offer}\" }})`\n\n\
          - Sous-discussion : `{child}`\n\
          - Ceci est une offre de contrôle, pas encore le brief de travail : le brief \
-         n'arrive dans la sous-discussion qu'après ton acceptation.",
+         est renvoyé directement par l'acceptation et conservé dans la sous-discussion.",
         reference = task_reference,
         title = task_title,
         offer = offer_id,
@@ -10741,11 +10740,13 @@ pub struct AcceptOfferRequest {
     pub source_binding_session_id: Option<String>,
 }
 
-/// The attach payload the bridge needs to rebind: the child room to follow.
+/// The accepted execution and its direct worker instructions. The child id remains the
+/// durable task/evidence room; it is not a request to transfer the caller's room binding.
 #[derive(Serialize)]
 pub struct AcceptOfferResponse {
     pub child_discussion_id: String,
     pub execution: TaskExecution,
+    pub worker_instructions: String,
 }
 
 /// Map the accept outcome to an HTTP response. Pure, so the anti-oracle fusion is unit
@@ -10758,9 +10759,11 @@ fn accept_outcome_to_response(outcome: AcceptAttachOutcome) -> ApiResponse<Accep
         AcceptAttachOutcome::Attached {
             child_discussion_id,
             execution,
+            worker_instructions,
         } => ApiResponse::ok(AcceptOfferResponse {
             child_discussion_id,
             execution,
+            worker_instructions,
         }),
         AcceptAttachOutcome::NotFound | AcceptAttachOutcome::WrongAcceptor => {
             ApiResponse::err_coded(
@@ -10788,9 +10791,10 @@ fn accept_outcome_to_response(outcome: AcceptAttachOutcome) -> ApiResponse<Accep
 }
 
 /// `POST /api/orchestration/accept-offer` — the exact targeted CLI session accepts its
-/// control offer and is attached to the sub-discussion. Identity is derived server-side
-/// from the bridge-supplied live pair, then moves the bridge-supplied durable
-/// room binding; the model passes only `offer_id`.
+/// control offer. Identity is derived server-side from the bridge-supplied live pair and
+/// reload-stable binding, but neither live membership nor durable room ownership moves;
+/// the execution's pinned session id carries worker authority. The model passes only
+/// `offer_id`.
 pub async fn accept_offer(
     State(state): State<AppState>,
     Json(request): Json<AcceptOfferRequest>,
@@ -18852,19 +18856,17 @@ mod tests {
         (task_ref, parent_id, child_id, offer_id)
     }
 
-    /// Full CLI handshake (KT-328 tranche 2): a parked worker accepts its offer → the
-    /// session moves to the child, the brief lands there targeted (no dispatch), the
-    /// execution is Working, the task InProgress, the offer accepted, and the origin
-    /// carries a durable attach notice.
+    /// KT-837 — accepting a worker offer grants the exact session an execution-scoped
+    /// worker role without moving its principal-room membership or durable binding.
     #[tokio::test]
     async fn cli_worker_accepts_and_attaches_end_to_end() {
         let repo = init_repo();
-        let db = Database::open_in_memory().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let (task_ref, _parent_id, child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
 
         // A real MCP reload rotates the active bridge identity while preserving
-        // the durable room binding. The accept boundary must authorize the
-        // exact LIVE row and move the separate DURABLE binding.
+        // the durable room binding. The accept boundary authorizes both identities
+        // but must not transfer either room owner.
         db.with_conn(|conn| {
             conn.execute(
                 "UPDATE discussion_sessions SET session_id = 'live-sess-a' WHERE id = 101",
@@ -18893,10 +18895,11 @@ mod tests {
             accept_worker_offer_and_attach(&db, &offer_id, "ClaudeCode", "live-sess-a", "sess-a")
                 .await
                 .unwrap();
-        let (attached_child, exec_id) = match outcome {
+        let (attached_child, exec_id, worker_instructions) = match outcome {
             AcceptAttachOutcome::Attached {
                 child_discussion_id,
                 execution,
+                worker_instructions,
             } => {
                 assert_eq!(
                     execution.status,
@@ -18908,11 +18911,15 @@ mod tests {
                     "a resumed execution cannot expose the former acceptance hold as active"
                 );
                 assert_eq!(execution.blocked_reason_code, None);
-                (child_discussion_id, execution.id)
+                (child_discussion_id, execution.id, worker_instructions)
             }
             other => panic!("expected Attached, got {other:?}"),
         };
         assert_eq!(attached_child, child_id);
+        assert!(
+            worker_instructions.contains(&task_ref),
+            "acceptance returns the brief directly to the worker"
+        );
 
         // Task flipped Todo → InProgress (the sole anti-race authority).
         let tref = task_ref.clone();
@@ -18923,7 +18930,8 @@ mod tests {
             .unwrap();
         assert_eq!(task.summary.status, PlanningTaskStatus::InProgress);
 
-        // Offer settled `accepted`; session moved to the child (binding + membership).
+        // Offer settled `accepted`; the durable binding and live membership stay in the
+        // principal room so reload, waits and principal authorization keep working.
         let (offer, bound_disc, session_disc) = {
             let oid = offer_id.clone();
             db.with_conn(move |conn| {
@@ -18946,12 +18954,12 @@ mod tests {
         assert_eq!(offer.status, crate::models::WorkerOfferStatus::Accepted);
         assert_eq!(
             bound_disc.as_deref(),
-            Some(child_id.as_str()),
-            "durable binding moved to the child"
+            Some(_parent_id.as_str()),
+            "durable binding must remain on the principal room"
         );
         assert_eq!(
-            session_disc, child_id,
-            "session membership moved to the child"
+            session_disc, _parent_id,
+            "live membership must remain on the principal room"
         );
 
         // The work brief is in the CHILD (the only message there), Cli-targeted, no dispatch.
@@ -18981,29 +18989,149 @@ mod tests {
         assert_eq!(targets[0].cli_session_id, Some(101));
         assert_eq!(dispatches, 0, "a CLI worker enqueues zero native dispatch");
 
-        // The origin carries a durable attach notice naming the child (never silent).
+        // The origin carries a durable activation notice naming the child (never silent).
+        let notice_exec_id = exec_id.clone();
         let notice = db
             .with_conn(move |conn| {
                 Ok(conn.query_row(
                     "SELECT content FROM messages WHERE id = ?1",
-                    [format!("orch-attach:{exec_id}:0")],
+                    [format!("orch-attach:{notice_exec_id}:0")],
                     |r| r.get::<_, String>(0),
                 )?)
             })
             .await
             .unwrap();
         assert!(
-            notice.contains(&child_id),
-            "attach notice names the child room, got {notice:?}"
+            notice.contains(&child_id) && notice.contains("reste présente"),
+            "activation notice names the child and preserved room, got {notice:?}"
         );
+
+        // While the execution is Working, the exact CLI still receives messages addressed
+        // to it in the principal room.
+        let parent_for_message = _parent_id.clone();
+        db.with_conn(move |conn| {
+            let message = orchestrator_message(
+                "kt837-parent-message".into(),
+                "Parent-room steering remains deliverable.".into(),
+            );
+            crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+                conn,
+                &parent_for_message,
+                &message,
+                &[MessageTarget::cli(AgentType::ClaudeCode, 101)],
+                &[],
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let Json(waited) = crate::api::disc_invite::wait_for_peer(
+            State(kt790_state(&db)),
+            Path(_parent_id.clone()),
+            axum::extract::Query(crate::api::disc_invite::WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".into()),
+                session_id: Some("live-sess-a".into()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let parent_messages = waited.data.expect("principal-room wait must succeed");
+        assert!(parent_messages.messages.iter().any(|message| {
+            message.message_id == "kt837-parent-message" && message.addressed_to_caller
+        }));
+
+        // Parent-room membership also keeps this CLI a party to executions it coordinates,
+        // independently of the one on which it is currently the worker.
+        let eid = exec_id.clone();
+        let principal_party = db
+            .with_conn(move |conn| {
+                let mut coordinated = crate::db::orchestration::get_task_execution(conn, &eid)?
+                    .context("accepted execution vanished")?;
+                coordinated.id = "another-coordinated-execution".into();
+                coordinated.worker_cli_session_id = None;
+                execution_party_is_authorized(conn, &coordinated, "ClaudeCode", "live-sess-a")
+            })
+            .await
+            .unwrap();
+        assert!(
+            principal_party,
+            "the principal stays a party to its other executions"
+        );
+
+        // Delivery reaches AwaitingReview without any return/rejoin operation because the
+        // session never left the principal room.
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let delivered =
+            deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "live-sess-a", &manifest)
+                .await
+                .unwrap();
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        let (status, member_room, source_room) = {
+            let eid = exec_id.clone();
+            db.with_conn(move |conn| {
+                let status = crate::db::orchestration::get_task_execution(conn, &eid)?
+                    .context("delivered execution vanished")?
+                    .status;
+                let member_room: String = conn.query_row(
+                    "SELECT disc_id FROM discussion_sessions WHERE id = 101",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let source_room = crate::db::disc_source::find_disc_by_source_session(
+                    conn,
+                    "ClaudeCode",
+                    "sess-a",
+                )?;
+                Ok((status, member_room, source_room))
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(status, TaskExecutionStatus::AwaitingReview);
+        assert_eq!(member_room, _parent_id);
+        assert_eq!(source_room.as_deref(), Some(_parent_id.as_str()));
+
+        // Rejoining the CLI's own principal room is idempotent and the same durable source
+        // can be linked again without any force-reassignment path.
+        let parent_for_join = _parent_id.clone();
+        let (joined_pk, rebound_room) = db
+            .with_conn(move |conn| {
+                let invite =
+                    crate::db::discussion_sessions::create_invite_token(conn, &parent_for_join)?;
+                let joined = crate::db::discussion_sessions::join_via_token(
+                    conn,
+                    &invite.token,
+                    "ClaudeCode",
+                    "live-sess-a",
+                )?;
+                crate::db::disc_source::bind_to_source(
+                    conn,
+                    &parent_for_join,
+                    "ClaudeCode",
+                    "sess-a",
+                )?;
+                let rebound = crate::db::disc_source::find_disc_by_source_session(
+                    conn,
+                    "ClaudeCode",
+                    "sess-a",
+                )?;
+                Ok((joined.session_pk, rebound))
+            })
+            .await
+            .unwrap();
+        assert_eq!(joined_pk, 101);
+        assert_eq!(rebound_room.as_deref(), Some(_parent_id.as_str()));
     }
 
-    /// KT-425 — reproduce the real interruption boundary: phase 1 committed
-    /// `pending → accepting`, but neither durable binding nor live session moved and the
-    /// final checkpoint never ran. The exact target retry must resume the idempotent saga;
+    /// Reproduce the interruption boundary after `pending → accepting` but before the
+    /// final checkpoint. The exact target retry resumes without moving room ownership;
     /// another same-provider session remains opaque and cannot steal it.
     #[tokio::test]
-    async fn accepting_offer_resumes_after_crash_before_transfer() {
+    async fn accepting_offer_resumes_after_crash_before_checkpoint() {
         let repo = init_repo();
         let db = Database::open_in_memory().unwrap();
         let (task_ref, parent_id, child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
@@ -19040,6 +19168,7 @@ mod tests {
             AcceptAttachOutcome::Attached {
                 child_discussion_id,
                 execution,
+                ..
             } => {
                 assert_eq!(child_discussion_id, child_id);
                 execution
@@ -19066,7 +19195,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(offer_status, crate::models::WorkerOfferStatus::Accepted);
-        assert_eq!(session_disc, child_id);
+        assert_eq!(session_disc, parent_id);
         assert_eq!(task_status, PlanningTaskStatus::InProgress);
         assert_eq!(
             count(
@@ -20169,7 +20298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_restart_same_worker_reassignment_keeps_child_and_requires_acceptance() {
+    async fn cli_restart_same_worker_reassignment_keeps_principal_room_and_requires_acceptance() {
         let repo = init_repo();
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
@@ -20232,7 +20361,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(offer.target_cli_session_id, 101);
-        assert_eq!(offer.origin_discussion_id, child);
+        assert_eq!(offer.origin_discussion_id, parent);
         assert_eq!(offer.child_discussion_id, child);
         assert_eq!(offer.reason.as_deref(), Some("cli_reassignment"));
         let wrong = accept_worker_offer_and_attach(
@@ -20262,13 +20391,13 @@ mod tests {
         db.with_conn(move |conn| {
             let binding =
                 crate::db::disc_source::find_disc_by_source_session(conn, "ClaudeCode", "sess-a")?;
-            assert_eq!(binding.as_deref(), Some(child.as_str()));
+            assert_eq!(binding.as_deref(), Some(parent.as_str()));
             let membership: String = conn.query_row(
                 "SELECT disc_id FROM discussion_sessions WHERE id = 101",
                 [],
                 |row| row.get(0),
             )?;
-            assert_eq!(membership, child);
+            assert_eq!(membership, parent);
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM messages WHERE id = ?1",
                 [format!("orch-reassign-handoff:{id}:1")],
@@ -20438,11 +20567,11 @@ mod tests {
         );
     }
 
-    /// KT-320 DoD-9: terminality is the return boundary for a joined CLI.
-    /// Done, Cancelled and Failed all leave a durable message in both rooms and
-    /// restore both the source binding and the live session membership.
+    /// KT-837: new execution-scoped CLI workers are already in their origin room at every
+    /// terminal boundary. Done, Cancelled and Failed preserve both identities and emit no
+    /// false legacy-return trace.
     #[tokio::test]
-    async fn every_terminal_state_returns_the_cli_worker_to_its_origin() {
+    async fn every_terminal_state_keeps_execution_scoped_cli_in_its_origin() {
         async fn exercise(terminal: TaskExecutionStatus) {
             let repo = init_repo();
             let db = Database::open_in_memory().unwrap();
@@ -20554,13 +20683,10 @@ mod tests {
             assert_eq!(status, terminal);
             assert_eq!(binding.as_deref(), Some(parent_id.as_str()));
             assert_eq!(session_disc, parent_id);
+            assert_eq!(child_trace, 0, "false child return trace for {terminal:?}");
             assert_eq!(
-                child_trace, 1,
-                "child terminal trace missing for {terminal:?}"
-            );
-            assert_eq!(
-                origin_trace, 1,
-                "origin terminal trace missing for {terminal:?}"
+                origin_trace, 0,
+                "false origin return trace for {terminal:?}"
             );
         }
 
