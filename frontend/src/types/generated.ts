@@ -5154,12 +5154,16 @@ export type ProjectRepositoryResourceKind = "workflow" | "quick_prompt" | "quick
 export type ProjectRepositoryResourceLevel = "usable_without_kronn" | "kronn_required";
 
 /**
- * Read-only projection of the automations and artifacts attached to a project
- * and their alignment with the repository's `kronn/` directory.
+ * Read-only projection of the skills, automations and artifacts attached to a
+ * project and their alignment with the repository's `kronn/` directory.
  */
-export type ProjectRepositoryResources = { kronn_exists: boolean, resources: Array<ProjectRepositoryResource>, };
+export type ProjectRepositoryResources = { kronn_exists: boolean, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>, };
 
 export type ProjectRepositoryResourceStatus = "not_published" | "up_to_date" | "repository_modified" | "kronn_modified" | "conflict";
+
+export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, repository_paths: Array<string>, publication_path: string, };
+
+export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
 

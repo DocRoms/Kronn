@@ -19,11 +19,16 @@ vi.mock('../../lib/I18nContext', () => ({
 import { ProjectRepositoryResourcesPanel } from '../ProjectRepositoryResourcesPanel';
 
 describe('ProjectRepositoryResourcesPanel', () => {
-  beforeEach(() => repositoryResources.mockReset());
+  beforeEach(() => {
+    repositoryResources.mockReset();
+    localStorage.removeItem('kronn:projectRepositoryResourcesTab');
+  });
 
   it('previews the files selected for the first publication', async () => {
     repositoryResources.mockResolvedValue({
       kronn_exists: false,
+      skills_present: [],
+      skills_available: [],
       resources: [{
         id: 'qp-1',
         name: 'Review ticket',
@@ -38,6 +43,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
     render(<ProjectRepositoryResourcesPanel projectId="project-1" />);
 
     expect(await screen.findByText('projects.repositoryResources.kronnMissing')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /projects\.repositoryResources\.tab\.automation/ }));
     const checkbox = screen.getByRole('checkbox', {
       name: 'projects.repositoryResources.include',
     });
@@ -65,6 +71,8 @@ describe('ProjectRepositoryResourcesPanel', () => {
   it('keeps published resources checked and exposes their level and repository status', async () => {
     repositoryResources.mockResolvedValue({
       kronn_exists: true,
+      skills_present: [],
+      skills_available: [],
       resources: [
         {
           id: 'wf-1', name: 'Daily report', slug: 'daily-report', kind: 'workflow',
@@ -84,6 +92,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
 
     render(<ProjectRepositoryResourcesPanel projectId="project-1" />);
 
+    fireEvent.click(await screen.findByRole('tab', { name: /projects\.repositoryResources\.tab\.automation/ }));
     const daily = await screen.findByText('Daily report');
     const dailyRow = daily.closest('.project-repository-resource-row') as HTMLElement;
     expect(within(dailyRow).getByRole('checkbox')).toBeChecked();
@@ -91,10 +100,78 @@ describe('ProjectRepositoryResourcesPanel', () => {
     expect(dailyRow).toHaveTextContent('projects.repositoryResources.level.kronn_required');
     expect(dailyRow).toHaveTextContent('projects.repositoryResources.status.up_to_date');
 
+    fireEvent.click(screen.getByRole('tab', { name: /projects\.repositoryResources\.tab\.artifacts/ }));
     const artifactRow = screen.getByText('Health dashboard').closest('.project-repository-resource-row') as HTMLElement;
     expect(within(artifactRow).getByRole('checkbox')).toBeChecked();
     expect(within(artifactRow).getByRole('checkbox')).toBeDisabled();
     expect(artifactRow).toHaveTextContent('projects.repositoryResources.status.conflict');
     expect(screen.getAllByText('!')).toHaveLength(2);
+  });
+
+  it('separates present and available skills, groups automations, and remembers the sub-tab', async () => {
+    repositoryResources.mockResolvedValue({
+      kronn_exists: true,
+      skills_present: [{
+        id: 'rust',
+        name: 'Rust',
+        slug: 'rust',
+        description: 'Rust engineering',
+        provenance: 'both',
+        is_builtin: true,
+        status: 'up_to_date',
+        repository_paths: ['kronn/skills/rust/SKILL.md'],
+        publication_path: 'kronn/skills/rust/SKILL.md',
+      }],
+      skills_available: [{
+        id: 'custom-review',
+        name: 'Review',
+        slug: 'custom-review',
+        description: 'Review changes',
+        provenance: 'kronn',
+        is_builtin: false,
+        repository_paths: [],
+        publication_path: 'kronn/skills/custom-review/SKILL.md',
+      }],
+      resources: [
+        {
+          id: 'wf-1', name: 'Nightly', slug: 'nightly', kind: 'workflow',
+          level: 'kronn_required', status: 'not_published',
+          repository_paths: ['kronn/workflows/nightly.yaml'],
+        },
+        {
+          id: 'qp-1', name: 'Review ticket', slug: 'review-ticket', kind: 'quick_prompt',
+          level: 'usable_without_kronn', status: 'not_published',
+          repository_paths: ['kronn/prompts/review-ticket.md'],
+        },
+        {
+          id: 'artifact-1', name: 'Dashboard', slug: 'dashboard', kind: 'artifact',
+          level: 'kronn_required', status: 'not_published',
+          repository_paths: ['kronn/artifacts/dashboard/index.html'],
+        },
+      ],
+    } satisfies ProjectRepositoryResources);
+
+    const first = render(<ProjectRepositoryResourcesPanel projectId="project-1" />);
+
+    expect(await screen.findByText('Rust')).toBeInTheDocument();
+    expect(screen.getByText('Review')).toBeInTheDocument();
+    expect(screen.getByText('Rust').closest('.project-repository-resource-row'))
+      .toHaveTextContent('projects.repositoryResources.provenance.both');
+    expect(screen.getByRole('tab', { name: /projects\.repositoryResources\.tab\.skills 1/ }))
+      .toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.click(screen.getByRole('tab', { name: /projects\.repositoryResources\.tab\.automation 2/ }));
+    expect(screen.getByText('Nightly')).toBeInTheDocument();
+    expect(screen.getByText('Review ticket')).toBeInTheDocument();
+    expect(document.querySelector('[data-resource-kind="workflow"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-resource-kind="quick_prompt"]')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: /projects\.repositoryResources\.tab\.artifacts 1/ }));
+    expect(screen.getByText('Dashboard')).toBeInTheDocument();
+    first.unmount();
+
+    render(<ProjectRepositoryResourcesPanel projectId="project-1" />);
+    expect(await screen.findByRole('tab', { name: /projects\.repositoryResources\.tab\.artifacts 1/ }))
+      .toHaveAttribute('aria-selected', 'true');
   });
 });

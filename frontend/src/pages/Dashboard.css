@@ -3072,6 +3072,31 @@ html[data-density="large"] .dash-main {
   color: var(--kr-warning);
 }
 
+.project-overview-linked-repos {
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-md);
+  background: var(--kr-bg-card);
+}
+
+.project-overview-linked-repos-title {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+}
+
+.project-overview-linked-repos-title > svg {
+  color: var(--kr-accent-ink);
+}
+
+.project-overview-linked-repos-title > span {
+  margin-left: auto;
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+}
+
 .project-overview-dependencies {
   overflow: hidden;
   border: 1px solid var(--kr-border-light);
@@ -3233,8 +3258,7 @@ html[data-density="large"] .dash-main {
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='code'] .project-detail-section[data-project-view='code'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='docker'] .project-detail-section[data-project-view='docker'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='git'] .project-detail-section[data-project-view='git'],
-.project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='automationArtifacts'] .project-repository-resources[data-project-view='automationArtifacts'],
-.project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='resources'] .project-detail-section[data-project-view='resources'] {
+.project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='resources'] .project-repository-resources[data-project-view='resources'] {
   display: block;
 }
 

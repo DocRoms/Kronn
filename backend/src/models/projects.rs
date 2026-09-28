@@ -91,13 +91,40 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Read-only projection of the automations and artifacts attached to a project
-/// and their alignment with the repository's `kronn/` directory.
+/// Read-only projection of the skills, automations and artifacts attached to a
+/// project and their alignment with the repository's `kronn/` directory.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ProjectRepositoryResources {
     pub kronn_exists: bool,
+    pub skills_present: Vec<ProjectRepositorySkill>,
+    pub skills_available: Vec<ProjectRepositorySkill>,
     pub resources: Vec<ProjectRepositoryResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectRepositorySkill {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub description: String,
+    pub provenance: ProjectRepositorySkillProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_builtin: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProjectRepositoryResourceStatus>,
+    pub repository_paths: Vec<String>,
+    pub publication_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ProjectRepositorySkillProvenance {
+    Repository,
+    Kronn,
+    Both,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

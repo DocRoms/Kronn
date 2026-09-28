@@ -3217,6 +3217,96 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
 }
 
 #[tokio::test]
+async fn project_repository_resources_classifies_repository_and_kronn_skills() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    for relative in [
+        "kronn/skills/rust/SKILL.md",
+        ".claude/skills/rust/SKILL.md",
+        ".agents/skills/repo-review/SKILL.md",
+    ] {
+        let path = project_directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let name = if relative.contains("repo-review") {
+            "Repository review"
+        } else {
+            "Rust"
+        };
+        std::fs::write(
+            path,
+            format!("---\nname: {name}\ndescription: Test skill\n---\n\nInstructions\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project_directory.path().join("Cargo.toml"),
+        "[package]\nname='demo'\n",
+    )
+    .unwrap();
+    std::fs::write(project_directory.path().join("go.mod"), "module example.test/demo\n")
+        .unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at, default_skill_ids_json) VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                    rusqlite::params![
+                        "skills-project",
+                        "Skills project",
+                        project_path,
+                        now,
+                        r#"["rust","python"]"#,
+                    ],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, response) =
+        get_json(app, "/api/projects/skills-project/repository-resources").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    let present = response["data"]["skills_present"].as_array().unwrap();
+    let rust = present
+        .iter()
+        .find(|skill| skill["id"] == "rust")
+        .expect("attached Rust skill");
+    assert_eq!(rust["provenance"], "both");
+    assert_eq!(
+        rust["repository_paths"],
+        serde_json::json!([".claude/skills/rust/SKILL.md", "kronn/skills/rust/SKILL.md",]),
+    );
+    let attached = present
+        .iter()
+        .find(|skill| skill["id"] == "python")
+        .expect("attached Kronn-only skill");
+    assert_eq!(attached["provenance"], "kronn");
+    assert_eq!(attached["status"], "not_published");
+    let detected = present
+        .iter()
+        .find(|skill| skill["id"] == "go")
+        .expect("filesystem-detected skill");
+    assert_eq!(detected["provenance"], "repository");
+    let repository_only = present
+        .iter()
+        .find(|skill| skill["slug"] == "repo-review")
+        .expect("repository-only native skill");
+    assert_eq!(repository_only["name"], "Repository review");
+    assert_eq!(repository_only["provenance"], "repository");
+    assert!(response["data"]["skills_available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["id"] == "typescript" && skill["provenance"] == "kronn"));
+}
+
+#[tokio::test]
 async fn live_page_create_publish_and_read_round_trip() {
     let app = test_app();
     let (_, capability_before) = get_json(app.clone(), "/api/pages/capability").await;

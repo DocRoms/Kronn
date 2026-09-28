@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -10,8 +11,24 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use crate::models::{
     ApiErrorCode, ApiResponse, ProjectRepositoryResource, ProjectRepositoryResourceKind,
     ProjectRepositoryResourceLevel, ProjectRepositoryResourceStatus, ProjectRepositoryResources,
+    ProjectRepositorySkill, ProjectRepositorySkillProvenance, Skill,
 };
 use crate::AppState;
+
+const PROJECT_SKILL_ROOTS: &[&str] = &[
+    "kronn/skills",
+    ".claude/skills",
+    ".agents/skills",
+    ".vibe/skills",
+    ".kiro/skills",
+    ".gemini/skills",
+];
+
+#[derive(Default)]
+struct RepositorySkillSeed {
+    name: String,
+    repository_paths: Vec<String>,
+}
 
 struct ResourceSeed {
     id: String,
@@ -104,6 +121,249 @@ fn alignment_status(
     }
 }
 
+fn skill_display_name(path: &Path, fallback: &str) -> String {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return fallback.to_string();
+    };
+    let mut lines = content.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return fallback.to_string();
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(name) = trimmed.strip_prefix("name:") {
+            let name = name
+                .trim()
+                .trim_matches(|character| character == '\"' || character == '\'');
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    fallback.to_string()
+}
+
+fn discover_repository_skills(root: &Path) -> BTreeMap<String, RepositorySkillSeed> {
+    let mut skills = BTreeMap::<String, RepositorySkillSeed>::new();
+    for relative_root in PROJECT_SKILL_ROOTS {
+        let directory = root.join(relative_root);
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let slug = entry.file_name().to_string_lossy().into_owned();
+            if slug.is_empty() {
+                continue;
+            }
+            let skill_path = entry.path().join("SKILL.md");
+            if !skill_path.is_file() {
+                continue;
+            }
+            let repository_path = format!("{relative_root}/{slug}/SKILL.md");
+            let seed = skills.entry(slug.clone()).or_default();
+            if seed.name.is_empty() {
+                seed.name = skill_display_name(&skill_path, &slug);
+            }
+            if !seed.repository_paths.contains(&repository_path) {
+                seed.repository_paths.push(repository_path);
+            }
+        }
+    }
+    for seed in skills.values_mut() {
+        seed.repository_paths.sort();
+        seed.repository_paths.dedup();
+    }
+    skills
+}
+
+fn take_repository_skill(
+    repository_skills: &mut BTreeMap<String, RepositorySkillSeed>,
+    skill_id: &str,
+) -> Option<RepositorySkillSeed> {
+    let slug = crate::core::native_files::slug(skill_id);
+    let mut seed = repository_skills.remove(&slug);
+    if let Some(custom_slug) = skill_id.strip_prefix("custom-") {
+        if let Some(other) = repository_skills.remove(custom_slug) {
+            let current = seed.get_or_insert_with(RepositorySkillSeed::default);
+            if current.name.is_empty() {
+                current.name = other.name;
+            }
+            current.repository_paths.extend(other.repository_paths);
+            current.repository_paths.sort();
+            current.repository_paths.dedup();
+        }
+    }
+    seed
+}
+
+fn project_skills(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    project_key: &str,
+    root: &Path,
+    linked_skill_ids: &[String],
+) -> anyhow::Result<(Vec<ProjectRepositorySkill>, Vec<ProjectRepositorySkill>)> {
+    let catalog = crate::core::skills::list_all_skills();
+    let mut repository_skills = discover_repository_skills(root);
+
+    for detected_id in crate::api::audit::detect_project_skills(root) {
+        let slug = crate::core::native_files::slug(&detected_id);
+        let detected_name = catalog
+            .iter()
+            .find(|skill| skill.id == detected_id)
+            .map(|skill| skill.name.clone())
+            .unwrap_or_else(|| detected_id.clone());
+        let seed = repository_skills.entry(slug).or_default();
+        if seed.name.is_empty() {
+            seed.name = detected_name;
+        }
+    }
+
+    let linked: BTreeSet<&str> = linked_skill_ids.iter().map(String::as_str).collect();
+    let mut handled = BTreeSet::new();
+    let mut present = Vec::new();
+    let mut available = Vec::new();
+
+    for skill in catalog {
+        let repository = take_repository_skill(&mut repository_skills, &skill.id);
+        let is_linked = linked.contains(skill.id.as_str());
+        handled.insert(skill.id.clone());
+        let slug = crate::core::native_files::slug(&skill.id);
+        let publication_path = format!("kronn/skills/{slug}/SKILL.md");
+        let repository_paths = repository
+            .as_ref()
+            .map(|seed| seed.repository_paths.clone())
+            .unwrap_or_default();
+        let provenance = match (repository.is_some(), is_linked) {
+            (true, true) => ProjectRepositorySkillProvenance::Both,
+            (true, false) => ProjectRepositorySkillProvenance::Repository,
+            (false, _) => ProjectRepositorySkillProvenance::Kronn,
+        };
+        let status = if is_linked {
+            let identity = crate::db::resource_identities::find_by_target(
+                conn,
+                project_key,
+                "skill",
+                &skill.id,
+            )?;
+            match identity {
+                Some(identity) => Some(alignment_status(
+                    root,
+                    std::slice::from_ref(&publication_path),
+                    parse_identity_time(&identity.updated_at).unwrap_or_else(Utc::now),
+                    Some(&identity.updated_at),
+                )),
+                None if !root.join(&publication_path).is_file() => {
+                    Some(ProjectRepositoryResourceStatus::NotPublished)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let item = project_skill_item(
+            skill,
+            provenance,
+            status,
+            repository_paths,
+            publication_path,
+        );
+        if repository.is_some() || is_linked {
+            present.push(item);
+        } else {
+            available.push(item);
+        }
+    }
+
+    for skill_id in linked_skill_ids {
+        if handled.contains(skill_id) {
+            continue;
+        }
+        let slug = crate::core::native_files::slug(skill_id);
+        let repository = take_repository_skill(&mut repository_skills, skill_id);
+        let publication_path = format!("kronn/skills/{slug}/SKILL.md");
+        present.push(ProjectRepositorySkill {
+            id: skill_id.clone(),
+            name: repository
+                .as_ref()
+                .map(|seed| seed.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| skill_id.clone()),
+            slug,
+            description: String::new(),
+            provenance: if repository.is_some() {
+                ProjectRepositorySkillProvenance::Both
+            } else {
+                ProjectRepositorySkillProvenance::Kronn
+            },
+            is_builtin: None,
+            status: (!root.join(&publication_path).is_file())
+                .then_some(ProjectRepositoryResourceStatus::NotPublished),
+            repository_paths: repository
+                .map(|seed| seed.repository_paths)
+                .unwrap_or_default(),
+            publication_path,
+        });
+    }
+
+    for (slug, seed) in repository_skills {
+        present.push(ProjectRepositorySkill {
+            id: format!("repository:{slug}"),
+            name: if seed.name.is_empty() {
+                slug.clone()
+            } else {
+                seed.name
+            },
+            description: String::new(),
+            provenance: ProjectRepositorySkillProvenance::Repository,
+            is_builtin: None,
+            status: None,
+            repository_paths: seed.repository_paths,
+            publication_path: format!("kronn/skills/{slug}/SKILL.md"),
+            slug,
+        });
+    }
+
+    present.sort_by_key(|skill| skill.name.to_lowercase());
+    available.sort_by_key(|skill| skill.name.to_lowercase());
+    tracing::debug!(
+        project_id,
+        present = present.len(),
+        available = available.len(),
+        "classified project skills"
+    );
+    Ok((present, available))
+}
+
+fn project_skill_item(
+    skill: Skill,
+    provenance: ProjectRepositorySkillProvenance,
+    status: Option<ProjectRepositoryResourceStatus>,
+    repository_paths: Vec<String>,
+    publication_path: String,
+) -> ProjectRepositorySkill {
+    ProjectRepositorySkill {
+        id: skill.id.clone(),
+        name: skill.name,
+        slug: crate::core::native_files::slug(&skill.id),
+        description: skill.description,
+        provenance,
+        is_builtin: Some(skill.is_builtin),
+        status,
+        repository_paths,
+        publication_path,
+    }
+}
+
 /// GET /api/projects/:id/repository-resources
 pub async fn repository_resources(
     State(state): State<AppState>,
@@ -178,6 +438,13 @@ pub async fn repository_resources(
             );
 
             let root = PathBuf::from(&project.path);
+            let (skills_present, skills_available) = project_skills(
+                conn,
+                &project_id,
+                &project_key,
+                &root,
+                &project.default_skill_ids,
+            )?;
             let mut resources = Vec::with_capacity(seeds.len());
             for seed in seeds {
                 let identity = crate::db::resource_identities::find_by_target(
@@ -220,6 +487,8 @@ pub async fn repository_resources(
             resources.sort_by_key(|resource| resource.name.to_lowercase());
             Ok(Some(ProjectRepositoryResources {
                 kronn_exists: root.join("kronn").is_dir(),
+                skills_present,
+                skills_available,
                 resources,
             }))
         })

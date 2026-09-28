@@ -208,7 +208,14 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       addFolder: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),
-      repositoryResources: resolve({ kronn_exists: false, resources: [] }),
+      repositoryResources: resolve({
+        kronn_exists: false,
+        skills_present: [],
+        skills_available: [],
+        resources: [],
+      }),
+      linkedReposCandidates: resolve([]),
+      setLinkedRepos: resolve(true),
       dockerStatus: resolve({
         compose_present: false,
         compose_file: null,

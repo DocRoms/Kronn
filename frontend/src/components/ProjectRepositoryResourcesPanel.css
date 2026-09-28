@@ -1,18 +1,34 @@
-.project-repository-resources { padding: 14px; }
+.project-repository-resources { padding: var(--kr-sp-4); }
 .project-repository-resources-banner,
 .project-repository-resources-loading,
 .project-repository-resources-error { display: flex; align-items: center; gap: 8px; padding: 12px; color: var(--kr-text-muted); }
-.project-repository-resources-banner { margin-bottom: 12px; border: 1px solid var(--kr-border); border-radius: 8px; background: var(--kr-bg-raised); color: var(--kr-warning); }
-.project-repository-resources-columns { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, 1fr); gap: 16px; }
+.project-repository-resources-banner { margin-bottom: var(--kr-sp-3); border: 1px solid var(--kr-border); border-radius: var(--kr-radius-md); background: var(--kr-bg-raised); color: var(--kr-warning); }
+.project-repository-resources-tabs { display: flex; flex-wrap: wrap; gap: var(--kr-sp-2); margin-bottom: var(--kr-sp-3); border-bottom: 1px solid var(--kr-border); }
+.project-repository-resources-tabs button { display: inline-flex; align-items: center; gap: var(--kr-sp-2); padding: var(--kr-sp-2) var(--kr-sp-3); border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--kr-text-muted); font: inherit; font-size: var(--kr-fs-sm); cursor: pointer; }
+.project-repository-resources-tabs button:hover,
+.project-repository-resources-tabs button[data-active='true'] { color: var(--kr-text-primary); }
+.project-repository-resources-tabs button[data-active='true'] { border-bottom-color: var(--kr-accent); }
+.project-repository-resources-tabs button span { min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--kr-bg-hover); color: var(--kr-text-faint); font-size: var(--kr-fs-2xs); text-align: center; }
+.project-repository-resources-columns { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, 1fr); gap: var(--kr-sp-4); }
 .project-repository-resources-list,
-.project-repository-resources-tree { min-width: 0; border: 1px solid var(--kr-border); border-radius: 8px; overflow: hidden; }
+.project-repository-resources-tree { min-width: 0; border: 1px solid var(--kr-border); border-radius: var(--kr-radius-md); overflow: hidden; }
 .project-repository-resources h3 { margin: 0; padding: 11px 12px; border-bottom: 1px solid var(--kr-border); font-size: 12px; }
 .project-repository-resources-list > p { padding: 12px; color: var(--kr-text-muted); }
+.project-repository-resource-groups > section + section,
+.project-repository-skill-groups > section + section { border-top: 1px solid var(--kr-border); }
+.project-repository-resource-groups h3,
+.project-repository-skill-groups h3 { display: flex; align-items: center; justify-content: space-between; color: var(--kr-text-muted); }
+.project-repository-resource-groups h3 span,
+.project-repository-skill-groups h3 span { color: var(--kr-text-faint); font-size: var(--kr-fs-2xs); font-weight: 500; }
+.project-repository-resource-groups p,
+.project-repository-skill-groups p { padding: 12px; color: var(--kr-text-muted); }
 .project-repository-resource-row { display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 7px 10px; border-bottom: 1px solid var(--kr-border-subtle); cursor: pointer; }
 .project-repository-resource-row:has(input:disabled) { cursor: default; }
+.project-repository-skill-available { cursor: default; }
 .project-repository-resource-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
 .project-repository-resource-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .project-repository-resource-copy span { color: var(--kr-text-muted); font-size: 10px; }
+.project-repository-resource-copy small { display: -webkit-box; overflow: hidden; color: var(--kr-text-faint); font-size: var(--kr-fs-2xs); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .project-repository-resource-status { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--kr-text-muted); }
 .project-repository-resource-status[data-status='conflict'] { color: var(--kr-error); }
 .project-repository-resource-status[data-status='up_to_date'] { color: var(--kr-success); }

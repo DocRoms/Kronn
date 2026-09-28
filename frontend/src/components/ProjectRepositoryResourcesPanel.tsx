@@ -1,19 +1,34 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, FileCode2, FolderTree, Loader2 } from 'lucide-react';
+import { AlertTriangle, Check, FileCode2, FolderTree, Loader2, Package, Workflow, Zap } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import {
+  readProjectRepositoryResourcesTab,
+  rememberProjectRepositoryResourcesTab,
+  type ProjectRepositoryResourcesTab,
+} from '../lib/projectRepositoryResourcesTab';
 import { userError } from '../lib/userError';
 import type {
+  ProjectRepositoryResource,
   ProjectRepositoryResourceKind,
   ProjectRepositoryResourceLevel,
   ProjectRepositoryResourceStatus,
   ProjectRepositoryResources,
+  ProjectRepositorySkill,
+  ProjectRepositorySkillProvenance,
 } from '../types/generated';
 import './ProjectRepositoryResourcesPanel.css';
 
 interface Props {
   projectId: string;
 }
+
+const AUTOMATION_KINDS: ProjectRepositoryResourceKind[] = [
+  'workflow',
+  'quick_prompt',
+  'quick_exec',
+  'quick_api',
+];
 
 const STATUS_MARKER: Record<ProjectRepositoryResourceStatus, string> = {
   not_published: '+',
@@ -23,14 +38,19 @@ const STATUS_MARKER: Record<ProjectRepositoryResourceStatus, string> = {
   conflict: '!',
 };
 
-const resourceKey = (resource: ProjectRepositoryResources['resources'][number]) => (
-  `${resource.kind}:${resource.id}`
+const resourceKey = (resource: ProjectRepositoryResource) => `${resource.kind}:${resource.id}`;
+const skillKey = (skill: ProjectRepositorySkill) => `skill:${skill.id}`;
+const skillIsPublished = (skill: ProjectRepositorySkill) => (
+  skill.repository_paths.includes(skill.publication_path)
 );
 
 export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
   const { t } = useT();
   const [data, setData] = useState<ProjectRepositoryResources | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<ProjectRepositoryResourcesTab>(
+    readProjectRepositoryResourcesTab,
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -40,63 +60,117 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
     projectsApi.repositoryResources(projectId).then(result => {
       if (!active) return;
       setData(result);
-      setSelected(new Set(result.resources
-        .filter(resource => resource.status !== 'not_published')
-        .map(resourceKey)));
+      setSelected(new Set([
+        ...result.resources
+          .filter(resource => resource.status !== 'not_published')
+          .map(resourceKey),
+        ...result.skills_present
+          .filter(skill => skillIsPublished(skill) || (skill.status && skill.status !== 'not_published'))
+          .map(skillKey),
+      ]));
     }).catch(reason => {
       if (active) setError(userError(reason));
     });
     return () => { active = false; };
   }, [projectId]);
 
+  const automationResources = useMemo(
+    () => data?.resources.filter(resource => resource.kind !== 'artifact') ?? [],
+    [data],
+  );
+  const artifacts = useMemo(
+    () => data?.resources.filter(resource => resource.kind === 'artifact') ?? [],
+    [data],
+  );
   const tree = useMemo(() => {
     if (!data) return [];
-    return data.resources.flatMap(resource => resource.repository_paths.map(path => ({ resource, path })));
+    return [
+      ...data.resources.flatMap(resource => resource.repository_paths.map(path => ({
+        key: resourceKey(resource),
+        id: resource.id,
+        path,
+        status: resource.status as ProjectRepositoryResourceStatus | undefined,
+      }))),
+      ...data.skills_present.map(skill => ({
+        key: skillKey(skill),
+        id: skill.id,
+        path: skill.publication_path,
+        status: skill.status,
+      })),
+    ];
   }, [data]);
   const repositoryScaffoldIncluded = Boolean(data?.kronn_exists || selected.size > 0);
+
+  const selectTab = (tab: ProjectRepositoryResourcesTab) => {
+    setActiveTab(tab);
+    rememberProjectRepositoryResourcesTab(tab);
+  };
+  const toggleSelected = (key: string) => setSelected(current => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
 
   if (error) return <div className="project-repository-resources-error"><AlertTriangle size={15} /> {t('projects.repositoryResources.error')}: {error}</div>;
   if (!data) return <div className="project-repository-resources-loading"><Loader2 size={15} className="animate-spin" /> {t('projects.repositoryResources.loading')}</div>;
 
+  const tabs: Array<{ id: ProjectRepositoryResourcesTab; icon: typeof Zap; count: number }> = [
+    { id: 'skills', icon: Zap, count: data.skills_present.length },
+    { id: 'automation', icon: Workflow, count: automationResources.length },
+    { id: 'artifacts', icon: Package, count: artifacts.length },
+  ];
+
   return (
-    <section className="project-repository-resources" data-project-view="automationArtifacts">
+    <section className="project-repository-resources" data-project-view="resources">
+      <div className="project-repository-resources-tabs" role="tablist" aria-label={t('projects.repositoryResources.tabs')}>
+        {tabs.map(({ id, icon: Icon, count }) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === id}
+            data-active={activeTab === id}
+            onClick={() => selectTab(id)}
+          >
+            <Icon size={14} aria-hidden="true" />
+            {t(`projects.repositoryResources.tab.${id}`)}
+            <span>{count}</span>
+          </button>
+        ))}
+      </div>
       {!data.kronn_exists && (
         <div className="project-repository-resources-banner" role="status">
           <FolderTree size={16} /> {t('projects.repositoryResources.kronnMissing')}
         </div>
       )}
       <div className="project-repository-resources-columns">
-        <div className="project-repository-resources-list">
-          <h3>{t('projects.repositoryResources.resources')}</h3>
-          {data.resources.length === 0 && <p>{t('projects.repositoryResources.empty')}</p>}
-          {data.resources.map(resource => {
-            const key = resourceKey(resource);
-            const checked = selected.has(key);
-            return (
-              <label key={key} className="project-repository-resource-row">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  disabled={resource.status !== 'not_published'}
-                  onChange={() => setSelected(current => {
-                    const next = new Set(current);
-                    if (next.has(key)) next.delete(key); else next.add(key);
-                    return next;
-                  })}
-                  aria-label={t('projects.repositoryResources.include', resource.name)}
-                />
-                <FileCode2 size={15} aria-hidden="true" />
-                <span className="project-repository-resource-copy">
-                  <strong>{resource.name}</strong>
-                  <span>{kindLabel(t, resource.kind)} · {levelLabel(t, resource.level)}</span>
-                </span>
-                <span className="project-repository-resource-status" data-status={resource.status}>
-                  {resource.status === 'up_to_date' && <Check size={12} aria-hidden="true" />}
-                  {statusLabel(t, resource.status)}
-                </span>
-              </label>
-            );
-          })}
+        <div className="project-repository-resources-list" role="tabpanel">
+          {activeTab === 'skills' && (
+            <SkillsTab
+              present={data.skills_present}
+              available={data.skills_available}
+              selected={selected}
+              onToggle={toggleSelected}
+              t={t}
+            />
+          )}
+          {activeTab === 'automation' && (
+            <AutomationTab
+              resources={automationResources}
+              selected={selected}
+              onToggle={toggleSelected}
+              t={t}
+            />
+          )}
+          {activeTab === 'artifacts' && (
+            <ResourceList
+              resources={artifacts}
+              selected={selected}
+              onToggle={toggleSelected}
+              emptyKey="projects.repositoryResources.emptyArtifacts"
+              t={t}
+            />
+          )}
         </div>
         <div className="project-repository-resources-tree">
           <h3>{t('projects.repositoryResources.preview')}</h3>
@@ -118,13 +192,13 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
             </span>
             <span>INDEX.md · kronn.toml · kronn.lock</span>
           </div>
-          {tree.map(({ resource, path }) => {
-            const included = selected.has(resourceKey(resource));
-            const relative = path.replace(/^kronn\//, '');
+          {tree.map(item => {
+            const included = selected.has(item.key);
+            const relative = item.path.replace(/^kronn\//, '');
             return (
-              <div key={`${resource.id}:${path}`} className="project-repository-tree-entry" data-excluded={!included || undefined}>
-                <span className="project-repository-tree-marker" data-status={resource.status}>
-                  {included ? STATUS_MARKER[resource.status] : ''}
+              <div key={`${item.id}:${item.path}`} className="project-repository-tree-entry" data-excluded={!included || undefined}>
+                <span className="project-repository-tree-marker" data-status={item.status}>
+                  {included && item.status ? STATUS_MARKER[item.status] : ''}
                 </span>
                 <span>{relative}</span>
               </div>
@@ -143,6 +217,125 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
 }
 
 type Translate = (key: string, ...args: Array<string | number>) => string;
+
+interface ResourceListProps {
+  resources: ProjectRepositoryResource[];
+  selected: Set<string>;
+  onToggle: (key: string) => void;
+  emptyKey: string;
+  t: Translate;
+}
+
+function ResourceList({ resources, selected, onToggle, emptyKey, t }: ResourceListProps) {
+  if (resources.length === 0) return <p>{t(emptyKey)}</p>;
+  return <>{resources.map(resource => (
+    <ResourceRow
+      key={resourceKey(resource)}
+      resource={resource}
+      checked={selected.has(resourceKey(resource))}
+      onToggle={() => onToggle(resourceKey(resource))}
+      t={t}
+    />
+  ))}</>;
+}
+
+function ResourceRow({ resource, checked, onToggle, t }: {
+  resource: ProjectRepositoryResource;
+  checked: boolean;
+  onToggle: () => void;
+  t: Translate;
+}) {
+  return (
+    <label className="project-repository-resource-row">
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={resource.status !== 'not_published'}
+        onChange={onToggle}
+        aria-label={t('projects.repositoryResources.include', resource.name)}
+      />
+      <FileCode2 size={15} aria-hidden="true" />
+      <span className="project-repository-resource-copy">
+        <strong>{resource.name}</strong>
+        <span>{kindLabel(t, resource.kind)} · {levelLabel(t, resource.level)}</span>
+      </span>
+      <span className="project-repository-resource-status" data-status={resource.status}>
+        {resource.status === 'up_to_date' && <Check size={12} aria-hidden="true" />}
+        {statusLabel(t, resource.status)}
+      </span>
+    </label>
+  );
+}
+
+function AutomationTab({ resources, selected, onToggle, t }: Omit<ResourceListProps, 'emptyKey'>) {
+  if (resources.length === 0) return <p>{t('projects.repositoryResources.emptyAutomation')}</p>;
+  return <div className="project-repository-resource-groups">
+    {AUTOMATION_KINDS.map(kind => {
+      const group = resources.filter(resource => resource.kind === kind);
+      if (group.length === 0) return null;
+      return <section key={kind} data-resource-kind={kind}>
+        <h3>{kindLabel(t, kind)} <span>{group.length}</span></h3>
+        <ResourceList resources={group} selected={selected} onToggle={onToggle} emptyKey="" t={t} />
+      </section>;
+    })}
+  </div>;
+}
+
+function SkillsTab({ present, available, selected, onToggle, t }: {
+  present: ProjectRepositorySkill[];
+  available: ProjectRepositorySkill[];
+  selected: Set<string>;
+  onToggle: (key: string) => void;
+  t: Translate;
+}) {
+  return <div className="project-repository-skill-groups">
+    <section>
+      <h3>{t('projects.repositoryResources.skills.present')} <span>{present.length}</span></h3>
+      {present.length === 0 && <p>{t('projects.repositoryResources.emptySkills')}</p>}
+      {present.map(skill => {
+        const key = skillKey(skill);
+        const published = skillIsPublished(skill);
+        return <label key={key} className="project-repository-resource-row">
+          <input
+            type="checkbox"
+            checked={selected.has(key)}
+            disabled={published}
+            onChange={() => onToggle(key)}
+            aria-label={t('projects.repositoryResources.include', skill.name)}
+          />
+          <Zap size={15} aria-hidden="true" />
+          <span className="project-repository-resource-copy">
+            <strong>{skill.name}</strong>
+            <span>{provenanceLabel(t, skill.provenance)} · {levelLabel(t, 'usable_without_kronn')}</span>
+            {skill.description && <small>{skill.description}</small>}
+          </span>
+          {skill.status && (
+            <span className="project-repository-resource-status" data-status={skill.status}>
+              {skill.status === 'up_to_date' && <Check size={12} aria-hidden="true" />}
+              {statusLabel(t, skill.status)}
+            </span>
+          )}
+        </label>;
+      })}
+    </section>
+    <section>
+      <h3>{t('projects.repositoryResources.skills.available')} <span>{available.length}</span></h3>
+      {available.length === 0 && <p>{t('projects.repositoryResources.emptyAvailableSkills')}</p>}
+      {available.map(skill => (
+        <div key={skillKey(skill)} className="project-repository-resource-row project-repository-skill-available">
+          <Zap size={15} aria-hidden="true" />
+          <span className="project-repository-resource-copy">
+            <strong>{skill.name}</strong>
+            <span>{provenanceLabel(t, skill.provenance)}</span>
+            {skill.description && <small>{skill.description}</small>}
+          </span>
+        </div>
+      ))}
+    </section>
+  </div>;
+}
+
 const kindLabel = (t: Translate, kind: ProjectRepositoryResourceKind) => t(`projects.repositoryResources.kind.${kind}`);
 const levelLabel = (t: Translate, level: ProjectRepositoryResourceLevel) => t(`projects.repositoryResources.level.${level}`);
 const statusLabel = (t: Translate, status: ProjectRepositoryResourceStatus) => t(`projects.repositoryResources.status.${status}`);
+const provenanceLabel = (t: Translate, provenance: ProjectRepositorySkillProvenance) => t(`projects.repositoryResources.provenance.${provenance}`);

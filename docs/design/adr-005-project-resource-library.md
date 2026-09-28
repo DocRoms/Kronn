@@ -309,10 +309,16 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
   project in the database. It appears the first time a user chooses to publish
   a project resource to the repository (« Publier dans le dépôt »), and only
   published resources are written.
-- **Project page**: a tab « Automatisations & Artifacts » lists the workflows,
-  quick prompts, QE, QA and artifacts linked to the project, with their
-  repository status (not published, published, file changed, database changed,
-  conflict) and the publish or import action.
+- **Project page**: one **Resources** tab has three remembered sections:
+  Skills, Automation and Artifacts. Skills separates resources already present
+  in the repository/project from the remaining Kronn catalogue and reports
+  repository/Kronn provenance. Automation groups workflows, Quick Prompts, QE
+  and QA by type; Artifacts lists the project's pages. Existing portability
+  levels, repository alignment states, selection and `kronn/` preview remain
+  visible [src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:124-155].
+- The Overview shows the linked MCP count and companion repositories, and owns
+  the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2395]
+  [src: file: frontend/src/components/ProjectCard.tsx:2411].
 - **Automations and Artifacts pages**: grouped by project; everything not
   linked to a project goes into « Général ».
 - Simple and fast first: the listing reads existing rows and a cheap hash

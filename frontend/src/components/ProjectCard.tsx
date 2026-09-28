@@ -9,7 +9,6 @@ import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import AuditRecapPanel from './AuditRecapPanel';
 import type { AuditKind } from '../types/AuditKind';
-import { ProjectSkills } from './ProjectSkills';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
@@ -37,22 +36,19 @@ import { ContextHelp } from './ContextHelp';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { ProjectDockerPanel } from './ProjectDockerPanel';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
+import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
 
-const STATUS_COLORS: Record<string, string> = {
-  Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
-  Failed: 'var(--kr-error)', Cancelled: 'var(--kr-cancelled)', WaitingApproval: 'var(--kr-accent-ink)',
-};
-
-type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'automationArtifacts' | 'resources';
+type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'resources';
 
 const PROJECT_DETAIL_VIEWS: ProjectDetailView[] = [
-  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'automationArtifacts', 'resources',
+  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'resources',
 ];
 const PROJECT_DETAIL_VIEW_STORAGE_KEY = 'kronn:projectDetailView';
 
 function readProjectDetailView(): ProjectDetailView {
   try {
     const saved = localStorage.getItem(PROJECT_DETAIL_VIEW_STORAGE_KEY);
+    if (saved === 'automationArtifacts') return 'resources';
     return PROJECT_DETAIL_VIEWS.includes(saved as ProjectDetailView)
       ? saved as ProjectDetailView
       : 'overview';
@@ -128,7 +124,6 @@ export function ProjectCard({
   discussions: projDiscussions,
   driftStatus,
   agents,
-  allSkills,
   mcpConfigs,
   workflows,
   modelTiers,
@@ -139,7 +134,6 @@ export function ProjectCard({
   onOpenDiscussion,
   onRefetch,
   onRefetchDiscussions,
-  onRefetchSkills,
   onRefetchDrift,
 }: ProjectCardProps) {
   const { t, locale } = useT();
@@ -458,6 +452,7 @@ export function ProjectCard({
       target = sessionStorage.getItem(`kronn:projectView:${proj.id}`);
       if (target) sessionStorage.removeItem(`kronn:projectView:${proj.id}`);
     } catch { /* private mode / quota — no deep-link */ }
+    if (target === 'automationArtifacts') target = 'resources';
     if (target && PROJECT_DETAIL_VIEWS.includes(target as ProjectDetailView)) {
       queueMicrotask(() => {
         if (!cancelled) selectDetailView(target as ProjectDetailView);
@@ -741,13 +736,6 @@ export function ProjectCard({
     }
     return { tone: 'success', label: t('projects.master.overview.upToDate') };
   })();
-  // Pulse the "add plugins" hint when the project has zero MCPs AND hasn't
-  // been audited yet — plugins dramatically improve briefing + audit quality
-  // (tracker context, stack detection, MCP-aware questions) so the UI
-  // actively suggests adding some before either flow is launched.
-  const shouldPulseMcpHint = projMcps.length === 0
-    && (proj.audit_status === 'NoTemplate' || proj.audit_status === 'TemplateInstalled' || proj.audit_status === 'Bootstrapped');
-
   // 0.8.2 — Tracker-MCP hint. The audit Phase 3 + AutoPilot workflow get
   // dramatically more useful when a GitHub/GitLab/Jira/Linear MCP is
   // wired (real ticket creation, real issue context, "fetch_issue" step
@@ -1531,8 +1519,7 @@ export function ProjectCard({
               ['code', t('projects.master.tab.code'), Code2, undefined],
               ['docker', t('projects.master.tab.docker'), Container, undefined],
               ['git', t('projects.master.tab.git'), GitBranch, undefined],
-              ['automationArtifacts', t('projects.master.tab.automationArtifacts'), Package, undefined],
-              ['resources', t('projects.master.tab.resources'), Puzzle, undefined],
+              ['resources', t('projects.master.tab.resources'), Package, undefined],
             ] as const).map(([view, label, Icon, count]) => (
               <button
                 key={view}
@@ -2365,25 +2352,22 @@ export function ProjectCard({
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.code')}</span>
                 </button>
-                <button type="button" onClick={() => {
-                  selectDetailView('resources');
-                  setExpandedTab('mcps');
-                }}>
+                <button type="button" onClick={() => onNavigate('mcps')}>
                   <Puzzle size={16} />
                   <strong>{projMcps.length}</strong>
-                  <span>Plugins</span>
+                  <span>{t('projects.master.overview.linkedMcps')}</span>
                 </button>
                 <button type="button" onClick={() => {
+                  rememberProjectRepositoryResourcesTab('automation');
                   selectDetailView('resources');
-                  setExpandedTab('workflows');
                 }}>
                   <Workflow size={16} />
                   <strong>{projWorkflows.length}</strong>
                   <span>{t('projects.workflows')}</span>
                 </button>
                 <button type="button" onClick={() => {
+                  rememberProjectRepositoryResourcesTab('skills');
                   selectDetailView('resources');
-                  setExpandedTab('skills');
                 }}>
                   <Zap size={16} />
                   <strong>{(proj.default_skill_ids ?? []).length}</strong>
@@ -2407,11 +2391,71 @@ export function ProjectCard({
                   <strong>{driftStatus?.stale_sections.length ?? 0}</strong>
                   <span>{t('projects.master.overview.stale')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('resources')}>
-                  <FolderInput size={16} />
-                  <strong>{(proj.linked_repos ?? []).length}</strong>
-                  <span>{t('linkedRepos.title')}</span>
-                </button>
+              </div>
+              <section
+                id={`project-linked-repos-${proj.id}`}
+                className="project-overview-linked-repos"
+                data-testid="project-overview-linked-repos"
+              >
+                <div className="project-overview-linked-repos-title">
+                  <FolderInput size={15} />
+                  <strong>{t('linkedRepos.title')}</strong>
+                  <span>{(proj.linked_repos ?? []).length}</span>
+                </div>
+                <ProjectLinkedRepos
+                  projectId={proj.id}
+                  currentRepos={proj.linked_repos ?? []}
+                  onUpdate={onRefetch}
+                />
+              </section>
+              <div className="dash-delete-zone" data-testid="project-overview-delete-zone">
+                {deleteConfirmId === proj.id ? (
+                  <div>
+                    <div className="flex-row gap-4 mb-4">
+                      <button
+                        className="dash-soft-delete-btn"
+                        onClick={() => handleDeleteProject(proj.id, false)}
+                      >
+                        {t('projects.deleteSoft')}
+                      </button>
+                    </div>
+                    <div className="dash-delete-panel">
+                      <div className="dash-delete-warn">
+                        <AlertTriangle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                        {t('projects.deleteHardWarn')}
+                      </div>
+                      <div className="dash-delete-label">{t('projects.deleteHardConfirmLabel')}</div>
+                      <input
+                        value={deleteConfirmInput}
+                        onChange={e => setDeleteConfirmInput(e.target.value)}
+                        placeholder={proj.name}
+                        className="dash-delete-input"
+                      />
+                      <div className="flex-row gap-4">
+                        <button
+                          className="dash-danger-btn"
+                          style={{ opacity: deleteConfirmInput === proj.name ? 1 : 0.4, pointerEvents: deleteConfirmInput === proj.name ? 'auto' : 'none' }}
+                          onClick={() => handleDeleteProject(proj.id, true)}
+                          disabled={deleteConfirmInput !== proj.name}
+                        >
+                          <Trash2 size={12} /> {t('projects.deleteHard')}
+                        </button>
+                        <button
+                          className="dash-soft-delete-btn"
+                          onClick={() => { setDeleteConfirmId(null); setDeleteConfirmInput(''); }}
+                        >
+                          {t('audit.cancelAudit')}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <button className="dash-danger-btn" onClick={() => setDeleteConfirmId(proj.id)}>
+                      <Trash2 size={12} /> {t('projects.delete')}
+                    </button>
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -2449,7 +2493,7 @@ export function ProjectCard({
               />
             </section>
           )}
-          {detailMode && detailView === 'automationArtifacts' && (
+          {detailMode && detailView === 'resources' && (
             <ProjectRepositoryResourcesPanel projectId={proj.id} />
           )}
           {detailMode && detailView === 'tasks' && (
@@ -2686,144 +2730,6 @@ export function ProjectCard({
               </div>
             );
           })()}
-
-          {/* -- 3. MCPs -- */}
-          <div className="dash-section project-detail-section" data-project-view="resources">
-            <button className="dash-collapsible-header" onClick={() => toggleSection('mcps')} aria-expanded={isSectionOpen('mcps')}>
-              {isSectionOpen('mcps') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-              <Puzzle size={14} /> <span className="dash-section-title">Plugins</span>
-              <span className="dash-count">{projMcps.length}</span>
-            </button>
-            {/* "Add plugins first" pulse hint — visible even when the section is
-                collapsed so a user skimming the card doesn't miss it. Shown
-                only when zero plugins AND no audit has run yet; once plugins
-                exist or the audit is done, the hint disappears. */}
-            {shouldPulseMcpHint && (
-              <div className="dash-mcp-hint" role="note" aria-live="polite">
-                <Zap size={14} className="dash-mcp-hint-icon" />
-                <span className="dash-mcp-hint-text">{t('projects.mcpHint.beforeAudit')}</span>
-                <button
-                  type="button"
-                  className="dash-mcp-hint-cta"
-                  onClick={() => onNavigate('mcps')}
-                >
-                  {t('projects.mcpHint.cta')}
-                </button>
-              </div>
-            )}
-            {isSectionOpen('mcps') && (
-              <>
-                {projMcps.map(cfg => (
-                  <div key={cfg.id} className="dash-row" style={{ cursor: 'pointer' }} onClick={() => onNavigate(`mcps:${cfg.id}`)}>
-                    <div className="relative">
-                      <div aria-hidden="true" className="dash-dot" data-on="true" />
-                      <span className="dash-sr-only">
-                        {t('config.enabled')}
-                      </span>
-                    </div>
-                    <div className="flex-1">
-                      <span className="dash-row-name">{cfg.server_name}</span>
-                      <span className="dash-row-detail-sm">{cfg.label}</span>
-                      {cfg.is_global && <span className="dash-row-global-tag">GLOBAL</span>}
-                    </div>
-                    <ChevronRight size={12} className="text-ghost" />
-                  </div>
-                ))}
-                {projMcps.length === 0 && !shouldPulseMcpHint && (
-                  <div className="dash-row-empty">
-                    {t('projects.noMcp').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => onNavigate('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* -- 4. Workflows -- */}
-          <div className="dash-section project-detail-section" data-project-view="resources">
-            <button className="dash-collapsible-header" onClick={() => toggleSection('workflows')} aria-expanded={isSectionOpen('workflows')}>
-              {isSectionOpen('workflows') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-              <Workflow size={14} /> <span className="dash-section-title">{t('projects.workflows')}</span>
-              <span className="dash-count">{projWorkflows.length}</span>
-            </button>
-            {isSectionOpen('workflows') && (
-              <>
-                {projWorkflows.map(wf => (
-                  <div key={wf.id} className="dash-row">
-                    <div className="relative">
-                      <div aria-hidden="true" className="dash-dot" data-on={String(wf.enabled)} />
-                      <span className="dash-sr-only">
-                        {wf.enabled ? t('config.enabled') : t('config.disabled')}
-                      </span>
-                    </div>
-                    <div className="flex-1">
-                      <span className="dash-row-name">{wf.name}</span>
-                      <span className="dash-row-detail-sm">
-                        {wf.trigger_type} · {wf.step_count} step{wf.step_count > 1 ? 's' : ''}
-                      </span>
-                      {wf.last_run && (
-                        <span className="dash-row-detail-sm" style={{ color: STATUS_COLORS[wf.last_run.status] ?? 'var(--kr-text-faint)' }}>
-                          {wf.last_run.status}
-                        </span>
-                      )}
-                    </div>
-                    <button
-                      className="dash-icon-btn"
-                      onClick={() => onNavigate('workflows')}
-                      title={t('projects.workflows')}
-                      aria-label={t('projects.workflows')}
-                    >
-                      <ChevronRight size={12} />
-                    </button>
-                  </div>
-                ))}
-                {projWorkflows.length === 0 && (
-                  <div className="dash-row-empty">
-                    {t('projects.noWorkflows').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => onNavigate('workflows')}>{t('projects.noWorkflows').split(' — ')[1]}</button>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* -- 5. Skills -- */}
-          <div className="dash-section project-detail-section" data-project-view="resources">
-            <button className="dash-collapsible-header" onClick={() => toggleSection('skills')} aria-expanded={isSectionOpen('skills')}>
-              {isSectionOpen('skills') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-              <Zap size={14} /> <span className="dash-section-title">{t('projects.skills')}</span>
-              <span className="dash-count">{(proj.default_skill_ids ?? []).length}</span>
-            </button>
-            {isSectionOpen('skills') && (
-              <div style={{ paddingTop: 6 }}>
-                <ProjectSkills
-                  projectId={proj.id}
-                  currentSkillIds={proj.default_skill_ids ?? []}
-                  allSkills={allSkills}
-                  onUpdate={() => { onRefetch(); onRefetchSkills(); }}
-                />
-              </div>
-            )}
-          </div>
-
-          {/* -- 5b. Linked repos (0.8.3) — companion projects.
-              Lives between Skills and AI Context because it's
-              configuration that feeds INTO the agent's context
-              (same conceptual layer as skills), and the audit
-              pipeline picks it up at the same prompt-assembly
-              point as briefing_notes. */}
-          <div className="dash-section project-detail-section" data-project-view="resources">
-            <button className="dash-collapsible-header" onClick={() => toggleSection('linkedRepos')} aria-expanded={isSectionOpen('linkedRepos')}>
-              {isSectionOpen('linkedRepos') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-              <FolderInput size={14} /> <span className="dash-section-title">{t('linkedRepos.title')}</span>
-              <span className="dash-count">{(proj.linked_repos ?? []).length}</span>
-            </button>
-            {isSectionOpen('linkedRepos') && (
-              <ProjectLinkedRepos
-                projectId={proj.id}
-                currentRepos={proj.linked_repos ?? []}
-                onUpdate={onRefetch}
-              />
-            )}
-          </div>
 
           {/* -- 6. Audit -- */}
           <div className="dash-section project-detail-section" data-project-view="audit">
@@ -3106,55 +3012,6 @@ export function ProjectCard({
             )}
           </div>
 
-          <div className="dash-delete-zone project-detail-section" data-project-view="resources">
-            {deleteConfirmId === proj.id ? (
-              <div>
-                <div className="flex-row gap-4 mb-4">
-                  <button
-                    className="dash-soft-delete-btn"
-                    onClick={() => handleDeleteProject(proj.id, false)}
-                  >
-                    {t('projects.deleteSoft')}
-                  </button>
-                </div>
-                <div className="dash-delete-panel">
-                  <div className="dash-delete-warn">
-                    <AlertTriangle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                    {t('projects.deleteHardWarn')}
-                  </div>
-                  <div className="dash-delete-label">{t('projects.deleteHardConfirmLabel')}</div>
-                  <input
-                    value={deleteConfirmInput}
-                    onChange={e => setDeleteConfirmInput(e.target.value)}
-                    placeholder={proj.name}
-                    className="dash-delete-input"
-                  />
-                  <div className="flex-row gap-4">
-                    <button
-                      className="dash-danger-btn"
-                      style={{ opacity: deleteConfirmInput === proj.name ? 1 : 0.4, pointerEvents: deleteConfirmInput === proj.name ? 'auto' : 'none' }}
-                      onClick={() => handleDeleteProject(proj.id, true)}
-                      disabled={deleteConfirmInput !== proj.name}
-                    >
-                      <Trash2 size={12} /> {t('projects.deleteHard')}
-                    </button>
-                    <button
-                      className="dash-soft-delete-btn"
-                      onClick={() => { setDeleteConfirmId(null); setDeleteConfirmInput(''); }}
-                    >
-                      {t('audit.cancelAudit')}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <button className="dash-danger-btn" onClick={() => setDeleteConfirmId(proj.id)}>
-                  <Trash2 size={12} /> {t('projects.delete')}
-                </button>
-              </div>
-            )}
-          </div>
         </div>
       )}
     </div>
