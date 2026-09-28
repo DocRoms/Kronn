@@ -501,6 +501,8 @@ Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and 
    - **Mitigated**: partial fix shipped, residual work tracked.\n\
    - **Confirmed by user**: only set by the validation phase after user confirms.\n\
    - **Rejected**: only set by the validation phase if user rejects — the next audit will NOT recreate this TD.\n\
+   - **Accepted decision**: only set by the validation phase when the user records the TD as an intentional trade-off in `docs/decisions.md`.\n\
+   - **Deferred**: only set by the validation phase when the user postpones the TD decision.\n\
 \n\
 5. **Cap**: target 30 findings maximum. Critical + High findings (including all baseline checklist failures) are NEVER trimmed to fit the cap. Trim Medium and Low if needed. If you cannot stay under 30 even after trimming all Low, note the count of trimmed Medium in the index's `## Coverage gaps` section.\n\
 \n\
@@ -519,7 +521,7 @@ metadata:\n\
   type: tech-debt\n\
   audit_history:\n\
     - date: YYYY-MM-DD\n\
-      status: Verified in source | Inferred | Blocked upstream | Mitigated | Confirmed by user | Rejected\n\
+      status: Verified in source | Inferred | Blocked upstream | Mitigated | Confirmed by user | Rejected | Accepted decision | Deferred\n\
       reviewer: <audit kind, e.g. \"Full audit\" or \"Security audit\">\n\
       note: optional — what changed since previous entry (e.g. \"line numbers shifted\", \"severity bumped to High\")\n\
 ---\n\
@@ -2614,11 +2616,7 @@ mod prompt_tests {
     }
 
     #[test]
-    fn phase3_template_check_only_with_tracker_mcp() {
-        // The "before pushing tickets, check issue templates" nudge is
-        // gated on `has_issue_tracker_mcp` because it only makes sense
-        // when we're actually going to push tickets. Without a tracker
-        // the nudge is noise.
+    fn phase3_ticket_offer_only_with_tracker_mcp() {
         let info = AuditInfo {
             files: vec![],
             todos: vec![],
@@ -2628,55 +2626,65 @@ mod prompt_tests {
             let with = build_validation_prompt(lang, &info, true, &[]);
             let without = build_validation_prompt(lang, &info, false, &[]);
             assert!(
-                with.contains(".github/ISSUE_TEMPLATE"),
-                "{} prompt with tracker MCP must contain the template check",
+                with.to_lowercase().contains("ticket"),
+                "{} prompt with tracker MCP must contain the ticket offer",
                 lang
             );
             assert!(
-                !without.contains(".github/ISSUE_TEMPLATE"),
-                "{} prompt WITHOUT tracker MCP must NOT contain the template check (noise)",
+                !without.to_lowercase().contains("ticket"),
+                "{} prompt without tracker MCP must not contain a ticket offer",
                 lang
             );
         }
     }
 
     #[test]
-    fn phase2_scans_all_three_marker_types_and_drives_to_resolution() {
-        // 0.8.3 FIX — pre-fix Phase 2 only mentioned `TODO: unknown`
-        // (the value the user could set), never scanned `TODO: verify`
-        // or `TODO: ask user`. Result: 26 verify markers from
-        // DOCROMS_WEB's testing-quality.md stayed in the docs forever,
-        // never converted to user questions. The new Phase 2 explicitly
-        // enumerates all 3 types AND tells the agent to grep + resolve.
+    fn phases2_and3_use_td_cards_with_high_priority_singles_and_batches_of_eight() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo {
                 files: vec![],
                 todos: vec![],
-                tech_debt_items: vec![],
+                tech_debt_items: vec![crate::models::TechDebtItem {
+                    id: "TD-20260928-example".into(),
+                    problem: "Example".into(),
+                    area: "Backend".into(),
+                    severity: "High".into(),
+                }],
             };
             let prompt = build_validation_prompt(lang, &info, false, &[]);
-            for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
+            for contract in [
+                "kronn-question",
+                "audit-td:<TD-ID>",
+                "audit-td-batch",
+                "`items`",
+                "`confirm`",
+                "`reject`",
+                "`accept_decision`",
+                "`defer`",
+            ] {
                 assert!(
-                    prompt.contains(marker),
-                    "{lang} Phase 2 must mention `{marker}` so the agent processes it"
+                    prompt.contains(contract),
+                    "{lang} validation prompt must contain `{contract}`"
                 );
             }
-            // The grep instruction is what makes the scan systematic.
             assert!(
-                prompt.contains("grep") || prompt.contains("MCP"),
-                "{lang} Phase 2 must instruct an enumeration step (grep / MCP)"
+                prompt.contains("8 `items`"),
+                "{lang} remaining TD batches must be capped at eight items"
+            );
+            let expected_summary = match lang {
+                "en" => "across Phases 2 and 3",
+                "es" => "entre las Fases 2 y 3",
+                _ => "entre les Phases 2 et 3",
+            };
+            assert!(
+                prompt.contains(expected_summary),
+                "{lang} TD summary must cover both card phases"
             );
         }
     }
 
     #[test]
-    fn phase3_is_bulk_first_not_one_by_one() {
-        // 0.8.3 — Phase 3 was rewritten to surface a compact table of
-        // ALL findings + a single bulk question (all-confirm / all-
-        // reject / discuss-selected). The "1-by-1" anti-pattern bored
-        // users into bailing out before reaching Critical items.
-        // Pin the rewrite so a future "drive-by simplification" can't
-        // silently revert it.
+    fn validation_prompt_has_no_legacy_bulk_first_contradiction() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo {
                 files: vec![],
@@ -2684,32 +2692,14 @@ mod prompt_tests {
                 tech_debt_items: vec![],
             };
             let prompt = build_validation_prompt(lang, &info, false, &[]);
-            // The new flow advertises itself with "BULK-FIRST" — a
-            // marker an unfamiliar editor will see + understand.
-            assert!(
-                prompt.contains("BULK-FIRST"),
-                "{} Phase 3 must use BULK-FIRST protocol (marker missing)",
-                lang
-            );
-            // Compact table header must be in the prompt so the
-            // agent renders the same shape across languages.
-            assert!(
-                prompt.contains("| ID | Severity"),
-                "{} Phase 3 must instruct the compact markdown table",
-                lang
-            );
-            // Three bulk options (a) / (b) / (c) are the contract.
             let lower = prompt.to_lowercase();
             assert!(
-                lower.contains("(a)") && lower.contains("(b)") && lower.contains("(c)"),
-                "{} Phase 3 must offer 3 bulk options (a)/(b)/(c)",
-                lang
-            );
-            // Default for non-selected TDs is `Confirmed by user`
-            // (per user UX decision in 0.8.3 session).
-            assert!(
-                prompt.contains("Confirmed by user"),
-                "{} Phase 3 must default non-selected TDs to `Confirmed by user`",
+                !lower.contains("bulk-first")
+                    && !lower.contains("tout valider")
+                    && !lower.contains("do not batch-confirm")
+                    && !lower.contains("no confirmar en lote")
+                    && !lower.contains("pas de confirmation en lot"),
+                "{} validation prompt must not retain the contradictory legacy protocol",
                 lang
             );
         }
@@ -2726,10 +2716,10 @@ mod prompt_tests {
             let prompt = build_validation_prompt(lang, &info, false, &[]);
             let lower = prompt.to_lowercase();
             assert!(
-                lower.contains("never modify")
-                    || lower.contains("ne modifie jamais")
-                    || lower.contains("nunca modifiques"),
-                "Validation prompt ({}) must forbid code modification",
+                lower.contains("modify only `docs/`")
+                    || lower.contains("modifica solo `docs/`")
+                    || lower.contains("modifie uniquement `docs/`"),
+                "Validation prompt ({}) must restrict changes to docs",
                 lang
             );
         }

@@ -20,7 +20,7 @@ export interface FenceProblem {
 /// `deny_unknown_fields`: anything else and the whole fence is refused.
 const SPEC_FIELDS = new Set([
   'version', 'key', 'question', 'context',
-  'options', 'multiple', 'recommended_option_ids', 'task_ref',
+  'options', 'items', 'multiple', 'recommended_option_ids', 'task_ref',
 ]);
 const OPTION_FIELDS = new Set(['id', 'label', 'description']);
 
@@ -112,6 +112,27 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
     ids.add(option.id);
   }
   if (ids.size !== options.length) return { key: 'disc.question.invalidOptionId' };
+
+  const items = 'items' in spec ? spec.items : [];
+  if (!Array.isArray(items) || items.length > 8) {
+    return { key: 'disc.question.invalidOptions' };
+  }
+  const itemIds = new Set<string>();
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) return { key: 'disc.question.invalidOptions' };
+    const item = raw as Record<string, unknown>;
+    if (Object.keys(item).some(field => !OPTION_FIELDS.has(field))) {
+      return { key: 'disc.question.invalidUnknownField' };
+    }
+    if (!isStableKey(item.id)) return { key: 'disc.question.invalidOptionId' };
+    if (!isFilled(item.label, 250)) return { key: 'disc.question.invalidOptionLabel' };
+    if (!isOptionalText(item.description, 1000)) {
+      return { key: 'disc.question.invalidOptionDescription' };
+    }
+    itemIds.add(item.id);
+  }
+  if (itemIds.size !== items.length) return { key: 'disc.question.invalidOptionId' };
+  if (items.length > 0 && options.length === 0) return { key: 'disc.question.invalidOptions' };
 
   const recommended = 'recommended_option_ids' in spec ? spec.recommended_option_ids : [];
   if (!Array.isArray(recommended) || recommended.some(id => !ids.has(id as string))) {

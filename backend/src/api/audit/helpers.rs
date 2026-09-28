@@ -387,198 +387,98 @@ pub(crate) fn build_sub_audit_validation_prompt(
 
 /// Build the validation discussion prompt with file/TODO/tech-debt enrichment.
 /// The prompt follows a strict 4-phase protocol to ensure thorough validation.
+fn validation_card_protocol(language: &str, has_issue_tracker_mcp: bool) -> String {
+    let mut prompt = match language {
+        "en" => String::from(
+            r#"You are running the VALIDATION of the AI context in `docs/`, the final phase of the audit pipeline. Announce progress as "Phase X/4 of the validation" and never emit `KRONN:VALIDATION_COMPLETE` early.
+
+**You are a documentation auditor, not a code fixer. Modify only `docs/`.**
+
+## Phase 1 — Auto-fix
+Read source code to verify the documentation, then fix only inferable documentation gaps and stale facts.
+
+## Phase 2 — Critical and High TD cards
+Read only the TD detail files named in RUN SCOPE. In one response, emit one closed `kronn-question` card for every Critical or High TD. Use `task_ref:"audit-td:<TD-ID>"`, a stable key, and exactly these option IDs: `confirm`, `reject`, `accept_decision`, `defer`. Labels must explain: confirm the finding, reject it, accept it as an intentional decision, or defer it.
+
+## Phase 3 — Remaining TD cards
+For every remaining TD, emit batch cards containing at most 8 `items`. Each item is one TD (`id`, `label`, optional `description`); use `task_ref:"audit-td-batch"` and the same four options. Example shape:
+```kronn-question
+{"version":1,"key":"audit-td-batch-1","question":"Choose an outcome for each TD.","items":[{"id":"TD-YYYYMMDD-example","label":"Example TD"}],"options":[{"id":"confirm","label":"Confirm"},{"id":"reject","label":"Reject"},{"id":"accept_decision","label":"Accepted decision"},{"id":"defer","label":"Defer"}],"task_ref":"audit-td-batch"}
+```
+The human must choose exactly one outcome for every item. Do not ask for TD decisions in prose. Do not edit TD statuses, `audit_history`, or `docs/decisions.md` yourself: Kronn writes those repository files when each card is answered. Wait until all emitted cards are answered before continuing.
+
+## Phase 4 — Doc challenge
+Ask 2-3 practical onboarding questions answerable from `docs/` alone, verify the answers, and fix documentation gaps.
+
+## Completion
+When every phase and every card is complete, end with the exact phrase `KRONN:VALIDATION_COMPLETE`."#,
+        ),
+        "es" => String::from(
+            r#"Estas ejecutando la VALIDACION final del contexto AI en `docs/`. Anuncia el progreso como "Fase X/4 de la validacion" y nunca emitas `KRONN:VALIDATION_COMPLETE` antes de tiempo.
+
+**Eres auditor de documentacion, no corrector de codigo. Modifica solo `docs/`.**
+
+## Fase 1 — Auto-correccion
+Lee el codigo para verificar la documentacion y corrige solo lagunas documentales inferibles y datos obsoletos.
+
+## Fase 2 — Tarjetas TD Critical y High
+Lee solo los detalles TD de RUN SCOPE. En una respuesta, emite una tarjeta cerrada `kronn-question` por cada TD Critical o High. Usa `task_ref:"audit-td:<TD-ID>"`, una clave estable y exactamente estos IDs: `confirm`, `reject`, `accept_decision`, `defer`.
+
+## Fase 3 — Tarjetas TD restantes
+Para cada TD restante, emite tarjetas por lotes con un maximo de 8 `items`. Cada item es un TD (`id`, `label`, `description` opcional); usa `task_ref:"audit-td-batch"` y las mismas cuatro opciones. Forma de ejemplo:
+```kronn-question
+{"version":1,"key":"audit-td-batch-1","question":"Elige un resultado para cada TD.","items":[{"id":"TD-YYYYMMDD-example","label":"TD de ejemplo"}],"options":[{"id":"confirm","label":"Confirmar"},{"id":"reject","label":"Rechazar"},{"id":"accept_decision","label":"Decision aceptada"},{"id":"defer","label":"Diferir"}],"task_ref":"audit-td-batch"}
+```
+El humano debe elegir un resultado por item. No pidas decisiones TD en prosa. No edites estados TD, `audit_history` ni `docs/decisions.md`: Kronn escribe esos archivos al responder la tarjeta. Espera todas las respuestas antes de continuar.
+
+## Fase 4 — Desafio documental
+Haz 2-3 preguntas practicas de onboarding, verifica las respuestas solo con `docs/` y corrige las lagunas.
+
+## Fin
+Cuando todas las fases y tarjetas esten completas, termina exactamente con `KRONN:VALIDATION_COMPLETE`."#,
+        ),
+        _ => String::from(
+            r#"Tu conduis la VALIDATION finale du contexte AI dans `docs/`. Annonce l'avancement comme "Phase X/4 de la validation" et n'emets jamais `KRONN:VALIDATION_COMPLETE` trop tot.
+
+**Tu es un auditeur de documentation, pas un correcteur de code. Modifie uniquement `docs/`.**
+
+## Phase 1 — Auto-correction
+Lis le code pour verifier la documentation, puis corrige uniquement les lacunes documentaires inferables et les faits obsoletes.
+
+## Phase 2 — Cartes TD Critical et High
+Lis uniquement les fiches TD nommees dans RUN SCOPE. Dans une seule reponse, emets une carte fermee `kronn-question` pour chaque TD Critical ou High. Utilise `task_ref:"audit-td:<TD-ID>"`, une cle stable et exactement ces IDs : `confirm`, `reject`, `accept_decision`, `defer`.
+
+## Phase 3 — Cartes des autres TD
+Pour chaque TD restant, emets des cartes par lots contenant au maximum 8 `items`. Chaque item est un TD (`id`, `label`, `description` optionnelle) ; utilise `task_ref:"audit-td-batch"` et les quatre memes options. Exemple :
+```kronn-question
+{"version":1,"key":"audit-td-batch-1","question":"Choisis un statut pour chaque TD.","items":[{"id":"TD-YYYYMMDD-example","label":"TD exemple"}],"options":[{"id":"confirm","label":"Confirmer"},{"id":"reject","label":"Rejeter"},{"id":"accept_decision","label":"Decision assumee"},{"id":"defer","label":"Differer"}],"task_ref":"audit-td-batch"}
+```
+L'humain doit choisir exactement un resultat par item. Ne demande aucune decision TD en prose. Ne modifie pas toi-meme les statuts TD, `audit_history` ou `docs/decisions.md` : Kronn ecrit ces fichiers du depot a la reponse de chaque carte. Attends toutes les reponses avant de continuer.
+
+## Phase 4 — Challenge documentaire
+Pose 2-3 questions pratiques d'onboarding, verifie les reponses depuis `docs/` seulement et corrige les lacunes.
+
+## Fin
+Quand toutes les phases et toutes les cartes sont terminees, termine exactement par `KRONN:VALIDATION_COMPLETE`."#,
+        ),
+    };
+    if has_issue_tracker_mcp {
+        prompt.push_str(match language {
+            "en" => "\n\nAfter all cards are answered, offer one batch ticket-creation question for confirmed Critical/High TDs.",
+            "es" => "\n\nTras responder todas las tarjetas, ofrece una sola pregunta para crear tickets de los TD Critical/High confirmados.",
+            _ => "\n\nApres reponse a toutes les cartes, propose une seule question de creation de tickets pour les TD Critical/High confirmes.",
+        });
+    }
+    prompt
+}
+
 pub(crate) fn build_validation_prompt(
     language: &str,
     info: &AuditInfo,
     has_issue_tracker_mcp: bool,
     run_td_ids: &[String],
 ) -> String {
-    let base = match language {
-        "en" => {
-            let mut s = String::from(concat!(
-                "You are running the VALIDATION of the AI context (docs/ folder — legacy ai/ on old projects): the FINAL phase of the audit pipeline — every analysis step (foundation + chained sub-audits) is ALREADY done. Follow this 4-phase protocol and always announce your progress as \"Phase X/4 of the validation\" (never \"of the audit\" — users read that as the audit restarting). ",
-                "Do NOT emit KRONN:VALIDATION_COMPLETE until ALL phases are done.\n\n",
-                "**CRITICAL RULE: You are a DOCUMENTATION auditor, not a code fixer. ",
-                "NEVER modify source code, Makefile, configs, or any file outside `docs/`. ",
-                "Your ONLY job is to make `docs/` files accurate and complete.**\n\n",
-                "## Phase 1 — Auto-fix (autonomous)\n",
-                "Read source code to understand the project. Fix ONLY `docs/` files: orphan TODO markers, empty/skeleton files inferable from code, outdated info. ",
-                "Update `docs/` files directly. Report fixes. Do NOT touch source code.\n\n",
-                "## Phase 2 — Ambiguity questions (interactive)\n",
-                "**Scan ALL `docs/` files for the 3 marker types** and address each one:\n",
-                "- `<!-- TODO: ask user -->` — direct user question (intent / decision).\n",
-                "- `<!-- TODO: verify -->` — first try a final Glob/Read to verify yourself; if still impossible, escalate as a user question and convert to `<!-- TODO: ask user -->` shape.\n",
-                "- `<!-- TODO: unknown -->` — already a known unknown from a prior pass; re-ask the user.\n\n",
-                "Use `grep -rn 'TODO: ' docs/` (or equivalent MCP tool) to enumerate them. Ask each remaining ambiguity **one by one**, then update the relevant `docs/` file with the answer and REMOVE the marker. ",
-                "If the user reports a code issue, document it in `docs/inconsistencies-tech-debt.md` — do NOT fix the code yourself.\n",
-                "If user answers 'I don't know' or 'skip', leave as `<!-- TODO: unknown -->` and move on.\n",
-                "Phase 2 ends when every marker is either resolved (removed) or explicitly left as `<!-- TODO: unknown -->`.\n\n",
-                "## Phase 3 — Tech debt review (BULK-FIRST, not 1-by-1)\n",
-                "**Do NOT walk through TDs one-by-one** — that was the previous protocol and it bored users into bailing out before reaching the high-severity items.\n\n",
-                "Instead, in ONE message:\n",
-                "1. Read `docs/inconsistencies-tech-debt.md` AND every `docs/tech-debt/TD-*.md` (excluding README/TEMPLATE).\n",
-                "2. Present a **compact markdown table** of ALL findings:\n",
-                "   `| # | ID | Severity | Area | Title | Status | Effort |`\n",
-                "   `| - | -- | -------- | ---- | ----- | ------ | ------ |`\n",
-                "   One row per TD, numbered 1..N — users answer by number. Truncate Title to ~50 chars if needed. Use the existing Status from the detail file.\n",
-                "3. Ask the user **one question**:\n",
-                "   > « Voici les N TDs identifiés. Tu peux :\n",
-                "   > (a) **Tout valider** → tous deviennent `Confirmed by user` ;\n",
-                "   > (b) **Tout rejeter** → tous deviennent `Rejected` (le prochain audit ne les recréera pas) ;\n",
-                "   > (c) **Détailler certains** → liste les numéros ou IDs à discuter (ex: `3, 7` ou `TD-20260515-foo`).\n",
-                "   > Les TDs non listés gardent leur statut actuel — rien n'est confirmé implicitement. »\n",
-                "4. Apply the answer:\n",
-                "   - (a) → update the `audit_history` of every TD detail file with `status: Confirmed by user` (today's date). No 1-by-1 questions.\n",
-                "   - (b) → update every TD's `status: Rejected` AND remove its row from the index table. The next audit's anti-repetition pass will skip them.\n",
-                "   - (c) → for EACH selected ID: read the detail file, verify against source, ask the user (severity / priority / ticket?). Every OTHER TD keeps its current status — NEVER mark a TD `Confirmed by user` on silence; only an explicit (a) or an explicit per-TD confirmation may.\n",
-                "5. If a ticket tracker MCP is available AND the user picked (a) or (c)-selected TDs, offer to create tickets for the High/Critical entries in ONE batch question, not per-TD.\n",
-            ));
-            if has_issue_tracker_mcp {
-                s.push_str(concat!(
-                    "Also ask: create a ticket? (issue tracker available via MCP)\n",
-                    "**Before creating tickets**: check `.github/ISSUE_TEMPLATE/` (or GitLab equivalent `.gitlab/issue_templates/`). ",
-                    "If empty AND the project shows OSS intent (LICENSE present OR remote points at github.com / gitlab.com / codeberg.org), ",
-                    "propose in ONE question:\n",
-                    "> \"No issue template detected. I can create 3 minimal templates (`bug.md`, `feature.md`, `td-from-audit.md`) in `.github/ISSUE_TEMPLATE/` before pushing the tickets — they'll follow the `td-from-audit` format. Approve?\"\n",
-                    "If yes: write the 3 files (YAML frontmatter + Description / Reproduction / Impact / Acceptance sections), commit them WITHOUT pushing (the user pushes), then create the tickets filling in the `td-from-audit` structure.\n",
-                    "If no: create the tickets free-form, leave the repo untouched.\n",
-                ));
-            }
-            s.push_str(concat!(
-                "Do not batch-confirm. Update/remove `docs/` entries per feedback. Do NOT fix code — only update documentation.\n",
-                "Also ask: did the audit miss anything obvious? (security, performance, compliance)\n\n",
-                "## Phase 4 — Doc challenge (interactive)\n",
-                "Ask 2-3 practical onboarding questions that must be answerable from `docs/` files alone. ",
-                "Examples: 'How would a new dev add a new API endpoint?', 'What command runs all tests?', 'Where is the DB schema?'. ",
-                "Check if `docs/` docs answer them correctly. Fix gaps in `docs/` files.\n\n",
-                "## Completion\n",
-                "All phases done → end with exact phrase: \"KRONN:VALIDATION_COMPLETE\". Never emit early.",
-            ));
-            s
-        }
-        "es" => {
-            let mut s = String::from(concat!(
-                "Estas ejecutando la VALIDACION del contexto AI (carpeta docs/ — legacy ai/): la fase FINAL del pipeline — todas las etapas de analisis (fundacion + sub-auditorias encadenadas) YA terminaron. Sigue este protocolo de 4 fases y anuncia siempre \"Fase X/4 de la validacion\" (nunca \"de la auditoria\"). ",
-                "NO emitas KRONN:VALIDATION_COMPLETE hasta completar TODAS las fases.\n\n",
-                "**REGLA CRITICA: Eres un auditor de DOCUMENTACION, no un corrector de codigo. ",
-                "NUNCA modifiques codigo fuente, Makefile, configs, ni ningun archivo fuera de `docs/`. ",
-                "Tu UNICO trabajo: hacer los archivos `docs/` precisos y completos.**\n\n",
-                "## Fase 1 — Auto-correccion (autonoma)\n",
-                "Lee el codigo para entender el proyecto. Corrige SOLO archivos `docs/`: TODOs huerfanos, archivos esqueleto inferibles del codigo, info obsoleta. ",
-                "Actualiza `docs/` directamente. Reporta. NO toques el codigo fuente.\n\n",
-                "## Fase 2 — Preguntas (interactiva)\n",
-                "**Escanea TODOS los archivos `docs/` buscando los 3 tipos de marcadores** y procesa cada uno:\n",
-                "- `<!-- TODO: ask user -->` — pregunta directa al usuario (intencion / decision).\n",
-                "- `<!-- TODO: verify -->` — primero intenta un Glob/Read final para verificar tu mismo; si sigue imposible, escala como pregunta y convierte en `<!-- TODO: ask user -->`.\n",
-                "- `<!-- TODO: unknown -->` — ya es un desconocido conocido de una pasada anterior; vuelve a preguntar al usuario.\n\n",
-                "Usa `grep -rn 'TODO: ' docs/` (o herramienta MCP equivalente) para enumerarlos. Pregunta cada ambiguedad **una por una**, luego actualiza el archivo `docs/` con la respuesta y ELIMINA el marcador. ",
-                "Si el usuario reporta un problema de codigo, documentalo en `docs/inconsistencies-tech-debt.md` — NO corrijas el codigo tu mismo.\n",
-                "Si el usuario responde 'no se' o 'saltar', deja como `<!-- TODO: unknown -->` y continua.\n",
-                "Fase 2 termina cuando cada marcador esta resuelto (eliminado) o explicitamente marcado `<!-- TODO: unknown -->`.\n\n",
-                "## Fase 3 — Deuda tecnica (BULK-FIRST, no una por una)\n",
-                "**NO recorras los TDs uno por uno** — ese era el protocolo anterior y los usuarios abandonaban antes de llegar a los items criticos.\n\n",
-                "En UN SOLO mensaje:\n",
-                "1. Lee `docs/inconsistencies-tech-debt.md` Y todos los `docs/tech-debt/TD-*.md` (excluyendo README/TEMPLATE).\n",
-                "2. Presenta una **tabla markdown compacta** de TODOS los hallazgos:\n",
-                "   `| # | ID | Severity | Area | Title | Status | Effort |`\n",
-                "   `| - | -- | -------- | ---- | ----- | ------ | ------ |`\n",
-                "   Una fila por TD, numerada 1..N — el usuario responde por numero. Trunca Title a ~50 chars si hace falta.\n",
-                "3. Haz **una sola pregunta**:\n",
-                "   > « Aqui los N TDs identificados. Puedes :\n",
-                "   > (a) **Validar todo** → todos pasan a `Confirmed by user` ;\n",
-                "   > (b) **Rechazar todo** → todos pasan a `Rejected` (la proxima auditoria no los recreara) ;\n",
-                "   > (c) **Detallar algunos** → lista los numeros o IDs a discutir (ej: `3, 7` o `TD-20260515-foo`).\n",
-                "   > Los TDs no listados conservan su estado actual — nada se confirma implicitamente. »\n",
-                "4. Aplica la respuesta:\n",
-                "   - (a) → actualiza `audit_history` de cada TD con `status: Confirmed by user` (fecha de hoy). Sin preguntas 1-por-1.\n",
-                "   - (b) → cada TD `status: Rejected` Y elimina su fila del indice. El anti-repetition pass de la proxima auditoria los saltara.\n",
-                "   - (c) → para CADA ID seleccionado: lee, verifica, pregunta detalles. Los OTROS TDs conservan su estado — NUNCA marques `Confirmed by user` por silencio; solo un (a) explicito o una confirmacion explicita por TD.\n",
-                "5. Si MCP issue tracker disponible Y user eligio (a) o (c)-seleccionados, ofrece crear tickets para los High/Critical en UN solo batch, no por TD.\n",
-            ));
-            if has_issue_tracker_mcp {
-                s.push_str(concat!(
-                    "Tambien: ¿crear ticket? (gestor de issues disponible via MCP)\n",
-                    "**Antes de crear los tickets**: verifica `.github/ISSUE_TEMPLATE/` (o equivalente GitLab `.gitlab/issue_templates/`). ",
-                    "Si esta vacio Y el proyecto muestra intent OSS (LICENSE presente O remote apunta a github.com / gitlab.com / codeberg.org), ",
-                    "propone en UNA pregunta:\n",
-                    "> \"No hay template de issue. Puedo crear 3 templates minimos (`bug.md`, `feature.md`, `td-from-audit.md`) en `.github/ISSUE_TEMPLATE/` antes de pushear los tickets — seguiran el formato `td-from-audit`. ¿Apruebas?\"\n",
-                    "Si si: escribe los 3 archivos (frontmatter YAML + secciones Descripcion / Reproduccion / Impacto / Aceptacion), commit-los SIN push (el usuario hace push), luego crea los tickets siguiendo la estructura `td-from-audit`.\n",
-                    "Si no: crea los tickets en formato libre, no toques el repo.\n",
-                ));
-            }
-            s.push_str(concat!(
-                "No confirmar en lote. Actualiza/elimina entradas `docs/` segun feedback. NO corrijas codigo — solo documenta.\n",
-                "Tambien pregunta: ¿la auditoria omitio algo obvio? (seguridad, rendimiento, cumplimiento)\n\n",
-                "## Fase 4 — Challenge doc (interactiva)\n",
-                "Haz 2-3 preguntas practicas de onboarding que deben ser respondibles solo con los archivos `docs/`. ",
-                "Ejemplos: '¿Como agregar un endpoint?', '¿Que comando ejecuta los tests?'. Corrige gaps en archivos `docs/`.\n\n",
-                "## Fin\n",
-                "Todas las fases completas → termina con: \"KRONN:VALIDATION_COMPLETE\". Nunca antes.",
-            ));
-            s
-        }
-        _ => {
-            let mut s = String::from(concat!(
-                "Tu conduis la VALIDATION du contexte AI (dossier docs/ — legacy ai/ sur les vieux projets) : la phase FINALE du pipeline — toutes les etapes d'analyse (fondation + sous-audits chaines) sont DEJA terminees. Suis ce protocole en 4 phases et annonce toujours \"Phase X/4 de la validation\" (jamais \"de l'audit\" — l'utilisateur croit que l'audit redemarre). ",
-                "NE PAS emettre KRONN:VALIDATION_COMPLETE avant la fin des 4 phases.\n\n",
-                "**REGLE CRITIQUE : Tu es un auditeur de DOCUMENTATION, pas un correcteur de code. ",
-                "NE MODIFIE JAMAIS le code source, Makefile, configs, ou tout fichier hors de `docs/`. ",
-                "Ton SEUL travail : rendre les fichiers `docs/` precis et complets.**\n\n",
-                "## Phase 1 — Auto-correction (autonome)\n",
-                "Lis le code source pour comprendre le projet. Corrige UNIQUEMENT les fichiers `docs/` : TODOs orphelins, fichiers squelettes inferables du code, infos obsoletes. ",
-                "Mets a jour `docs/` directement. Rapporte les corrections. NE touche PAS au code source.\n\n",
-                "## Phase 2 — Questions (interactif)\n",
-                "**Scanne TOUS les fichiers `docs/` a la recherche des 3 types de marqueurs** et traite chacun :\n",
-                "- `<!-- TODO: ask user -->` — question directe a l'utilisateur (intention / decision).\n",
-                "- `<!-- TODO: verify -->` — tente d'abord un Glob/Read final pour verifier toi-meme; si toujours impossible, escalade comme question et convertis en `<!-- TODO: ask user -->`.\n",
-                "- `<!-- TODO: unknown -->` — deja un inconnu connu d'une passe precedente; re-pose la question a l'utilisateur.\n\n",
-                "Utilise `grep -rn 'TODO: ' docs/` (ou outil MCP equivalent) pour les enumerer. Pose chaque ambiguite **une par une**, puis mets a jour le fichier `docs/` avec la reponse et SUPPRIME le marqueur. ",
-                "Si l'utilisateur signale un probleme de code, documente-le dans `docs/inconsistencies-tech-debt.md` — NE corrige PAS le code toi-meme.\n",
-                "Si l'utilisateur repond 'je ne sais pas' ou 'passer', laisse `<!-- TODO: unknown -->` et continue.\n",
-                "Phase 2 termine quand chaque marqueur est resolu (supprime) ou explicitement laisse `<!-- TODO: unknown -->`.\n\n",
-                "## Phase 3 — Dette technique (BULK-FIRST, plus de 1-par-1)\n",
-                "**NE PARCOURS PAS les TDs un par un** — c'etait le protocole precedent et les users abandonnaient avant d'atteindre les items critiques.\n\n",
-                "En UN SEUL message :\n",
-                "1. Lis `docs/inconsistencies-tech-debt.md` ET tous les `docs/tech-debt/TD-*.md` (hors README/TEMPLATE).\n",
-                "2. Presente une **table markdown compacte** de TOUS les findings :\n",
-                "   `| # | ID | Severity | Area | Title | Status | Effort |`\n",
-                "   `| - | -- | -------- | ---- | ----- | ------ | ------ |`\n",
-                "   Une ligne par TD, numerotee 1..N — l'utilisateur repond par numero. Tronque Title a ~50 chars si necessaire.\n",
-                "3. Pose **une seule question** :\n",
-                "   > « Voici les N TDs identifies. Tu peux :\n",
-                "   > (a) **Tout valider** → tous passent en `Confirmed by user` ;\n",
-                "   > (b) **Tout rejeter** → tous passent en `Rejected` (le prochain audit ne les recreera pas) ;\n",
-                "   > (c) **Detailler certains** → liste les numeros ou IDs a discuter (ex: `3, 7` ou `TD-20260515-foo`).\n",
-                "   > Les TDs non listes gardent leur statut actuel — rien n'est confirme implicitement. »\n",
-                "4. Applique la reponse :\n",
-                "   - (a) → mets a jour `audit_history` de chaque TD avec `status: Confirmed by user` (date du jour). Pas de questions 1-par-1.\n",
-                "   - (b) → chaque TD `status: Rejected` ET retire sa ligne de l'index. L'anti-repetition pass du prochain audit les sautera.\n",
-                "   - (c) → pour CHAQUE ID selectionne : lis, verifie, demande les details. Les AUTRES TDs gardent leur statut — ne marque JAMAIS `Confirmed by user` sur silence ; seul un (a) explicite ou une confirmation explicite par TD le permet.\n",
-                "5. Si MCP issue tracker dispo ET user a choisi (a) ou (c)-selectionnes, propose de creer les tickets pour les High/Critical en UN seul batch, pas par TD.\n",
-            ));
-            if has_issue_tracker_mcp {
-                s.push_str(concat!(
-                    "Aussi : creer un ticket ? (gestionnaire d'issues dispo via MCP)\n",
-                    "**Avant de creer les tickets** : verifie `.github/ISSUE_TEMPLATE/` (ou equivalent GitLab `.gitlab/issue_templates/`). ",
-                    "Si vide ET que le projet a un repo OSS-intent (LICENSE present OU remote vers github.com / gitlab.com / codeberg.org), ",
-                    "propose en UNE question :\n",
-                    "> \"Pas de template d'issue detecte. Je peux creer 3 templates minimaux (`bug.md`, `feature.md`, `td-from-audit.md`) dans `.github/ISSUE_TEMPLATE/` avant de pousser les tickets — ils suivront le format `td-from-audit`. Tu valides ?\"\n",
-                    "Si oui : ecris les 3 fichiers (frontmatter YAML + sections Description / Reproduction / Impact / Acceptance), commit-les SANS push (le user pushera), puis cree les tickets en remplissant la structure `td-from-audit`.\n",
-                    "Si non : cree les tickets en free-form, sans toucher au repo.\n",
-                ));
-            }
-            s.push_str(concat!(
-                "Pas de confirmation en lot. Mets a jour/supprime les entrees `docs/` selon feedback. NE corrige PAS le code — documente seulement.\n",
-                "Demande aussi : l'audit a-t-il rate quelque chose d'evident ? (securite, performance, conformite)\n\n",
-                "## Phase 4 — Challenge doc (interactif)\n",
-                "Pose 2-3 questions pratiques d'onboarding qui doivent etre couvertes par les fichiers `docs/` seuls. ",
-                "Exemples : 'Comment ajouter un endpoint ?', 'Quelle commande lance les tests ?'. Corrige les lacunes dans les fichiers `docs/`.\n\n",
-                "## Fin\n",
-                "Toutes les phases terminees → termine par : \"KRONN:VALIDATION_COMPLETE\". Jamais avant.",
-            ));
-            s
-        }
-    };
+    let base = validation_card_protocol(language, has_issue_tracker_mcp);
 
     // 0.8.7 anti-hallu: prepend the doc-writer discipline reminder so
     // Phase 1 (auto-fix) and Phase 4 (challenge doc) which both mutate
@@ -587,7 +487,7 @@ pub(crate) fn build_validation_prompt(
     // structurally outside the anti-hallucination scope.
     let mut prompt = String::with_capacity(base.len() + 512);
     prompt.push_str(anti_halluc_doc_writer_block(language));
-    // Run scope FIRST: Phase 3 must only review the TDs this run touched,
+    // Run scope FIRST: Phases 2 and 3 must only review the TDs this run touched,
     // never re-open findings settled by previous validation discussions.
     prompt.push_str(&run_scope_block(run_td_ids, language));
     prompt.push_str(&base);
@@ -615,9 +515,9 @@ pub(crate) fn build_validation_prompt(
 
     if !info.tech_debt_items.is_empty() {
         let hint = match language {
-            "en" => format!("{} tech debt items to review in Phase 3. Read `docs/inconsistencies-tech-debt.md` and `docs/tech-debt/` for details.", info.tech_debt_items.len()),
-            "es" => format!("{} items de deuda tecnica a revisar en Fase 3. Lee `docs/inconsistencies-tech-debt.md` y `docs/tech-debt/` para detalles.", info.tech_debt_items.len()),
-            _ => format!("{} items de dette technique a revoir en Phase 3. Lis `docs/inconsistencies-tech-debt.md` et `docs/tech-debt/` pour les details.", info.tech_debt_items.len()),
+            "en" => format!("{} tech debt items to review across Phases 2 and 3. Read `docs/inconsistencies-tech-debt.md` and `docs/tech-debt/` for details.", info.tech_debt_items.len()),
+            "es" => format!("{} items de deuda tecnica a revisar entre las Fases 2 y 3. Lee `docs/inconsistencies-tech-debt.md` y `docs/tech-debt/` para detalles.", info.tech_debt_items.len()),
+            _ => format!("{} items de dette technique a revoir entre les Phases 2 et 3. Lis `docs/inconsistencies-tech-debt.md` et `docs/tech-debt/` pour les details.", info.tech_debt_items.len()),
         };
         prompt.push_str(&format!("\n\n{}", hint));
     }

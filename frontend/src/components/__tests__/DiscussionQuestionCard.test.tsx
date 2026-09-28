@@ -159,6 +159,58 @@ describe('DiscussionQuestionCard', () => {
     expect(screen.queryByTestId('disc-question-send')).toBeNull();
   });
 
+  it('requires one outcome per item in an audit batch card', async () => {
+    const items = [
+      { id: 'TD-1', label: 'First TD', description: null },
+      { id: 'TD-2', label: 'Second TD', description: null },
+    ];
+    const options = [
+      { id: 'confirm', label: 'Confirm', description: null },
+      { id: 'reject', label: 'Reject', description: null },
+      { id: 'accept_decision', label: 'Accepted decision', description: null },
+      { id: 'defer', label: 'Defer', description: null },
+    ];
+    questionsMock.mockResolvedValue({
+      questions: [question({ items, options, task_ref: 'audit-td-batch' })],
+      pending_count: 1,
+    });
+    answerMock.mockResolvedValue(question({
+      items,
+      options,
+      task_ref: 'audit-td-batch',
+      state: 'answered',
+      answer: {
+        selected_option_ids: [],
+        item_answers: [
+          { item_id: 'TD-1', selected_option_id: 'confirm' },
+          { item_id: 'TD-2', selected_option_id: 'defer' },
+        ],
+        text: null,
+        author_pseudo: 'Romu - mac',
+        answered_at: '2026-09-06T09:00:00Z',
+        message_id: 'm-2',
+      },
+    }));
+
+    renderCard();
+    await screen.findByTestId('disc-question-items');
+    fireEvent.click(screen.getByTestId('disc-question-item-TD-1-confirm'));
+    expect(screen.getByTestId('disc-question-send')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('disc-question-item-TD-2-defer'));
+    expect(screen.getByTestId('disc-question-send')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('disc-question-send'));
+
+    await waitFor(() => expect(answerMock).toHaveBeenCalledWith('d-1', 'q-1', expect.objectContaining({
+      selected_option_ids: [],
+      item_answers: [
+        { item_id: 'TD-1', selected_option_id: 'confirm' },
+        { item_id: 'TD-2', selected_option_id: 'defer' },
+      ],
+    })));
+    expect(await screen.findByTestId('disc-question-answer')).toHaveTextContent('First TD: Confirm');
+    expect(screen.getByTestId('disc-question-answer')).toHaveTextContent('Second TD: Defer');
+  });
+
   /// Free text is always offered, options or not — the right answer is
   /// regularly one nobody thought to list.
   it('accepts a written answer with no option chosen', async () => {

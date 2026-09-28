@@ -1,6 +1,7 @@
 pub mod anti_halluc;
 pub mod audit_detectors;
 pub mod audit_mcp_filter;
+pub mod audit_validation;
 pub mod backup;
 pub mod checksums;
 pub mod cli_access_probe;

@@ -356,7 +356,7 @@ export type AiFileNode = { path: string, name: string, is_dir: boolean, children
 
 export type AiSearchResult = { path: string, match_count: number, };
 
-export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, text?: string | null, idempotency_key: string, };
+export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, item_answers?: Array<DiscussionQuestionItemAnswer>, text?: string | null, idempotency_key: string, };
 
 export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection,
 /**
@@ -2631,9 +2631,13 @@ stats: PlanningPlanStats, };
  */
 export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
 
-export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
+export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
-export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+
+export type DiscussionQuestionItem = { id: string, label: string, description: string | null, };
+
+export type DiscussionQuestionItemAnswer = { item_id: string, selected_option_id: string, };
 
 export type DiscussionQuestionList = { questions: Array<DiscussionQuestion>, pending_count: number, };
 

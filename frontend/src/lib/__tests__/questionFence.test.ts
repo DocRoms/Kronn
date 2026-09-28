@@ -156,6 +156,31 @@ describe('findFenceProblem', () => {
     }))).toEqual({ key: 'disc.question.invalidOptionDescription' });
   });
 
+  it('accepts at most eight unique batch items and requires shared options', () => {
+    const options = [{ id: 'confirm', label: 'Confirm' }];
+    expect(findFenceProblem(fence({
+      options,
+      recommended_option_ids: [],
+      items: [{ id: 'TD-1', label: 'First TD' }, { id: 'TD-2', label: 'Second TD' }],
+    }))).toBeNull();
+    expect(findFenceProblem(fence({
+      options: [],
+      recommended_option_ids: [],
+      items: [{ id: 'TD-1', label: 'First TD' }],
+    })))
+      .toEqual({ key: 'disc.question.invalidOptions' });
+    expect(findFenceProblem(fence({
+      options,
+      recommended_option_ids: [],
+      items: Array.from({ length: 9 }, (_, index) => ({ id: `TD-${index}`, label: 'TD' })),
+    }))).toEqual({ key: 'disc.question.invalidOptions' });
+    expect(findFenceProblem(fence({
+      options,
+      recommended_option_ids: [],
+      items: [{ id: 'TD-1', label: 'First' }, { id: 'TD-1', label: 'Duplicate' }],
+    }))).toEqual({ key: 'disc.question.invalidOptionId' });
+  });
+
   it('checks a recommendation points at an option that exists', () => {
     expect(findFenceProblem(fence({ recommended_option_ids: ['nope'] })))
       .toEqual({ key: 'disc.question.invalidRecommended' });

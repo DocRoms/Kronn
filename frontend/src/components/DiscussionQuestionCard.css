@@ -103,6 +103,25 @@
   margin: 0;
 }
 
+.disc-question-items {
+  display: grid;
+  gap: var(--kr-sp-3);
+}
+
+.disc-question-item {
+  margin: 0;
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-md);
+}
+
+.disc-question-item legend {
+  padding: 0 var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+}
+
 .disc-question-option-label {
   display: flex;
   align-items: center;
