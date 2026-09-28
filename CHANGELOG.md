@@ -48,6 +48,12 @@ Release notes for 0.9.3 and earlier are available in the
   on a conflict does).
 - The lock records `N2` rather than `N0` for a workflow or a Quick API, and
   `N1` for prompts, skills and Quick Execs.
+- Claude Code sessions launched by Kronn no longer load the workstation's
+  automatic memory (`MEMORY.md`): `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is set for
+  workflow Agent steps, `task_exec` principals and workers, about 8.8k fewer
+  tokens on the first call and on every re-read. A native discussion turn is off
+  by default too; start the backend with `KRONN_CLAUDE_AUTO_MEMORY=1` to keep it
+  there. See [Claude auto-memory](docs/operations/claude-auto-memory.md).
 
 ## [0.14.1] - 2026-09-26
 

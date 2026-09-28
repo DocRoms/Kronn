@@ -23,6 +23,10 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - Anthropic prompt caching through LiteLLM is on by default;
   `KRONN_LITELLM_PROMPT_CACHE=0` turns it off. See
   [token economy](operations/token-economy-0.9.6.md).
+- Claude Code sessions launched by Kronn no longer load the workstation's
+  auto-memory (`MEMORY.md`); a native discussion keeps it only with
+  `KRONN_CLAUDE_AUTO_MEMORY=1`. See
+  [Claude auto-memory](operations/claude-auto-memory.md).
 - The native-files sync removes only what it wrote (`.kronn/native-files.json`),
   and boot reclaims the clean worktree of an interrupted run after
   `server.interrupted_worktree_ttl_days`. See the
