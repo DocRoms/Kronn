@@ -5208,13 +5208,19 @@ export type ProjectRepositoryResourceMutation = { kind: ProjectRepositoryResourc
  * Read-only projection of the skills, automations and artifacts attached to a
  * project and their alignment with the repository's `kronn/` directory.
  */
-export type ProjectRepositoryResources = { kronn_exists: boolean, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>, };
+export type ProjectRepositoryResources = { kronn_exists: boolean,
+/**
+ * Native skill folders found in the repository, `kronn/skills` included.
+ */
+skill_roots: Array<ProjectSkillRoot>, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>, };
 
 export type ProjectRepositoryResourceStatus = "not_published" | "up_to_date" | "repository_modified" | "kronn_modified" | "conflict";
 
 export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, publication_path: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
+
+export type ProjectSkillRoot = { path: string, skill_count: number, };
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
 

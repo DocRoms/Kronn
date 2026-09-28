@@ -35,9 +35,48 @@ describe('ProjectRepositoryResourcesPanel', () => {
     localStorage.removeItem('kronn:projectRepositoryResourcesTab');
   });
 
+  it('lists native skill folders before a secondary kronn/ notice', async () => {
+    repositoryResources.mockResolvedValue({
+      kronn_exists: false,
+      skill_roots: [
+        { path: '.agents/skills', skill_count: 3 },
+        { path: '.github/skills', skill_count: 1 },
+      ],
+      skills_present: [],
+      skills_available: [],
+      resources: [],
+    } satisfies ProjectRepositoryResources);
+
+    render(<ProjectRepositoryResourcesPanel projectId="project-1" />);
+
+    const roots = await screen.findByTestId('project-skill-roots');
+    expect(within(roots).getByText('.agents/skills/')).toBeInTheDocument();
+    expect(within(roots).getByText('.github/skills/')).toBeInTheDocument();
+    expect(within(roots).getAllByText('projects.repositoryResources.skillRoots.count')).toHaveLength(2);
+    const notice = screen.getByText(/projects\.repositoryResources\.kronnMissingSecondary/).closest('[role="status"]');
+    expect(notice).toHaveAttribute('data-tone', 'secondary');
+    expect(screen.queryByText('projects.repositoryResources.kronnMissing')).not.toBeInTheDocument();
+  });
+
+  it('says so when the repository has no native skill folder', async () => {
+    repositoryResources.mockResolvedValue({
+      kronn_exists: false,
+      skill_roots: [],
+      skills_present: [],
+      skills_available: [],
+      resources: [],
+    } satisfies ProjectRepositoryResources);
+
+    render(<ProjectRepositoryResourcesPanel projectId="project-1" />);
+
+    expect(await screen.findByText('projects.repositoryResources.skillRoots.none')).toBeInTheDocument();
+    expect(screen.getByText(/projects\.repositoryResources\.kronnMissing$/).closest('[role="status"]')).not.toHaveAttribute('data-tone');
+  });
+
   it('previews the files selected for the first publication', async () => {
     repositoryResources.mockResolvedValue({
       kronn_exists: false,
+      skill_roots: [],
       skills_present: [],
       skills_available: [],
       resources: [{
@@ -83,6 +122,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
     publishRepositoryResource.mockResolvedValue({});
     repositoryResources.mockResolvedValue({
       kronn_exists: true,
+      skill_roots: [],
       skills_present: [],
       skills_available: [],
       resources: [{
@@ -102,6 +142,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
   it('offers repository import and hash-bound approval as separate actions', async () => {
     const imported = {
       kronn_exists: true,
+      skill_roots: [],
       skills_present: [],
       skills_available: [],
       resources: [{
@@ -143,6 +184,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
   it('keeps published resources checked and exposes their level and repository status', async () => {
     repositoryResources.mockResolvedValue({
       kronn_exists: true,
+      skill_roots: [],
       skills_present: [],
       skills_available: [],
       resources: [
@@ -185,6 +227,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
   it('separates present and available skills, groups automations, and remembers the sub-tab', async () => {
     repositoryResources.mockResolvedValue({
       kronn_exists: true,
+      skill_roots: [],
       skills_present: [{
         id: 'rust',
         name: 'Rust',

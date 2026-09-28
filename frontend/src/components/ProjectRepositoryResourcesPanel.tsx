@@ -145,6 +145,8 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
       })),
     ];
   }, [data]);
+  const nativeSkillRoots = data?.skill_roots ?? [];
+  const hasNativeSkills = nativeSkillRoots.some(root => root.path !== 'kronn/skills' && root.skill_count > 0);
   const repositoryScaffoldIncluded = Boolean(data?.kronn_exists || selected.size > 0);
   const selectedForPublication = data ? [
     ...data.resources
@@ -215,8 +217,15 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
         ))}
       </div>
       {!data.kronn_exists && (
-        <div className="project-repository-resources-banner" role="status">
-          <FolderTree size={16} /> {t('projects.repositoryResources.kronnMissing')}
+        <div
+          className="project-repository-resources-banner"
+          data-tone={hasNativeSkills ? 'secondary' : undefined}
+          role="status"
+        >
+          <FolderTree size={16} />{' '}
+          {t(hasNativeSkills
+            ? 'projects.repositoryResources.kronnMissingSecondary'
+            : 'projects.repositoryResources.kronnMissing')}
         </div>
       )}
       {selectedForPublication.length > 0 && (
@@ -233,6 +242,23 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
       )}
       <div className="project-repository-resources-columns">
         <div className="project-repository-resources-list" role="tabpanel">
+          {activeTab === 'skills' && (
+            <div className="project-repository-skill-roots" data-testid="project-skill-roots">
+              <strong>{t('projects.repositoryResources.skillRoots.title')}</strong>
+              {nativeSkillRoots.length === 0 ? (
+                <span>{t('projects.repositoryResources.skillRoots.none')}</span>
+              ) : (
+                <ul>
+                  {nativeSkillRoots.map(root => (
+                    <li key={root.path}>
+                      <code>{root.path}/</code>
+                      <span>{t('projects.repositoryResources.skillRoots.count', root.skill_count)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {activeTab === 'skills' && (
             <SkillsTab
               present={data.skills_present}

@@ -97,9 +97,19 @@ pub struct Project {
 #[ts(export)]
 pub struct ProjectRepositoryResources {
     pub kronn_exists: bool,
+    /// Native skill folders found in the repository, `kronn/skills` included.
+    #[serde(default)]
+    pub skill_roots: Vec<ProjectSkillRoot>,
     pub skills_present: Vec<ProjectRepositorySkill>,
     pub skills_available: Vec<ProjectRepositorySkill>,
     pub resources: Vec<ProjectRepositoryResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectSkillRoot {
+    pub path: String,
+    pub skill_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

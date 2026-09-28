@@ -210,6 +210,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       delete: resolve(undefined),
       repositoryResources: resolve({
         kronn_exists: false,
+        skill_roots: [],
         skills_present: [],
         skills_available: [],
         resources: [],

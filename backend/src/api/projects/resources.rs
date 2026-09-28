@@ -23,6 +23,11 @@ const PROJECT_SKILL_ROOTS: &[&str] = &[
     "kronn/skills",
     ".claude/skills",
     ".agents/skills",
+    ".codex/skills",
+    ".github/skills",
+    ".opencode/skills",
+    ".opencode/skill",
+    ".cursor/skills",
     ".vibe/skills",
     ".kiro/skills",
     ".gemini/skills",
@@ -246,6 +251,26 @@ fn skill_display_name(path: &Path, fallback: &str) -> String {
         }
     }
     fallback.to_string()
+}
+
+/// Skill folders present in the repository, with how many `SKILL.md` each holds.
+fn discover_skill_roots(root: &Path) -> Vec<crate::models::ProjectSkillRoot> {
+    PROJECT_SKILL_ROOTS
+        .iter()
+        .filter_map(|relative_root| {
+            let entries = std::fs::read_dir(root.join(relative_root)).ok()?;
+            let skill_count = entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .filter(|entry| !(*relative_root == ".agents/skills" && entry.file_name() == "kronn"))
+                .filter(|entry| entry.path().join("SKILL.md").is_file())
+                .count();
+            Some(crate::models::ProjectSkillRoot {
+                path: (*relative_root).to_string(),
+                skill_count: u32::try_from(skill_count).unwrap_or(u32::MAX),
+            })
+        })
+        .collect()
 }
 
 fn discover_repository_skills(root: &Path) -> BTreeMap<String, RepositorySkillSeed> {
@@ -646,6 +671,7 @@ pub async fn repository_resources(
             resources.sort_by_key(|resource| resource.name.to_lowercase());
             Ok(Some(ProjectRepositoryResources {
                 kronn_exists: root.join("kronn").is_dir(),
+                skill_roots: discover_skill_roots(&root),
                 skills_present,
                 skills_available,
                 resources,
@@ -1127,6 +1153,37 @@ pub async fn approve_repository_resource(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_roots_cover_every_native_skill_folder_and_count_real_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = |relative: &str| {
+            let dir = tmp.path().join(relative);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: s\n---\n").unwrap();
+        };
+        skill(".agents/skills/review");
+        skill(".agents/skills/kronn");
+        skill(".github/skills/triage");
+        skill(".opencode/skill/deploy");
+        skill(".codex/skills/lint");
+        std::fs::create_dir_all(tmp.path().join(".cursor/skills/draft")).unwrap();
+
+        let roots = discover_skill_roots(tmp.path());
+        let count = |path: &str| {
+            roots
+                .iter()
+                .find(|root| root.path == path)
+                .map(|root| root.skill_count)
+        };
+        assert_eq!(count(".agents/skills"), Some(1), "the kronn router skill is not a project skill");
+        assert_eq!(count(".github/skills"), Some(1));
+        assert_eq!(count(".opencode/skill"), Some(1));
+        assert_eq!(count(".codex/skills"), Some(1));
+        assert_eq!(count(".cursor/skills"), Some(0), "a folder without SKILL.md holds no skill");
+        assert_eq!(count(".claude/skills"), None, "absent folders are not reported");
+        assert!(discover_repository_skills(tmp.path()).contains_key("triage"));
+    }
     use chrono::TimeZone;
 
     #[test]
