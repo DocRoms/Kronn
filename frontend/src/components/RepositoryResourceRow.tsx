@@ -43,7 +43,8 @@ function CopyPathButton({ path }: { path: string }) {
 
 function PathLine({ row }: { row: ResourceRow }) {
   const { t } = useT();
-  if (!row.displayPath) return <span className="rr-muted">—</span>;
+  // No file on the repository side: nothing to print, so no line either.
+  if (!row.displayPath) return null;
   const { head, tail } = splitPath(row.displayPath);
   return (
     <span className="rr-path" data-pending={!row.pathExists || undefined}>
@@ -150,7 +151,7 @@ export function RepositoryResourceRow({ row, checked, busy, canWrite, onToggle, 
         {row.pathsDiverge && (
           <span className="rr-diverge">{t('projects.repositoryResources.originDiverge', row.origins.join(', '))}</span>
         )}
-        {row.description && <small className="rr-description">{row.description}</small>}
+        {row.description && <small className="rr-description" title={row.description}>{row.description}</small>}
       </div>
       <div className="rr-cell rr-cell-sync" role="cell">
         <span className="rr-pill" data-state={row.state}>

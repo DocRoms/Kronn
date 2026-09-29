@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowRightLeft, GitBranch, Loader2, Package, Search, Workflow, Zap, FolderTree, Lock } from 'lucide-react';
+import { AlertTriangle, ArrowRightLeft, ChevronDown, ChevronRight, GitBranch, Loader2, Package, RefreshCw, Search, Workflow, Zap, FolderTree, Lock } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import {
+  readProjectRepositoryCatalogOpen,
   readProjectRepositoryResourcesTab,
+  rememberProjectRepositoryCatalogOpen,
   rememberProjectRepositoryResourcesTab,
   type ProjectRepositoryResourcesTab,
 } from '../lib/projectRepositoryResourcesTab';
@@ -103,6 +105,9 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const [transfer, setTransfer] = useState<TransferPlan | null>(null);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [alignOpen, setAlignOpen] = useState(false);
+  // Folded by default, and remembered per project once someone opens it.
+  const [catalogOpenByProject, setCatalogOpenByProject] = useState<Record<string, boolean>>({});
+  const catalogOpenStored = catalogOpenByProject[projectId] ?? readProjectRepositoryCatalogOpen(projectId);
 
   const applyResult = useCallback((result: ProjectRepositoryResources) => {
     setData(result);
@@ -172,6 +177,26 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       setActionError(userError(reason));
     }
   });
+
+  // The suggestions come from the files found in the repository each time the
+  // listing is read, so reading it again is what runs the detection again.
+  const redetect = useAsyncGuard(async (targetProjectId: string) => {
+    setBusyKey('detect');
+    setActionError(null);
+    try {
+      setData(await projectsApi.repositoryResources(targetProjectId));
+    } catch (reason) {
+      setActionError(userError(reason));
+    } finally {
+      setBusyKey(null);
+    }
+  });
+
+  const toggleCatalog = () => {
+    const next = !catalogOpenStored;
+    setCatalogOpenByProject(current => ({ ...current, [projectId]: next }));
+    rememberProjectRepositoryCatalogOpen(projectId, next);
+  };
 
   const selectTab = (tab: ProjectRepositoryResourcesTab) => {
     setActiveTab(tab);
@@ -304,7 +329,6 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   };
 
   const nativeSkillRoots = data.skill_roots ?? [];
-  const hasNativeSkills = nativeSkillRoots.some(root => root.path !== 'kronn/skills' && root.skill_count > 0);
   const uncommitted = data.uncommitted_managed_paths ?? [];
   const repositoryScaffoldIncluded = Boolean(data.kronn_exists || selected.size > 0);
   const attention = attentionAll.filter(item => item.row.group === activeTab);
@@ -331,6 +355,10 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const searched = tabRows.filter(row => matchesQuery(row, query));
   const visibleRows = searched.filter(row => matchesPresence(row, filter));
   const visibleSet = new Set(visibleRows.map(row => row.key));
+  // A search or the "Kronn only" filter must find what is folded away.
+  const searching = query.trim() !== '' || filter === 'kronn';
+  const catalogOpen = searching || catalogOpenStored;
+  const showBulk = selectedForPublication.length > 0 || allLines.length > 0;
 
   const sections: Array<{ id: string; title: string; kind?: string; rows: ResourceRow[] }> = [];
   if (activeTab === 'skills') {
@@ -393,12 +421,18 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       </div>
 
       {!data.kronn_exists && canWrite && (
-        <p className="project-repository-resources-note" role="status">
-          <FolderTree size={12} aria-hidden="true" />
-          {t(hasNativeSkills
-            ? 'projects.repositoryResources.kronnMissingSecondary'
-            : 'projects.repositoryResources.kronnMissing')}
-        </p>
+        <details className="rr-share" data-testid="repository-share">
+          <summary>
+            <FolderTree size={12} aria-hidden="true" />
+            <span>{t('projects.repositoryResources.share.title')}</span>
+            <small>{t('projects.repositoryResources.share.missing')}</small>
+          </summary>
+          <div className="rr-share-body">
+            <p>{t('projects.repositoryResources.share.purpose')}</p>
+            <p>{t('projects.repositoryResources.share.approval')}</p>
+            <p>{t('projects.repositoryResources.share.subprojects')}</p>
+          </div>
+        </details>
       )}
       {!canWrite && (
         <div className="project-repository-resources-banner" data-tone="secondary" role="status" data-banner="write-disabled">
@@ -508,35 +542,37 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
                 </button>
               ))}
             </div>
-            <div className="rr-bulk">
-              {selectedForPublication.length > 0 && (
-                <button
-                  type="button"
-                  className="rr-button"
-                  disabled={busyKey !== null || !canWrite}
-                  title={canWrite ? undefined : t('projects.repositoryResources.banner.writeDisabled.title')}
-                  onClick={() => setTransfer({ kind: 'publish_selected', rows: selectedForPublication })}
-                >
-                  {busyKey?.startsWith('publish_selected') && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
-                  {t('projects.repositoryResources.publishSelected', selectedForPublication.length)}
-                </button>
-              )}
-              <button
-                type="button"
-                className="rr-button"
-                data-testid="align-all"
-                disabled={busyKey !== null || lineCount === 0}
-                title={allLines.length > 0 && lineCount === 0
-                  ? t('projects.repositoryResources.banner.writeDisabled.title')
-                  : undefined}
-                onClick={() => setAlignOpen(true)}
-              >
-                <ArrowRightLeft size={14} aria-hidden="true" />
-                {allLines.length === 0
-                  ? t('projects.repositoryResources.alignAllDone')
-                  : t('projects.repositoryResources.alignAll', lineCount)}
-              </button>
-            </div>
+            {showBulk && (
+              <div className="rr-bulk">
+                {selectedForPublication.length > 0 && (
+                  <button
+                    type="button"
+                    className="rr-button"
+                    disabled={busyKey !== null || !canWrite}
+                    title={canWrite ? undefined : t('projects.repositoryResources.banner.writeDisabled.title')}
+                    onClick={() => setTransfer({ kind: 'publish_selected', rows: selectedForPublication })}
+                  >
+                    {busyKey?.startsWith('publish_selected') && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
+                    {t('projects.repositoryResources.publishSelected', selectedForPublication.length)}
+                  </button>
+                )}
+                {allLines.length > 0 && (
+                  <button
+                    type="button"
+                    className="rr-button"
+                    data-testid="align-all"
+                    disabled={busyKey !== null || lineCount === 0}
+                    title={lineCount === 0
+                      ? t('projects.repositoryResources.banner.writeDisabled.title')
+                      : undefined}
+                    onClick={() => setAlignOpen(true)}
+                  >
+                    <ArrowRightLeft size={14} aria-hidden="true" />
+                    {t('projects.repositoryResources.alignAll', lineCount)}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {tabRows.length === 0 ? (
@@ -552,26 +588,61 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
                 <span role="columnheader">{t('projects.repositoryResources.columns.kronn')}</span>
                 <span role="columnheader">{t('projects.repositoryResources.columns.action')}</span>
               </div>
-              {sections.filter(section => section.rows.length > 0).map(section => (
-                <div key={section.id} role="rowgroup" aria-label={section.title} data-resource-kind={section.kind}>
-                  {(activeTab !== 'artifacts') && (
-                    <h3 role="presentation">{section.title} <span>{section.rows.length}</span></h3>
-                  )}
-                  {section.rows.map(row => (
-                    <RepositoryResourceRow
-                      key={row.key}
-                      row={row}
-                      checked={selected.has(row.key)}
-                      busy={busyKey?.endsWith(row.key) ?? false}
-                      canWrite={canWrite}
-                      onToggle={() => toggleSelected(row.key)}
-                      onOpen={() => setSheet({ type: 'compare', key: row.key })}
-                      onPrimary={() => startAction(row)}
-                      onMenu={action => onMenu(row, action)}
-                    />
-                  ))}
-                </div>
-              ))}
+              {sections.filter(section => section.rows.length > 0).map(section => {
+                const folds = section.id === 'available';
+                const open = !folds || catalogOpen;
+                return (
+                  <div key={section.id} role="rowgroup" aria-label={section.title} data-resource-kind={section.kind}>
+                    {(activeTab !== 'artifacts') && (
+                      <h3 role="presentation" data-folds={folds || undefined}>
+                        {folds ? (
+                          <button
+                            type="button"
+                            className="rr-section-toggle"
+                            aria-expanded={open}
+                            disabled={searching}
+                            onClick={toggleCatalog}
+                          >
+                            {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+                            <span>{section.title}</span>
+                            <span className="rr-section-count">{section.rows.length}</span>
+                          </button>
+                        ) : (
+                          <>{section.title} <span>{section.rows.length}</span></>
+                        )}
+                      </h3>
+                    )}
+                    {section.id === 'suggested' && (
+                      <div className="rr-section-hint" role="presentation">
+                        <span>{t('projects.repositoryResources.skills.suggestedHint')}</span>
+                        <button
+                          type="button"
+                          className="rr-link"
+                          disabled={busyKey !== null}
+                          onClick={() => { void redetect(projectId); }}
+                        >
+                          {busyKey === 'detect' && <Loader2 size={12} className="animate-spin" aria-hidden="true" />}
+                          {busyKey !== 'detect' && <RefreshCw size={12} aria-hidden="true" />}
+                          {t('projects.repositoryResources.skills.redetect')}
+                        </button>
+                      </div>
+                    )}
+                    {open && section.rows.map(row => (
+                      <RepositoryResourceRow
+                        key={row.key}
+                        row={row}
+                        checked={selected.has(row.key)}
+                        busy={busyKey?.endsWith(row.key) ?? false}
+                        canWrite={canWrite}
+                        onToggle={() => toggleSelected(row.key)}
+                        onOpen={() => setSheet({ type: 'compare', key: row.key })}
+                        onPrimary={() => startAction(row)}
+                        onMenu={action => onMenu(row, action)}
+                      />
+                    ))}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

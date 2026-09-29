@@ -71,7 +71,7 @@
 /* Align all */
 .rr-align-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .rr-align-list label { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 2px var(--kr-sp-2); padding: 6px 0; border-bottom: 1px solid var(--kr-border-subtle); cursor: pointer; }
-.rr-align-list input[type='checkbox'] { grid-row: 1 / span 2; width: 16px; height: 16px; margin: 0; accent-color: var(--kr-accent); }
+.rr-align-list input[type='checkbox'] { grid-row: 1 / span 2; }
 .rr-align-list .rr-align-name { font-weight: 600; }
 .rr-align-list label code { grid-column: 2; overflow: hidden; color: var(--kr-text-muted); text-overflow: ellipsis; white-space: nowrap; }
 

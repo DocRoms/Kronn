@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import fr from '../../lib/i18n/locales/fr';
 import { listing, resource, skill } from './repositoryResourceFixtures';
 
 // vitest blanks CSS modules (`css: false`), so read the stylesheets as text.
@@ -47,6 +48,10 @@ const R = 'projects.repositoryResources.';
 const rowOf = (name: string) => screen.getByRole('button', { name }).closest('[role="row"]') as HTMLElement;
 const actionIn = (row: HTMLElement, action: string) => within(row).getByRole('button', { name: `${R}action.${action}` });
 const openTab = (tab: string) => fireEvent.click(screen.getByRole('tab', { name: new RegExp(`tab\\.${tab}`) }));
+// The "available in Kronn, not in this project" catalog is folded until opened.
+const named = (key: string) => new RegExp(`${R}${key}`.replace(/\./g, '\\.'));
+const catalogToggle = () => screen.getByRole('button', { name: named('skills.available') });
+const openCatalog = () => fireEvent.click(catalogToggle());
 
 async function show(data = listing(), props: Partial<Parameters<typeof ProjectRepositoryResourcesPanel>[0]> = {}) {
   repositoryResources.mockResolvedValue(data);
@@ -62,10 +67,12 @@ describe('ProjectRepositoryResourcesPanel', () => {
     publishRepositoryResource.mockResolvedValue({});
     importRepositoryResource.mockResolvedValue({});
     localStorage.removeItem('kronn:projectRepositoryResourcesTab');
+    localStorage.removeItem('kronn:projectRepositoryCatalogOpen:project-1');
+    localStorage.removeItem('kronn:projectRepositoryCatalogOpen:project-2');
   });
 
-  describe('skill folders and kronn/ notices', () => {
-    it('lists native skill folders before a secondary kronn/ notice', async () => {
+  describe('skill folders and the kronn/ explanation', () => {
+    it('lists the native skill folders, then a folded "Share with the repository" block', async () => {
       await show(listing({
         kronn_exists: false,
         skill_roots: [
@@ -78,21 +85,45 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(within(roots).getByText('.agents/skills/')).toBeInTheDocument();
       expect(within(roots).getByText('.github/skills/')).toBeInTheDocument();
       expect(within(roots).getByText(`${R}skillRoots.count:3`)).toBeInTheDocument();
-      const notice = screen.getByText(new RegExp(`${R}kronnMissingSecondary`)).closest('[role="status"]');
-      expect(notice).toHaveClass('project-repository-resources-note');
-      expect(screen.queryByText(`${R}kronnMissing`)).not.toBeInTheDocument();
+      const share = screen.getByTestId('repository-share');
+      expect(share.tagName).toBe('DETAILS');
+      expect(share).not.toHaveAttribute('open');
+      expect(within(share).getByText(`${R}share.title`)).toBeInTheDocument();
+      expect(within(share).getByText(`${R}share.missing`)).toBeInTheDocument();
     });
 
-    it('says so when the repository has no native skill folder', async () => {
+    it('says what kronn/ is for once unfolded: versioning, cloning, approval, sub-folders', async () => {
       await show(listing({ kronn_exists: false }));
 
       expect(screen.getByText(`${R}skillRoots.none`)).toBeInTheDocument();
-      expect(screen.getByText(new RegExp(`${R}kronnMissing$`)).closest('[role="status"]')).toHaveClass('project-repository-resources-note');
+      const share = screen.getByTestId('repository-share');
+      for (const sentence of ['purpose', 'approval', 'subprojects']) {
+        expect(within(share).getByText(`${R}share.${sentence}`)).toBeInTheDocument();
+      }
     });
 
-    it('states the missing kronn/ folder as a discreet note, not as a banner', () => {
-      expect(panelCss).toMatch(/\.project-repository-resources-note \{[^}]*color: var\(--kr-text-muted\)[^}]*font-size: var\(--kr-fs-sm\)/);
-      expect(panelCss).not.toMatch(/\.project-repository-resources-note \{[^}]*font-size: (1[2-9]|2\d)px/);
+    it('is not offered once kronn/ exists, nor where the repository cannot be written', async () => {
+      const view = await show(listing({ kronn_exists: true }));
+      expect(screen.queryByTestId('repository-share')).not.toBeInTheDocument();
+      view.unmount();
+
+      await show(listing({ kronn_exists: false, can_write_repository: false, can_write_repository_reason: 'kronn_path_is_file' }));
+      expect(screen.queryByTestId('repository-share')).not.toBeInTheDocument();
+    });
+
+    it('words the explanation in French with the four points the team asked for', () => {
+      const body = [fr[`${R}share.purpose`], fr[`${R}share.approval`], fr[`${R}share.subprojects`]].join(' ');
+      expect(fr[`${R}share.title`]).toBe('Partager avec le dépôt (kronn/)');
+      expect(body).toMatch(/versionner dans le dépôt les skills, quick execs et workflows/);
+      expect(body).toMatch(/clonant/);
+      expect(body).toMatch(/approbation/);
+      expect(body).toMatch(/sous-projets/);
+    });
+
+    it('keeps the block discreet: muted, current text size, no box', () => {
+      expect(panelCss).toMatch(/\.rr-share \{[^}]*color: var\(--kr-text-muted\)[^}]*font-size: var\(--kr-fs-sm\)/);
+      expect(panelCss).not.toMatch(/\.rr-share[^{]*\{[^}]*font-size: (1[2-9]|2\d)px/);
+      expect(panelCss).not.toMatch(/\.rr-share \{[^}]*border:/);
       expect(panelCss).toMatch(/\.project-repository-resources \{[^}]*font-size: var\(--kr-fs-sm\)/);
     });
   });
@@ -175,6 +206,8 @@ describe('ProjectRepositoryResourcesPanel', () => {
       }));
 
       expect(screen.getByText('Rust')).toBeInTheDocument();
+      expect(screen.queryByText('Review')).not.toBeInTheDocument();
+      openCatalog();
       expect(screen.getByText('Review')).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: new RegExp(`tab\\.skills 1`) })).toHaveAttribute('aria-selected', 'true');
       openTab('automation');
@@ -572,8 +605,9 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(importRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'workflow', slug: 'charlie', overwrite_kronn_changes: false });
     });
 
-    it('is turned off with "everything is aligned" when nothing is behind', async () => {
+    it('is not shown at all when nothing is behind, so it never reads as a global state', async () => {
       await show(listing({
+        skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only' })],
         resources: [
           ...Array.from({ length: 79 }, (_, index) => resource({ id: `qe-${index}`, name: `Automation ${index}`, kind: 'quick_exec', status: 'kronn_only' })),
           resource({ id: 'same', name: 'Same', kind: 'workflow', status: 'up_to_date' }),
@@ -581,11 +615,21 @@ describe('ProjectRepositoryResourcesPanel', () => {
       }));
       openTab('automation');
 
-      const button = screen.getByTestId('align-all');
-      expect(button).toBeDisabled();
-      expect(button).toHaveTextContent(`${R}alignAllDone`);
-      fireEvent.click(button);
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('align-all')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /alignAll/ })).not.toBeInTheDocument();
+      expect(document.querySelector('.rr-bulk')).toBeNull();
+    });
+
+    it('appears for what is really late only, never for attach suggestions', async () => {
+      await show(listing({
+        skills_present: [skill({ id: 'devops', name: 'DevOps', provenance: 'kronn', status: 'kronn_only', suggested: true, suggested_reason: 'Dockerfile' })],
+        resources: [resource({ id: 'l', name: 'Late', kind: 'workflow', status: 'repository_newer' })],
+      }));
+
+      expect(screen.queryByTestId('align-all')).not.toBeInTheDocument();
+      openTab('automation');
+      expect(screen.getByTestId('repository-attention')).toBeInTheDocument();
+      expect(screen.getByTestId('align-all')).toHaveTextContent(`${R}alignAll:1`);
     });
 
     it('counts only the items of the sub-tab being looked at', async () => {
@@ -598,7 +642,20 @@ describe('ProjectRepositoryResourcesPanel', () => {
       openTab('automation');
       expect(screen.getByTestId('align-all')).toHaveTextContent(`${R}alignAll:1`);
       openTab('artifacts');
-      expect(screen.getByTestId('align-all')).toHaveTextContent(`${R}alignAllDone`);
+      expect(screen.queryByTestId('align-all')).not.toBeInTheDocument();
+    });
+
+    it('is turned off, not hidden, when the only late items are repository writes that cannot happen', async () => {
+      await show(listing({
+        can_write_repository: false,
+        can_write_repository_reason: 'repository_read_only',
+        resources: [resource({ id: 'd', name: 'Delta ahead', kind: 'workflow', status: 'kronn_newer' })],
+      }));
+      openTab('automation');
+
+      const button = screen.getByTestId('align-all');
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute('title', `${R}banner.writeDisabled.title`);
     });
 
     it('turns off the "repository will be updated" part when the repository cannot be written', async () => {
@@ -616,7 +673,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
 
     it('opens in the middle of the screen, outside the card, with checkboxes of one size', () => {
       expect(sheetsCss).toMatch(/\.rr-modal-backdrop \{[^}]*align-items: center; justify-content: center/);
-      expect(sheetsCss).toMatch(/\.rr-align-list input\[type='checkbox'\] \{[^}]*width: 16px; height: 16px/);
+      expect(panelCss).toMatch(/\.rr-cell-select input\[type='checkbox'\],\s*\.rr-align-list input\[type='checkbox'\] \{[^}]*width: 16px; height: 16px/);
     });
 
     it('renders its dialog at the document root so no ancestor can pin it to a corner', async () => {
@@ -657,7 +714,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(within(banner).getByText(`${R}banner.writeDisabled.reason.kronn_path_is_file`)).toBeInTheDocument();
       expect(banner).not.toHaveTextContent(/exists and is not a directory/);
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-      expect(screen.queryByText(`${R}kronnMissing`)).not.toBeInTheDocument();
+      expect(screen.queryByTestId('repository-share')).not.toBeInTheDocument();
       expect(actionIn(rowOf('Private'), 'publish')).toBeDisabled();
       expect(actionIn(rowOf('Shared'), 'import')).toBeEnabled();
     });
@@ -734,6 +791,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
         skills_available: [skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only' })],
       }));
 
+      openCatalog();
       const row = rowOf('Rust');
       expect(within(row).getByText(`${R}scope.catalog`)).toBeInTheDocument();
       fireEvent.click(actionIn(row, 'attach'));
@@ -765,7 +823,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
       }));
       openTab('automation');
 
-      expect(screen.getByText(`${R}kronnMissing`)).toBeInTheDocument();
+      expect(screen.getByTestId('repository-share')).toBeInTheDocument();
       const checkbox = screen.getByRole('checkbox', { name: `${R}include:Review ticket` });
       expect(checkbox).not.toBeChecked();
       expect(checkbox).toBeEnabled();
@@ -840,7 +898,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(within(row).getByText(`${R}status.kronn_only`)).toBeInTheDocument();
       expect(within(row).getByText(new RegExp(`${R}scope.suggested`))).toBeInTheDocument();
       expect(within(row).getByText(`${R}suggestedBecause:Dockerfile`)).toBeInTheDocument();
-      expect(within(row).getByText('—')).toBeInTheDocument();
+      expect(within(row).queryByText('—')).not.toBeInTheDocument();
       expect(row.querySelector('.rr-path')).toBeNull();
       expect(actionIn(row, 'attach')).toBeInTheDocument();
       expect(within(row).getByRole('checkbox')).toBeDisabled();
@@ -856,12 +914,14 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(screen.getByRole('tab', { name: /tab\.skills 4/ })).toBeInTheDocument();
     });
 
-    it('shows "—" on the repository side of an unrelated catalog skill, and no hypothetical path', async () => {
+    it('prints no path and no dash line for an unrelated catalog skill', async () => {
       await show(matrix());
 
+      openCatalog();
       const row = rowOf('Unrelated');
-      expect(within(row).getByText('—')).toBeInTheDocument();
+      expect(within(row).queryByText('—')).not.toBeInTheDocument();
       expect(row.querySelector('.rr-path')).toBeNull();
+      expect(row.querySelector('.rr-cell-repository')?.children).toHaveLength(1);
       expect(row).not.toHaveTextContent('SKILL.md');
       expect(row).not.toHaveTextContent(`${R}notInRepository`);
       expect(within(row).getByText(`${R}status.catalog`)).toBeInTheDocument();
@@ -869,6 +929,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
 
     it('leaves one primary action per state and none on the identical ones', async () => {
       await show(matrix());
+      openCatalog();
       const expectSkill: Record<string, string | null> = {
         'Native lint': 'use_native',
         DevOps: 'attach',
@@ -922,6 +983,149 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(screen.getByRole('tab', { name: /tab\.artifacts/ }).querySelector('.rr-todo')).toBeNull();
       expect(panelCss).toMatch(/\.project-repository-resources-tabs \.rr-todo \{[^}]*var\(--kr-warning\)/);
       expect(panelCss).toMatch(/\.project-repository-resources-tabs \.rr-count \{[^}]*var\(--kr-bg-hover\)/);
+    });
+  });
+
+  describe('the catalog of Kronn skills that are not in this project', () => {
+    const withCatalog = () => listing({
+      skills_present: [skill({ id: 'kept', name: 'Kept', status: 'up_to_date', repository_paths: ['kronn/skills/kept/SKILL.md'] })],
+      skills_available: Array.from({ length: 34 }, (_, index) => skill({
+        id: `catalog-${index}`, name: `Catalog skill ${index}`, provenance: 'kronn', status: 'kronn_only',
+        description: `Does thing number ${index}`,
+      })),
+    });
+
+    it('is folded by default: one header line with its count, and none of the 34 rows', async () => {
+      await show(withCatalog());
+
+      const toggle = catalogToggle();
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      expect(toggle).toHaveTextContent('34');
+      expect(toggle).toBeEnabled();
+      expect(screen.queryByText('Catalog skill 0')).not.toBeInTheDocument();
+      expect(screen.getByText('Kept')).toBeInTheDocument();
+      expect(document.querySelectorAll('[role="row"][data-state="catalog"]')).toHaveLength(0);
+    });
+
+    it('unfolds on a click and folds again on the next', async () => {
+      await show(withCatalog());
+
+      openCatalog();
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'true');
+      expect(screen.getByText('Catalog skill 0')).toBeInTheDocument();
+      expect(document.querySelectorAll('[role="row"][data-state="catalog"]')).toHaveLength(34);
+      openCatalog();
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByText('Catalog skill 0')).not.toBeInTheDocument();
+    });
+
+    it('remembers the choice for this project and for no other', async () => {
+      const first = await show(withCatalog());
+      openCatalog();
+      expect(localStorage.getItem('kronn:projectRepositoryCatalogOpen:project-1')).toBe('open');
+      first.unmount();
+
+      const again = await show(withCatalog());
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'true');
+      again.unmount();
+
+      repositoryResources.mockResolvedValue(withCatalog());
+      const other = render(<ProjectRepositoryResourcesPanel projectId="project-2" />);
+      await screen.findByRole('tablist');
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'false');
+      other.unmount();
+
+      await show(withCatalog());
+      openCatalog();
+      expect(localStorage.getItem('kronn:projectRepositoryCatalogOpen:project-1')).toBeNull();
+    });
+
+    it('opens by itself as soon as something is searched, and finds the folded skill', async () => {
+      await show(withCatalog());
+
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'skill 7' } });
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'true');
+      expect(screen.getByText('Catalog skill 7')).toBeInTheDocument();
+      expect(screen.queryByText('Catalog skill 8')).not.toBeInTheDocument();
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: '' } });
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByText('Catalog skill 7')).not.toBeInTheDocument();
+    });
+
+    it('opens with the "Kronn only" filter, and stays out of the way of the other filters', async () => {
+      await show(withCatalog());
+
+      fireEvent.click(screen.getByRole('button', { name: named('filter.kronn') }));
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'true');
+      expect(screen.getByText('Catalog skill 33')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: named('filter.repository') }));
+      expect(screen.queryByRole('button', { name: named('skills.available') })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: named('filter.all') }));
+      expect(catalogToggle()).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    it('offers no header when there is nothing in the catalog', async () => {
+      await show(listing({ skills_present: [skill({ id: 'kept', name: 'Kept', status: 'up_to_date', repository_paths: ['kronn/skills/kept/SKILL.md'] })] }));
+
+      expect(screen.queryByRole('button', { name: named('skills.available') })).not.toBeInTheDocument();
+    });
+
+    it('keeps a row on one line of description, the whole text in its tooltip', async () => {
+      await show(withCatalog());
+
+      openCatalog();
+      const description = rowOf('Catalog skill 3').querySelector('.rr-description') as HTMLElement;
+      expect(description).toHaveAttribute('title', 'Does thing number 3');
+      expect(panelCss).toMatch(/\.rr-description \{[^}]*-webkit-line-clamp: 1/);
+    });
+
+    it('words a provided skill as "provided by Kronn", not as already integrated in the project', () => {
+      expect(fr[`${R}builtin`]).toBe('fourni par Kronn');
+      expect(Object.values(fr).filter(text => /intégré/.test(text) && /catalogue/i.test(text))).toEqual([]);
+    });
+  });
+
+  describe('suggestions', () => {
+    const suggestion = (id: string, name: string, reason: string) => skill({
+      id, name, provenance: 'kronn', status: 'kronn_only', is_builtin: true, suggested: true, suggested_reason: reason,
+    });
+
+    it('say where they come from, once, under their heading', async () => {
+      await show(listing({ skills_present: [suggestion('devops', 'DevOps', 'Dockerfile')] }));
+
+      const group = document.querySelector('[role="rowgroup"][aria-label="' + R + 'skills.suggested"]') as HTMLElement;
+      expect(within(group).getByText(`${R}skills.suggestedHint`)).toBeInTheDocument();
+      expect(within(group).getByText(`${R}suggestedBecause:Dockerfile`)).toBeInTheDocument();
+      expect(within(group).getByText(named('builtin'))).toBeInTheDocument();
+    });
+
+    it('run the detection again from the panel: the listing is read once more, ticked files stay ticked', async () => {
+      await show(listing({
+        skills_present: [suggestion('devops', 'DevOps', 'Dockerfile')],
+        resources: [resource({ id: 'qp', name: 'Mine', kind: 'quick_prompt', status: 'kronn_only' })],
+      }));
+      openTab('automation');
+      fireEvent.click(screen.getByRole('checkbox', { name: `${R}include:Mine` }));
+      openTab('skills');
+      repositoryResources.mockResolvedValue(listing({
+        skills_present: [suggestion('devops', 'DevOps', 'Dockerfile'), suggestion('typescript', 'TypeScript', 'tsconfig.json')],
+        resources: [resource({ id: 'qp', name: 'Mine', kind: 'quick_prompt', status: 'kronn_only' })],
+      }));
+
+      expect(screen.queryByText('TypeScript')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: `${R}skills.redetect` }));
+
+      expect(await screen.findByText('TypeScript')).toBeInTheDocument();
+      expect(repositoryResources).toHaveBeenCalledTimes(2);
+      openTab('automation');
+      expect(screen.getByRole('checkbox', { name: `${R}include:Mine` })).toBeChecked();
+    });
+
+    it('offer the detection only where there are suggestions', async () => {
+      await show(listing({ skills_present: [skill({ id: 'kept', name: 'Kept', status: 'up_to_date', repository_paths: ['kronn/skills/kept/SKILL.md'] })] }));
+
+      expect(screen.queryByRole('button', { name: `${R}skills.redetect` })).not.toBeInTheDocument();
     });
   });
 
@@ -1037,6 +1241,38 @@ describe('ProjectRepositoryResourcesPanel', () => {
     });
   });
 
+  describe('selection checkboxes', () => {
+    const rule = /\.rr-cell-select input\[type='checkbox'\],\s*\.rr-align-list input\[type='checkbox'\] \{([^}]*)\}/;
+
+    it('are drawn as a plain box, with a border and a transparent fill, in both themes', () => {
+      const declarations = rule.exec(panelCss)?.[1] ?? '';
+      expect(declarations).toMatch(/appearance: none/);
+      expect(declarations).toMatch(/border: 1\.5px solid var\(--kr-text-muted\)/);
+      expect(declarations).toMatch(/background: transparent/);
+      expect(panelCss).not.toMatch(/\.rr-cell-select input[^{]*\{[^}]*accent-color/);
+    });
+
+    it('draw the tick with a border, so a locked ticked box is never a solid grey block', () => {
+      expect(panelCss).toMatch(/input\[type='checkbox'\]:checked::after \{[^}]*content: ''[^}]*border: solid var\(--kr-accent-ink\)/);
+      expect(panelCss).toMatch(/input\[type='checkbox'\]:disabled:checked::after \{[^}]*border-color: var\(--kr-text-faint\)/);
+      expect(panelCss).not.toMatch(/input\[type='checkbox'\][^{]*\{[^}]*background: var\(--kr-(bg-hover|bg-input|text)/);
+    });
+
+    it('stay selection boxes: published rows locked and ticked, others free to tick', async () => {
+      await show(listing({
+        resources: [
+          resource({ id: 'a', name: 'Private', kind: 'quick_prompt', status: 'kronn_only' }),
+          resource({ id: 'b', name: 'Written', kind: 'quick_prompt', status: 'up_to_date' }),
+        ],
+      }));
+      openTab('automation');
+
+      expect(within(rowOf('Private')).getByRole('checkbox')).toBeEnabled();
+      expect(within(rowOf('Written')).getByRole('checkbox')).toBeDisabled();
+      expect(within(rowOf('Written')).getByRole('checkbox')).toBeChecked();
+    });
+  });
+
   describe('400 px layout', () => {
     const mobile = (css: string) => css.slice(css.indexOf('@media (max-width: 640px)'));
 
@@ -1046,6 +1282,15 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(rules).toMatch(/\.rr-cell-action \.rr-action[^}]*min-height: 44px/);
       expect(rules).toMatch(/\.rr-cell-action \{ grid-area: action/);
       expect(rules).toMatch(/\.rr-head \{ display: none/);
+    });
+
+    it('keeps the search field at its own height instead of stretching it along the stacked toolbar', () => {
+      const rules = mobile(panelCss);
+      expect(rules).toMatch(/\.rr-toolbar \{ flex-direction: column; align-items: stretch; \}/);
+      // A 200px flex-basis is a 200px tall field once the toolbar is a column.
+      expect(rules).toMatch(/\.rr-search \{[^}]*flex: 0 0 auto[^}]*align-self: stretch[^}]*min-height: 44px/);
+      expect(panelCss).toMatch(/\.rr-search \{[^}]*flex: 1 1 200px/);
+      expect(rules.indexOf('.rr-search {')).toBeGreaterThan(rules.indexOf('.rr-toolbar {'));
     });
 
     it('opens the sheet full screen with 44 px controls', () => {

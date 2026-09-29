@@ -21,3 +21,24 @@ export function rememberProjectRepositoryResourcesTab(tab: ProjectRepositoryReso
     // localStorage may be unavailable in private/restricted browser modes.
   }
 }
+
+const CATALOG_OPEN_STORAGE_PREFIX = 'kronn:projectRepositoryCatalogOpen:';
+
+/** Whether the "available in Kronn, not in this project" catalog was left open
+ *  for this project. Folded until someone opens it. */
+export function readProjectRepositoryCatalogOpen(projectId: string): boolean {
+  try {
+    return localStorage.getItem(`${CATALOG_OPEN_STORAGE_PREFIX}${projectId}`) === 'open';
+  } catch {
+    return false;
+  }
+}
+
+export function rememberProjectRepositoryCatalogOpen(projectId: string, open: boolean) {
+  try {
+    if (open) localStorage.setItem(`${CATALOG_OPEN_STORAGE_PREFIX}${projectId}`, 'open');
+    else localStorage.removeItem(`${CATALOG_OPEN_STORAGE_PREFIX}${projectId}`);
+  } catch {
+    // localStorage may be unavailable in private/restricted browser modes.
+  }
+}

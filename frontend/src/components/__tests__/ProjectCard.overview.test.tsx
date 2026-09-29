@@ -182,7 +182,7 @@ describe('ProjectCard — repository overview', () => {
     fireEvent.click(resourcesTab);
     expect(resourcesTab).toHaveAttribute('data-active', 'true');
     expect(detailBody).toHaveAttribute('data-detail-view', 'resources');
-    expect(await screen.findByText('projects.repositoryResources.kronnMissing')).toBeInTheDocument();
+    expect(await screen.findByText('projects.repositoryResources.share.title')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.overview' }));
     fireEvent.click(screen.getByRole('button', { name: /projects\.workflows/ }));
