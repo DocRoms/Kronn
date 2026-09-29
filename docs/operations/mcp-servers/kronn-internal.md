@@ -463,6 +463,23 @@ retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/scripts/disc-introspection-mcp.py:921-941]
 [src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
+An approved delivery the integration sends back (a red validation, a merge
+conflict) is not left in `ChangesRequested`. In the same checkpoint the worker
+is re-activated on the next attempt with the failing command, its exit code and
+its output (a joined CLI through a control offer, parked
+`Blocked(awaiting_worker_acceptance)` until it re-accepts; a native worker
+through a fresh dispatch, back to `Working`), and the principal that approved
+gets a notice in the parent room, addressed to its pinned session, with the
+same evidence. When the failure did not come from the delivery, the principal
+calls `task_exec_resume`: the integration runs again on the same approved
+delivery, without a new delivery, and validations already green for that
+candidate are not run again. The relaunched worker is stood down first, and the
+call is refused once the worker committed or left changes since the send-back,
+or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
+the re-validation does not rewind the attempt the send-back opened.
+[src: file: backend/src/api/orchestration.rs]
+[src: file: backend/src/db/orchestration.rs]
+
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
 validations (command, exit code, duration) and a backend-derived

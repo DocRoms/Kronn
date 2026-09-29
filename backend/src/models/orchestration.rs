@@ -283,11 +283,16 @@ impl TaskExecutionStatus {
         }
         match self {
             Pending => matches!(to, Provisioning),
-            Provisioning => matches!(to, Working | Blocked | Failed),
+            // `Approved` is the KT-862 re-validation: the principal takes back an
+            // integration send-back whose failure did not come from the delivery.
+            // The move is only accepted while the approval is restorable — see
+            // `db::orchestration::restorable_approval`, enforced by the transition
+            // primitive, not by this coarse structural gate.
+            Provisioning => matches!(to, Working | Blocked | Failed | Approved),
             // Structural gate only; the resume target is narrowed to
             // `blocked_from_status` by the checkpoint guard.
             Blocked => matches!(to, Provisioning | Applying),
-            Working => matches!(to, AwaitingReview),
+            Working => matches!(to, AwaitingReview | Approved),
             AwaitingReview => matches!(to, Approved | ChangesRequested),
             Approved => matches!(to, Integrating),
             // `Provisioning` is the KT-319 rework re-offer path: a CLI worker must re-accept

@@ -974,7 +974,8 @@ TOOLS = [
         "name": "task_exec_resume",
         "description": (
             "Resume only when task_exec_status returns "
-            "`next_action.tool=task_exec_resume`; the guarded checkpoint is retry-safe. "
+            "`next_action.tool=task_exec_resume`, or when an integration send-back notice "
+            "names it; the guarded checkpoint is retry-safe. "
             "See tool_manual({tool: \"task_exec_resume\"})."
         ),
         "inputSchema": {
@@ -9728,7 +9729,16 @@ TOOL_MANUALS = {
         "cleanliness and checkpoint SHAs, cannot skip provisioning or review, "
         "and returns the existing terminal result when an Applying-origin "
         "resume already succeeded. After reconnect, recover with status rather "
-        "than replaying launch."
+        "than replaying launch.\n\n"
+        "**After an integration send-back.** When a red validation or a merge conflict "
+        "sends an approved delivery back, the worker is relaunched with the command and "
+        "its output and a notice addressed to you names this tool. If the failure did "
+        "not come from the delivery (a flaky test, the environment), call "
+        "`task_exec_resume` to run the integration again on the SAME approved delivery: "
+        "no new delivery is asked of the worker, validations already green for that "
+        "candidate are not run again, and the relaunched worker is stood down. It is "
+        "refused once the worker committed or left changes in the worktree since the "
+        "send-back, and once it delivered again: review that delivery instead."
     ),
     "task_exec_reassign": (
         "Principal-only, and ONE change per call: pass either a `worker` or `validations`, "

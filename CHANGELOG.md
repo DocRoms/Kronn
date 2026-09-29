@@ -123,6 +123,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An approved delivery the integration sends back (a validation that goes red, a
+  merge conflict) no longer stays in `ChangesRequested` with nobody working it
+  and nobody told. The send-back now re-activates the worker with the failing
+  command, its exit code and its output (a joined CLI is re-offered the next
+  attempt, a native worker is redispatched) and posts a notice, with the same
+  evidence, to the principal that approved. The principal can also run the
+  integration again on the same approved delivery with `task_exec_resume` when
+  the failure did not come from it (a flaky test, the environment): no new
+  delivery, the validations already green for that candidate are not re-run, and
+  it is refused once the worker committed or delivered again.
 - `task_exec_launch` no longer accepts a validation Quick Exec can never run
   (`cd frontend && npx tsc -b`, `CARGO_TARGET_DIR=… cargo test`, a pipe, a
   binary off the allowlist). It was accepted, the worker delivered, the review

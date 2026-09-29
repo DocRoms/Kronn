@@ -193,9 +193,13 @@ fn adr_legal(from: TaskExecutionStatus, to: TaskExecutionStatus) -> bool {
             | (Provisioning, Working)
             | (Provisioning, Blocked)
             | (Provisioning, Failed)
+            // KT-862: the principal takes back an integration send-back whose failure
+            // did not come from the delivery. Guarded in the transition primitive.
+            | (Provisioning, Approved)
             | (Blocked, Provisioning)
             | (Blocked, Applying)
             | (Working, AwaitingReview)
+            | (Working, Approved)
             | (AwaitingReview, Approved)
             | (AwaitingReview, ChangesRequested)
             | (Approved, Integrating)
