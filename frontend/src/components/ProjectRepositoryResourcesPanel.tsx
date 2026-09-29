@@ -765,6 +765,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       )}
       {sheet?.type === 'compare' && sheetRow && (
         <RepositoryResourceCompare
+          projectId={projectId}
           row={sheetRow}
           openable={openableKeys}
           canWrite={canWrite}

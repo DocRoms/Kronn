@@ -166,12 +166,6 @@ pub struct ProjectRepositorySkill {
     pub approval_required: bool,
     #[serde(default)]
     pub approved: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub diff: Option<String>,
-    /// One unified diff per differing file, for the same states as `diff`.
-    #[serde(default)]
-    pub file_diffs: Vec<RepositoryResourceFileDiff>,
     pub repository_paths: Vec<String>,
     /// True when this slug is present under more than one native skill root
     /// (`.claude/skills`, `.agents/skills`…) and those copies are not
@@ -235,21 +229,6 @@ pub struct ProjectRepositoryResource {
     pub approval_required: bool,
     #[serde(default)]
     pub approved: bool,
-    /// Real unified diff of the resource's main file (the rendered HTML for
-    /// an artifact). Present only for `repository_newer`, `kronn_newer` and
-    /// `conflict`; `file_diffs` carries every file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub diff: Option<String>,
-    /// One unified diff per differing file — an artifact's `artifact.yaml`
-    /// and `index.html` each get their own entry.
-    #[serde(default)]
-    pub file_diffs: Vec<RepositoryResourceFileDiff>,
-    /// Field-by-field diff of the resource definition (trigger, commands,
-    /// agents, models…). Populated for workflow, Quick API and Quick Exec,
-    /// for the same three states as `diff`.
-    #[serde(default)]
-    pub field_diff: Vec<RepositoryResourceFieldDiff>,
     pub repository_paths: Vec<String>,
     /// Every path publishing this resource would write, including the
     /// shared scaffold (`kronn/INDEX.md`, `kronn/kronn.toml`, the router
@@ -323,6 +302,31 @@ pub struct RepositoryResourceLink {
 pub struct RequiredSecretStatus {
     pub name: String,
     pub configured: bool,
+}
+
+/// What differs between the repository and Kronn for one resource, computed
+/// when someone opens the Compare sheet rather than on every listing: the
+/// listing only says *that* the two sides differ (its `status`), never *how*.
+/// The Kronn side is the masked rendering a publish would write, so it holds
+/// no secret value; the repository side is the file as it stands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryResourceComparison {
+    /// Real unified diff of the resource's main file (the rendered HTML for
+    /// an artifact). Present only for `repository_newer`, `kronn_newer` and
+    /// `conflict`; `file_diffs` carries every file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diff: Option<String>,
+    /// One unified diff per differing file — an artifact's `artifact.yaml`
+    /// and `index.html` each get their own entry.
+    #[serde(default)]
+    pub file_diffs: Vec<RepositoryResourceFileDiff>,
+    /// Field-by-field diff of the resource definition (trigger, commands,
+    /// agents, models…). Populated for workflow, Quick API and Quick Exec,
+    /// for the same three states as `diff`.
+    #[serde(default)]
+    pub field_diff: Vec<RepositoryResourceFieldDiff>,
 }
 
 /// The unified diff (repository side against Kronn side) of one file a

@@ -29,12 +29,14 @@ Release notes for 0.9.3 and earlier are available in the
   found outside `kronn/`). Each item carries the repository date (last commit's
   author and date, else the file's mtime), the Kronn date and `aligned_at`; its
   `required_secrets` with whether Kronn's stored configs hold each name; its
-  ADR-005 level; a unified diff per file (`file_diffs`, the artifact's HTML
-  included) and, for workflows, Quick APIs and Quick Execs, a field-by-field
-  diff, both for the three states where the sides differ; and `write_preview`,
-  every path a publish would write, `docs/AGENTS.md` and the router skill
-  included. The listing also reports `can_write_repository` with its reason
-  and `uncommitted_managed_paths`.
+  ADR-005 level; and `write_preview`, every path a publish would write,
+  `docs/AGENTS.md` and the router skill included. The listing also reports
+  `can_write_repository` with its reason and `uncommitted_managed_paths`. What
+  differs is not in the listing: `GET .../repository-resources/comparison?kind=&id=`
+  returns, for the three states where the sides differ, a unified diff per file
+  (`file_diffs`, the artifact's HTML included) and, for workflows, Quick APIs
+  and Quick Execs, a field-by-field diff (`field_diff`). The Compare sheet asks
+  for it when it opens and shows a loading state meanwhile.
 - A native skill outside `kronn/` can be used in Kronn without `kronn.lock`
   (`POST .../repository-resources/skills/use`: a read-only reference to its
   path) or copied into Kronn as a managed skill
@@ -132,6 +134,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The AI & automation tab of a project with many automations no longer takes
+  seconds to load (about 5.2 s in front_euronews, the same on every read).
+  Each read rendered every automation and masked its secrets again, and built
+  the diffs of every differing one. The listing now carries no diff, only the
+  status; the diffs come from `.../repository-resources/comparison` when
+  the Compare sheet opens. The masked rendering of a resource is kept in memory
+  under a fingerprint of the content it was made from, so the same content is
+  never masked twice, and text that cannot hold a secret no longer goes through
+  the masking regexes (a check on the literal every match must contain, with a
+  property test that the output is unchanged). Masking is otherwise the same:
+  the same patterns, the same non-leak tests. The links between resources
+  (`uses`, `used_by`, the "N linked" badge, the transfer announcements) stay in
+  the listing and do not depend on the diffs: on 120 resources, 40 of them
+  workflows of 15 steps, they cost about 2 ms when nothing is published and
+  about 9 ms when every resource has its repository file, out of about 100 ms.
 - An approved delivery the integration sends back (a validation that goes red, a
   merge conflict) no longer stays in `ChangesRequested` with nobody working it
   and nobody told. The send-back now re-activates the worker with the failing

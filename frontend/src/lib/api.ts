@@ -13,10 +13,12 @@ import type {
   Project,
   ApproveProjectRepositoryResourceRequest,
   ImportProjectRepositoryResourceRequest,
+  ProjectRepositoryResourceKind,
   ProjectRepositoryResourceMutation,
   ProjectRepositoryResources,
   PublishProjectRepositoryResourceRequest,
   RepositoryNativeSkillRequest,
+  RepositoryResourceComparison,
   ProjectDockerAction,
   ProjectDockerLogs,
   ProjectDockerRunningSummary,
@@ -901,6 +903,13 @@ export const projects = {
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
   repositoryResources: (id: string) =>
     api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
+  /** The diffs behind one listed resource, built when its Compare sheet opens:
+   *  the listing itself only says that the two sides differ. */
+  repositoryResourceComparison: (id: string, kind: ProjectRepositoryResourceKind, resourceId: string) =>
+    api<RepositoryResourceComparison>(
+      'GET',
+      `/projects/${encodeURIComponent(id)}/repository-resources/comparison?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(resourceId)}`,
+    ),
   publishRepositoryResource: (id: string, request: PublishProjectRepositoryResourceRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/publish`, request),
   importRepositoryResource: (id: string, request: ImportProjectRepositoryResourceRequest) =>

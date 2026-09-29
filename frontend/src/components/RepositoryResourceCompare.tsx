@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Loader2 } from 'lucide-react';
+import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { formatResourceDate } from '../lib/formatResourceDate';
 import { formatFieldValue, parseUnifiedDiff, sideBySide } from '../lib/repositoryResourceDiff';
-import type { ResourceRow, RowLink } from '../lib/repositoryResourceRows';
+import { isComparable, type ResourceRow, type RowLink } from '../lib/repositoryResourceRows';
+import type { RepositoryResourceComparison } from '../types/generated';
 import { RepositoryResourceModal } from './RepositoryResourceModal';
 
 type DiffMode = 'unified' | 'side';
@@ -34,6 +36,41 @@ function DiffView({ diff, mode }: { diff: string; mode: DiffMode }) {
       ))}
     </div>
   );
+}
+
+type ComparisonPhase = 'idle' | 'loading' | 'ready' | 'error';
+
+/** The diffs behind a listed row. The listing only says that the two sides
+ *  differ; they are built by the backend when this sheet opens, so nothing is
+ *  computed (or masked) for the rows nobody opens. */
+function useComparison(projectId: string, row: ResourceRow) {
+  const comparable = isComparable(row);
+  const [attempt, setAttempt] = useState(0);
+  // The answer is filed under the request it belongs to, so a stale answer, or a
+  // row whose content changed underneath the open sheet, reads as "loading"
+  // again instead of showing the wrong diff.
+  const requestKey = [projectId, row.kind, row.id, row.state, row.repositoryFingerprint, row.kronnFingerprint, attempt].join('|');
+  const [settled, setSettled] = useState<{ key: string; comparison?: RepositoryResourceComparison } | null>(null);
+
+  useEffect(() => {
+    if (!comparable) return;
+    let active = true;
+    projectsApi.repositoryResourceComparison(projectId, row.kind, row.id)
+      .then(comparison => { if (active) setSettled({ key: requestKey, comparison }); })
+      .catch(() => { if (active) setSettled({ key: requestKey }); });
+    return () => { active = false; };
+  }, [comparable, projectId, row.kind, row.id, requestKey]);
+
+  let phase: ComparisonPhase = 'idle';
+  if (comparable) {
+    if (settled?.key !== requestKey) phase = 'loading';
+    else phase = settled.comparison ? 'ready' : 'error';
+  }
+  return {
+    phase,
+    comparison: phase === 'ready' ? settled?.comparison : undefined,
+    retry: () => setAttempt(count => count + 1),
+  };
 }
 
 /** One side of the reference graph: a link opens the resource's own sheet,
@@ -74,6 +111,7 @@ function LinkList({ title, links, openable, onOpen }: {
 }
 
 interface Props {
+  projectId: string;
   row: ResourceRow;
   /** Keys of the rows a link can open. */
   openable: ReadonlySet<string>;
@@ -90,16 +128,21 @@ interface Props {
 /** Both sides of one resource: where each lives, what differs, and — when the
  *  two versions disagree — the three ways out, each naming what it overwrites. */
 export function RepositoryResourceCompare({
-  row, openable, canWrite, busy, onKeepRepository, onKeepKronn, onRefresh, onPrimary, onOpenLink, onClose,
+  projectId, row, openable, canWrite, busy, onKeepRepository, onKeepKronn, onRefresh, onPrimary, onOpenLink, onClose,
 }: Props) {
   const { t, locale } = useT();
   const [mode, setMode] = useState<DiffMode>('unified');
   const [merging, setMerging] = useState(false);
   const isConflict = row.state === 'conflict';
   const date = (iso?: string) => formatResourceDate(iso, locale);
-  const diffs = row.fileDiffs.length > 0
-    ? row.fileDiffs
-    : row.diff ? [{ path: row.displayPath, diff: row.diff }] : [];
+  const { phase, comparison, retry } = useComparison(projectId, row);
+  const fieldDiff = comparison?.field_diff ?? [];
+  const fileDiffs = comparison?.file_diffs ?? [];
+  const diffs = fileDiffs.length > 0
+    ? fileDiffs
+    : comparison?.diff ? [{ path: row.displayPath, diff: comparison.diff }] : [];
+  // Nobody should overwrite a side before the differences are on screen.
+  const reviewing = phase === 'loading';
   const repositoryPath = row.displayPath || row.targetPath;
   const primaryLabel = row.primary === 'view' || row.primary === 'compare' || row.primary === 'approve'
     ? null
@@ -173,10 +216,28 @@ export function RepositoryResourceCompare({
         </section>
       )}
 
-      {(row.fieldDiff.length > 0 || diffs.length > 0) && (
+      {phase === 'loading' && (
+        <section className="rr-section" aria-busy="true" data-testid="repository-compare-loading">
+          <h3>{t('projects.repositoryResources.compare.differs')}</h3>
+          <p className="rr-muted" role="status">
+            <Loader2 size={14} className="animate-spin" aria-hidden="true" />{' '}
+            {t('projects.repositoryResources.compare.loading')}
+          </p>
+        </section>
+      )}
+      {phase === 'error' && (
         <section className="rr-section">
           <h3>{t('projects.repositoryResources.compare.differs')}</h3>
-          {row.fieldDiff.length > 0 && (
+          <p className="rr-muted" role="alert">{t('projects.repositoryResources.compare.loadFailed')}</p>
+          <button type="button" className="rr-button" onClick={retry}>
+            {t('projects.repositoryResources.compare.retry')}
+          </button>
+        </section>
+      )}
+      {(fieldDiff.length > 0 || diffs.length > 0) && (
+        <section className="rr-section">
+          <h3>{t('projects.repositoryResources.compare.differs')}</h3>
+          {fieldDiff.length > 0 && (
             <table className="rr-fields">
               <thead>
                 <tr>
@@ -186,7 +247,7 @@ export function RepositoryResourceCompare({
                 </tr>
               </thead>
               <tbody>
-                {row.fieldDiff.map(field => (
+                {fieldDiff.map(field => (
                   <tr key={field.field}>
                     <th scope="row"><code>{field.field}</code></th>
                     <td><code>{formatFieldValue(field.repository)}</code></td>
@@ -224,7 +285,7 @@ export function RepositoryResourceCompare({
           )}
         </section>
       )}
-      {row.fieldDiff.length === 0 && diffs.length === 0 && (
+      {(phase === 'idle' || phase === 'ready') && fieldDiff.length === 0 && diffs.length === 0 && (
         <p className="rr-muted">{t('projects.repositoryResources.compare.noDiff')}</p>
       )}
 
@@ -244,7 +305,7 @@ export function RepositoryResourceCompare({
             <article data-choice="repository">
               <h4>{t('projects.repositoryResources.compare.keepRepository')}</h4>
               <p>{t('projects.repositoryResources.compare.keepRepositoryEffect', date(row.kronnUpdatedAt))}</p>
-              <button type="button" className="rr-button" disabled={busy} onClick={onKeepRepository}>
+              <button type="button" className="rr-button" disabled={busy || reviewing} onClick={onKeepRepository}>
                 {busy && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
                 {t('projects.repositoryResources.compare.keepRepository')}
               </button>
@@ -252,7 +313,7 @@ export function RepositoryResourceCompare({
             <article data-choice="kronn">
               <h4>{t('projects.repositoryResources.compare.keepKronn')}</h4>
               <p>{t('projects.repositoryResources.compare.keepKronnEffect', repositoryPath, date(row.repositoryUpdatedAt))}</p>
-              <button type="button" className="rr-button" disabled={busy || !canWrite} onClick={onKeepKronn}>
+              <button type="button" className="rr-button" disabled={busy || reviewing || !canWrite} onClick={onKeepKronn}>
                 {busy && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
                 {t('projects.repositoryResources.compare.keepKronn')}
               </button>

@@ -5,12 +5,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
+use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::core::content_memo::{self, ContentMemo, MemoStats};
 use crate::core::export_secrets::{RedactedField, REDACTED};
 use crate::models::{
     ArtifactBundlePage, ProjectRepositoryResourceKind, QuickApi, QuickExec, QuickPrompt, Skill,
@@ -229,14 +231,15 @@ fn replace_redacted_values(
                 secrets.insert(name.to_string());
                 return;
             }
-            let name = secret_name(kind, slug, path);
             if text == REDACTED {
+                let name = secret_name(kind, slug, path);
                 *text = format!("secret://{name}");
                 secrets.insert(name);
                 return;
             }
             let (redacted, count) = crate::core::redact::redact_for_audit_artifact(text);
             if count > 0 {
+                let name = secret_name(kind, slug, path);
                 *text = redacted.replace("***REDACTED***", &format!("secret://{name}"));
                 secrets.insert(name);
             }
@@ -323,6 +326,51 @@ fn rendered(
     }
 }
 
+/// Upper bound on what the render memo keeps: a project's automations are a
+/// few KB each, so this holds every project of a large install at once.
+const RENDER_MEMO_BUDGET: usize = 48 * 1024 * 1024;
+
+/// Rendered resources by the fingerprint of the content they were rendered
+/// from. Rendering masks every string of the resource, and a listing renders
+/// each automation of a project on every read: the result depends on that
+/// content alone, so it is computed once and served from here afterwards.
+static RENDER_MEMO: LazyLock<ContentMemo<RenderedRepositoryResource>> =
+    LazyLock::new(|| ContentMemo::new(RENDER_MEMO_BUDGET));
+
+/// How the render memo has answered so far: `misses` counts the resources
+/// whose secrets were actually masked, `hits` the ones served from memory.
+pub fn render_memo_stats() -> MemoStats {
+    RENDER_MEMO.stats()
+}
+
+fn rendered_weight(rendered: &RenderedRepositoryResource) -> usize {
+    // The document repeats the content held by the files: count both.
+    2 * rendered.files.values().map(Vec::len).sum::<usize>() + rendered.hash.len()
+}
+
+/// `render` behind the memo. The key is the *unmasked* content (`source`) with
+/// what else shapes the output (kind, slug, timestamp), so a changed
+/// definition, or the same one under another slug, is masked afresh while an
+/// unchanged one is not.
+fn memoized_render(
+    kind: ProjectRepositoryResourceKind,
+    slug: &str,
+    updated_at: DateTime<Utc>,
+    source: &Value,
+    render: impl FnOnce() -> Result<RenderedRepositoryResource, String>,
+) -> Result<RenderedRepositoryResource, String> {
+    let source = serde_json::to_vec(source).map_err(|error| error.to_string())?;
+    let key = content_memo::fingerprint(&[
+        format!("{kind:?}").as_bytes(),
+        slug.as_bytes(),
+        updated_at.to_rfc3339().as_bytes(),
+        &source,
+    ]);
+    RENDER_MEMO
+        .get_or_try_insert(&key, rendered_weight, render)
+        .map(|rendered| RenderedRepositoryResource::clone(&rendered))
+}
+
 pub fn render_workflow(
     workflow: &Workflow,
     slug: &str,
@@ -333,66 +381,93 @@ pub fn render_workflow(
     // fingerprint lets a human approve the definition, then enable it without
     // changing the content they reviewed.
     exported.enabled = false;
-    let mut redacted = Vec::new();
-    crate::core::export_secrets::redact_workflow(&mut exported, &mut redacted);
-    let (document, secrets) = document(
+    let source = serde_json::to_value(&exported).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::Workflow,
         slug,
         workflow.updated_at,
-        serde_json::to_value(exported).map_err(|error| error.to_string())?,
-        redacted,
-    );
-    let files = BTreeMap::from([(
-        format!("kronn/workflows/{slug}.yaml"),
-        json_file(&document)?,
-    )]);
-    Ok(rendered(document, workflow.name.clone(), files, secrets))
+        &source,
+        || {
+            let mut redacted = Vec::new();
+            crate::core::export_secrets::redact_workflow(&mut exported, &mut redacted);
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::Workflow,
+                slug,
+                workflow.updated_at,
+                serde_json::to_value(exported).map_err(|error| error.to_string())?,
+                redacted,
+            );
+            let files = BTreeMap::from([(
+                format!("kronn/workflows/{slug}.yaml"),
+                json_file(&document)?,
+            )]);
+            Ok(rendered(document, workflow.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_quick_prompt(
     prompt: &QuickPrompt,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let (document, secrets) = document(
+    let source = serde_json::to_value(prompt).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::QuickPrompt,
         slug,
         prompt.updated_at,
-        serde_json::to_value(prompt).map_err(|error| error.to_string())?,
-        Vec::new(),
-    );
-    let prompt_template = document
-        .resource
-        .get("prompt_template")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let files = BTreeMap::from([(
-        format!("kronn/prompts/{slug}.md"),
-        markdown_file(
-            &document,
-            &prompt.name,
-            &prompt.description,
-            prompt_template,
-        )?,
-    )]);
-    Ok(rendered(document, prompt.name.clone(), files, secrets))
+        &source,
+        || {
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::QuickPrompt,
+                slug,
+                prompt.updated_at,
+                source.clone(),
+                Vec::new(),
+            );
+            let prompt_template = document
+                .resource
+                .get("prompt_template")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let files = BTreeMap::from([(
+                format!("kronn/prompts/{slug}.md"),
+                markdown_file(
+                    &document,
+                    &prompt.name,
+                    &prompt.description,
+                    prompt_template,
+                )?,
+            )]);
+            Ok(rendered(document, prompt.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_quick_api(api: &QuickApi, slug: &str) -> Result<RenderedRepositoryResource, String> {
     let mut exported = api.clone();
-    let mut redacted = Vec::new();
-    crate::core::export_secrets::redact_quick_api(&mut exported, &mut redacted);
-    let (document, secrets) = document(
+    let source = serde_json::to_value(&exported).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::QuickApi,
         slug,
         api.updated_at,
-        serde_json::to_value(exported).map_err(|error| error.to_string())?,
-        redacted,
-    );
-    let files = BTreeMap::from([(
-        format!("kronn/quick-apis/{slug}.yaml"),
-        json_file(&document)?,
-    )]);
-    Ok(rendered(document, api.name.clone(), files, secrets))
+        &source,
+        || {
+            let mut redacted = Vec::new();
+            crate::core::export_secrets::redact_quick_api(&mut exported, &mut redacted);
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::QuickApi,
+                slug,
+                api.updated_at,
+                serde_json::to_value(exported).map_err(|error| error.to_string())?,
+                redacted,
+            );
+            let files = BTreeMap::from([(
+                format!("kronn/quick-apis/{slug}.yaml"),
+                json_file(&document)?,
+            )]);
+            Ok(rendered(document, api.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_quick_exec(
@@ -400,20 +475,29 @@ pub fn render_quick_exec(
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
     let mut exported = exec.clone();
-    let mut redacted = Vec::new();
-    crate::core::export_secrets::redact_quick_exec(&mut exported, &mut redacted);
-    let (document, secrets) = document(
+    let source = serde_json::to_value(&exported).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::QuickExec,
         slug,
         exec.updated_at,
-        serde_json::to_value(exported).map_err(|error| error.to_string())?,
-        redacted,
-    );
-    let files = BTreeMap::from([(
-        format!("kronn/quick-execs/{slug}.yaml"),
-        json_file(&document)?,
-    )]);
-    Ok(rendered(document, exec.name.clone(), files, secrets))
+        &source,
+        || {
+            let mut redacted = Vec::new();
+            crate::core::export_secrets::redact_quick_exec(&mut exported, &mut redacted);
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::QuickExec,
+                slug,
+                exec.updated_at,
+                serde_json::to_value(exported).map_err(|error| error.to_string())?,
+                redacted,
+            );
+            let files = BTreeMap::from([(
+                format!("kronn/quick-execs/{slug}.yaml"),
+                json_file(&document)?,
+            )]);
+            Ok(rendered(document, exec.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_artifact(
@@ -421,29 +505,38 @@ pub fn render_artifact(
     updated_at: DateTime<Utc>,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let (document, secrets) = document(
+    let source = serde_json::to_value(artifact).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::Artifact,
         slug,
         updated_at,
-        serde_json::to_value(artifact).map_err(|error| error.to_string())?,
-        Vec::new(),
-    );
-    let html = document
-        .resource
-        .get("html")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let files = BTreeMap::from([
-        (
-            format!("kronn/artifacts/{slug}/artifact.yaml"),
-            json_file(&document)?,
-        ),
-        (
-            format!("kronn/artifacts/{slug}/index.html"),
-            html.as_bytes().to_vec(),
-        ),
-    ]);
-    Ok(rendered(document, artifact.title.clone(), files, secrets))
+        &source,
+        || {
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::Artifact,
+                slug,
+                updated_at,
+                source.clone(),
+                Vec::new(),
+            );
+            let html = document
+                .resource
+                .get("html")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let files = BTreeMap::from([
+                (
+                    format!("kronn/artifacts/{slug}/artifact.yaml"),
+                    json_file(&document)?,
+                ),
+                (
+                    format!("kronn/artifacts/{slug}/index.html"),
+                    html.as_bytes().to_vec(),
+                ),
+            ]);
+            Ok(rendered(document, artifact.title.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_skill(
@@ -451,23 +544,32 @@ pub fn render_skill(
     updated_at: DateTime<Utc>,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let (document, secrets) = document(
+    let source = serde_json::to_value(skill).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::Skill,
         slug,
         updated_at,
-        serde_json::to_value(skill).map_err(|error| error.to_string())?,
-        Vec::new(),
-    );
-    let content = document
-        .resource
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let files = BTreeMap::from([(
-        format!("kronn/skills/{slug}/SKILL.md"),
-        markdown_file(&document, &skill.name, &skill.description, content)?,
-    )]);
-    Ok(rendered(document, skill.name.clone(), files, secrets))
+        &source,
+        || {
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::Skill,
+                slug,
+                updated_at,
+                source.clone(),
+                Vec::new(),
+            );
+            let content = document
+                .resource
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let files = BTreeMap::from([(
+                format!("kronn/skills/{slug}/SKILL.md"),
+                markdown_file(&document, &skill.name, &skill.description, content)?,
+            )]);
+            Ok(rendered(document, skill.name.clone(), files, secrets))
+        },
+    )
 }
 
 /// Refuses a `kronn` path that exists but is not a directory (e.g. a launcher
@@ -1571,6 +1673,105 @@ mod tests {
         assert!(!text.contains("hunter2"));
         assert!(text.contains("secret://KRONN_QUICKPROMPT_DEPLOY_PROMPT_RESOURCE_PROMPT_TEMPLATE"));
         assert_eq!(rendered.required_secrets.len(), 1);
+    }
+
+    #[test]
+    fn the_same_content_is_masked_once_and_changed_content_afresh() {
+        let prompt = sample_prompt("memo probe one: password=hunter2");
+        let mut edited = prompt.clone();
+        edited.prompt_template = "memo probe one: a different sentence".into();
+        let mut runs = 0;
+        let mut render = |slug: &str, prompt: &QuickPrompt| {
+            let source = serde_json::to_value(prompt).unwrap();
+            memoized_render(
+                ProjectRepositoryResourceKind::QuickPrompt,
+                slug,
+                prompt.updated_at,
+                &source,
+                || {
+                    runs += 1;
+                    render_quick_prompt_unmemoized(prompt, slug)
+                },
+            )
+            .unwrap()
+        };
+
+        let first = render("memo-probe-one", &prompt);
+        let second = render("memo-probe-one", &prompt);
+        assert_eq!(first.hash, second.hash);
+        assert_eq!(first.files, second.files);
+        assert_eq!(first.required_secrets, second.required_secrets);
+
+        let third = render("memo-probe-one", &edited);
+        assert_ne!(
+            first.hash, third.hash,
+            "changed content is not served stale"
+        );
+
+        render("memo-probe-other-slug", &prompt);
+        assert_eq!(
+            runs, 3,
+            "masked for the first content, the edit and the other slug — never twice for the same"
+        );
+    }
+
+    /// The prompt rendered without the memo, for the counting test above.
+    fn render_quick_prompt_unmemoized(
+        prompt: &QuickPrompt,
+        slug: &str,
+    ) -> Result<RenderedRepositoryResource, String> {
+        let (document, secrets) = document(
+            ProjectRepositoryResourceKind::QuickPrompt,
+            slug,
+            prompt.updated_at,
+            serde_json::to_value(prompt).map_err(|error| error.to_string())?,
+            Vec::new(),
+        );
+        let body = document
+            .resource
+            .get("prompt_template")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let files = BTreeMap::from([(
+            format!("kronn/prompts/{slug}.md"),
+            markdown_file(&document, &prompt.name, &prompt.description, &body)?,
+        )]);
+        Ok(rendered(document, prompt.name.clone(), files, secrets))
+    }
+
+    #[test]
+    fn a_rendering_served_from_memory_still_holds_no_secret_value() {
+        let secret = "memo-leak-probe-7f3a";
+        let prompt = sample_prompt(&format!(
+            "Call the API with password={secret} and Authorization: Bearer abcdef0123456789abcdef"
+        ));
+        let before = render_memo_stats();
+        let fresh = render_quick_prompt(&prompt, "memo-leak-probe").unwrap();
+        let cached = render_quick_prompt(&prompt, "memo-leak-probe").unwrap();
+        assert!(
+            render_memo_stats().hits > before.hits,
+            "the second rendering comes from the memo"
+        );
+        for rendered in [&fresh, &cached] {
+            let everything = format!(
+                "{}{}{:?}",
+                rendered
+                    .files
+                    .values()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                    .collect::<String>(),
+                serde_json::to_string(&rendered.document).unwrap(),
+                rendered.required_secrets,
+            );
+            assert!(!everything.contains(secret), "{everything}");
+            assert!(
+                !everything.contains("abcdef0123456789abcdef"),
+                "{everything}"
+            );
+            assert!(everything.contains("secret://KRONN_QUICKPROMPT_MEMO_LEAK_PROBE_"));
+        }
+        assert_eq!(fresh.hash, cached.hash);
     }
 
     #[test]
