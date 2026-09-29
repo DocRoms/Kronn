@@ -15581,6 +15581,47 @@ mod tests {
         );
     }
 
+    /// KT-839 — the HTTP launch route (the CLI principals' path) has no tool
+    /// layer in front of it: the shared provisioning boundary is what refuses.
+    #[tokio::test]
+    async fn the_shared_launch_boundary_refuses_an_unrunnable_validation_before_side_effects() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+
+        let refusal = provision_single_task_execution_with_validations(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt-839-http-launch".into()),
+            },
+            vec![ValidationSpec {
+                command: "cd frontend && npx tsc -b --pretty false".into(),
+                quick_exec_id: None,
+                timeout_secs: None,
+            }],
+        )
+        .await
+        .expect_err("a validation that can never run must not be accepted");
+
+        match refusal {
+            ProvisionError::NotLaunchable(reason) => {
+                assert!(reason.contains("can never run"), "{reason}");
+                assert!(reason.contains("`cd`"), "{reason}");
+                assert!(reason.contains("pnpm --dir frontend exec"), "{reason}");
+            }
+            other => panic!("expected NotLaunchable, got {other:?}"),
+        }
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            0
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 0);
+    }
+
     /// KT-839 — the principal can correct the gates of a launched execution
     /// without cancelling it, and the correction is journaled.
     #[tokio::test]
