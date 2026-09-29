@@ -11,6 +11,7 @@ const panelCss = stylesheet('ProjectRepositoryResourcesPanel.css');
 const sheetsCss = stylesheet('RepositoryResourceSheets.css');
 
 const repositoryResources = vi.hoisted(() => vi.fn());
+const repositoryResourceComparison = vi.hoisted(() => vi.fn());
 const publishRepositoryResource = vi.hoisted(() => vi.fn());
 const importRepositoryResource = vi.hoisted(() => vi.fn());
 const approveRepositoryResource = vi.hoisted(() => vi.fn());
@@ -23,6 +24,7 @@ const quickExecsDelete = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/api', () => ({
   projects: {
     repositoryResources,
+    repositoryResourceComparison,
     publishRepositoryResource,
     importRepositoryResource,
     approveRepositoryResource,
@@ -62,8 +64,9 @@ async function show(data = listing(), props: Partial<Parameters<typeof ProjectRe
 
 describe('ProjectRepositoryResourcesPanel', () => {
   beforeEach(() => {
-    [repositoryResources, publishRepositoryResource, importRepositoryResource, approveRepositoryResource,
-      useNativeSkill, copyNativeSkill, setDefaultSkills, quickExecsList, quickExecsDelete].forEach(mock => mock.mockReset());
+    [repositoryResources, repositoryResourceComparison, publishRepositoryResource, importRepositoryResource,
+      approveRepositoryResource, useNativeSkill, copyNativeSkill, setDefaultSkills, quickExecsList,
+      quickExecsDelete].forEach(mock => mock.mockReset());
     publishRepositoryResource.mockResolvedValue({});
     importRepositoryResource.mockResolvedValue({});
     localStorage.removeItem('kronn:projectRepositoryResourcesTab');
@@ -419,17 +422,23 @@ describe('ProjectRepositoryResourcesPanel', () => {
         repository_paths: ['kronn/workflows/nightly.yaml'],
         repository_updated_at: '2026-09-01T10:00:00Z', repository_updated_by: 'Ada',
         kronn_updated_at: '2026-09-02T08:00:00Z',
-        diff: '--- repository\n+++ Kronn\n@@ -1,2 +1,2 @@\n name: nightly\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n',
-        file_diffs: [{ path: 'kronn/workflows/nightly.yaml', diff: '--- repository\n+++ Kronn\n@@ -1,2 +1,2 @@\n name: nightly\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n' }],
-        field_diff: [{ field: 'trigger.schedule', repository: '0 3 * * *', kronn: '0 4 * * *' }],
       })],
+    });
+    const NIGHTLY_DIFF = '--- repository\n+++ Kronn\n@@ -1,2 +1,2 @@\n name: nightly\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n';
+    const nightlyComparison = () => ({
+      diff: NIGHTLY_DIFF,
+      file_diffs: [{ path: 'kronn/workflows/nightly.yaml', diff: NIGHTLY_DIFF }],
+      field_diff: [{ field: 'trigger.schedule', repository: '0 3 * * *', kronn: '0 4 * * *' }],
     });
 
     async function openCompare(data = conflict()) {
+      repositoryResourceComparison.mockResolvedValue(nightlyComparison());
       await show(data);
       openTab('automation');
       fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
-      return within(await screen.findByRole('dialog'));
+      const dialog = within(await screen.findByRole('dialog'));
+      await waitFor(() => expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument());
+      return dialog;
     }
 
     it('shows both sides, what differs by field, then the text, and closes on Escape', async () => {
@@ -446,6 +455,70 @@ describe('ProjectRepositoryResourcesPanel', () => {
 
       fireEvent.keyDown(document.body, { key: 'Escape' });
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('asks for the differences only when the sheet opens, once, for that resource', async () => {
+      repositoryResourceComparison.mockResolvedValue(nightlyComparison());
+      await show(conflict());
+      openTab('automation');
+      expect(repositoryResourceComparison).not.toHaveBeenCalled();
+
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+      await screen.findByRole('dialog');
+      await waitFor(() => expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument());
+
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(1);
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'workflow', 'wf-1');
+    });
+
+    it('shows a loading state, and holds both "keep" buttons, until the differences arrive', async () => {
+      let resolve: (value: ReturnType<typeof nightlyComparison>) => void = () => {};
+      repositoryResourceComparison.mockReturnValue(new Promise(done => { resolve = done; }));
+      await show(conflict());
+      openTab('automation');
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(screen.getByTestId('repository-compare-loading')).toBeInTheDocument();
+      expect(dialog.getByText(`${R}compare.loading`)).toBeInTheDocument();
+      expect(dialog.queryByText('-cron: 0 3 * * *')).not.toBeInTheDocument();
+      expect(dialog.queryByText(`${R}compare.noDiff`)).not.toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepRepository` })).toBeDisabled();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepKronn` })).toBeDisabled();
+
+      resolve(nightlyComparison());
+      expect(await dialog.findByText('-cron: 0 3 * * *')).toBeInTheDocument();
+      expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepRepository` })).toBeEnabled();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepKronn` })).toBeEnabled();
+    });
+
+    it('says when the differences could not be loaded and tries again on request', async () => {
+      repositoryResourceComparison.mockRejectedValueOnce(new Error('boom'));
+      repositoryResourceComparison.mockResolvedValueOnce(nightlyComparison());
+      await show(conflict());
+      openTab('automation');
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(await dialog.findByRole('alert')).toHaveTextContent(`${R}compare.loadFailed`);
+      expect(dialog.queryByText(`${R}compare.noDiff`)).not.toBeInTheDocument();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}compare.retry` }));
+      expect(await dialog.findByText('-cron: 0 3 * * *')).toBeInTheDocument();
+      expect(dialog.queryByRole('alert')).not.toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks for nothing when the two sides agree: there is nothing to compare', async () => {
+      await show(listing({ resources: [resource({ id: 'ok', name: 'Same', kind: 'quick_prompt', status: 'up_to_date' })] }));
+      openTab('automation');
+
+      fireEvent.click(rowOf('Same'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(dialog.getByText(`${R}compare.noDiff`)).toBeInTheDocument();
+      expect(repositoryResourceComparison).not.toHaveBeenCalled();
     });
 
     it('keeping the repository overwrites Kronn and says so beforehand', async () => {
@@ -1210,6 +1283,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
 
   describe('fingerprints on the sheets', () => {
     it('shows the eight-character fingerprint of both sides when comparing', async () => {
+      repositoryResourceComparison.mockResolvedValue({ file_diffs: [], field_diff: [] });
       await show(listing({
         resources: [resource({
           id: 'wf-1', name: 'Nightly', slug: 'nightly', kind: 'workflow', status: 'conflict',

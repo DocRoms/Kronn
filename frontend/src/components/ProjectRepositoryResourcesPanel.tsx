@@ -699,6 +699,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       )}
       {sheet?.type === 'compare' && sheetRow && (
         <RepositoryResourceCompare
+          projectId={projectId}
           row={sheetRow}
           canWrite={canWrite}
           busy={busyKey !== null}

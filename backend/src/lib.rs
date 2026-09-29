@@ -921,6 +921,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::projects::repository_resources),
         )
         .route(
+            "/api/projects/{id}/repository-resources/comparison",
+            get(api::projects::repository_resource_comparison),
+        )
+        .route(
             "/api/projects/{id}/repository-resources/publish",
             post(api::projects::publish_repository_resource),
         )

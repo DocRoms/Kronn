@@ -7,6 +7,7 @@ pub mod checksums;
 pub mod cli_access_probe;
 pub mod cmd;
 pub mod config;
+pub mod content_memo;
 pub mod context_audit;
 pub mod context_files;
 pub mod crypto;

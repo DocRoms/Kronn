@@ -5249,24 +5249,7 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
-export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, adr_level: ResourceAdrLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean,
-/**
- * Real unified diff of the resource's main file (the rendered HTML for
- * an artifact). Present only for `repository_newer`, `kronn_newer` and
- * `conflict`; `file_diffs` carries every file.
- */
-diff?: string,
-/**
- * One unified diff per differing file — an artifact's `artifact.yaml`
- * and `index.html` each get their own entry.
- */
-file_diffs: Array<RepositoryResourceFileDiff>,
-/**
- * Field-by-field diff of the resource definition (trigger, commands,
- * agents, models…). Populated for workflow, Quick API and Quick Exec,
- * for the same three states as `diff`.
- */
-field_diff: Array<RepositoryResourceFieldDiff>, repository_paths: Array<string>,
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, adr_level: ResourceAdrLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean, repository_paths: Array<string>,
 /**
  * Every path publishing this resource would write, including the
  * shared scaffold (`kronn/INDEX.md`, `kronn/kronn.toml`, the router
@@ -5330,11 +5313,7 @@ suggested: boolean,
  * What triggered the suggestion, as the detected file name (`Dockerfile`,
  * `Cargo.toml`…) — the UI words it in the reader's language.
  */
-suggested_reason?: string, approval_required: boolean, approved: boolean, diff?: string,
-/**
- * One unified diff per differing file, for the same states as `diff`.
- */
-file_diffs: Array<RepositoryResourceFileDiff>, repository_paths: Array<string>,
+suggested_reason?: string, approval_required: boolean, approved: boolean, repository_paths: Array<string>,
 /**
  * True when this slug is present under more than one native skill root
  * (`.claude/skills`, `.agents/skills`…) and those copies are not
@@ -5812,6 +5791,32 @@ export type RepositoryNativeSkillRequest = { relative_path: string,
  * from the repository file. Without it, that copy is never overwritten.
  */
 overwrite_kronn_changes?: boolean, };
+
+/**
+ * What differs between the repository and Kronn for one resource, computed
+ * when someone opens the Compare sheet rather than on every listing: the
+ * listing only says *that* the two sides differ (its `status`), never *how*.
+ * The Kronn side is the masked rendering a publish would write, so it holds
+ * no secret value; the repository side is the file as it stands.
+ */
+export type RepositoryResourceComparison = {
+/**
+ * Real unified diff of the resource's main file (the rendered HTML for
+ * an artifact). Present only for `repository_newer`, `kronn_newer` and
+ * `conflict`; `file_diffs` carries every file.
+ */
+diff?: string,
+/**
+ * One unified diff per differing file — an artifact's `artifact.yaml`
+ * and `index.html` each get their own entry.
+ */
+file_diffs: Array<RepositoryResourceFileDiff>,
+/**
+ * Field-by-field diff of the resource definition (trigger, commands,
+ * agents, models…). Populated for workflow, Quick API and Quick Exec,
+ * for the same three states as `diff`.
+ */
+field_diff: Array<RepositoryResourceFieldDiff>, };
 
 /**
  * One differing field between the repository and Kronn definitions of a

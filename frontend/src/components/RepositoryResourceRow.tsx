@@ -81,10 +81,9 @@ function RowMenu({ row, onMenu }: Pick<Props, 'row' | 'onMenu'>) {
     };
   }, [open]);
 
-  const hasDiff = row.fileDiffs.length > 0 || row.fieldDiff.length > 0 || Boolean(row.diff);
   const items: Array<{ id: RowMenuAction; label: string }> = [];
   if (row.primary !== 'view') items.push({ id: 'view', label: t('projects.repositoryResources.action.view') });
-  if ((row.state === 'repository_newer' || row.state === 'kronn_newer') && hasDiff) {
+  if (row.state === 'repository_newer' || row.state === 'kronn_newer') {
     items.push({ id: 'compare', label: t('projects.repositoryResources.action.compareOnly') });
   }
   if (row.state === 'native_skill') {

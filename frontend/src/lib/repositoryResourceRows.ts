@@ -4,8 +4,6 @@ import type {
   ProjectRepositoryResourceStatus,
   ProjectRepositoryResources,
   ProjectRepositorySkill,
-  RepositoryResourceFieldDiff,
-  RepositoryResourceFileDiff,
   RequiredSecretStatus,
 } from '../types/generated';
 import type { ProjectRepositoryResourcesTab } from './projectRepositoryResourcesTab';
@@ -64,9 +62,6 @@ export interface ResourceRow {
   approved: boolean;
   requiredSecrets: RequiredSecretStatus[];
   writePreview: string[];
-  diff?: string;
-  fileDiffs: RepositoryResourceFileDiff[];
-  fieldDiff: RepositoryResourceFieldDiff[];
   repositoryUpdatedAt?: string;
   repositoryUpdatedBy?: string;
   kronnUpdatedAt?: string;
@@ -89,6 +84,15 @@ export const EXECUTABLE_KINDS: ProjectRepositoryResourceKind[] = [
 ];
 
 export const resourceKey = (kind: ProjectRepositoryResourceKind, id: string) => `${kind}:${id}`;
+
+/** States where both sides exist and can differ: the only ones the backend has
+ *  something to compare for. The listing never carries the diffs themselves —
+ *  the Compare sheet asks for them when it opens. */
+const COMPARABLE_STATES: SyncState[] = ['repository_newer', 'kronn_newer', 'conflict', 'approval_required'];
+
+export const isComparable = (row: ResourceRow): boolean => (
+  COMPARABLE_STATES.includes(row.state) && !row.id.startsWith('repository:')
+);
 
 /** Label of the folder a repository path lives in: `kronn/` or `.claude`… */
 export function originLabel(path: string): string {
@@ -167,9 +171,6 @@ function resourceRow(resource: ProjectRepositoryResource): ResourceRow {
     approved: resource.approved,
     requiredSecrets: resource.required_secrets ?? [],
     writePreview: resource.write_preview ?? [],
-    diff: resource.diff,
-    fileDiffs: resource.file_diffs ?? [],
-    fieldDiff: resource.field_diff ?? [],
     repositoryUpdatedAt: resource.repository_updated_at,
     repositoryUpdatedBy: resource.repository_updated_by,
     kronnUpdatedAt: resource.kronn_updated_at,
@@ -226,9 +227,6 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
     approved: skill.approved,
     requiredSecrets: skill.required_secrets ?? [],
     writePreview: skill.write_preview ?? [],
-    diff: skill.diff,
-    fileDiffs: skill.file_diffs ?? [],
-    fieldDiff: [],
     repositoryUpdatedAt: skill.repository_updated_at,
     repositoryUpdatedBy: skill.repository_updated_by,
     kronnUpdatedAt: skill.kronn_updated_at,
