@@ -326,6 +326,9 @@ fn provenance_snapshot_keeps_escalation_after_config_changes_and_unknown_acp_def
             succeeded: true,
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
+            session_id: None,
+            cost_usd: None,
+            cost_unknown_reason: None,
         }],
     }));
     let mut step = step();
@@ -525,6 +528,9 @@ fn step_cache_totals_sum_reporting_attempts_and_stay_unknown_otherwise() {
         succeeded: true,
         cached_prompt_tokens: read,
         cache_write_prompt_tokens: write,
+        session_id: None,
+        cost_usd: None,
+        cost_unknown_reason: None,
     };
     let mut provenance = WorkflowAgentProvenance::default();
     assert_eq!(provenance.prompt_cache_totals(), (None, None));

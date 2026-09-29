@@ -1735,6 +1735,92 @@ pub fn record_worker_served_model(
     Ok(affected > 0)
 }
 
+/// What a worker session cost, as the priced reply says (KT-894): a figure, or
+/// the reason there is none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerSessionCost {
+    pub usd: Option<f64>,
+    pub unknown_reason: Option<String>,
+}
+
+/// Record a CLI session the worker started, and optionally what it cost. Only
+/// the execution's current dispatch may write, so a stale run cannot add a
+/// session to a reassigned worker (same rule as the served model). Idempotent
+/// per (dispatch, session): the poll that names the session and the end of the
+/// turn that prices it may land in either order, and neither erases the other.
+/// Returns whether the session belongs to the execution's current dispatch.
+pub fn record_worker_cli_session(
+    conn: &Connection,
+    execution_id: &str,
+    dispatch_job_id: &str,
+    agent_type: &str,
+    session_id: &str,
+    cost: Option<&WorkerSessionCost>,
+) -> Result<bool> {
+    in_savepoint(conn, |conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO task_execution_worker_sessions \
+                 (dispatch_job_id, session_id, task_execution_id, attempt_no, agent_type, created_at) \
+             SELECT ?2, ?4, id, attempt_no, ?3, ?5 FROM task_executions \
+              WHERE id = ?1 AND dispatch_job_id = ?2",
+            params![
+                execution_id,
+                dispatch_job_id,
+                agent_type,
+                session_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        if let Some(cost) = cost {
+            conn.execute(
+                "UPDATE task_execution_worker_sessions \
+                    SET cost_usd = ?4, cost_unknown_reason = ?5 \
+                  WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND session_id = ?3",
+                params![
+                    execution_id,
+                    dispatch_job_id,
+                    session_id,
+                    cost.usd,
+                    cost.unknown_reason
+                ],
+            )?;
+        }
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_execution_worker_sessions \
+              WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND session_id = ?3)",
+            params![execution_id, dispatch_job_id, session_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    })
+}
+
+/// Every CLI session the execution's workers ran, oldest first.
+pub fn list_worker_cli_sessions(
+    conn: &Connection,
+    execution_id: &str,
+) -> Result<Vec<crate::models::TaskExecutionWorkerSession>> {
+    let mut statement = conn.prepare(
+        "SELECT attempt_no, dispatch_job_id, agent_type, session_id, cost_usd, \
+                cost_unknown_reason, created_at \
+           FROM task_execution_worker_sessions \
+          WHERE task_execution_id = ?1 \
+          ORDER BY created_at, rowid",
+    )?;
+    let rows = statement.query_map([execution_id], |row| {
+        Ok(crate::models::TaskExecutionWorkerSession {
+            attempt_no: row.get::<_, i64>(0)?.max(0) as u32,
+            dispatch_job_id: row.get(1)?,
+            agent_type: row.get(2)?,
+            session_id: row.get(3)?,
+            cost_usd: row.get(4)?,
+            cost_unknown_reason: row.get(5)?,
+            started_at: parse_dt(row.get(6)?),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn get_worker_served_model(conn: &Connection, execution_id: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(

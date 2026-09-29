@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Each Agent step attempt exposes the CLI session it ran in and what it cost:
+  `agent_provenance.attempts[].session_id` is the id Claude Code reports on its
+  `init` line, the name of its transcript, and `cost_usd` is priced like a
+  discussion reply (KT-894) — `null` with `cost_unknown_reason` when the
+  counters or the rate are missing. Callers no longer have to find transcripts
+  by the worktree name or a token added to the prompt. `task_exec_status` lists
+  the worker's CLI sessions, rework attempts and relaunches included
+  (`worker_sessions`, with their cost), and its compact view names the latest.
+
 - The project's repository resources (`GET /api/projects/:id/repository-resources`)
   now describe both sides of every item. Its `status` is one of
   `repository_only`, `kronn_only`, `up_to_date`, `repository_newer`,

@@ -487,6 +487,18 @@ validations (command, exit code, duration) and a backend-derived
 The default `view: "full"` is unchanged: worker briefs and reviews read its
 lineage, attempts and manifests.
 
+`view: "full"` also lists `worker_sessions` (KT-911): one entry per CLI process
+the worker started, oldest first, with its `attempt_no`, the `dispatch_job_id`
+that launched it, its `agent_type`, its `session_id` (the id the CLI reported on
+its init line, which is the name of its transcript), and `cost_usd` (`null`
+with a `cost_unknown_reason` when unknown, and while the turn is still running).
+A rework starts a new attempt and a relaunched dispatch starts a new process;
+both keep their earlier entries. Only the execution's current dispatch may add
+one, so a replaced worker cannot relabel it. `view: "compact"` carries the
+`session_id` of the latest two. An HTTP worker has no CLI session and lists none.
+[src: file: backend/src/db/orchestration.rs]
+[src: file: backend/src/api/delivery_publication.rs]
+
 `task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
 the execution is in one of the `wait_for` statuses and adds
 `wait: {matched, timed_out, waited_ms}` to the usual response. A status already

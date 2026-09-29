@@ -1521,6 +1521,9 @@ mod tests {
             succeeded: true,
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
+            session_id: None,
+            cost_usd: None,
+            cost_unknown_reason: None,
         }
     }
 

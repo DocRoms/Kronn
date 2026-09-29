@@ -363,6 +363,10 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
 pub enum AcpSessionEvent {
     /// Model identifier from a structured runtime response, not configuration.
     ModelObserved(String),
+    /// The CLI's own session id, as its init line reports it. Unlike
+    /// `NativeSessionId` it is observation only: nothing is persisted for a
+    /// later resume, it just names the transcript this launch writes.
+    CliSessionObserved(String),
     /// Runtime-owned conversation identifier discovered after session
     /// creation. This is control metadata consumed by the runner, never text
     /// forwarded to the discussion or an agent-visible event payload.

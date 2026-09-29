@@ -5720,3 +5720,117 @@ fn replacing_validations_of_an_unknown_execution_is_refused() {
         .to_string();
     assert!(error.contains("not found"), "{error}");
 }
+
+/// KT-911 — a worker's CLI sessions are listed per attempt and per process, a
+/// stale dispatch cannot add one, and pricing a session never erases or
+/// duplicates it whichever of the two lands first.
+#[test]
+fn worker_cli_sessions_are_kept_per_attempt_and_only_the_current_dispatch_writes() {
+    let conn = setup();
+    let exec_id = launch_and_drive(
+        &conn,
+        "t-sessions",
+        1191,
+        &[
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+        ],
+    );
+    let record = |dispatch: &str, session: &str, cost: Option<&WorkerSessionCost>| {
+        record_worker_cli_session(&conn, &exec_id, dispatch, "ClaudeCode", session, cost).unwrap()
+    };
+    // `task_executions.dispatch_job_id` references a real dispatch job.
+    for (n, dispatch) in ["dispatch-a", "dispatch-b"].into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+             VALUES (?1, ?2, 'User', 'go', '2026-01-01T00:00:00Z', ?3)",
+            params![format!("m-{dispatch}"), DISC, 100 + n as i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                 trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, available_at, \
+                 created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?1, '[]', ?5, '2026-01-01T00:00:00Z', \
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            // One running dispatch per room: the earlier launch is over.
+            params![
+                dispatch,
+                DISC,
+                format!("m-{dispatch}"),
+                100 + n as i64,
+                if n == 0 { "Completed" } else { "Running" }
+            ],
+        )
+        .unwrap();
+    }
+    let unknown = WorkerSessionCost {
+        usd: None,
+        unknown_reason: Some("cache reads were not reported".into()),
+    };
+    let known = WorkerSessionCost {
+        usd: Some(1.5),
+        unknown_reason: None,
+    };
+
+    attach_execution_dispatch(&conn, &exec_id, "dispatch-a").unwrap();
+    // The price may land before the poll that names the session.
+    assert!(record("dispatch-a", "sess-1", Some(&unknown)));
+    assert!(
+        record("dispatch-a", "sess-1", None),
+        "naming it again is a no-op"
+    );
+    assert!(
+        !record("dispatch-old", "sess-stale", None),
+        "a dispatch the execution left cannot add a session"
+    );
+    let sessions = list_worker_cli_sessions(&conn, &exec_id).unwrap();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0].session_id, "sess-1");
+    assert_eq!(sessions[0].attempt_no, 0);
+    assert_eq!(sessions[0].cost_usd, None);
+    assert_eq!(
+        sessions[0].cost_unknown_reason.as_deref(),
+        Some("cache reads were not reported"),
+        "unknown is a reason, not a zero"
+    );
+
+    // The same dispatch relaunched its process: a second session, same attempt.
+    assert!(record("dispatch-a", "sess-2", Some(&known)));
+    // Pricing the first session again replaces its unknown reason with the figure.
+    assert!(record("dispatch-a", "sess-1", Some(&known)));
+    assert_eq!(list_worker_cli_sessions(&conn, &exec_id).unwrap().len(), 2);
+    // A rework: new dispatch, next attempt. Earlier sessions stay.
+    conn.execute(
+        "UPDATE task_executions SET attempt_no = 1 WHERE id = ?1",
+        [&exec_id],
+    )
+    .unwrap();
+    attach_execution_dispatch(&conn, &exec_id, "dispatch-b").unwrap();
+    assert!(record("dispatch-b", "sess-3", None));
+    assert!(
+        !record("dispatch-a", "sess-late", None),
+        "the replaced dispatch is stale now"
+    );
+
+    let sessions = list_worker_cli_sessions(&conn, &exec_id).unwrap();
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|s| (
+                s.attempt_no,
+                s.dispatch_job_id.as_str(),
+                s.session_id.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, "dispatch-a", "sess-1"),
+            (0, "dispatch-a", "sess-2"),
+            (1, "dispatch-b", "sess-3"),
+        ]
+    );
+    assert_eq!(sessions[0].cost_usd, Some(1.5));
+    assert_eq!(sessions[0].cost_unknown_reason, None);
+    assert_eq!(sessions[1].cost_usd, Some(1.5));
+    assert_eq!(sessions[2].cost_usd, None);
+}

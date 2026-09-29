@@ -336,6 +336,11 @@ impl AcpTransport for ClaudeAcpAdapter {
                     if let Some(model) = crate::agents::provenance::claude_observed_model(&line) {
                         let _ = events.send(AcpSessionEvent::ModelObserved(model)).await;
                     }
+                    if let Some(session_id) = crate::agents::provenance::claude_session_id(&line) {
+                        let _ = events
+                            .send(AcpSessionEvent::CliSessionObserved(session_id))
+                            .await;
+                    }
                     match parse_claude_stream_line(&line) {
                         StreamJsonEvent::Text(text) => {
                             let _ = events.send(AcpSessionEvent::TextDelta(text)).await;

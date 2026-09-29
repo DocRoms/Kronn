@@ -7065,7 +7065,12 @@ export type TaskExecutionAuditEvent = { id: string, action: string, from_status:
  * sourced from the orchestration aggregate; task DoD, manifests, validations
  * and telemetry are joined here so clients never reconstruct lineage from chat.
  */
-export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
+export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>,
+/**
+ * Every CLI session the worker ran, attempts and relaunches included, oldest
+ * first (KT-911). Empty for a worker with no CLI session (HTTP providers).
+ */
+worker_sessions: Array<TaskExecutionWorkerSession>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
 
 /**
  * One journaled transition (ADR §3; DoD-3).
@@ -7215,6 +7220,27 @@ export type TaskExecutionValidationRun = { id: string, task_execution_id: string
  * accepts by — never a raw kr-join token.
  */
 export type TaskExecutionWorkerOffer = { id: string, task_execution_id: string, attempt_no: number, target_cli_session_id: number, origin_discussion_id: string, child_discussion_id: string, status: WorkerOfferStatus, expires_at: string | null, offer_message_id: string | null, reason: string | null, accepted_at: string | null, declined_at: string | null, created_at: string, updated_at: string, };
+
+/**
+ * One CLI session of a task worker: the process one dispatch started, for one
+ * attempt. `session_id` is what the CLI reported on its init line, which is the
+ * name of its transcript (KT-911).
+ */
+export type TaskExecutionWorkerSession = {
+/**
+ * The semantic worker attempt (`0` is the first; each rework adds one).
+ */
+attempt_no: number,
+/**
+ * The dispatch that launched this process. A retried dispatch lists one
+ * session per process it started.
+ */
+dispatch_job_id: string, agent_type: string, session_id: string,
+/**
+ * `None` is unknown, never free — `cost_unknown_reason` says why. Also
+ * `None` while the session is still running.
+ */
+cost_usd: number | null, cost_unknown_reason?: string | null, started_at: string, };
 
 export type TaskWorkerCatalogue = { workers: Array<TaskWorkerCatalogueEntry>, };
 
@@ -8019,7 +8045,25 @@ cached_prompt_tokens?: number | null,
 /**
  * Prompt tokens written to the provider's prompt cache. `None` when not reported.
  */
-cache_write_prompt_tokens?: number | null, };
+cache_write_prompt_tokens?: number | null,
+/**
+ * The CLI's own session id for this attempt, as the runtime reported it on
+ * its `init` line — the name of the transcript it wrote (KT-911). `null`
+ * for a runtime with no CLI session, or when it never got as far as
+ * reporting one.
+ */
+session_id: string | null,
+/**
+ * What this attempt cost in USD, computed like a discussion reply's cost
+ * (KT-894): the agent's own figure when it gives one, else the detailed
+ * counters at the rates of the model that served it. `null` is unknown,
+ * never free — `cost_unknown_reason` then says why.
+ */
+cost_usd: number | null,
+/**
+ * Why `cost_usd` is `null`. Absent when the cost is known.
+ */
+cost_unknown_reason?: string | null, };
 
 export type WorkflowAgentAttemptRole = "Initial" | "Repair" | "Escalation" | "Review" | "Author";
 

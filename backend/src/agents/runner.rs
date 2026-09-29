@@ -1814,6 +1814,11 @@ pub trait AgentIo: Send {
     fn reported_prompt_cache(&self) -> PromptCacheUsage {
         PromptCacheUsage::default()
     }
+    /// The structured transport's usage with its parts kept apart — what a
+    /// cost is computed from (KT-894). `None` when nothing was reported.
+    fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        None
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -1846,6 +1851,9 @@ impl AgentIo for AgentProcess {
     }
     fn reported_prompt_cache(&self) -> PromptCacheUsage {
         AgentProcess::reported_prompt_cache(self)
+    }
+    fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        AgentProcess::reported_usage_counters(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -3902,6 +3910,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                             if let Some(model) = provenance::claude_observed_model(&line) {
                                 provenance::observe_model(provenance.as_ref(), &model);
                             }
+                            if let Some(session_id) = provenance::claude_session_id(&line) {
+                                provenance::observe_session(provenance.as_ref(), &session_id);
+                            }
                         }
                         if tx_out.send(line).await.is_err() {
                             break;
@@ -4421,6 +4432,9 @@ async fn run_acp_session(
                     }
                     AcpSessionEvent::ModelObserved(model) => {
                         provenance::observe_model(provenance.as_ref(), &model);
+                    }
+                    AcpSessionEvent::CliSessionObserved(session_id) => {
+                        provenance::observe_session(provenance.as_ref(), &session_id);
                     }
                     AcpSessionEvent::ToolCall { name } => {
                         // A tool call is not text. Forwarding it on `tx` — the

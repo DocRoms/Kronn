@@ -7942,6 +7942,7 @@ pub(crate) fn execution_detail(
         target_branch: run.target_branch,
         definition_of_done: task.definition_of_done,
         attempts: attempts.into_values().collect(),
+        worker_sessions: crate::db::orchestration::list_worker_cli_sessions(conn, exec_id)?,
         validation_runs: crate::db::orchestration::list_validation_runs(conn, exec_id)?,
         recovery,
         usage: crate::models::TaskExecutionUsage {
@@ -10740,6 +10741,7 @@ const COMPACT_STATUS_MAX_CHARS: usize = 960;
 const COMPACT_ERROR_MAX_CHARS: usize = 160;
 const COMPACT_COMMAND_MAX_CHARS: usize = 60;
 const COMPACT_VALIDATIONS_MAX: usize = 3;
+const COMPACT_SESSIONS_MAX: usize = 2;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CompactValidation {
@@ -10769,6 +10771,10 @@ pub struct TaskExecutionCompactStatus {
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub validations: Vec<CompactValidation>,
+    /// The worker's most recent CLI sessions, newest last: the names of its
+    /// transcripts (KT-911). `view: full` lists them all, attempts included.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub worker_sessions: Vec<String>,
     pub next_action: Option<CompactNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<ExecutionWaitOutcome>,
@@ -10919,11 +10925,21 @@ pub(crate) fn compact_execution_status(
             .map(|delivery| delivery.head_sha.clone()),
         last_error: compact_last_error(detail),
         validations: compact_validations(detail),
+        worker_sessions: detail.worker_sessions[detail
+            .worker_sessions
+            .len()
+            .saturating_sub(COMPACT_SESSIONS_MAX)..]
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect(),
         next_action: compact_next_action(detail),
         wait,
     };
     while compact_status_chars(&compact) > COMPACT_STATUS_MAX_CHARS {
-        if !compact.validations.is_empty() {
+        // The decision fields outrank the transcript names: drop those first.
+        if !compact.worker_sessions.is_empty() {
+            compact.worker_sessions.remove(0);
+        } else if !compact.validations.is_empty() {
             compact.validations.remove(0);
         } else if let Some(error) = compact.last_error.take() {
             let shorter = error.chars().count() / 2;
@@ -24520,6 +24536,147 @@ mod tests {
         assert_eq!(worst["status"], "AwaitingReview");
         assert!(worst["last_error"].as_str().unwrap().ends_with('…'));
         assert!(!worst["validations"].as_array().unwrap().is_empty());
+    }
+
+    /// KT-911 DoD-3 — `task_exec_status` lists the CLI sessions of the worker,
+    /// attempts included, with what each cost; the compact view names the latest
+    /// and still fits its budget.
+    #[tokio::test]
+    async fn task_exec_status_lists_the_workers_cli_sessions_attempts_included() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, child_id, exec_id) = kt791_delivered_execution(&db, repo.path()).await;
+        let state = kt790_state(&db);
+
+        let (before, _) = kt791_status(&state, &exec_id, TaskExecStatusView::Full).await;
+        assert_eq!(
+            before["worker_sessions"],
+            serde_json::json!([]),
+            "a worker that ran no CLI session lists none"
+        );
+        let (compact, _) = kt791_status(&state, &exec_id, TaskExecStatusView::Compact).await;
+        assert!(compact.get("worker_sessions").is_none());
+
+        // The joined worker of this harness has no dispatch: give the execution
+        // two real ones, the launch and the rework's.
+        let dispatch = "dispatch-launch".to_string();
+        {
+            let (id, child_id, dispatch) = (exec_id.clone(), child_id.clone(), dispatch.clone());
+            db.with_conn(move |conn| {
+                for (n, job) in [dispatch.as_str(), "dispatch-rework"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, content, timestamp, \
+                             sort_order) VALUES (?1, ?2, 'User', 'go', '2026-09-29T00:00:00Z', ?3)",
+                        rusqlite::params![format!("m-{job}"), child_id, 9_000 + n as i64],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                             trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, \
+                             available_at, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?1, '[]', ?5, '2026-09-29T00:00:00Z', \
+                             '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z')",
+                        // One running dispatch per room: the launch is over.
+                        rusqlite::params![
+                            job,
+                            child_id,
+                            format!("m-{job}"),
+                            9_000 + n as i64,
+                            if n == 0 { "Completed" } else { "Running" }
+                        ],
+                    )?;
+                }
+                crate::db::orchestration::attach_execution_dispatch(conn, &id, &dispatch)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        {
+            let (id, dispatch) = (exec_id.clone(), dispatch.clone());
+            db.with_conn(move |conn| {
+                let usd = |usd| crate::db::orchestration::WorkerSessionCost {
+                    usd,
+                    unknown_reason: usd
+                        .is_none()
+                        .then(|| "cache reads were not reported".into()),
+                };
+                // The first launch, a relaunch of the same dispatch, then a rework.
+                crate::db::orchestration::record_worker_cli_session(
+                    conn,
+                    &id,
+                    &dispatch,
+                    "ClaudeCode",
+                    "11111111-1111-4111-8111-111111111111",
+                    Some(&usd(Some(0.42))),
+                )?;
+                crate::db::orchestration::record_worker_cli_session(
+                    conn,
+                    &id,
+                    &dispatch,
+                    "ClaudeCode",
+                    "22222222-2222-4222-8222-222222222222",
+                    Some(&usd(None)),
+                )?;
+                conn.execute(
+                    "UPDATE task_executions SET attempt_no = attempt_no + 1, \
+                            dispatch_job_id = 'dispatch-rework' WHERE id = ?1",
+                    [&id],
+                )?;
+                crate::db::orchestration::record_worker_cli_session(
+                    conn,
+                    &id,
+                    "dispatch-rework",
+                    "ClaudeCode",
+                    "33333333-3333-4333-8333-333333333333",
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        let (full, _) = kt791_status(&state, &exec_id, TaskExecStatusView::Full).await;
+        let sessions = full["worker_sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 3, "{full:#}");
+        assert_eq!(
+            sessions[0]["session_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(sessions[0]["attempt_no"], 0);
+        assert_eq!(sessions[0]["dispatch_job_id"], dispatch.as_str());
+        assert_eq!(sessions[0]["agent_type"], "ClaudeCode");
+        assert_eq!(sessions[0]["cost_usd"], 0.42);
+        assert!(sessions[0].get("cost_unknown_reason").is_none());
+        assert_eq!(
+            sessions[1]["session_id"],
+            "22222222-2222-4222-8222-222222222222"
+        );
+        assert!(sessions[1]["cost_usd"].is_null());
+        assert_eq!(
+            sessions[1]["cost_unknown_reason"],
+            "cache reads were not reported"
+        );
+        assert_eq!(
+            sessions[2]["attempt_no"], 1,
+            "the rework is its own attempt"
+        );
+        assert_eq!(sessions[2]["dispatch_job_id"], "dispatch-rework");
+
+        let (compact, compact_chars) =
+            kt791_status(&state, &exec_id, TaskExecStatusView::Compact).await;
+        assert!(compact_chars < 1000, "{compact_chars}: {compact:#}");
+        assert_eq!(
+            compact["worker_sessions"],
+            serde_json::json!([
+                "22222222-2222-4222-8222-222222222222",
+                "33333333-3333-4333-8333-333333333333"
+            ]),
+            "the latest sessions, newest last"
+        );
     }
 
     /// KT-791 DoD-2 — reassigning an execution awaiting review rejects its

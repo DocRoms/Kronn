@@ -3026,6 +3026,7 @@ async fn make_agent_stream_inner(
                 state.db.clone(),
                 worker.execution_id.clone(),
                 worker.dispatch_job_id.clone(),
+                worker.agent_type.clone(),
             )
         });
         match runner::start_agent_with_config(runner::AgentStartConfig {
@@ -3539,9 +3540,10 @@ async fn make_agent_stream_inner(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
-                if let Some(recorder) = served_model {
-                    recorder.finish().await;
-                }
+                let finished_worker_launch = match served_model {
+                    Some(recorder) => Some(recorder.finish().await),
+                    None => None,
+                };
                 let validation_redaction_error =
                     validation_redaction_scope
                         .as_ref()
@@ -3856,6 +3858,22 @@ async fn make_agent_stream_inner(
                         reason = reason.reason(),
                         "message cost unknown"
                     );
+                }
+                // The execution lists the worker's sessions with the cost this
+                // reply was priced at (KT-911): the figure, or why there is none.
+                if let Some(launch) = finished_worker_launch.as_ref() {
+                    launch
+                        .record_cost(crate::db::orchestration::WorkerSessionCost {
+                            usd: priced.cost_usd,
+                            unknown_reason: match (priced.cost_usd, priced.cost_unknown) {
+                                (Some(_), _) => None,
+                                (None, Some(reason)) => Some(reason.reason().to_string()),
+                                (None, None) => {
+                                    Some("the runtime reported no usage for this session".into())
+                                }
+                            },
+                        })
+                        .await;
                 }
 
                 // 0.8.7 anti-hallucination P2 — lint the finalized reply:
