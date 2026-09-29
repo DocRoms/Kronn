@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use axum::{
@@ -8,6 +8,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::resource_links::{
+    definition_references, link_resources, ResourceKey, ResourceReferences,
+};
 use crate::models::{
     ApiErrorCode, ApiResponse, ApproveProjectRepositoryResourceRequest, ArtifactBundlePage,
     CreateLivePageDataset, ImportProjectRepositoryResourceRequest, LivePage, LivePageRevision,
@@ -139,7 +142,7 @@ fn lock_entry(
 }
 
 impl ProjectRepositoryResourceKind {
-    fn identity_kind(self) -> &'static str {
+    pub(super) fn identity_kind(self) -> &'static str {
         match self {
             Self::Skill => "skill",
             Self::Workflow => "workflow",
@@ -942,6 +945,33 @@ pub async fn repository_resources(
                 skill.repository_fingerprint = view.repository_fingerprint;
                 skill.kronn_fingerprint = view.kronn_fingerprint;
             }
+            // The repository side of every non-skill entry, read once: the id
+            // its file was written under and what its definition points at.
+            let mut repository_side: HashMap<ResourceKey, ResourceReferences> = HashMap::new();
+            for entry in lock.iter().flat_map(|lock| lock.resources.iter()) {
+                if entry.kind == ProjectRepositoryResourceKind::Skill {
+                    continue;
+                }
+                let Ok((document, _)) =
+                    crate::core::repository_resources::read_resource(&root, entry)
+                else {
+                    continue;
+                };
+                repository_side.insert(
+                    (entry.kind.identity_kind(), entry.slug.clone()),
+                    ResourceReferences {
+                        aliases: document
+                            .resource
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .into_iter()
+                            .collect(),
+                        references: definition_references(entry.kind, &document.resource),
+                    },
+                );
+            }
+            let mut link_sources: HashMap<ResourceKey, ResourceReferences> = HashMap::new();
             let mut resources = Vec::with_capacity(seeds.len());
             for seed in seeds {
                 let identity = crate::db::resource_identities::find_by_target(
@@ -959,6 +989,7 @@ pub async fn repository_resources(
                         slug
                     }
                 };
+                let page_slug = seed.slug.clone();
                 let slug = identity
                     .as_ref()
                     .map(|item| item.slug.clone())
@@ -966,6 +997,20 @@ pub async fn repository_resources(
                     .unwrap_or_else(generated_slug);
                 let repository_paths = seed.kind.paths(&slug);
                 let rendered = render_database_resource(conn, seed.kind, &seed.id, &slug, None)?;
+                let mut link_source = repository_side
+                    .get(&(seed.kind.identity_kind(), slug.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                link_source.references.extend(definition_references(
+                    seed.kind,
+                    &rendered.document.resource,
+                ));
+                // A workflow names its Artifact by id or by slug.
+                link_source.aliases.extend(page_slug);
+                if seed.kind == ProjectRepositoryResourceKind::Artifact {
+                    link_source.aliases.push(slug.clone());
+                }
+                link_sources.insert((seed.kind.identity_kind(), seed.id.clone()), link_source);
                 let alignment = crate::db::repository_resources::find_alignment(
                     conn,
                     &project_key,
@@ -1011,6 +1056,8 @@ pub async fn repository_resources(
                     aligned_at: view.aligned_at,
                     repository_fingerprint: view.repository_fingerprint,
                     kronn_fingerprint: view.kronn_fingerprint,
+                    uses: Vec::new(),
+                    used_by: Vec::new(),
                 });
             }
             if let Some(lock) = lock.as_ref() {
@@ -1033,8 +1080,16 @@ pub async fn repository_resources(
                         .as_ref()
                         .ok()
                         .map(|(_, hash)| crate::core::repository_resources::fingerprint(hash));
+                    let id = format!("repository:{}:{}", entry.kind.identity_kind(), entry.slug);
+                    link_sources.insert(
+                        (entry.kind.identity_kind(), id.clone()),
+                        repository_side
+                            .get(&(entry.kind.identity_kind(), entry.slug.clone()))
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
                     resources.push(ProjectRepositoryResource {
-                        id: format!("repository:{}:{}", entry.kind.identity_kind(), entry.slug),
+                        id,
                         name: entry.name.clone(),
                         slug: entry.slug.clone(),
                         kind: entry.kind,
@@ -1063,10 +1118,13 @@ pub async fn repository_resources(
                         aligned_at: None,
                         repository_fingerprint,
                         kronn_fingerprint: None,
+                        uses: Vec::new(),
+                        used_by: Vec::new(),
                     });
                 }
             }
             resources.sort_by_key(|resource| resource.name.to_lowercase());
+            link_resources(&mut resources, &link_sources);
             let (can_write_repository, can_write_repository_reason) =
                 crate::core::repository_resources::can_write_repository(&root);
             let uncommitted_managed_paths = lock
@@ -2578,6 +2636,179 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
         }
+    }
+
+    fn sample_prompt_json(id: &str, name: &str, project_id: &str) -> QuickPrompt {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "icon": "zap", "prompt_template": "Review {{diff}}",
+            "variables": [], "agent": "ClaudeCode", "project_id": project_id,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn sample_workflow_json(
+        id: &str,
+        name: &str,
+        project_id: &str,
+        steps: serde_json::Value,
+    ) -> Workflow {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "project_id": project_id,
+            "trigger": {"type": "Manual"}, "steps": steps, "actions": [],
+            "safety": {}, "workspace_config": null, "concurrency_limit": null,
+            "enabled": false,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn listing_exposes_uses_and_used_by_including_missing_references_and_loops() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_execs::insert_quick_exec(conn, &sample_exec("project-1"))?;
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt_json("qp-1", "Review", "project-1"),
+                )?;
+                crate::db::workflows::insert_workflow(
+                    conn,
+                    &sample_workflow_json(
+                        "wf-1",
+                        "Nightly triage",
+                        "project-1",
+                        serde_json::json!([
+                            {"name": "ask", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-1"},
+                            {"name": "lint", "step_type": {"type": "CollectApiData"},
+                             "collect_api_data": {"sources": [{"alias": "lint", "quick_exec_id": "qe-1"}]}},
+                            {"name": "gone", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-gone"},
+                            {"name": "child", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-2"}
+                        ]),
+                    ),
+                )?;
+                crate::db::workflows::insert_workflow(
+                    conn,
+                    &sample_workflow_json(
+                        "wf-2",
+                        "Child",
+                        "project-1",
+                        serde_json::json!([
+                            {"name": "back", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-1"}
+                        ]),
+                    ),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let listing = list_resources(&state, &project_id).await;
+        let find = |id: &str| listing.resources.iter().find(|item| item.id == id).unwrap();
+
+        let nightly = find("wf-1");
+        let uses: Vec<(&str, bool)> = nightly
+            .uses
+            .iter()
+            .map(|link| (link.id.as_str(), link.missing))
+            .collect();
+        assert_eq!(
+            uses,
+            vec![
+                ("wf-2", false),
+                ("qe-1", false),
+                ("qp-1", false),
+                ("qp-gone", true)
+            ],
+            "present links by name, then the missing one"
+        );
+        let child = &nightly.uses[0];
+        assert_eq!(child.kind, ProjectRepositoryResourceKind::Workflow);
+        assert_eq!(child.slug.as_deref(), Some("child"));
+        assert_eq!(child.name, "Child");
+        let gone = nightly.uses.last().unwrap();
+        assert_eq!(gone.kind, ProjectRepositoryResourceKind::QuickPrompt);
+        assert!(gone.slug.is_none(), "nothing to derive a stable slug from");
+
+        for leaf in ["qp-1", "qe-1"] {
+            assert!(find(leaf).uses.is_empty());
+            let used_by: Vec<&str> = find(leaf)
+                .used_by
+                .iter()
+                .map(|link| link.id.as_str())
+                .collect();
+            assert_eq!(used_by, vec!["wf-1"]);
+            assert_eq!(
+                find(leaf).used_by[0].slug.as_deref(),
+                Some("nightly-triage")
+            );
+        }
+        // The loop is visible from both sides and neither end vanishes.
+        let child = find("wf-2");
+        assert_eq!(child.uses.len(), 1);
+        assert_eq!(child.uses[0].id, "wf-1");
+        assert_eq!(child.used_by.len(), 1);
+        assert_eq!(child.used_by[0].id, "wf-1");
+        assert_eq!(nightly.used_by.len(), 1);
+        assert_eq!(nightly.used_by[0].id, "wf-2");
+    }
+
+    #[tokio::test]
+    async fn listing_resolves_definitions_written_on_another_machine_through_their_files() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        // Published elsewhere: the workflow file names the Quick Prompt by the
+        // id it had on that machine, and nothing of it is in Kronn's database.
+        let prompt = sample_prompt_json("foreign-qp", "Review", "elsewhere");
+        let workflow = sample_workflow_json(
+            "foreign-wf",
+            "Nightly triage",
+            "elsewhere",
+            serde_json::json!([
+                {"name": "ask", "step_type": {"type": "Agent"}, "quick_prompt_id": "foreign-qp"},
+                {"name": "lost", "step_type": {"type": "Agent"}, "quick_prompt_id": "never-published"}
+            ]),
+        );
+        for rendered in [
+            crate::core::repository_resources::render_quick_prompt(&prompt, "review").unwrap(),
+            crate::core::repository_resources::render_workflow(&workflow, "nightly-triage")
+                .unwrap(),
+        ] {
+            crate::core::repository_resources::publish(root.path(), "repo", rendered, false)
+                .unwrap();
+        }
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+
+        let listing = list_resources(&state, &project_id).await;
+        let find = |slug: &str| {
+            listing
+                .resources
+                .iter()
+                .find(|item| item.slug == slug)
+                .unwrap()
+        };
+        assert_eq!(
+            find("nightly-triage").status,
+            ProjectRepositoryResourceStatus::RepositoryOnly
+        );
+        let uses = &find("nightly-triage").uses;
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses[0].id, "repository:quick_prompt:review");
+        assert_eq!(uses[0].slug.as_deref(), Some("review"));
+        assert!(!uses[0].missing);
+        assert_eq!(uses[1].id, "never-published");
+        assert!(uses[1].missing);
+        assert_eq!(find("review").used_by.len(), 1);
+        assert_eq!(
+            find("review").used_by[0].slug.as_deref(),
+            Some("nightly-triage")
+        );
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+import type { TransferSide } from './repositoryResourceLinks';
 import { isExecutable, type ResourceRow } from './repositoryResourceRows';
 
 export type TransferKind =
@@ -13,6 +14,8 @@ export type TransferKind =
 export interface TransferPlan {
   kind: TransferKind;
   rows: ResourceRow[];
+  /** Linked items the transfer also moves, dependencies first. */
+  linked?: ResourceRow[];
 }
 
 export type EffectTone = 'write' | 'commit' | 'activation' | 'loss';
@@ -39,6 +42,13 @@ export const writesToRepository = (kind: TransferKind): boolean => (
   kind === 'publish' || kind === 'update_repository' || kind === 'publish_selected'
 );
 
+/** Which side a one-resource transfer writes, when its dependencies matter. */
+export function transferSide(kind: TransferKind): TransferSide | null {
+  if (kind === 'publish' || kind === 'update_repository') return 'repository';
+  if (kind === 'import' || kind === 'update_kronn') return 'kronn';
+  return null;
+}
+
 /** Every path a repository write would touch, shared scaffold included. */
 export function writtenPaths(rows: ResourceRow[]): string[] {
   return [...new Set(rows.flatMap(row => (row.writePreview.length > 0 ? row.writePreview : [row.targetPath])))]
@@ -50,8 +60,11 @@ export function writtenPaths(rows: ResourceRow[]): string[] {
  *  whether a commit is left to do, what runs, and what gets replaced. */
 export function describeTransfer(plan: TransferPlan, context: EffectContext): EffectLine[] {
   const [row] = plan.rows;
+  const linked = plan.linked ?? [];
+  const linkedLine = linked.length > 0 ? [line('write', 'linkedIncluded', linked.length)] : [];
   if (writesToRepository(plan.kind)) {
-    const lines = [line('write', 'write', writtenPaths(plan.rows).join(', '))];
+    const lines = [line('write', 'write', writtenPaths([...linked, ...plan.rows]).join(', '))];
+    lines.push(...linkedLine);
     if (!context.kronnExists) lines.push(line('write', 'createsFolder'));
     lines.push(line('commit', 'commitTodo'), line('activation', 'publishNoActivation'));
     lines.push(plan.kind === 'update_repository'
@@ -64,6 +77,7 @@ export function describeTransfer(plan: TransferPlan, context: EffectContext): Ef
     return [
       line('write', 'repositoryUntouched'),
       line('write', plan.kind === 'import' ? 'kronnCreates' : 'kronnReplaces', row.name, path),
+      ...linkedLine,
       line('commit', 'commitNone'),
       line('activation', isExecutable(row.kind) ? 'needsApproval' : 'noExecution'),
       plan.kind === 'update_kronn'

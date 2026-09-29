@@ -3228,6 +3228,84 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
 }
 
 #[tokio::test]
+async fn project_repository_resources_expose_uses_and_used_by_with_missing_references() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["linked-project", "Linked project", project_path, now.to_rfc3339()],
+                )?;
+                kronn::db::quick_execs::insert_quick_exec(
+                    conn,
+                    &kronn::models::QuickExec {
+                        id: "qe-lint".into(),
+                        name: "Lint".into(),
+                        icon: "terminal".into(),
+                        description: String::new(),
+                        project_id: Some("linked-project".into()),
+                        command: "cargo".into(),
+                        args: vec!["check".into()],
+                        timeout_secs: 30,
+                        output_format: Default::default(),
+                        variables: Vec::new(),
+                        pinned: false,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                let workflow: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
+                    "id": "wf-nightly", "name": "Nightly triage", "project_id": "linked-project",
+                    "trigger": {"type": "Manual"},
+                    "steps": [
+                        {"name": "lint", "step_type": {"type": "CollectApiData"},
+                         "collect_api_data": {"sources": [{"alias": "lint", "quick_exec_id": "qe-lint"}]}},
+                        {"name": "ask", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-gone"}
+                    ],
+                    "actions": [], "safety": {}, "workspace_config": null,
+                    "concurrency_limit": null, "enabled": false,
+                    "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339()
+                }))
+                .unwrap();
+                kronn::db::workflows::insert_workflow(conn, &workflow)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, response) =
+        get_json(app, "/api/projects/linked-project/repository-resources").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    let resources = response["data"]["resources"].as_array().unwrap();
+    let find = |id: &str| resources.iter().find(|item| item["id"] == id).unwrap();
+    assert_eq!(
+        find("wf-nightly")["uses"],
+        serde_json::json!([
+            {"kind": "quick_exec", "id": "qe-lint", "slug": "lint", "name": "Lint", "missing": false},
+            {"kind": "quick_prompt", "id": "qp-gone", "name": "qp-gone", "missing": true},
+        ])
+    );
+    assert_eq!(find("wf-nightly")["used_by"], serde_json::json!([]));
+    assert_eq!(find("qe-lint")["uses"], serde_json::json!([]));
+    assert_eq!(
+        find("qe-lint")["used_by"],
+        serde_json::json!([
+            {"kind": "workflow", "id": "wf-nightly", "slug": "nightly-triage", "name": "Nightly triage", "missing": false},
+        ])
+    );
+}
+
+#[tokio::test]
 async fn repository_resource_publish_align_import_and_hash_approval_round_trip() {
     let state = test_state();
     state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());

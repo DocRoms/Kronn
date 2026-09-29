@@ -114,6 +114,11 @@
 .rr-origin { padding: 0 6px; border: 1px solid var(--kr-border); border-radius: var(--kr-radius-pill); color: var(--kr-text-muted); font: var(--kr-fs-sm) var(--kr-font-mono); }
 .rr-description { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 1; }
 .rr-diverge { color: var(--kr-warning); font-size: var(--kr-fs-sm); }
+/* Linked resources: a discreet count on the row, a status line after a selection */
+.rr-links-badge { display: inline-flex; align-items: center; gap: 3px; color: var(--kr-text-muted); font-size: var(--kr-fs-sm); white-space: nowrap; }
+.rr-links-badge[data-missing] { color: var(--kr-warning); }
+.rr-link-note { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 10px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-radius-sm); background: var(--kr-bg-raised); color: var(--kr-text-muted); font-size: var(--kr-fs-sm); }
+.rr-link-note[data-tone='warning'] { border-color: var(--kr-warning); color: var(--kr-warning); }
 /* Path: the start (kronn/workflows/) shrinks with an ellipsis, the end of the
    file name never does, and the note and copy button keep their own room. */
 .rr-path { display: flex; min-width: 0; align-items: center; gap: 6px; color: var(--kr-text-muted); }
@@ -132,6 +137,7 @@
 .rr-pill[data-state='up_to_date'] { border-color: var(--kr-success); color: var(--kr-success); }
 .rr-pill[data-state='repository_newer'],
 .rr-pill[data-state='kronn_newer'] { border-color: var(--kr-info); background: var(--kr-info-bg); color: var(--kr-info); }
+.rr-pill[data-state='missing'] { margin-left: 4px; border-color: var(--kr-warning); background: var(--kr-warning-bg); color: var(--kr-warning); }
 .rr-pill[data-state='conflict'] { border-color: var(--kr-warning); background: var(--kr-warning-bg); color: var(--kr-warning); }
 .rr-pill[data-state='approval_required'] { border-color: var(--kr-pink); background: color-mix(in srgb, var(--kr-pink) 12%, transparent); color: var(--kr-pink); }
 .rr-cell-action { flex-direction: row; align-items: center; justify-content: flex-end; gap: 6px; }

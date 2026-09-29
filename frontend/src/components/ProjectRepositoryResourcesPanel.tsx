@@ -11,10 +11,18 @@ import {
   type ProjectRepositoryResourcesTab,
 } from '../lib/projectRepositoryResourcesTab';
 import { removeFromKronn } from '../lib/repositoryResourceExecution';
-import type { TransferKind, TransferPlan } from '../lib/repositoryResourceEffects';
+import { transferSide, type TransferKind, type TransferPlan } from '../lib/repositoryResourceEffects';
+import {
+  linkedToggleNote,
+  rowGraph,
+  toggleLinked,
+  transferLinks,
+  type LinkNote,
+} from '../lib/repositoryResourceLinks';
 import {
   alignExcludedCount,
   alignLines,
+  allRows,
   attachedSkillIds,
   attentionItems,
   AUTOMATION_TYPE_FILTERS,
@@ -41,7 +49,7 @@ import { RepositoryResourceAlign } from './RepositoryResourceAlign';
 import { RepositoryResourceApprove } from './RepositoryResourceApprove';
 import { RepositoryResourceCompare } from './RepositoryResourceCompare';
 import { RepositoryResourceRow, type RowMenuAction } from './RepositoryResourceRow';
-import { RepositoryResourceTransfer } from './RepositoryResourceTransfer';
+import { RepositoryResourceTransfer, type TransferChoice } from './RepositoryResourceTransfer';
 import './ProjectRepositoryResourcesPanel.css';
 
 interface Props {
@@ -93,6 +101,9 @@ const includedByDefault = (row: ResourceRow) => (
 
 type Sheet = { type: 'compare' | 'approve'; key: string };
 
+/** Rows a person can tick: the ones that exist only in Kronn and can be written. */
+const canTick = (row?: ResourceRow): boolean => row?.state === 'kronn_only' && !row.suggested;
+
 export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, onOpenGit, onAddKey }: Props) {
   const { t } = useT();
   const [data, setData] = useState<ProjectRepositoryResources | null>(null);
@@ -110,12 +121,14 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const [transfer, setTransfer] = useState<TransferPlan | null>(null);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [alignOpen, setAlignOpen] = useState(false);
+  const [linkNote, setLinkNote] = useState<LinkNote | null>(null);
   // Folded by default, and remembered per project once someone opens it.
   const [catalogOpenByProject, setCatalogOpenByProject] = useState<Record<string, boolean>>({});
   const catalogOpenStored = catalogOpenByProject[projectId] ?? readProjectRepositoryCatalogOpen(projectId);
 
   const applyResult = useCallback((result: ProjectRepositoryResources) => {
     setData(result);
+    setLinkNote(null);
     const rows = buildRows(result);
     setSelected(new Set(
       [...rows.skills, ...rows.automation, ...rows.artifacts]
@@ -139,6 +152,8 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   }, [projectId, applyResult]);
 
   const rows: RepositoryRows | null = useMemo(() => (data ? buildRows(data) : null), [data]);
+  const graph = useMemo(() => rowGraph(rows ? allRows(rows) : []), [rows]);
+  const openableKeys = useMemo(() => new Set(graph.keys()), [graph]);
   const attentionAll: AttentionItem[] = useMemo(() => (rows ? attentionItems(rows) : []), [rows]);
   const attentionTotal = attentionAll.length;
   const loaded = data !== null;
@@ -207,13 +222,16 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
     setActiveTab(tab);
     setFilter('all');
     setTypeFilter('all');
+    setLinkNote(null);
     rememberProjectRepositoryResourcesTab(tab);
   };
-  const toggleSelected = (key: string) => setSelected(current => {
-    const next = new Set(current);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    return next;
-  });
+  // Ticking a resource ticks what it needs, and one that a ticked resource
+  // still needs cannot be unticked: the selection always works as a whole.
+  const toggleSelected = (key: string) => {
+    const result = toggleLinked(graph, selected, key, dep => canTick(graph.get(dep)));
+    setSelected(result.checked);
+    setLinkNote(linkedToggleNote(t, graph, key, result));
+  };
 
   const tree = useMemo(() => {
     if (!data) return [];
@@ -241,15 +259,20 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
     switch (plan.kind) {
       case 'publish':
       case 'update_repository':
-        await projectsApi.publishRepositoryResource(projectId, {
-          kind: row.kind, id: row.id, overwrite_repository_changes: false,
-        });
+        // What the resource needs goes first, so it is never written alone.
+        for (const item of [...(plan.linked ?? []), row]) {
+          await projectsApi.publishRepositoryResource(projectId, {
+            kind: item.kind, id: item.id, overwrite_repository_changes: false,
+          });
+        }
         break;
       case 'import':
       case 'update_kronn':
-        await projectsApi.importRepositoryResource(projectId, {
-          kind: row.kind, slug: row.slug, overwrite_kronn_changes: false,
-        });
+        for (const item of [...(plan.linked ?? []), row]) {
+          await projectsApi.importRepositoryResource(projectId, {
+            kind: item.kind, slug: item.slug, overwrite_kronn_changes: false,
+          });
+        }
         break;
       case 'use_native':
         await projectsApi.useNativeSkill(projectId, { relative_path: nativePath ?? row.paths[0] });
@@ -270,8 +293,14 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
     }
   };
 
-  const confirmTransfer = async (plan: TransferPlan, nativePath?: string) => {
-    await runTask(projectId, `${plan.kind}:${plan.rows[0].key}`, transferTask(plan, nativePath));
+  const confirmTransfer = async (plan: TransferPlan, choice: TransferChoice) => {
+    const side = transferSide(plan.kind);
+    const linked = side && choice.includeLinked ? transferLinks(graph, plan.rows[0], side).pending : [];
+    await runTask(
+      projectId,
+      `${plan.kind}:${plan.rows[0].key}`,
+      transferTask({ ...plan, linked }, choice.nativePath),
+    );
     setTransfer(null);
   };
 
@@ -348,6 +377,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
     : undefined;
   const attentionByTab = (tab: ProjectRepositoryResourcesTab) => attentionAll.filter(item => item.row.group === tab).length;
   const visibleAttention = attentionOpen ? attention : attention.slice(0, ATTENTION_VISIBLE);
+  const transferKindSide = transfer ? transferSide(transfer.kind) : null;
 
   const tabs: Array<{ id: ProjectRepositoryResourcesTab; count: number }> = [
     { id: 'skills', count: rows.skills.filter(row => !row.suggested).length },
@@ -604,6 +634,12 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
             )}
           </div>
 
+          {linkNote && (
+            <p className="rr-link-note" data-tone={linkNote.tone} role="status" data-testid="link-note">
+              {linkNote.text}
+            </p>
+          )}
+
           {tabRows.length === 0 ? (
             <p>{t(emptyKey)}</p>
           ) : visibleRows.length === 0 ? (
@@ -720,21 +756,24 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       {transfer && (
         <RepositoryResourceTransfer
           plan={transfer}
+          links={transferKindSide ? transferLinks(graph, transfer.rows[0], transferKindSide) : undefined}
           kronnExists={kronnExists}
           busy={busyKey !== null}
-          onConfirm={nativePath => { void confirmTransfer(transfer, nativePath); }}
+          onConfirm={choice => { void confirmTransfer(transfer, choice); }}
           onCancel={() => setTransfer(null)}
         />
       )}
       {sheet?.type === 'compare' && sheetRow && (
         <RepositoryResourceCompare
           row={sheetRow}
+          openable={openableKeys}
           canWrite={canWrite}
           busy={busyKey !== null}
           onKeepRepository={() => { void keepSide(sheetRow, 'repository'); }}
           onKeepKronn={() => { void keepSide(sheetRow, 'kronn'); }}
           onRefresh={() => { void refresh(projectId); }}
           onPrimary={() => { setSheet(null); startAction(sheetRow); }}
+          onOpenLink={key => setSheet({ type: 'compare', key })}
           onClose={() => setSheet(null)}
         />
       )}
@@ -751,6 +790,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
       {alignOpen && (
         <RepositoryResourceAlign
           lines={allLines}
+          graph={graph}
           excludedCount={excludedCount}
           canWrite={canWrite}
           kronnExists={kronnExists}

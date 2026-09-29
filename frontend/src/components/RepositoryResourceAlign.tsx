@@ -2,11 +2,14 @@ import { useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { writtenPaths } from '../lib/repositoryResourceEffects';
+import { linkedToggleNote, toggleLinked, type LinkNote, type RowGraph } from '../lib/repositoryResourceLinks';
 import type { AlignDirection, AlignLine } from '../lib/repositoryResourceRows';
 import { RepositoryResourceModal } from './RepositoryResourceModal';
 
 interface Props {
   lines: AlignLine[];
+  /** Every row, to follow the references between resources. */
+  graph: RowGraph;
   /** Rows left out because they hold two versions or wait for approval. */
   excludedCount: number;
   canWrite: boolean;
@@ -21,19 +24,23 @@ const SECTIONS: AlignDirection[] = ['to_kronn', 'to_repository'];
 /** Recap of everything "Align all" would move, one checkbox per line, all
  *  ticked when it opens except what the repository's state forbids writing. */
 export function RepositoryResourceAlign({
-  lines, excludedCount, canWrite, kronnExists, busy, onConfirm, onCancel,
+  lines, graph, excludedCount, canWrite, kronnExists, busy, onConfirm, onCancel,
 }: Props) {
   const { t } = useT();
   const usable = (line: AlignLine) => line.direction === 'to_kronn' || canWrite;
   const [checked, setChecked] = useState(
     () => new Set(lines.filter(usable).map(line => line.row.key)),
   );
+  const [note, setNote] = useState<LinkNote | null>(null);
   const chosen = lines.filter(line => checked.has(line.row.key) && usable(line));
-  const toggle = (key: string) => setChecked(current => {
-    const next = new Set(current);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    return next;
-  });
+  // Ticking a line ticks what it needs; a line something ticked still needs
+  // stays ticked, and says why.
+  const alignable = new Set(lines.filter(usable).map(line => line.row.key));
+  const toggle = (key: string) => {
+    const result = toggleLinked(graph, checked, key, dep => alignable.has(dep));
+    setChecked(result.checked);
+    setNote(linkedToggleNote(t, graph, key, result));
+  };
   const repositoryRows = chosen.filter(line => line.direction === 'to_repository').map(line => line.row);
 
   return (
@@ -57,6 +64,9 @@ export function RepositoryResourceAlign({
         </button>
       </>}
     >
+      {note && (
+        <p className="rr-link-note" data-tone={note.tone} role="status" data-testid="align-link-note">{note.text}</p>
+      )}
       {SECTIONS.map(direction => {
         const section = lines.filter(line => line.direction === direction);
         if (section.length === 0) return null;

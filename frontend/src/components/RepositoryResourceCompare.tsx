@@ -3,7 +3,7 @@ import { Loader2 } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { formatResourceDate } from '../lib/formatResourceDate';
 import { formatFieldValue, parseUnifiedDiff, sideBySide } from '../lib/repositoryResourceDiff';
-import type { ResourceRow } from '../lib/repositoryResourceRows';
+import type { ResourceRow, RowLink } from '../lib/repositoryResourceRows';
 import { RepositoryResourceModal } from './RepositoryResourceModal';
 
 type DiffMode = 'unified' | 'side';
@@ -36,21 +36,61 @@ function DiffView({ diff, mode }: { diff: string; mode: DiffMode }) {
   );
 }
 
+/** One side of the reference graph: a link opens the resource's own sheet,
+ *  unless nothing answers to it (a missing reference). */
+function LinkList({ title, links, openable, onOpen }: {
+  title: string;
+  links: RowLink[];
+  openable: ReadonlySet<string>;
+  onOpen: (key: string) => void;
+}) {
+  const { t } = useT();
+  return (
+    <div>
+      <h3>{title} <span>{links.length}</span></h3>
+      {links.length === 0 ? (
+        <p className="rr-muted">{t('projects.repositoryResources.links.none')}</p>
+      ) : (
+        <ul className="rr-path-list">
+          {links.map(link => (
+            <li key={link.key} data-missing={link.missing || undefined}>
+              {!link.missing && openable.has(link.key) ? (
+                <button type="button" className="rr-link" onClick={() => onOpen(link.key)}>{link.name}</button>
+              ) : (
+                <span>{link.name}</span>
+              )}
+              {' '}<small>{t(`projects.repositoryResources.kind.${link.kind}`)}</small>
+              {link.missing && (
+                <span className="rr-pill" data-state="missing" title={t('projects.repositoryResources.links.missingHint')}>
+                  {t('projects.repositoryResources.links.missing')}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 interface Props {
   row: ResourceRow;
+  /** Keys of the rows a link can open. */
+  openable: ReadonlySet<string>;
   canWrite: boolean;
   busy: boolean;
   onKeepRepository: () => void;
   onKeepKronn: () => void;
   onRefresh: () => void;
   onPrimary: () => void;
+  onOpenLink: (key: string) => void;
   onClose: () => void;
 }
 
 /** Both sides of one resource: where each lives, what differs, and — when the
  *  two versions disagree — the three ways out, each naming what it overwrites. */
 export function RepositoryResourceCompare({
-  row, canWrite, busy, onKeepRepository, onKeepKronn, onRefresh, onPrimary, onClose,
+  row, openable, canWrite, busy, onKeepRepository, onKeepKronn, onRefresh, onPrimary, onOpenLink, onClose,
 }: Props) {
   const { t, locale } = useT();
   const [mode, setMode] = useState<DiffMode>('unified');
@@ -116,6 +156,13 @@ export function RepositoryResourceCompare({
           </dl>
         </section>
       </div>
+
+      {row.kind !== 'skill' && (
+        <section className="rr-section rr-link-lists" data-testid="resource-links">
+          <LinkList title={t('projects.repositoryResources.links.uses')} links={row.uses} openable={openable} onOpen={onOpenLink} />
+          <LinkList title={t('projects.repositoryResources.links.usedBy')} links={row.usedBy} openable={openable} onOpen={onOpenLink} />
+        </section>
+      )}
 
       {row.paths.length > 1 && (
         <section className="rr-section">

@@ -6,6 +6,7 @@ import type {
   ProjectRepositorySkill,
   RepositoryResourceFieldDiff,
   RepositoryResourceFileDiff,
+  RepositoryResourceLink,
   RequiredSecretStatus,
 } from '../types/generated';
 import type { ProjectRepositoryResourcesTab } from './projectRepositoryResourcesTab';
@@ -29,6 +30,18 @@ export type PrimaryAction =
   | 'approve'
   | 'attach'
   | 'view';
+
+/** One end of a reference between two resources. `key` is the row key of the
+ *  linked resource; a `missing` link names nothing the project holds, so no
+ *  row answers to its key. */
+export interface RowLink {
+  key: string;
+  kind: ProjectRepositoryResourceKind;
+  id: string;
+  slug?: string;
+  name: string;
+  missing: boolean;
+}
 
 export interface ResourceRow {
   key: string;
@@ -72,6 +85,10 @@ export interface ResourceRow {
   kronnUpdatedAt?: string;
   alignedAt?: string;
   level?: ProjectRepositoryResource['level'];
+  /** What this resource references, missing references included. */
+  uses: RowLink[];
+  /** The project's resources that reference this one. */
+  usedBy: RowLink[];
 }
 
 export interface RepositoryRows {
@@ -89,6 +106,15 @@ export const EXECUTABLE_KINDS: ProjectRepositoryResourceKind[] = [
 ];
 
 export const resourceKey = (kind: ProjectRepositoryResourceKind, id: string) => `${kind}:${id}`;
+
+const rowLink = (link: RepositoryResourceLink): RowLink => ({
+  key: resourceKey(link.kind, link.id),
+  kind: link.kind,
+  id: link.id,
+  slug: link.slug,
+  name: link.name,
+  missing: link.missing,
+});
 
 /** Label of the folder a repository path lives in: `kronn/` or `.claude`… */
 export function originLabel(path: string): string {
@@ -177,6 +203,8 @@ function resourceRow(resource: ProjectRepositoryResource): ResourceRow {
     repositoryFingerprint: resource.repository_fingerprint,
     kronnFingerprint: resource.kronn_fingerprint,
     level: resource.level,
+    uses: (resource.uses ?? []).map(rowLink),
+    usedBy: (resource.used_by ?? []).map(rowLink),
   };
 }
 
@@ -236,6 +264,8 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
     repositoryFingerprint: skill.repository_fingerprint,
     kronnFingerprint: skill.kronn_fingerprint,
     level: 'usable_without_kronn',
+    uses: [],
+    usedBy: [],
   };
 }
 

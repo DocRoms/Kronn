@@ -63,6 +63,19 @@ Release notes for 0.9.3 and earlier are available in the
   allowlisted binary and literal arguments, no shell, from the root of the
   worktree, with `pnpm --dir …` / `cargo … --manifest-path … --target-dir …` as
   the forms that replace `cd … &&` and `VAR=…`.
+- Resources of a project's repository listing now say what they are linked to
+  (KT-905). Each item of `GET /api/projects/:id/repository-resources` carries
+  `uses` (what a workflow's steps or an Artifact's action blocks reference:
+  Quick Prompts, Quick APIs, Quick Execs, sub-workflows, Artifacts) and
+  `used_by`, as `{ kind, id, slug, name, missing }`; a reference to something
+  the project does not hold is kept and flagged `missing`. A row shows a
+  discreet "3 linked" count and its sheet lists "Uses" and "Used by", each
+  entry opening the linked resource. Ticking a resource ticks everything it
+  needs (recursively, loops included) with a "3 linked items added" line; a
+  resource a ticked one still needs cannot be unticked ("required by
+  nightly-triage"); "Align all" follows the same rule. Writing or loading a
+  single resource announces its dependencies and includes them by default;
+  leaving them out warns that it will only partly work.
 
 ### Changed
 

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import fr from '../../lib/i18n/locales/fr';
-import { listing, resource, skill } from './repositoryResourceFixtures';
+import { link, listing, resource, skill } from './repositoryResourceFixtures';
 
 // vitest blanks CSS modules (`css: false`), so read the stylesheets as text.
 const stylesheet = (name: string) => readFileSync(join(import.meta.dirname, '..', name), 'utf-8');
@@ -1429,6 +1429,288 @@ describe('ProjectRepositoryResourcesPanel', () => {
       for (const css of [panelCss, sheetsCss, foldCss]) {
         expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(|var\(--(?!kr-)/);
       }
+    });
+  });
+
+  describe('linked resources', () => {
+    const ghost = { id: 'ghost', name: 'ghost', kind: 'quick_exec' as const };
+    /** Nightly triage uses Review, Fetch, Board and a Quick Exec that no longer exists. */
+    const linked = (status: 'kronn_only' | 'repository_only' = 'kronn_only') => {
+      const idOf = (kind: string, id: string) => (status === 'repository_only' ? `repository:${kind}:${id}` : id);
+      const make = (kind: 'quick_prompt' | 'quick_api' | 'artifact', id: string, name: string) => (
+        resource({ id: idOf(kind, id), name, slug: id, kind, status })
+      );
+      const review = make('quick_prompt', 'review', 'Review');
+      const fetch = make('quick_api', 'fetch', 'Fetch');
+      const board = make('artifact', 'board', 'Board');
+      const nightly = resource({
+        id: idOf('workflow', 'nightly-triage'), name: 'Nightly triage', slug: 'nightly-triage', kind: 'workflow', status,
+        uses: [link(review), link(fetch), link(board), link(ghost, true)],
+      });
+      const usedByNightly = [link(nightly)];
+      return listing({
+        resources: [
+          nightly,
+          { ...review, used_by: usedByNightly },
+          { ...fetch, used_by: usedByNightly },
+          { ...board, used_by: usedByNightly },
+        ],
+      });
+    };
+    const tick = (name: string) => fireEvent.click(screen.getByRole('checkbox', { name: `${R}include:${name}` }));
+    const ticked = (name: string) => expect(screen.getByRole('checkbox', { name: `${R}include:${name}` })).toBeChecked();
+    const badge = (row: HTMLElement, text: string) => within(row).getByText(text).closest('.rr-links-badge');
+
+    it('shows a discreet count of linked items on the row, and warns when a reference leads nowhere', async () => {
+      await show(linked());
+      openTab('automation');
+
+      const nightly = badge(rowOf('Nightly triage'), `${R}links.count.other:4`);
+      expect(nightly).toHaveAttribute('data-missing', 'true');
+      expect(nightly).toHaveAttribute('title', `${R}links.summary:4|0`);
+      const review = badge(rowOf('Review'), `${R}links.count.one`);
+      expect(review).not.toHaveAttribute('data-missing');
+      expect(review).toHaveAttribute('title', `${R}links.summary:0|1`);
+    });
+
+    it('shows no count on a resource nothing is linked to', async () => {
+      await show(listing({ resources: [resource({ id: 'solo', name: 'Solo', kind: 'quick_prompt', status: 'kronn_only' })] }));
+      openTab('automation');
+
+      expect(within(rowOf('Solo')).queryByText(/links\.count/)).not.toBeInTheDocument();
+    });
+
+    it('lists "Uses" and "Used by" in the sheet, opens a linked resource on click and marks a missing one', async () => {
+      await show(linked());
+      openTab('automation');
+
+      fireEvent.click(within(rowOf('Nightly triage')).getByRole('button', { name: 'Nightly triage' }));
+      const sheet = within(await screen.findByTestId('resource-links'));
+      const listOf = (scope: typeof sheet, side: string) => within(
+        scope.getByRole('heading', { name: new RegExp(`${R}links\\.${side}`) }).parentElement as HTMLElement,
+      );
+      const uses = listOf(sheet, 'uses');
+      expect(uses.getAllByRole('listitem')).toHaveLength(4);
+      ['Review', 'Fetch', 'Board'].forEach(name => expect(uses.getByRole('button', { name })).toBeInTheDocument());
+      expect(uses.queryByRole('button', { name: 'ghost' })).not.toBeInTheDocument();
+      expect(uses.getByText('ghost')).toBeInTheDocument();
+      expect(uses.getByText(`${R}links.missing`)).toBeInTheDocument();
+      expect(listOf(sheet, 'usedBy').getByText(`${R}links.none`)).toBeInTheDocument();
+
+      fireEvent.click(uses.getByRole('button', { name: 'Review' }));
+      expect(await screen.findByRole('dialog', { name: 'Review' })).toBeInTheDocument();
+      const reviewUsedBy = listOf(within(screen.getByTestId('resource-links')), 'usedBy');
+
+      fireEvent.click(reviewUsedBy.getByRole('button', { name: 'Nightly triage' }));
+      expect(await screen.findByRole('dialog', { name: 'Nightly triage' })).toBeInTheDocument();
+    });
+
+    it('ticks everything a workflow needs when it is ticked, and says how many came along', async () => {
+      await show(linked());
+      openTab('automation');
+
+      tick('Nightly triage');
+
+      expect(screen.getByTestId('link-note')).toHaveTextContent(`${R}links.added.other:3`);
+      ticked('Nightly triage');
+      ticked('Review');
+      ticked('Fetch');
+      expect(screen.getByRole('button', { name: `${R}publishSelected:4` })).toBeInTheDocument();
+      openTab('artifacts');
+      ticked('Board');
+    });
+
+    it('refuses to untick what a ticked workflow still needs and names the workflow', async () => {
+      await show(linked());
+      openTab('automation');
+      tick('Nightly triage');
+
+      tick('Review');
+
+      ticked('Review');
+      expect(screen.getByTestId('link-note')).toHaveAttribute('data-tone', 'warning');
+      expect(screen.getByTestId('link-note')).toHaveTextContent(
+        `${R}links.blocked:Review|${R}links.requiredBy:Nightly triage`,
+      );
+      expect(screen.getByRole('button', { name: `${R}publishSelected:4` })).toBeInTheDocument();
+
+      // Once the workflow is unticked, its dependencies are free again.
+      tick('Nightly triage');
+      tick('Review');
+      expect(screen.getByRole('checkbox', { name: `${R}include:Review` })).not.toBeChecked();
+      expect(screen.getByRole('button', { name: `${R}publishSelected:2` })).toBeInTheDocument();
+    });
+
+    it('writes the ticked group together: the workflow and everything it needs', async () => {
+      await show(linked());
+      openTab('automation');
+      tick('Nightly triage');
+
+      fireEvent.click(screen.getByRole('button', { name: `${R}publishSelected:4` }));
+      const dialog = within(await screen.findByRole('dialog'));
+      fireEvent.click(dialog.getByRole('button', { name: `${R}publishSelected:4` }));
+
+      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(4));
+      const written = publishRepositoryResource.mock.calls.map(([, request]) => `${request.kind}:${request.id}`).sort();
+      expect(written).toEqual(['artifact:board', 'quick_api:fetch', 'quick_prompt:review', 'workflow:nightly-triage']);
+    });
+
+    it('announces the dependencies of a single write and includes them by default', async () => {
+      await show(linked());
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly triage'), 'publish'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      const announced = within(dialog.getByTestId('transfer-linked'));
+      expect(announced.getByText(`${R}links.transfer.introRepository:Nightly triage|3`)).toBeInTheDocument();
+      ['Review', 'Fetch', 'Board'].forEach(name => expect(announced.getByText(name)).toBeInTheDocument());
+      expect(announced.getByRole('checkbox', { name: `${R}links.transfer.include:3` })).toBeChecked();
+      expect(announced.queryByRole('alert')).not.toBeInTheDocument();
+      expect(announced.getByText(`${R}links.transfer.missing:1|ghost`)).toBeInTheDocument();
+      expect(dialog.getByText(`${R}effect.linkedIncluded:3`)).toBeInTheDocument();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}action.publish` }));
+      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(4));
+      const written = publishRepositoryResource.mock.calls.map(([, request]) => request.id);
+      expect(written.at(-1)).toBe('nightly-triage');
+      expect(written.slice(0, 3).sort()).toEqual(['board', 'fetch', 'review']);
+    });
+
+    it('lets a single write continue without them, warning that it will only partly work', async () => {
+      await show(linked());
+      openTab('automation');
+      fireEvent.click(actionIn(rowOf('Nightly triage'), 'publish'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      fireEvent.click(dialog.getByRole('checkbox', { name: `${R}links.transfer.include:3` }));
+
+      expect(dialog.getByRole('alert')).toHaveTextContent(`${R}links.transfer.partial:Nightly triage`);
+      expect(dialog.queryByText(`${R}effect.linkedIncluded:3`)).not.toBeInTheDocument();
+      fireEvent.click(dialog.getByRole('button', { name: `${R}action.publish` }));
+      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(1));
+      expect(publishRepositoryResource).toHaveBeenCalledWith('project-1', {
+        kind: 'workflow', id: 'nightly-triage', overwrite_repository_changes: false,
+      });
+    });
+
+    it('announces the dependencies of a single load into Kronn and loads them first by default', async () => {
+      await show(linked('repository_only'));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly triage'), 'import'));
+      const dialog = within(await screen.findByRole('dialog'));
+      const announced = within(dialog.getByTestId('transfer-linked'));
+      expect(announced.getByText(`${R}links.transfer.introKronn:Nightly triage|3`)).toBeInTheDocument();
+      expect(announced.getByRole('checkbox', { name: `${R}links.transfer.include:3` })).toBeChecked();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}action.import` }));
+      await waitFor(() => expect(importRepositoryResource).toHaveBeenCalledTimes(4));
+      const loaded = importRepositoryResource.mock.calls.map(([, request]) => request.slug);
+      expect(loaded.at(-1)).toBe('nightly-triage');
+      expect(loaded.slice(0, 3).sort()).toEqual(['board', 'fetch', 'review']);
+      expect(publishRepositoryResource).not.toHaveBeenCalled();
+    });
+
+    it('announces nothing for a resource with no dependencies', async () => {
+      await show(listing({ resources: [resource({ id: 'solo', name: 'Solo', kind: 'quick_prompt', status: 'kronn_only' })] }));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Solo'), 'publish'));
+      const dialog = await screen.findByRole('dialog');
+
+      expect(within(dialog).queryByTestId('transfer-linked')).not.toBeInTheDocument();
+    });
+
+    describe('Tout aligner', () => {
+      const late = () => {
+        const child = resource({ id: 'q', name: 'Child prompt', slug: 'child', kind: 'quick_prompt', status: 'kronn_newer' });
+        const parent = resource({ id: 'w', name: 'Parent flow', slug: 'parent', kind: 'workflow', status: 'kronn_newer', uses: [link(child)] });
+        const remote = resource({ id: 'r', name: 'Remote prompt', slug: 'remote', kind: 'quick_prompt', status: 'repository_newer' });
+        return listing({ resources: [parent, { ...child, used_by: [link(parent)] }, remote] });
+      };
+      const openAlign = async (data: ReturnType<typeof listing>) => {
+        await show(data);
+        openTab('automation');
+        fireEvent.click(screen.getByTestId('align-all'));
+        return within(await screen.findByRole('dialog'));
+      };
+      const line = (dialog: ReturnType<typeof within>, name: RegExp) => dialog.getByRole('checkbox', { name });
+
+      it('keeps a line ticked while a ticked line needs it, and says who', async () => {
+        const dialog = await openAlign(late());
+
+        fireEvent.click(line(dialog, /Child prompt/));
+
+        expect(line(dialog, /Child prompt/)).toBeChecked();
+        expect(dialog.getByTestId('align-link-note')).toHaveAttribute('data-tone', 'warning');
+        expect(dialog.getByTestId('align-link-note')).toHaveTextContent(
+          `${R}links.blocked:Child prompt|${R}links.requiredBy:Parent flow`,
+        );
+        expect(dialog.getByRole('button', { name: `${R}align.confirm:3` })).toBeInTheDocument();
+      });
+
+      it('ticks what a line needs when it is ticked back, and moves the whole group', async () => {
+        const dialog = await openAlign(late());
+        fireEvent.click(line(dialog, /Parent flow/));
+        fireEvent.click(line(dialog, /Child prompt/));
+        expect(line(dialog, /Parent flow/)).not.toBeChecked();
+        expect(line(dialog, /Child prompt/)).not.toBeChecked();
+        expect(dialog.getByRole('button', { name: `${R}align.confirm:1` })).toBeInTheDocument();
+
+        fireEvent.click(line(dialog, /Parent flow/));
+
+        expect(line(dialog, /Child prompt/)).toBeChecked();
+        expect(dialog.getByTestId('align-link-note')).toHaveTextContent(`${R}links.added.one`);
+        fireEvent.click(dialog.getByRole('button', { name: `${R}align.confirm:3` }));
+        await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(2));
+        expect(importRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'quick_prompt', slug: 'remote', overwrite_kronn_changes: false });
+        expect(publishRepositoryResource.mock.calls.map(([, request]) => request.id).sort()).toEqual(['q', 'w']);
+      });
+
+      it('unticks two lines that need each other together', async () => {
+        const first = resource({ id: 'a', name: 'Alpha flow', slug: 'alpha', kind: 'workflow', status: 'kronn_newer' });
+        const second = resource({ id: 'b', name: 'Beta flow', slug: 'beta', kind: 'workflow', status: 'kronn_newer' });
+        const dialog = await openAlign(listing({
+          resources: [
+            { ...first, uses: [link(second)], used_by: [link(second)] },
+            { ...second, uses: [link(first)], used_by: [link(first)] },
+          ],
+        }));
+
+        fireEvent.click(line(dialog, /Beta flow/));
+
+        expect(line(dialog, /Alpha flow/)).not.toBeChecked();
+        expect(line(dialog, /Beta flow/)).not.toBeChecked();
+        expect(dialog.getByTestId('align-link-note')).toHaveTextContent(`${R}links.removed.one`);
+
+        fireEvent.click(line(dialog, /Alpha flow/));
+        expect(line(dialog, /Beta flow/)).toBeChecked();
+      });
+    });
+
+    describe('a loop between two resources', () => {
+      it('ticks both when one is ticked and unticks both together', async () => {
+        const first = resource({ id: 'a', name: 'Alpha flow', slug: 'alpha', kind: 'workflow', status: 'kronn_only' });
+        const second = resource({ id: 'b', name: 'Beta flow', slug: 'beta', kind: 'workflow', status: 'kronn_only' });
+        await show(listing({
+          resources: [
+            { ...first, uses: [link(second)], used_by: [link(second)] },
+            { ...second, uses: [link(first)], used_by: [link(first)] },
+          ],
+        }));
+        openTab('automation');
+
+        tick('Alpha flow');
+        ticked('Alpha flow');
+        ticked('Beta flow');
+        expect(screen.getByRole('button', { name: `${R}publishSelected:2` })).toBeInTheDocument();
+
+        tick('Beta flow');
+        expect(screen.getByRole('checkbox', { name: `${R}include:Alpha flow` })).not.toBeChecked();
+        expect(screen.getByRole('checkbox', { name: `${R}include:Beta flow` })).not.toBeChecked();
+        expect(screen.getByTestId('link-note')).toHaveTextContent(`${R}links.removed.one`);
+      });
     });
   });
 });
