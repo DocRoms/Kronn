@@ -48,6 +48,15 @@ Release notes for 0.9.3 and earlier are available in the
   previous set; the room, the worktree, the attempts and the earlier validation
   results are untouched. It is refused while an integration runs, once the
   execution is terminal, and for a campaign run's shared gates.
+- `task_exec_reassign({task_execution_id, validations, reason})`: the principal
+  replaces the validations of an existing execution without relaunching it, with
+  `validations` in place of `worker` (one change per call). The set replaces the
+  current one, is held to the launch rules, and is journaled
+  (`validations_replaced`) with the actor, the reason and the previous set; the
+  room, the worktree, the attempts and the earlier validation results are
+  untouched. It is refused while an integration runs, once the execution is
+  terminal, and for a campaign run's shared gates. It is a change of an existing
+  tool rather than a new one so the MCP catalogue does not grow.
 - `task_exec_prepare` accepts the `validations` it will launch with and answers
   `launchable: false` (reason `invalid_validations`) for one that could never run.
 - `tool_manual({tool: "task_exec_prepare"})` now states how a validation runs: one
@@ -108,6 +117,13 @@ Release notes for 0.9.3 and earlier are available in the
   Quick Exec allowlist ``) and sent an approved task back to `ChangesRequested`.
   The launch, the campaign policy and the preflight now refuse it up front, with
   the form that runs.
+- The brief of a worker with a shell no longer tells it to "run the validations".
+  It runs the targeted tests; the long validations the principal persisted are
+  played by Kronn at integration, and the worker commits and delivers in the same
+  turn without waiting on a background command. A full `cargo test` started in the
+  background outlived the 600 s shell limit, the worker handed the turn back to
+  wait for it and ended without delivering (`worker_completed_without_delivery`,
+  twice on KT-847).
 - The merge commit Kronn creates when it integrates a task branch now carries
   the `Signed-off-by` of the configured git identity, so a repository that
   enforces the DCO no longer turns the release PR red on it.

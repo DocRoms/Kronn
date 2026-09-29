@@ -469,8 +469,10 @@ async fn orchestration_cli_tool_routes_require_server_verifiable_identity() {
                 "reason": "test"
             }),
         ),
+        // KT-839: replacing the gates rides the same route, so it needs the same
+        // server-verifiable identity — it must not be a way around it.
         (
-            format!("/api/orchestration/tool/executions/{missing_execution}/validations"),
+            format!("/api/orchestration/tool/executions/{missing_execution}/reassign"),
             serde_json::json!({
                 "source_agent": "",
                 "source_session_id": "",

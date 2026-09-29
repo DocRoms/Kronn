@@ -427,7 +427,8 @@ after the worker delivered and the review passed. The contract is served by
 `[src: file: backend/src/api/orchestration.rs]`
 
 To correct the gates of an execution that already exists, the principal calls
-`task_exec_update_validations({task_execution_id, validations, reason})`. The
+`task_exec_reassign({task_execution_id, validations, reason})` — `validations`
+instead of `worker`, ONE change per call (both, or neither, is refused). The
 set REPLACES the current one (`[]` removes every gate), is held to the launch
 rules, and is journaled on the execution (`validations_replaced`, with the actor,
 the reason and the previous set); nothing is relaunched and earlier validation
@@ -435,6 +436,21 @@ results stay as evidence. It is refused while the execution is Integrating,
 Validating or Applying, once it is Done, Failed or Cancelled, and for an
 execution of a campaign run, whose gates are the campaign's shared policy.
 `[src: file: backend/src/db/orchestration.rs]`
+The swap is a change of `task_exec_reassign` and not a tool of its own because
+every declaration is paid for on every session (`mcp_surface_budget.py`), and
+because that tool is already the principal's amendment of a live execution:
+principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
+have let a self-reviewing worker weaken its own gates and ties the swap to the
+persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
+`[src: file: backend/src/api/orchestration.rs]`
+
+The worker brief of a worker with a shell says who runs which gates: the worker
+runs the TARGETED tests, the long validations the principal persisted are played
+by Kronn at integration, and the worker commits and delivers in the same turn
+without ever waiting on a background command (its shell tool cuts a command at
+600 s, and a worker that hands the turn back to wait ends without delivering,
+`worker_completed_without_delivery`).
+`[src: file: backend/src/api/orchestration.rs]`
 
 `task_exec_status` returns `next_action.tool = task_exec_resume` only for a
 publicly recoverable Applying-origin checkpoint. The principal may then call

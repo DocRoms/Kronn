@@ -6575,10 +6575,22 @@ fn worker_brief_markdown(
             );
         }
     }
+    // KT-839: a worker was pushed to "run the validations", ran a full suite in the
+    // background because its shell tool cuts a command at 600 s, handed the turn back
+    // to wait for it, and its process ended WITHOUT delivering
+    // (`worker_completed_without_delivery`, twice on KT-847). The long gates the
+    // principal persisted are Kronn's to run at integration; the worker's job is the
+    // targeted tests, then commit and deliver in the same turn.
     let tests = if can_run_shell {
-        "Exécute les commandes de validation adaptées au projet et reporte chaque résultat \
+        "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
-         commande ou sortie vérifiable est refusé."
+         commande ou sortie vérifiable est refusé.\n\
+         Les validations longues persistées par le principal (souvent la suite complète) sont \
+         jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
+         L'outil shell coupe une commande longue (Bash : 600 s) : n'en lance jamais une en \
+         arrière-plan pour l'attendre, car ton processus s'arrête dès que tu rends la main \
+         et l'exécution finit sans livraison. Enchaîne dans le même tour : tests ciblés, \
+         commit, puis `task_exec_deliver`."
             .to_string()
     } else {
         "Tu n'as pas de shell : n'affirme jamais avoir exécuté `cargo`, `pnpm`, `make` \
@@ -6638,7 +6650,7 @@ fn worker_brief_markdown(
             format!(
                 "Utilise les outils natifs de ton CLI (recherche, lecture ciblée, édition et shell). \
                  Cherche d'abord le symbole cité dans l'objectif, lis seulement la région utile, \
-                 puis édite dès que tu sais quoi changer. Exécute les validations pertinentes. {}",
+                 puis édite dès que tu sais quoi changer. Exécute les tests ciblés (section Tests). {}",
                 if mediated_host_commit {
                     "Ne lance pas `git commit` dans le shell : appelle `task_exec_commit` avec \
                      uniquement les fichiers explicites et le message. Kronn possède seul \
@@ -9232,18 +9244,47 @@ pub struct TaskExecReassignRequest {
     /// the internal `CampaignWorkerSelection` envelope. `model`/`profile_id`
     /// are not publicly overridable here; a reassignment always resolves
     /// them from the target's tier, exactly like a fresh launch would.
-    pub worker: MessageTarget,
+    ///
+    /// Exactly one of `worker` and `validations` per call — see
+    /// `execution_amendment`.
+    #[serde(default)]
+    pub worker: Option<MessageTarget>,
+    /// KT-839 — the complete new set of gates: it REPLACES the execution's
+    /// validations, it is not merged into them. An empty list removes every gate.
+    #[serde(default)]
+    pub validations: Option<Vec<crate::models::ValidationSpec>>,
     pub reason: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TaskExecUpdateValidationsRequest {
-    pub source_agent: String,
-    pub source_session_id: String,
-    /// The complete new set: it REPLACES the execution's validations, it is not
-    /// merged into them. An empty list removes every gate.
-    pub validations: Vec<crate::models::ValidationSpec>,
-    pub reason: String,
+/// The one change a `task_exec_reassign` call makes to an existing execution.
+///
+/// Reassign is the principal's amendment tool for a live execution — principal-only,
+/// reason-journaled, room and evidence kept — so replacing its validations lives
+/// here rather than in a tool of its own (KT-839: every declaration is paid for on
+/// every session, see `mcp_surface_budget.py`). The two changes are never combined:
+/// each is journaled and refused on its own terms, and a half-applied pair would
+/// be neither.
+pub(crate) enum ExecutionAmendment {
+    Reassign(MessageTarget),
+    ReplaceValidations(Vec<crate::models::ValidationSpec>),
+}
+
+pub(crate) fn execution_amendment(
+    worker: Option<MessageTarget>,
+    validations: Option<Vec<crate::models::ValidationSpec>>,
+) -> Result<ExecutionAmendment, &'static str> {
+    match (worker, validations) {
+        (Some(worker), None) => Ok(ExecutionAmendment::Reassign(worker)),
+        (None, Some(validations)) => Ok(ExecutionAmendment::ReplaceValidations(validations)),
+        (Some(_), Some(_)) => Err(
+            "task_exec_reassign makes one change per call: pass a `worker` to reassign the \
+             execution, or the complete `validations` set to replace its gates — not both",
+        ),
+        (None, None) => Err(
+            "task_exec_reassign needs a change: a typed `worker` to reassign the execution, or \
+             the complete `validations` set to replace its gates ([] removes every gate)",
+        ),
+    }
 }
 
 fn caller_fields(agent: &str, session_id: &str) -> Option<(String, String)> {
@@ -10744,7 +10785,7 @@ pub async fn task_exec_reassign(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
     Json(request): Json<TaskExecReassignRequest>,
-) -> Json<ApiResponse<ExecutionRecoveryView>> {
+) -> Json<ApiResponse<serde_json::Value>> {
     let Some((agent, session_id)) =
         caller_fields(&request.source_agent, &request.source_session_id)
     else {
@@ -10776,20 +10817,51 @@ pub async fn task_exec_reassign(
             "execution not found or caller is not its principal",
         ));
     }
-    pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
-    reassign_execution(
-        State(state),
-        Path(exec_id),
-        Json(ReassignExecutionRequest {
-            worker: crate::models::CampaignWorkerSelection {
-                target: request.worker,
-                model: None,
-                profile_id: None,
+    let amendment = match execution_amendment(request.worker, request.validations) {
+        Ok(amendment) => amendment,
+        Err(refusal) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, refusal)),
+    };
+    match amendment {
+        ExecutionAmendment::Reassign(target) => {
+            pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
+            let Json(response) = reassign_execution(
+                State(state),
+                Path(exec_id),
+                Json(ReassignExecutionRequest {
+                    worker: crate::models::CampaignWorkerSelection {
+                        target,
+                        model: None,
+                        profile_id: None,
+                    },
+                    reason: request.reason,
+                }),
+            )
+            .await;
+            Json(ApiResponse {
+                success: response.success,
+                data: response
+                    .data
+                    .and_then(|view| serde_json::to_value(view).ok()),
+                error: response.error,
+                error_code: response.error_code,
+            })
+        }
+        ExecutionAmendment::ReplaceValidations(validations) => match replace_execution_validations(
+            &state.db,
+            &exec_id,
+            validations,
+            &request.reason,
+            agent_actor(&agent_pin, Some(&session_pin)),
+        )
+        .await
+        {
+            Ok(replacement) => match serde_json::to_value(replacement) {
+                Ok(value) => Json(ApiResponse::ok(value)),
+                Err(error) => Json(ApiResponse::err(error.to_string())),
             },
-            reason: request.reason,
-        }),
-    )
-    .await
+            Err((code, message)) => Json(ApiResponse::err_coded(code, message)),
+        },
+    }
 }
 
 /// Replace the validations of an existing execution (KT-839), for both principal
@@ -10829,56 +10901,6 @@ pub(crate) async fn replace_execution_validations(
     })
     .await
     .map_err(|error| (ApiErrorCode::Conflict, error.to_string()))
-}
-
-pub async fn task_exec_update_validations(
-    State(state): State<AppState>,
-    Path(exec_id): Path<String>,
-    Json(request): Json<TaskExecUpdateValidationsRequest>,
-) -> Json<ApiResponse<crate::db::orchestration::ValidationsReplacement>> {
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
-        ));
-    };
-    let authorized = {
-        let id = exec_id.clone();
-        let (agent, session_id) = (agent.clone(), session_id.clone());
-        state
-            .db
-            .with_conn(move |conn| {
-                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
-                    .context("execution not found or caller is not its principal")?;
-                principal_cli_is_authorized(
-                    conn,
-                    &execution.parent_discussion_id,
-                    &agent,
-                    &session_id,
-                )
-            })
-            .await
-    };
-    if !matches!(authorized, Ok(true)) {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::NotFound,
-            "execution not found or caller is not its principal",
-        ));
-    }
-    match replace_execution_validations(
-        &state.db,
-        &exec_id,
-        request.validations,
-        &request.reason,
-        agent_actor(&agent, Some(&session_id)),
-    )
-    .await
-    {
-        Ok(replacement) => Json(ApiResponse::ok(replacement)),
-        Err((code, message)) => Json(ApiResponse::err_coded(code, message)),
-    }
 }
 
 /// Map a launch-saga refusal/failure to a stable `(code, message)`. `ProvisionError` has
@@ -12960,10 +12982,7 @@ mod tests {
             None,
         );
         assert!(brief.contains("outils natifs de ton CLI"), "{brief}");
-        assert!(
-            brief.contains("Exécute les commandes de validation"),
-            "{brief}"
-        );
+        assert!(brief.contains("Lance les tests **ciblés**"), "{brief}");
         assert!(
             brief.contains("exactement un `{ met, evidence }`"),
             "{brief}"
@@ -12973,6 +12992,75 @@ mod tests {
         assert!(brief.contains("N'utilise pas `git commit`"), "{brief}");
         assert!(!brief.contains("opaque-dod-id"), "{brief}");
         assert!(!brief.contains("`head_sha` : le HEAD exact"), "{brief}");
+    }
+
+    /// KT-839 — on KT-847 a worker told to "run the validations" started the full
+    /// `cargo test` in the background (its shell tool cuts a command at 600 s),
+    /// handed the turn back to wait for it and ended WITHOUT delivering, twice
+    /// (`worker_completed_without_delivery`). The brief now says who runs the long
+    /// gates, and that the worker never waits on a background command.
+    #[test]
+    fn shell_worker_brief_leaves_the_long_validations_to_kronn_and_delivers_in_one_turn() {
+        for (spawned_host_cli, label) in [(true, "spawned host CLI"), (false, "joined CLI")] {
+            let brief = worker_brief_markdown(
+                "KT-839",
+                "Validations inexécutables",
+                "Refuser au lancement",
+                &[],
+                "/wt/kt839",
+                "kronn/task/KT-839",
+                "abc1234",
+                true,
+                spawned_host_cli,
+                None,
+            );
+            for promise in [
+                // the worker runs the targeted tests…
+                "Lance les tests **ciblés**",
+                // …the persisted long ones are Kronn's, at integration…
+                "Les validations longues persistées par le principal",
+                "jouées par Kronn à l'intégration",
+                // …and it never waits on a background command…
+                "n'en lance jamais une en arrière-plan pour l'attendre",
+                "Bash : 600 s",
+                // …but commits and delivers within the same turn.
+                "Enchaîne dans le même tour : tests ciblés, commit, puis `task_exec_deliver`",
+            ] {
+                assert!(brief.contains(promise), "{label}: `{promise}` in {brief}");
+            }
+            // The old instruction is what pushed the worker into the long suite.
+            assert!(
+                !brief.contains("Exécute les commandes de validation"),
+                "{label}: {brief}"
+            );
+            assert!(
+                !brief.contains("Exécute les validations pertinentes"),
+                "{label}: {brief}"
+            );
+            // The promise sits in the Tests section, before the delivery format.
+            let tests = brief.find("## Tests").expect("tests section");
+            let contract = brief.find("jouées par Kronn à l'intégration").unwrap();
+            let delivery = brief.find("## Format de livraison").expect("delivery");
+            assert!(tests < contract && contract < delivery, "{label}: {brief}");
+        }
+
+        // A worker with no shell has no long command to wait on, and is never
+        // told it can run one: its own contract (report `skipped`) is unchanged.
+        let http = worker_brief_markdown(
+            "KT-839",
+            "Sous-tâche Ollama",
+            "Refuser au lancement",
+            &[],
+            "/wt/kt839",
+            "kronn/task/KT-839",
+            "abc1234",
+            false,
+            true,
+            None,
+        );
+        assert!(http.contains("Tu n'as pas de shell"), "{http}");
+        assert!(!http.contains("arrière-plan"), "{http}");
+        assert!(!http.contains("Bash : 600 s"), "{http}");
     }
 
     /// KT-854: the brief says how to bring the target branch in without erasing
@@ -15652,9 +15740,11 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
+        // The swap is a `task_exec_reassign` call carrying `validations` instead of
+        // a `worker` (KT-839: no tool of its own, see `ExecutionAmendment`).
         let update = |validations: serde_json::Value, reason: &str| ToolCall {
             id: "update".into(),
-            name: "task_exec_update_validations".into(),
+            name: "task_exec_reassign".into(),
             arguments: serde_json::json!({
                 "task_execution_id": exec_id,
                 "validations": validations,
@@ -15691,6 +15781,51 @@ mod tests {
 
         // A reason is part of the trace.
         assert!(!exec.execute(&update(serde_json::json!([]), "  ")).await.ok);
+
+        // One change per call: a worker AND gates is refused, and so is neither.
+        let both = exec
+            .execute(&ToolCall {
+                id: "both".into(),
+                name: "task_exec_reassign".into(),
+                arguments: serde_json::json!({
+                    "task_execution_id": exec_id,
+                    "worker": serde_json::to_value(native_worker()).unwrap(),
+                    "validations": [],
+                    "reason": "two changes at once",
+                }),
+            })
+            .await;
+        assert!(!both.ok);
+        assert!(both.content.to_string().contains("one change per call"));
+        let neither = exec
+            .execute(&ToolCall {
+                id: "neither".into(),
+                name: "task_exec_reassign".into(),
+                arguments: serde_json::json!({
+                    "task_execution_id": exec_id,
+                    "reason": "no change at all",
+                }),
+            })
+            .await;
+        assert!(!neither.ok);
+        assert!(neither.content.to_string().contains("needs a change"));
+        // An explicit null is not "no gates".
+        let null = exec
+            .execute(&ToolCall {
+                id: "null".into(),
+                name: "task_exec_reassign".into(),
+                arguments: serde_json::json!({
+                    "task_execution_id": exec_id,
+                    "validations": null,
+                    "reason": "null is not an empty set",
+                }),
+            })
+            .await;
+        assert!(!null.ok);
+        assert_eq!(
+            run_validations(db.clone(), run_id.clone()).await,
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
 
         let fixed = serde_json::json!([
             {"command": "pnpm --dir frontend exec tsc -b --pretty false", "timeout_secs": 300},
@@ -15860,14 +15995,15 @@ mod tests {
             db.clone(),
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         );
-        let request = |session: &str, command: &str| TaskExecUpdateValidationsRequest {
+        let request = |session: &str, command: &str| TaskExecReassignRequest {
             source_agent: "ClaudeCode".into(),
             source_session_id: session.into(),
-            validations: vec![ValidationSpec {
+            worker: None,
+            validations: Some(vec![ValidationSpec {
                 command: command.into(),
                 quick_exec_id: None,
                 timeout_secs: None,
-            }],
+            }]),
             reason: "the first set could never run".into(),
         };
         let gates = |db: std::sync::Arc<Database>, exec_id: String| async move {
@@ -15890,7 +16026,7 @@ mod tests {
         let before = exec_of(&db, &exec_id).await;
 
         // The worker's own room is not the principal room.
-        let Json(denied) = task_exec_update_validations(
+        let Json(denied) = task_exec_reassign(
             State(state.clone()),
             Path(exec_id.clone()),
             Json(request("the-worker-room-cli", "cargo test")),
@@ -15899,8 +16035,23 @@ mod tests {
         assert!(!denied.success);
         assert!(gates(db.clone(), exec_id.clone()).await.is_empty());
 
+        // A worker and gates in one call, or neither, is not a single change.
+        let mut both = request("principal", "cargo test");
+        both.worker = Some(MessageTarget::cli(AgentType::ClaudeCode, 104));
+        let Json(both) =
+            task_exec_reassign(State(state.clone()), Path(exec_id.clone()), Json(both)).await;
+        assert!(!both.success);
+        assert!(both.error.unwrap().contains("one change per call"));
+        let mut neither = request("principal", "cargo test");
+        neither.validations = None;
+        let Json(neither) =
+            task_exec_reassign(State(state.clone()), Path(exec_id.clone()), Json(neither)).await;
+        assert!(!neither.success);
+        assert!(neither.error.unwrap().contains("needs a change"));
+        assert!(gates(db.clone(), exec_id.clone()).await.is_empty());
+
         // The principal cannot swap in a gate that would never run either.
-        let Json(unrunnable) = task_exec_update_validations(
+        let Json(unrunnable) = task_exec_reassign(
             State(state.clone()),
             Path(exec_id.clone()),
             Json(request("principal", "cd backend && cargo test")),
@@ -15912,7 +16063,7 @@ mod tests {
             .unwrap()
             .contains("cargo test --manifest-path"));
 
-        let Json(replaced) = task_exec_update_validations(
+        let Json(replaced) = task_exec_reassign(
             State(state.clone()),
             Path(exec_id.clone()),
             Json(request(
@@ -15923,8 +16074,8 @@ mod tests {
         .await;
         assert!(replaced.success, "{:?}", replaced.error);
         let replacement = replaced.data.unwrap();
-        assert!(replacement.changed);
-        assert!(replacement.previous.is_empty());
+        assert_eq!(replacement["changed"], true);
+        assert_eq!(replacement["previous"], serde_json::json!([]));
         assert_eq!(
             gates(db.clone(), exec_id.clone()).await,
             ["cargo test --manifest-path backend/Cargo.toml"]
@@ -21127,7 +21278,8 @@ mod tests {
         let request = |session| TaskExecReassignRequest {
             source_agent: "ClaudeCode".into(),
             source_session_id: "principal".into(),
-            worker: MessageTarget::cli(AgentType::ClaudeCode, session),
+            worker: Some(MessageTarget::cli(AgentType::ClaudeCode, session)),
+            validations: None,
             reason: "explicitly recover this exact worker in its existing child".into(),
         };
         let Json(foreign) = task_exec_reassign(
@@ -23373,7 +23525,8 @@ mod tests {
             Json(TaskExecReassignRequest {
                 source_agent: "ClaudeCode".into(),
                 source_session_id: "principal-sess".into(),
-                worker: MessageTarget::discussion_agent(AgentType::Ollama),
+                worker: Some(MessageTarget::discussion_agent(AgentType::Ollama)),
+                validations: None,
                 reason: "the delivery misread the DoD; try a native worker".into(),
             }),
         )
@@ -23455,7 +23608,8 @@ mod tests {
             Json(TaskExecReassignRequest {
                 source_agent: "ClaudeCode".into(),
                 source_session_id: "principal-sess".into(),
-                worker: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
+                validations: None,
                 reason: "hand the rework to another CLI".into(),
             }),
         )
@@ -26817,7 +26971,8 @@ mod tests {
             Json(TaskExecReassignRequest {
                 source_agent: "ClaudeCode".into(),
                 source_session_id: "principal".into(),
-                worker: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
+                validations: None,
                 reason: "redirect to a fresh CLI since the first never accepted".into(),
             }),
         )

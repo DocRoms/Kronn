@@ -200,7 +200,6 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
             "task_exec_deliver",
             "task_exec_review",
             "task_exec_cancel",
-            "task_exec_update_validations",
             "task_exec_reassign",
             "agent_job_start",
             "agent_schedule_wake",
@@ -1059,24 +1058,15 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
             json!(["task_execution_id", "reason"]),
         ),
         tool(
-            "task_exec_update_validations",
-            "Replace the validations of an existing execution as its parent-room principal, without relaunching it: pass the complete new set (it replaces, it does not merge) and a reason. Same rules as launch; the swap is journaled with the previous set. Refused while an integration runs, once terminal, or for a campaign's shared gates. Contract: tool_manual({tool: \"task_exec_update_validations\"}).",
-            json!({
-                "task_execution_id": {"type": "string"},
-                "validations": validations_schema("The complete new set of gates; [] removes every gate."),
-                "reason": {"type": "string"}
-            }),
-            json!(["task_execution_id", "validations", "reason"]),
-        ),
-        tool(
             "task_exec_reassign",
-            "Reassign a blocked, interrupted or awaiting-review execution (a pending delivery is rejected) as its parent-room principal while preserving durable child/worktree/checkpoints.",
+            "Amend an existing execution as its parent-room principal, keeping its durable child/worktree/checkpoints. ONE change per call: `worker` reassigns a blocked, interrupted or awaiting-review execution (a pending delivery is rejected); `validations` replaces its gates without relaunching. Contract: tool_manual({tool: \"task_exec_reassign\"}).",
             json!({
                 "task_execution_id": {"type": "string"},
                 "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier — the same object agent_list hands back and task_exec_prepare/task_exec_launch accept as worker."},
+                "validations": validations_schema("The COMPLETE new set of gates (it replaces, never merges); [] removes every gate."),
                 "reason": {"type": "string"}
             }),
-            json!(["task_execution_id", "worker", "reason"]),
+            json!(["task_execution_id", "reason"]),
         ),
     ]
 }
@@ -1232,7 +1222,6 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
         "task_exec_prepare",
         "task_exec_launch",
         "task_exec_cancel",
-        "task_exec_update_validations",
         "task_exec_reassign",
         "task_exec_review",
         // Durable jobs are a principal/recovery capability. A bounded worker
@@ -2643,64 +2632,6 @@ impl KronnToolExecutor {
                 .await;
                 unwrap_api(call, response.success, response.data, response.error)
             }
-            "task_exec_update_validations" => {
-                let Some(execution_id) = required_string(call, "task_execution_id") else {
-                    return fail(call, "missing required field `task_execution_id`");
-                };
-                let Some(reason) = required_string(call, "reason") else {
-                    return fail(call, "missing required field `reason`");
-                };
-                let validations = match validations_argument(call) {
-                    Ok(Some(validations)) => validations,
-                    Ok(None) => {
-                        return fail(
-                            call,
-                            "missing required field `validations`: the complete new set, [] to remove every gate",
-                        )
-                    }
-                    Err(error) => return fail(call, error),
-                };
-                let execution = {
-                    let discussion_id = discussion_id.clone();
-                    let actor_type = actor_type.clone();
-                    let source_message_id = self.source_message_id.clone();
-                    self.state
-                        .db
-                        .with_conn(move |conn| {
-                            native_execution_for_caller(
-                                conn,
-                                &execution_id,
-                                &discussion_id,
-                                &actor_type,
-                                source_message_id.as_deref(),
-                                true,
-                            )
-                        })
-                        .await
-                };
-                let execution = match execution {
-                    Ok(execution) => execution,
-                    Err(error) => return fail(call, error.to_string()),
-                };
-                let actor = crate::models::PlanningActor {
-                    kind: crate::models::PlanningActorKind::Agent,
-                    id: Some(self.actor_id.clone()),
-                    session_id: self.actor_session_id(),
-                    source_message_id: self.source_message_id.clone(),
-                };
-                match crate::api::orchestration::replace_execution_validations(
-                    &self.state.db,
-                    &execution.id,
-                    validations,
-                    &reason,
-                    actor,
-                )
-                .await
-                {
-                    Ok(replacement) => ok(call, json!(replacement)),
-                    Err((_, message)) => fail(call, message),
-                }
-            }
             "task_exec_reassign" => {
                 let Some(execution_id) = required_string(call, "task_execution_id") else {
                     return fail(call, "missing required field `task_execution_id`");
@@ -2708,26 +2639,41 @@ impl KronnToolExecutor {
                 let Some(reason) = required_string(call, "reason") else {
                     return fail(call, "missing required field `reason`");
                 };
-                let target = match serde_json::from_value::<crate::models::MessageTarget>(
-                    call.arguments["worker"].clone(),
-                ) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        return fail(
-                            call,
-                            format!(
-                                "worker must be the typed MessageTarget object copied verbatim \
-                                 from agent_list (kind/agent_type/...), not the internal \
-                                 CampaignWorkerSelection envelope: {error}"
-                            ),
-                        )
+                // One change per call (KT-839): a `worker` reassigns, `validations`
+                // replaces the gates. Absent means absent; an explicit null gate
+                // list is refused by `validations_argument`, never read as "no gates".
+                let target = match call
+                    .arguments
+                    .get("worker")
+                    .filter(|value| !value.is_null())
+                {
+                    None => None,
+                    Some(value) => {
+                        match serde_json::from_value::<crate::models::MessageTarget>(value.clone())
+                        {
+                            Ok(target) => Some(target),
+                            Err(error) => {
+                                return fail(
+                                    call,
+                                    format!(
+                                        "worker must be the typed MessageTarget object copied \
+                                         verbatim from agent_list (kind/agent_type/...), not the \
+                                         internal CampaignWorkerSelection envelope: {error}"
+                                    ),
+                                )
+                            }
+                        }
                     }
                 };
-                let worker = crate::models::CampaignWorkerSelection {
-                    target,
-                    model: None,
-                    profile_id: None,
+                let validations = match validations_argument(call) {
+                    Ok(validations) => validations,
+                    Err(error) => return fail(call, error),
                 };
+                let amendment =
+                    match crate::api::orchestration::execution_amendment(target, validations) {
+                        Ok(amendment) => amendment,
+                        Err(refusal) => return fail(call, refusal),
+                    };
                 let authorized = {
                     let execution_id = execution_id.clone();
                     let discussion_id = discussion_id.clone();
@@ -2744,20 +2690,57 @@ impl KronnToolExecutor {
                                 source_message_id.as_deref(),
                                 true,
                             )
-                            .map(|_| ())
+                            .map(|execution| execution.id)
                         })
                         .await
                 };
-                if let Err(error) = authorized {
-                    return fail(call, error.to_string());
+                // The reference may have been a task reference; the swap is keyed by
+                // the resolved execution id.
+                let resolved_id = match authorized {
+                    Ok(id) => id,
+                    Err(error) => return fail(call, error.to_string()),
+                };
+                match amendment {
+                    crate::api::orchestration::ExecutionAmendment::Reassign(target) => {
+                        let worker = crate::models::CampaignWorkerSelection {
+                            target,
+                            model: None,
+                            profile_id: None,
+                        };
+                        let Json(response) = crate::api::orchestration::reassign_execution(
+                            State(self.state.clone()),
+                            Path(execution_id),
+                            Json(crate::api::orchestration::ReassignExecutionRequest {
+                                worker,
+                                reason,
+                            }),
+                        )
+                        .await;
+                        unwrap_api(call, response.success, response.data, response.error)
+                    }
+                    crate::api::orchestration::ExecutionAmendment::ReplaceValidations(
+                        validations,
+                    ) => {
+                        let actor = crate::models::PlanningActor {
+                            kind: crate::models::PlanningActorKind::Agent,
+                            id: Some(self.actor_id.clone()),
+                            session_id: self.actor_session_id(),
+                            source_message_id: self.source_message_id.clone(),
+                        };
+                        match crate::api::orchestration::replace_execution_validations(
+                            &self.state.db,
+                            &resolved_id,
+                            validations,
+                            &reason,
+                            actor,
+                        )
+                        .await
+                        {
+                            Ok(replacement) => ok(call, json!(replacement)),
+                            Err((_, message)) => fail(call, message),
+                        }
+                    }
                 }
-                let Json(response) = crate::api::orchestration::reassign_execution(
-                    State(self.state.clone()),
-                    Path(execution_id),
-                    Json(crate::api::orchestration::ReassignExecutionRequest { worker, reason }),
-                )
-                .await;
-                unwrap_api(call, response.success, response.data, response.error)
             }
             other => fail(call, format!("unknown task execution tool `{other}`")),
         }
@@ -3877,7 +3860,7 @@ fn tool_manual(name: Option<&str>) -> Value {
              with reason `invalid_validations` and the form that runs, and makes \
              task_exec_launch refuse it the same way — it is never accepted to fail at \
              integration. To correct the gates of an execution that already exists, without \
-             relaunching it, use `task_exec_update_validations`.",
+             relaunching it, call `task_exec_reassign` with `validations`.",
         ),
         (
             "task_exec_launch",
@@ -3889,18 +3872,23 @@ fn tool_manual(name: Option<&str>) -> Value {
              here, before anything is created.",
         ),
         (
-            "task_exec_update_validations",
-            "Principal-only. Replaces the validations of an existing, non-terminal execution \
-             without relaunching it, so its room, worktree, attempts and evidence stay as they \
-             are. Pass `task_execution_id`, the COMPLETE new `validations` set (it replaces the \
-             old one — it is not merged; `[]` removes every gate) and a `reason`. The set is \
-             held to the launch rules (tool_manual({tool: \"task_exec_prepare\"})): a command \
-             that could never run is refused.\n\n\
-             The swap is journaled on the execution with the actor, the reason and the previous \
-             set, and the answer returns `previous`, `validations` and `changed` (false when the \
-             set was already the current one). Earlier validation results are kept as evidence; \
-             what integration requires is a pass of each CURRENT gate on the exact candidate, so \
-             a corrected command is simply run at the next integration.\n\n\
+            "task_exec_reassign",
+            "Principal-only, and ONE change per call: pass either a `worker` or `validations`, \
+             never both and never neither. Room, worktree, attempts and evidence are kept \
+             either way.\n\n\
+             **`worker`** reassigns a blocked, interrupted or awaiting-review execution (a \
+             pending delivery is rejected and stays in the attempt history). Pass the flat typed \
+             MessageTarget copied from `agent_list`, never the internal \
+             `{target, model, profile_id}` envelope.\n\n\
+             **`validations`** replaces the gates of an existing, non-terminal execution without \
+             relaunching it. Pass the COMPLETE new set — it replaces the old one, it is not \
+             merged; `[]` removes every gate — and a `reason`. The set is held to the launch \
+             rules (tool_manual({tool: \"task_exec_prepare\"})): a command that could never run \
+             is refused. The swap is journaled on the execution with the actor, the reason and \
+             the previous set, and the answer returns `previous`, `validations` and `changed` \
+             (false when the set was already the current one). Earlier validation results are \
+             kept as evidence; what integration requires is a pass of each CURRENT gate on the \
+             exact candidate, so a corrected command is simply run at the next integration. \
              Refused while the execution is Integrating, Validating or Applying (the running \
              integration started with the old set — retry when it settles), once it is Done, \
              Failed or Cancelled, and for an execution of a campaign, whose gates are the \
@@ -4446,7 +4434,6 @@ mod tests {
                 "task_exec_deliver",
                 "task_exec_review",
                 "task_exec_cancel",
-                "task_exec_update_validations",
                 "task_exec_reassign",
             ]
         );
@@ -5153,7 +5140,7 @@ mod tests {
             "pnpm --dir frontend exec tsc",
             "cargo test --manifest-path backend/Cargo.toml --target-dir",
             "invalid_validations",
-            "task_exec_update_validations",
+            "task_exec_reassign",
         ] {
             assert!(
                 text.contains(fact),
@@ -5182,9 +5169,15 @@ mod tests {
             .as_str()
             .expect("launch page")
             .contains("tool_manual({tool: \"task_exec_prepare\"})"));
-        let update = tool_manual(Some("task_exec_update_validations"));
-        let update = update["manual"].as_str().expect("update page");
-        for fact in ["COMPLETE", "journaled", "Integrating", "campaign"] {
+        let update = tool_manual(Some("task_exec_reassign"));
+        let update = update["manual"].as_str().expect("reassign page");
+        for fact in [
+            "ONE change per call",
+            "COMPLETE",
+            "journaled",
+            "Integrating",
+            "campaign",
+        ] {
             assert!(update.contains(fact), "{fact}: {update}");
         }
     }

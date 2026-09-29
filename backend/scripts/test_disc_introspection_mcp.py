@@ -1242,7 +1242,7 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             "pnpm --dir frontend exec tsc",
             "cargo test --manifest-path backend/Cargo.toml --target-dir",
             "`invalid_validations`",
-            "task_exec_update_validations",
+            "`task_exec_reassign` with",
         ):
             with self.subTest(fact=fact):
                 self.assertIn(fact, manual)
@@ -1269,54 +1269,71 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.assertIn("validations", schema["properties"])
         self.assertNotIn("validations", schema["required"])
 
-    def test_update_validations_replaces_the_set_with_the_derived_identity(self):
+    def test_replacing_validations_is_a_reassign_change_not_a_tool_of_its_own(self):
+        """KT-839 — every declaration is paid for on every session
+        (`mcp_surface_budget.py`), so the principal's swap of an execution's gates
+        rides `task_exec_reassign`: principal-only, reason-journaled, room and
+        evidence kept. `task_exec_review` was the wrong home (its authorization
+        admits a self-reviewing worker, and ReviewDecision v1 is a persisted
+        contract); `task_exec_prepare` is documented as mutation-free."""
         tools = {item["name"]: item for item in self.mod.TOOLS}
-        schema = tools["task_exec_update_validations"]["inputSchema"]
-        self.assertEqual(
-            schema["required"], ["task_execution_id", "validations", "reason"]
-        )
+        self.assertNotIn("task_exec_update_validations", tools)
+        self.assertNotIn("task_exec_update_validations", self.mod.DISPATCH)
+        schema = tools["task_exec_reassign"]["inputSchema"]
+        self.assertIn("validations", schema["properties"])
+        # `worker` is no longer always required: one of the two is.
+        self.assertEqual(schema["required"], ["task_execution_id", "reason"])
         self.assertNotIn("source_agent", schema["properties"])
         self.assertNotIn("source_session_id", schema["properties"])
-        self.assertIn("task_exec_update_validations", self.mod._GUARDED_ORCHESTRATION_TOOLS)
-        self.assertIn("task_exec_update_validations", self.mod.TOOL_MANUALS)
+        manual = self.mod.TOOL_MANUALS["task_exec_reassign"]
+        for fact in ("ONE change per call", "COMPLETE", "journaled", "Integrating", "campaign"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, manual)
 
+    def test_reassign_replaces_the_gates_with_the_derived_identity(self):
         http = mock.MagicMock(return_value={"success": True, "data": {"changed": True}})
         fixed = [{"command": "pnpm --dir frontend exec tsc -b --pretty false"}]
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
              mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
              mock.patch.object(self.mod, "_http", http):
-            self.mod.call_task_exec_update_validations({
+            self.mod.call_task_exec_reassign({
                 "task_execution_id": "exec-1", "validations": fixed,
                 "reason": "cd is not runnable",
             })
             # The empty set is a real request (drop every gate), not a missing one.
-            self.mod.call_task_exec_update_validations({
+            self.mod.call_task_exec_reassign({
                 "task_execution_id": "exec-1", "validations": [], "reason": "no gate",
             })
-            for missing in (
-                {"validations": fixed, "reason": "r"},
+            worker = {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}
+            for refused in (
+                # one change per call: both, or neither
+                {"task_execution_id": "exec-1", "worker": worker,
+                 "validations": fixed, "reason": "r"},
                 {"task_execution_id": "exec-1", "reason": "r"},
+                # the rest of the contract
+                {"validations": fixed, "reason": "r"},
                 {"task_execution_id": "exec-1", "validations": fixed},
+                {"task_execution_id": "exec-1", "validations": "cargo test", "reason": "r"},
             ):
-                with self.assertRaises(RuntimeError):
-                    self.mod.call_task_exec_update_validations(missing)
+                with self.subTest(refused=refused), self.assertRaises(RuntimeError):
+                    self.mod.call_task_exec_reassign(refused)
         identity = {"source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a"}
         self.assertEqual(http.call_count, 2)
         http.assert_has_calls([
-            mock.call("POST", "/api/orchestration/tool/executions/exec-1/validations", {
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
                 **identity, "validations": fixed, "reason": "cd is not runnable",
             }),
-            mock.call("POST", "/api/orchestration/tool/executions/exec-1/validations", {
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
                 **identity, "validations": [], "reason": "no gate",
             }),
         ])
 
-    def test_stale_bridge_refuses_update_validations_before_http(self):
+    def test_stale_bridge_refuses_a_validations_swap_before_http(self):
         self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
         with mock.patch.object(self.mod, "_http") as http:
             with self.assertRaises(RuntimeError) as refused:
-                self.mod.call_task_exec_update_validations({
+                self.mod.call_task_exec_reassign({
                     "task_execution_id": "exec-1", "validations": [], "reason": "r",
                 })
             self.assertIn("Reconnect", str(refused.exception))
