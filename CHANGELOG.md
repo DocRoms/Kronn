@@ -33,6 +33,14 @@ Release notes for 0.9.3 and earlier are available in the
   repository and replaces an edited copy only with `overwrite_kronn_changes`).
   The same skill under several skill folders is grouped by slug, every path
   kept, and flagged when the copies differ.
+- The Automation sub-tab of a project's "AI & automation" tab filters by type
+  (All / QP / QA / QE / Workflow), each chip with its count. It stacks with the
+  location filter and the search, and every chip counts what choosing it would
+  show given the others.
+- The global Automation page filters by state (All / Favorites / Active /
+  Inactive; only a disabled workflow is inactive) next to the type and project
+  filters. On a screen narrower than 640 px, the filters of both surfaces fold
+  behind one "Filters (n)" button.
 
 ### Changed
 
@@ -47,6 +55,10 @@ Release notes for 0.9.3 and earlier are available in the
   overview panel, whose summary and "Test all" / "Test the project" button
   follow it. A plugin's scope is now edited only from the Access tab of its
   sheet.
+- The global Automation page's sidebar keeps only the shared collection
+  chrome (title row, Favorites, Recent, project tree, footer). Its search, type
+  chips and project select moved into a filter bar above the list; every
+  feature they offered is still there, and `/` still reaches the search.
 - `not_published`, `repository_modified` and `kronn_modified` are now
   `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
   only in the repository is `repository_only`. A resource that exists on both

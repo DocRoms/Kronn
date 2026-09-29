@@ -6,7 +6,9 @@ import {
   attachedSkillIds,
   attentionCount,
   attentionItems,
+  AUTOMATION_TYPE_FILTERS,
   buildRows,
+  matchesAutomationType,
   matchesPresence,
   matchesQuery,
   originLabel,
@@ -14,6 +16,27 @@ import {
 } from '../repositoryResourceRows';
 
 describe('repository resource rows', () => {
+  it('matches an automation row by its type, All matching every kind', () => {
+    const rows = buildRows(listing({
+      resources: [
+        resource({ id: 'a', name: 'A', kind: 'quick_prompt', status: 'up_to_date' }),
+        resource({ id: 'b', name: 'B', kind: 'quick_api', status: 'up_to_date' }),
+        resource({ id: 'c', name: 'C', kind: 'quick_exec', status: 'up_to_date' }),
+        resource({ id: 'd', name: 'D', kind: 'workflow', status: 'up_to_date' }),
+      ],
+    })).automation;
+    expect(AUTOMATION_TYPE_FILTERS).toEqual(['all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow']);
+    expect(Object.fromEntries(AUTOMATION_TYPE_FILTERS.map(filter => [
+      filter, rows.filter(row => matchesAutomationType(row, filter)).map(row => row.name),
+    ]))).toEqual({
+      all: ['A', 'B', 'C', 'D'],
+      quick_prompt: ['A'],
+      quick_api: ['B'],
+      quick_exec: ['C'],
+      workflow: ['D'],
+    });
+  });
+
   it('maps every status to one primary action', () => {
     const rows = buildRows(listing({
       resources: [

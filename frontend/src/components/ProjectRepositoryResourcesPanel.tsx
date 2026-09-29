@@ -17,12 +17,15 @@ import {
   alignLines,
   attachedSkillIds,
   attentionItems,
+  AUTOMATION_TYPE_FILTERS,
   buildRows,
+  matchesAutomationType,
   matchesPresence,
   matchesQuery,
   writesRepository,
   type AlignLine,
   type AttentionItem,
+  type AutomationTypeFilter,
   type PresenceFilter,
   type RepositoryRows,
   type ResourceRow,
@@ -33,6 +36,7 @@ import type {
   ProjectRepositoryResourceStatus,
   ProjectRepositoryResources,
 } from '../types/generated';
+import { FilterFold } from './FilterFold';
 import { RepositoryResourceAlign } from './RepositoryResourceAlign';
 import { RepositoryResourceApprove } from './RepositoryResourceApprove';
 import { RepositoryResourceCompare } from './RepositoryResourceCompare';
@@ -101,6 +105,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<PresenceFilter>('all');
+  const [typeFilter, setTypeFilter] = useState<AutomationTypeFilter>('all');
   const [attentionOpen, setAttentionOpen] = useState(false);
   const [transfer, setTransfer] = useState<TransferPlan | null>(null);
   const [sheet, setSheet] = useState<Sheet | null>(null);
@@ -201,6 +206,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const selectTab = (tab: ProjectRepositoryResourcesTab) => {
     setActiveTab(tab);
     setFilter('all');
+    setTypeFilter('all');
     rememberProjectRepositoryResourcesTab(tab);
   };
   const toggleSelected = (key: string) => setSelected(current => {
@@ -353,7 +359,10 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
     ? [...rows.skills, ...rows.catalog]
     : activeTab === 'automation' ? rows.automation : rows.artifacts;
   const searched = tabRows.filter(row => matchesQuery(row, query));
-  const visibleRows = searched.filter(row => matchesPresence(row, filter));
+  // Type and location narrow the same rows: each chip counts what choosing it
+  // would show given the other one, and the search.
+  const visibleRows = searched.filter(row => matchesPresence(row, filter) && matchesAutomationType(row, typeFilter));
+  const activeFilterCount = Number(filter !== 'all') + Number(typeFilter !== 'all');
   const visibleSet = new Set(visibleRows.map(row => row.key));
   // A search or the "Kronn only" filter must find what is folded away.
   const searching = query.trim() !== '' || filter === 'kronn';
@@ -528,20 +537,40 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
                 onChange={event => setQuery(event.target.value)}
               />
             </label>
-            <div className="rr-filters" role="group" aria-label={t('projects.repositoryResources.filters')}>
-              {FILTERS.map(option => (
-                <button
-                  key={option}
-                  type="button"
-                  className="rr-chip"
-                  aria-pressed={filter === option}
-                  onClick={() => setFilter(option)}
-                >
-                  {t(`projects.repositoryResources.filter.${option}`)}
-                  <span>{searched.filter(row => matchesPresence(row, option)).length}</span>
-                </button>
-              ))}
-            </div>
+            <FilterFold label={t('collection.filters')} activeCount={activeFilterCount}>
+              {activeTab === 'automation' && (
+                <div className="rr-filters" role="group" aria-label={t('projects.repositoryResources.types')} data-testid="automation-type-filters">
+                  {AUTOMATION_TYPE_FILTERS.map(option => (
+                    <button
+                      key={option}
+                      type="button"
+                      className="rr-chip"
+                      data-type-filter={option}
+                      title={option === 'all' ? undefined : t(`projects.repositoryResources.kind.${option}`)}
+                      aria-pressed={typeFilter === option}
+                      onClick={() => setTypeFilter(option)}
+                    >
+                      {t(`projects.repositoryResources.type.${option}`)}
+                      <span>{searched.filter(row => matchesPresence(row, filter) && matchesAutomationType(row, option)).length}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="rr-filters" role="group" aria-label={t('projects.repositoryResources.filters')}>
+                {FILTERS.map(option => (
+                  <button
+                    key={option}
+                    type="button"
+                    className="rr-chip"
+                    aria-pressed={filter === option}
+                    onClick={() => setFilter(option)}
+                  >
+                    {t(`projects.repositoryResources.filter.${option}`)}
+                    <span>{searched.filter(row => matchesPresence(row, option) && matchesAutomationType(row, typeFilter)).length}</span>
+                  </button>
+                ))}
+              </div>
+            </FilterFold>
             {showBulk && (
               <div className="rr-bulk">
                 {selectedForPublication.length > 0 && (

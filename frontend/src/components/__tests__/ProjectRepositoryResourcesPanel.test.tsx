@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import fr from '../../lib/i18n/locales/fr';
@@ -9,6 +9,7 @@ import { listing, resource, skill } from './repositoryResourceFixtures';
 const stylesheet = (name: string) => readFileSync(join(import.meta.dirname, '..', name), 'utf-8');
 const panelCss = stylesheet('ProjectRepositoryResourcesPanel.css');
 const sheetsCss = stylesheet('RepositoryResourceSheets.css');
+const foldCss = stylesheet('FilterFold.css');
 
 const repositoryResources = vi.hoisted(() => vi.fn());
 const publishRepositoryResource = vi.hoisted(() => vi.fn());
@@ -1273,6 +1274,125 @@ describe('ProjectRepositoryResourcesPanel', () => {
     });
   });
 
+  describe('type filter of the Automation sub-tab (KT-904)', () => {
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    const library = listing({
+      resources: [
+        resource({ id: 'k', name: 'Only Kronn', kind: 'quick_prompt', status: 'kronn_only', repository_paths: ['kronn/prompts/only-kronn.md'] }),
+        resource({ id: 'ok', name: 'Same', kind: 'quick_prompt', status: 'up_to_date', repository_paths: ['kronn/prompts/same.md'] }),
+        resource({ id: 'cf', name: 'Two Versions', kind: 'quick_api', status: 'conflict' }),
+        resource({ id: 'repository:quick_exec:r', name: 'Only Repo', kind: 'quick_exec', status: 'repository_only', repository_paths: ['kronn/quick-execs/only-repo.yaml'] }),
+        resource({ id: 'ap', name: 'Needs Approval', kind: 'quick_exec', status: 'approval_required' }),
+        resource({ id: 'rn', name: 'Repo Newer', kind: 'workflow', status: 'repository_newer' }),
+        resource({ id: 'kn', name: 'Kronn Newer', kind: 'workflow', status: 'kronn_newer' }),
+      ],
+    });
+    const typeGroup = () => screen.getByRole('group', { name: `${R}types` });
+    const typeChip = (type: string) => within(typeGroup()).getByRole('button', { name: named(`type.${type}`) });
+    const locationChip = (option: string) => screen.getByRole('button', { name: named(`filter.${option}`) });
+    const count = (chip: HTMLElement) => Number(chip.querySelector('span')?.textContent);
+    const shown = () => ['Only Kronn', 'Same', 'Two Versions', 'Only Repo', 'Needs Approval', 'Repo Newer', 'Kronn Newer']
+      .filter(name => screen.queryByRole('button', { name }));
+
+    it('offers All / QP / QA / QE / Workflow with their counts on the Automation sub-tab only', async () => {
+      await show(library);
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+      openTab('automation');
+
+      const chips = within(typeGroup()).getAllByRole('button');
+      expect(chips.map(chip => chip.dataset.typeFilter)).toEqual(['all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow']);
+      expect(chips.map(count)).toEqual([7, 2, 1, 2, 2]);
+      expect(chips[0]).toHaveAttribute('aria-pressed', 'true');
+      // A short label with the full name on hover, in the same chip as the rest of the tab.
+      expect(chips[1]).toHaveClass('rr-chip');
+      expect(chips[1]).toHaveAttribute('title', `${R}kind.quick_prompt`);
+
+      openTab('artifacts');
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+    });
+
+    it('narrows the list to the chosen type and back', async () => {
+      await show(library);
+      openTab('automation');
+
+      fireEvent.click(typeChip('quick_prompt'));
+      expect(typeChip('quick_prompt')).toHaveAttribute('aria-pressed', 'true');
+      expect(shown()).toEqual(['Only Kronn', 'Same']);
+      expect(document.querySelector('[data-resource-kind="workflow"]')).toBeNull();
+      expect(document.querySelector('[data-resource-kind="quick_prompt"]')).toBeInTheDocument();
+
+      fireEvent.click(typeChip('workflow'));
+      expect(shown()).toEqual(['Repo Newer', 'Kronn Newer']);
+
+      fireEvent.click(typeChip('all'));
+      expect(shown()).toHaveLength(7);
+    });
+
+    it('stacks with the location filter and the search, each chip counting what the others leave', async () => {
+      await show(library);
+      openTab('automation');
+
+      fireEvent.click(typeChip('quick_exec'));
+      expect(shown()).toEqual(['Only Repo', 'Needs Approval']);
+      // Location chips now count within the QE only: two in all, one in the repository only, one in both.
+      expect(['all', 'repository', 'kronn', 'both'].map(option => count(locationChip(option)))).toEqual([2, 1, 0, 1]);
+
+      fireEvent.click(locationChip('repository'));
+      expect(shown()).toEqual(['Only Repo']);
+      // Type chips count within the repository-only rows: one QE, nothing else.
+      expect(['all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow'].map(type => count(typeChip(type)))).toEqual([1, 0, 0, 1, 0]);
+
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'no such thing' } });
+      expect(shown()).toEqual([]);
+      expect(screen.getByText(`${R}emptyFiltered`)).toBeInTheDocument();
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'only-repo' } });
+      expect(shown()).toEqual(['Only Repo']);
+
+      // Lifting the location filter keeps the type and the search in force.
+      fireEvent.click(locationChip('all'));
+      expect(shown()).toEqual(['Only Repo']);
+      fireEvent.click(typeChip('all'));
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: '' } });
+      expect(shown()).toHaveLength(7);
+    });
+
+    it('starts each tab with every type again', async () => {
+      await show(library);
+      openTab('automation');
+      fireEvent.click(typeChip('workflow'));
+      openTab('skills');
+      openTab('automation');
+      expect(typeChip('all')).toHaveAttribute('aria-pressed', 'true');
+      expect(shown()).toHaveLength(7);
+    });
+
+    it('folds the type and location chips behind "Filtres (n)" at 400 px, next to a search that stays', async () => {
+      vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+      await show(library);
+      openTab('automation');
+
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+      expect(screen.queryByRole('group', { name: `${R}filters` })).toBeNull();
+      expect(screen.getByRole('searchbox')).toBeInTheDocument();
+      const fold = screen.getByRole('button', { name: 'collection.filters' });
+      expect(fold).toHaveAttribute('aria-expanded', 'false');
+
+      fireEvent.click(fold);
+      expect(fold).toHaveAttribute('aria-expanded', 'true');
+      fireEvent.click(typeChip('quick_prompt'));
+      fireEvent.click(locationChip('kronn'));
+      expect(shown()).toEqual(['Only Kronn']);
+      expect(screen.getByRole('button', { name: 'collection.filters (2)' })).toBe(fold);
+
+      fireEvent.keyDown(fold, { key: 'Escape' });
+      expect(fold).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+      // Folded, the filters still apply.
+      expect(shown()).toEqual(['Only Kronn']);
+    });
+  });
+
   describe('400 px layout', () => {
     const mobile = (css: string) => css.slice(css.indexOf('@media (max-width: 640px)'));
 
@@ -1299,8 +1419,14 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(rules).toMatch(/\.rr-modal \.rr-button[^}]*min-height: 44px/);
     });
 
+    it('folds its filters into a full-width, 44 px button instead of stretching the toolbar', () => {
+      expect(foldCss).toMatch(/\.kr-filter-fold-toggle \{[^}]*width: 100%[^}]*min-height: 44px/);
+      expect(foldCss).toMatch(/\.kr-filter-fold \{[^}]*width: 100%[^}]*min-width: 0/);
+      expect(foldCss).toMatch(/\.kr-filter-fold-label \{[^}]*text-overflow: ellipsis/);
+    });
+
     it('uses design tokens only', () => {
-      for (const css of [panelCss, sheetsCss]) {
+      for (const css of [panelCss, sheetsCss, foldCss]) {
         expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(|var\(--(?!kr-)/);
       }
     });

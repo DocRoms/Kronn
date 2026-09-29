@@ -21,7 +21,7 @@ import {
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star, Trash2,
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
-  PlugZap, MessageSquareText, TerminalSquare, Filter,
+  PlugZap, MessageSquareText, TerminalSquare,
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
@@ -55,6 +55,15 @@ import { ConfirmDeleteButton } from '../components/ConfirmDeleteButton';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
 import { CollectionProjectTree } from '../components/CollectionProjectTree';
+import { AutomationFilterBar } from '../components/AutomationFilterBar';
+import {
+  countAutomationKinds,
+  countAutomationStates,
+  matchesAutomationFilters,
+  type AutomationFilters,
+  type AutomationKindFilter,
+  type AutomationStateFilter,
+} from '../lib/automationFilters';
 import {
   sortQuickApis,
   sortQuickPrompts,
@@ -322,8 +331,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [automationKindFilter, setAutomationKindFilter] = useState<AutomationTab | 'all'>(
     postImprovedQpId ? 'quickPrompts' : 'all',
   );
-  const [showAutomationProjectFilter, setShowAutomationProjectFilter] = useState(false);
-  const automationProjectFilterButtonRef = useRef<HTMLButtonElement>(null);
+  const [automationStateFilter, setAutomationStateFilter] = useState<AutomationStateFilter>('all');
   const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<string>>(
     readCollapsedAutomationSections,
   );
@@ -1914,6 +1922,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       || showCreate || editingWorkflow || showCreateQA || editingQA
       || showCreateQP || editingQP || showCreateQE || editingQE,
   );
+  const automationFilters: AutomationFilters = {
+    kind: automationKindFilter,
+    state: automationStateFilter,
+    projectId: automationProjectFilter,
+    query: automationQuery,
+  };
+  const automationKindCounts = countAutomationKinds(automationResources, automationFilters);
+  const automationStateCounts = countAutomationStates(automationResources, automationFilters);
+  const selectAutomationKindFilter = (kind: AutomationKindFilter) => {
+    if (kind === 'all') setAutomationKindFilter('all');
+    else selectAutomationKind(kind);
+  };
   return (
     <div className="automation-page" data-has-selection={automationHasSelection}>
       <CollectionShell<AutomationResource>
@@ -1923,12 +1943,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         items={automationResources}
         getId={resource => resource.id}
         getLabel={resource => resource.searchText}
-        itemFilter={resource => (
-          automationKindFilter === 'all' || resource.kind === automationKindFilter
-        ) && (
-          automationProjectFilter === 'all'
-          || (automationProjectFilter === '__global__' ? !resource.projectId : resource.projectId === automationProjectFilter)
-        )}
+        // The search is applied by the shell; the bar owns the other filters.
+        itemFilter={resource => matchesAutomationFilters(resource, automationFilters, ['query'])}
         persistence={{
           query: automationQuery,
           onQueryChange: setAutomationQuery,
@@ -1980,8 +1996,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           const resource = automationResources.find(item => item.id === id);
           if (resource) openAutomationResource(resource);
         }}
-        globalSearchShortcut
-        showSearchClear
         showControls={false}
         isMobile={isMobile}
         sidebarOpen={sidebarOpen}
@@ -2022,58 +2036,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </ContextHelp>
         </>}
         slots={{
-          // The tour still anchors on the library; the shell owns the title
-          // row now, so the marker travels with it.
-          sidebarHeaderEnd: <button
-            ref={automationProjectFilterButtonRef}
-            type="button"
-            className="collection-shell-search-action collection-shell-search-action-icon"
-            data-active={showAutomationProjectFilter || automationProjectFilter !== 'all'}
-            onClick={() => setShowAutomationProjectFilter(open => !open)}
-            onKeyDown={event => {
-              if (event.key === 'Escape' && showAutomationProjectFilter) {
-                event.preventDefault();
-                setShowAutomationProjectFilter(false);
-              }
-            }}
-            aria-label={t('automation.projectFilter')}
-            title={t('automation.projectFilter')}
-            aria-expanded={showAutomationProjectFilter}
-            aria-controls={showAutomationProjectFilter ? 'automation-project-filter-options' : undefined}
-          >
-            <Filter size={14} aria-hidden="true" />
-          </button>,
-          afterSidebarHeader: <>
-            {showAutomationProjectFilter && <div
-              id="automation-project-filter-options"
-              className="collection-shell-search-options"
-              onKeyDown={event => {
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  setShowAutomationProjectFilter(false);
-                  automationProjectFilterButtonRef.current?.focus();
-                }
-              }}
-            >
-              <select
-                className="automation-project-filter"
-                value={automationProjectFilter}
-                onChange={event => setAutomationProjectFilter(event.target.value)}
-                aria-label={t('automation.projectFilter')}
-              >
-                <option value="all">{t('automation.allProjects')}</option>
-                <option value="__global__">{t('disc.noProject')}</option>
-                {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
-              </select>
-            </div>}
-            <div className="automation-kind-filters" aria-label={t('automation.typeFilter')}>
-              <button type="button" data-active={automationKindFilter === 'all'} aria-pressed={automationKindFilter === 'all'} onClick={() => setAutomationKindFilter('all')}>{t('automation.allTypes')}</button>
-              <button type="button" data-tour-id="automation-kind-workflow" data-active={automationKindFilter === 'workflows'} aria-pressed={automationKindFilter === 'workflows'} onClick={() => selectAutomationKind('workflows')}><WorkflowIcon size={11} />{t('wf.tabWorkflows')} ({workflows.length})</button>
-              <button type="button" data-tour-id="automation-kind-quick-api" data-active={automationKindFilter === 'quickApis'} aria-pressed={automationKindFilter === 'quickApis'} onClick={() => selectAutomationKind('quickApis')}><PlugZap size={11} />{t('wf.tabQuickApis')} ({quickApiList?.length ?? 0})</button>
-              <button type="button" data-tour-id="automation-kind-quick-prompt" data-active={automationKindFilter === 'quickPrompts'} aria-pressed={automationKindFilter === 'quickPrompts'} onClick={() => selectAutomationKind('quickPrompts')}><MessageSquareText size={11} />{t('wf.tabQuickPrompts')} ({quickPromptList?.length ?? 0})</button>
-              <button type="button" data-tour-id="automation-kind-quick-exec" data-active={automationKindFilter === 'quickExecs'} aria-pressed={automationKindFilter === 'quickExecs'} onClick={() => selectAutomationKind('quickExecs')}><TerminalSquare size={11} />{t('wf.tabQuickExecs')} ({quickExecList?.length ?? 0})</button>
-            </div>
-          </>,
+          // The search and every filter live in the bar above the list: the
+          // sidebar keeps the title row, the project tree and its footer.
+          renderSearch: () => null,
           renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
             const sidebarWorkflows = visibleItems.flatMap(resource => resource.workflow ? [resource.workflow] : []);
             const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);
@@ -2301,6 +2266,24 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         }}
       />
 
+      {/* Search and filters sit above the list, not in the sidebar, which
+          keeps only the project tree. The bar narrows the tree and the list. */}
+      <div className="automation-main">
+      <AutomationFilterBar
+        filters={automationFilters}
+        kindCounts={automationKindCounts}
+        stateCounts={automationStateCounts}
+        projects={projects}
+        onQueryChange={setAutomationQuery}
+        onKindChange={selectAutomationKindFilter}
+        onStateChange={setAutomationStateFilter}
+        onProjectChange={setAutomationProjectFilter}
+        onClear={() => {
+          setAutomationKindFilter('all');
+          setAutomationStateFilter('all');
+          setAutomationProjectFilter('all');
+        }}
+      />
       <section className="automation-viewer">
       {showAutomationActions && (
         <div
@@ -4370,6 +4353,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         </div>
       )}
       </section>
+      </div>
     </div>
   );
 }

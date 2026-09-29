@@ -317,6 +317,16 @@ export function matchesPresence(row: ResourceRow, filter: PresenceFilter): boole
   return filter === 'all' || row.presence === filter;
 }
 
+/** The automation kinds a type chip can pick, in the order of the chips. */
+export type AutomationTypeFilter = 'all' | 'quick_prompt' | 'quick_api' | 'quick_exec' | 'workflow';
+export const AUTOMATION_TYPE_FILTERS: AutomationTypeFilter[] = [
+  'all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow',
+];
+
+export function matchesAutomationType(row: ResourceRow, filter: AutomationTypeFilter): boolean {
+  return filter === 'all' || row.kind === filter;
+}
+
 export function matchesQuery(row: ResourceRow, query: string): boolean {
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
