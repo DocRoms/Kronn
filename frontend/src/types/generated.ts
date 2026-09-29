@@ -5261,7 +5261,18 @@ write_preview: Array<string>, required_secrets: Array<RequiredSecretStatus>, rep
  * First 8 characters of the content hash of each side, so two versions
  * can be told apart at a glance. Absent when that side has no file.
  */
-repository_fingerprint?: string, kronn_fingerprint?: string, };
+repository_fingerprint?: string, kronn_fingerprint?: string,
+/**
+ * What this resource references (a workflow's Quick Prompts, Quick APIs,
+ * Quick Execs, sub-workflows and Artifacts; an Artifact's action blocks),
+ * in stable identities. A reference to something the project does not
+ * hold is listed too, flagged `missing`.
+ */
+uses: Array<RepositoryResourceLink>,
+/**
+ * The resources of this project that reference this one.
+ */
+used_by: Array<RepositoryResourceLink>, };
 
 export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
 
@@ -5831,6 +5842,33 @@ export type RepositoryResourceFieldDiff = { field: string, repository?: any, kro
  * resource is written to.
  */
 export type RepositoryResourceFileDiff = { path: string, diff: string, };
+
+/**
+ * One edge of the reference graph between a project's resources, seen from
+ * either end.
+ */
+export type RepositoryResourceLink = { kind: ProjectRepositoryResourceKind,
+/**
+ * The linked resource's listing `id`; the id the reference points at when
+ * the target is `missing`.
+ */
+id: string,
+/**
+ * The linked resource's stable `(kind, slug)` identity. Absent when
+ * `missing`: nothing known to derive it from.
+ */
+slug?: string,
+/**
+ * Display name; the referenced id when `missing`.
+ */
+name: string,
+/**
+ * Nothing the project holds answers to this reference: no resource of
+ * this project in Kronn, none in its repository. It may still exist
+ * elsewhere (another project, the global scope), where a publish or an
+ * import would not carry it.
+ */
+missing: boolean, };
 
 /**
  * Why Kronn cannot write into a repository right now — a code the UI

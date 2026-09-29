@@ -35,9 +35,67 @@ Release notes for 0.9.3 and earlier are available in the
   repository and replaces an edited copy only with `overwrite_kronn_changes`).
   The same skill under several skill folders is grouped by slug, every path
   kept, and flagged when the copies differ.
+- The Automation sub-tab of a project's "AI & automation" tab filters by type
+  (All / QP / QA / QE / Workflow), each chip with its count. It stacks with the
+  location filter and the search, and every chip counts what choosing it would
+  show given the others.
+- The global Automation page filters by state (All / Favorites / Active /
+  Inactive; only a disabled workflow is inactive) next to the type and project
+  filters. On a screen narrower than 640 px, the filters of both surfaces fold
+  behind one "Filters (n)" button.
+- `task_exec_update_validations({task_execution_id, validations, reason})`: the
+  principal replaces the validations of an existing execution without
+  relaunching it. The set replaces the current one, is held to the launch rules,
+  and is journaled (`validations_replaced`) with the actor, the reason and the
+  previous set; the room, the worktree, the attempts and the earlier validation
+  results are untouched. It is refused while an integration runs, once the
+  execution is terminal, and for a campaign run's shared gates.
+- `task_exec_reassign({task_execution_id, validations, reason})`: the principal
+  replaces the validations of an existing execution without relaunching it, with
+  `validations` in place of `worker` (one change per call). The set replaces the
+  current one, is held to the launch rules, and is journaled
+  (`validations_replaced`) with the actor, the reason and the previous set; the
+  room, the worktree, the attempts and the earlier validation results are
+  untouched. It is refused while an integration runs, once the execution is
+  terminal, and for a campaign run's shared gates. It is a change of an existing
+  tool rather than a new one so the MCP catalogue does not grow.
+- `task_exec_prepare` accepts the `validations` it will launch with and answers
+  `launchable: false` (reason `invalid_validations`) for one that could never run.
+- `tool_manual({tool: "task_exec_prepare"})` now states how a validation runs: one
+  allowlisted binary and literal arguments, no shell, from the root of the
+  worktree, with `pnpm --dir …` / `cargo … --manifest-path … --target-dir …` as
+  the forms that replace `cd … &&` and `VAR=…`.
+- Resources of a project's repository listing now say what they are linked to
+  (KT-905). Each item of `GET /api/projects/:id/repository-resources` carries
+  `uses` (what a workflow's steps or an Artifact's action blocks reference:
+  Quick Prompts, Quick APIs, Quick Execs, sub-workflows, Artifacts) and
+  `used_by`, as `{ kind, id, slug, name, missing }`; a reference to something
+  the project does not hold is kept and flagged `missing`. A row shows a
+  discreet "3 linked" count and its sheet lists "Uses" and "Used by", each
+  entry opening the linked resource. Ticking a resource ticks everything it
+  needs (recursively, loops included) with a "3 linked items added" line; a
+  resource a ticked one still needs cannot be unticked ("required by
+  nightly-triage"); "Align all" follows the same rule. Writing or loading a
+  single resource announces its dependencies and includes them by default;
+  leaving them out warns that it will only partly work.
 
 ### Changed
 
+- The Plugins sidebar no longer carries a per-project tree, so each plugin is
+  listed once (a global plugin used to appear once per project, and again
+  under "No project"). It is a flat list: Favorites and "Recently tested"
+  (both collapsible, and taken out of the full list) then "All plugins", each
+  row keeping its scope chips ("All projects · 3 projects"). Project, Health
+  (error / to check / ready) and Local sync (available in local CLIs / not
+  synced) join Type in the filter panel; the filter icon stays lit while one is
+  set, and "Clear filters" resets them all. The Project filter drives the
+  overview panel, whose summary and "Test all" / "Test the project" button
+  follow it. A plugin's scope is now edited only from the Access tab of its
+  sheet.
+- The global Automation page's sidebar keeps only the shared collection
+  chrome (title row, Favorites, Recent, project tree, footer). Its search, type
+  chips and project select moved into a filter bar above the list; every
+  feature they offered is still there, and `/` still reaches the search.
 - `not_published`, `repository_modified` and `kronn_modified` are now
   `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
   only in the repository is `repository_only`. A resource that exists on both
@@ -77,7 +135,35 @@ Release notes for 0.9.3 and earlier are available in the
   never masked twice, and text that cannot hold a secret no longer goes through
   the masking regexes (a check on the literal every match must contain, with a
   property test that the output is unchanged). Masking is otherwise the same:
-  the same patterns, the same non-leak tests.
+  the same patterns, the same non-leak tests. The links between resources
+  (`uses`, `used_by`, the "N linked" badge, the transfer announcements) stay in
+  the listing and do not depend on the diffs: on 120 resources, 40 of them
+  workflows of 15 steps, they cost about 2 ms when nothing is published and
+  about 9 ms when every resource has its repository file, out of about 100 ms.
+- An approved delivery the integration sends back (a validation that goes red, a
+  merge conflict) no longer stays in `ChangesRequested` with nobody working it
+  and nobody told. The send-back now re-activates the worker with the failing
+  command, its exit code and its output (a joined CLI is re-offered the next
+  attempt, a native worker is redispatched) and posts a notice, with the same
+  evidence, to the principal that approved. The principal can also run the
+  integration again on the same approved delivery with `task_exec_resume` when
+  the failure did not come from it (a flaky test, the environment): no new
+  delivery, the validations already green for that candidate are not re-run, and
+  it is refused once the worker committed or delivered again.
+- `task_exec_launch` no longer accepts a validation Quick Exec can never run
+  (`cd frontend && npx tsc -b`, `CARGO_TARGET_DIR=… cargo test`, a pipe, a
+  binary off the allowlist). It was accepted, the worker delivered, the review
+  approved, and the integration then refused the command (`` `cd` is not in the
+  Quick Exec allowlist ``) and sent an approved task back to `ChangesRequested`.
+  The launch, the campaign policy and the preflight now refuse it up front, with
+  the form that runs.
+- The brief of a worker with a shell no longer tells it to "run the validations".
+  It runs the targeted tests; the long validations the principal persisted are
+  played by Kronn at integration, and the worker commits and delivers in the same
+  turn without waiting on a background command. A full `cargo test` started in the
+  background outlived the 600 s shell limit, the worker handed the turn back to
+  wait for it and ended without delivering (`worker_completed_without_delivery`,
+  twice on KT-847).
 - The merge commit Kronn creates when it integrates a task branch now carries
   the `Signed-off-by` of the configured git identity, so a repository that
   enforces the DCO no longer turns the release PR red on it.

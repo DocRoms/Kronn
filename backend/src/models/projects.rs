@@ -258,6 +258,39 @@ pub struct ProjectRepositoryResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kronn_fingerprint: Option<String>,
+    /// What this resource references (a workflow's Quick Prompts, Quick APIs,
+    /// Quick Execs, sub-workflows and Artifacts; an Artifact's action blocks),
+    /// in stable identities. A reference to something the project does not
+    /// hold is listed too, flagged `missing`.
+    #[serde(default)]
+    pub uses: Vec<RepositoryResourceLink>,
+    /// The resources of this project that reference this one.
+    #[serde(default)]
+    pub used_by: Vec<RepositoryResourceLink>,
+}
+
+/// One edge of the reference graph between a project's resources, seen from
+/// either end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryResourceLink {
+    pub kind: ProjectRepositoryResourceKind,
+    /// The linked resource's listing `id`; the id the reference points at when
+    /// the target is `missing`.
+    pub id: String,
+    /// The linked resource's stable `(kind, slug)` identity. Absent when
+    /// `missing`: nothing known to derive it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub slug: Option<String>,
+    /// Display name; the referenced id when `missing`.
+    pub name: String,
+    /// Nothing the project holds answers to this reference: no resource of
+    /// this project in Kronn, none in its repository. It may still exist
+    /// elsewhere (another project, the global scope), where a publish or an
+    /// import would not carry it.
+    #[serde(default)]
+    pub missing: bool,
 }
 
 /// A secret name a resource requires (`secret://NAME` in its file, listed in

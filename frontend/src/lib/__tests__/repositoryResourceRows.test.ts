@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { listing, resource, skill } from '../../components/__tests__/repositoryResourceFixtures';
+import { link, listing, resource, skill } from '../../components/__tests__/repositoryResourceFixtures';
 import {
   alignExcludedCount,
   alignLines,
   attachedSkillIds,
   attentionCount,
   attentionItems,
+  AUTOMATION_TYPE_FILTERS,
   buildRows,
   isComparable,
+  matchesAutomationType,
   matchesPresence,
   matchesQuery,
   originLabel,
@@ -15,6 +17,27 @@ import {
 } from '../repositoryResourceRows';
 
 describe('repository resource rows', () => {
+  it('matches an automation row by its type, All matching every kind', () => {
+    const rows = buildRows(listing({
+      resources: [
+        resource({ id: 'a', name: 'A', kind: 'quick_prompt', status: 'up_to_date' }),
+        resource({ id: 'b', name: 'B', kind: 'quick_api', status: 'up_to_date' }),
+        resource({ id: 'c', name: 'C', kind: 'quick_exec', status: 'up_to_date' }),
+        resource({ id: 'd', name: 'D', kind: 'workflow', status: 'up_to_date' }),
+      ],
+    })).automation;
+    expect(AUTOMATION_TYPE_FILTERS).toEqual(['all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow']);
+    expect(Object.fromEntries(AUTOMATION_TYPE_FILTERS.map(filter => [
+      filter, rows.filter(row => matchesAutomationType(row, filter)).map(row => row.name),
+    ]))).toEqual({
+      all: ['A', 'B', 'C', 'D'],
+      quick_prompt: ['A'],
+      quick_api: ['B'],
+      quick_exec: ['C'],
+      workflow: ['D'],
+    });
+  });
+
   it('maps every status to one primary action', () => {
     const rows = buildRows(listing({
       resources: [
@@ -273,5 +296,31 @@ describe('repository resource rows', () => {
     expect(Object.keys(row)).not.toEqual(expect.arrayContaining(['diff']));
     expect(row).not.toHaveProperty('fileDiffs');
     expect(row).not.toHaveProperty('fieldDiff');
+  });
+
+  it('carries both ends of every link on the row, keyed like the rows they point at', () => {
+    const review = resource({ id: 'qp-1', name: 'Review', kind: 'quick_prompt', status: 'kronn_only' });
+    const gone = { id: 'gone', name: 'gone', kind: 'quick_api' as const };
+    const rows = buildRows(listing({
+      resources: [
+        resource({ id: 'wf-1', name: 'Nightly', kind: 'workflow', status: 'kronn_only', uses: [link(review), link(gone, true)] }),
+        { ...review, used_by: [link({ id: 'wf-1', name: 'Nightly', kind: 'workflow' })] },
+      ],
+      skills_present: [skill({ id: 'rust', name: 'Rust' })],
+    }));
+    const [workflow] = rows.automation.filter(row => row.kind === 'workflow');
+    expect(workflow.uses).toEqual([
+      { key: 'quick_prompt:qp-1', kind: 'quick_prompt', id: 'qp-1', slug: 'review', name: 'Review', missing: false },
+      { key: 'quick_api:gone', kind: 'quick_api', id: 'gone', slug: undefined, name: 'gone', missing: true },
+    ]);
+    const [prompt] = rows.automation.filter(row => row.kind === 'quick_prompt');
+    expect(prompt.usedBy.map(item => item.key)).toEqual(['workflow:wf-1']);
+    expect(rows.skills[0]).toMatchObject({ uses: [], usedBy: [] });
+  });
+
+  it('reads a listing that predates the links as having none', () => {
+    const { uses: _uses, used_by: _usedBy, ...legacy } = resource({ id: 'a', name: 'A', kind: 'workflow', status: 'up_to_date' });
+    const rows = buildRows(listing({ resources: [legacy as ReturnType<typeof resource>] }));
+    expect(rows.automation[0]).toMatchObject({ uses: [], usedBy: [] });
   });
 });

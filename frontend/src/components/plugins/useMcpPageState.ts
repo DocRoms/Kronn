@@ -11,6 +11,7 @@ import { usePluginListState } from './usePluginListState';
 import { useAddPluginRegistryState } from './useAddPluginRegistryState';
 import { useCustomApiFormState } from './useCustomApiFormState';
 import { useCustomApiPortability } from './useCustomApiPortability';
+import { visibleToPluginProject } from './pluginHealth';
 
 export interface McpPageProps {
   projects: Project[];
@@ -158,17 +159,26 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
   // (empty selectedConfig lookup ⇒ instant `setSelectedConfigId(null)`).
   // Defer the selection until the id actually shows up post-refetch.
   const pendingSelectConfigIdRef = useRef<string | null>(null);
-  const { selectedConfigId, setSelectedConfigId, setMcpSearch, setMcpKindFilter } = list;
+  const {
+    selectedConfigId, setSelectedConfigId, setMcpSearch, setMcpKindFilter,
+    setMcpHealthFilter, setMcpSyncFilter, selectedProjectId, setSelectedProjectId,
+  } = list;
   useEffect(() => {
     const pendingId = pendingSelectConfigIdRef.current;
-    if (!pendingId || !mcpOverview.configs.some(c => c.id === pendingId)) return;
+    const added = mcpOverview.configs.find(c => c.id === pendingId);
+    if (!pendingId || !added) return;
     pendingSelectConfigIdRef.current = null;
     queueMicrotask(() => {
       setMcpSearch('');
       setMcpKindFilter('all');
+      setMcpHealthFilter('all');
+      setMcpSyncFilter('all');
+      // Keep the project the operator is working in, unless the new plugin
+      // is outside it and would be filtered out of the list straight away.
+      if (!visibleToPluginProject(added, selectedProjectId)) setSelectedProjectId('__all__');
       setSelectedConfigId(pendingId);
     });
-  }, [mcpOverview.configs, setMcpKindFilter, setMcpSearch, setSelectedConfigId]);
+  }, [mcpOverview.configs, selectedProjectId, setMcpKindFilter, setMcpHealthFilter, setMcpSyncFilter, setSelectedProjectId, setMcpSearch, setSelectedConfigId]);
 
   const handleAddMcpFromRegistry = async () => {
     const { addMcpSelected, addMcpLabel, addMcpEnv, addMcpGlobal, addMcpProjectIds, addMcpHostSync } = addRegistry;

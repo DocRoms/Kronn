@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Ellipsis, Loader2 } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Ellipsis, Loader2 } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { formatResourceDate } from '../lib/formatResourceDate';
+import { linkedCount } from '../lib/repositoryResourceLinks';
 import { splitPath, writesRepository, type ResourceRow } from '../lib/repositoryResourceRows';
 
 export type RowMenuAction = 'view' | 'compare' | 'copy_native';
@@ -38,6 +39,27 @@ function CopyPathButton({ path }: { path: string }) {
     <button type="button" className="rr-icon-button" onClick={copy} aria-label={t('projects.repositoryResources.copyPath')}>
       {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
     </button>
+  );
+}
+
+/** A discreet count of the resources this one is linked to, either way; it
+ *  warns when a reference leads to nothing the project holds. */
+function LinkedBadge({ row }: { row: ResourceRow }) {
+  const { t } = useT();
+  const count = linkedCount(row);
+  if (count === 0) return null;
+  const missing = row.uses.some(link => link.missing);
+  return (
+    <span
+      className="rr-links-badge"
+      data-missing={missing || undefined}
+      title={t('projects.repositoryResources.links.summary', row.uses.length, row.usedBy.length)}
+    >
+      {count === 1
+        ? t('projects.repositoryResources.links.count.one')
+        : t('projects.repositoryResources.links.count.other', count)}
+      {missing && <AlertTriangle size={11} aria-label={t('projects.repositoryResources.links.missing')} />}
+    </span>
   );
 }
 
@@ -145,6 +167,7 @@ export function RepositoryResourceRow({ row, checked, busy, canWrite, onToggle, 
         <span className="rr-name">
           <button type="button" className="rr-name-button" onClick={onOpen}>{row.name}</button>
           {row.origins.map(origin => <span key={origin} className="rr-origin">{origin}</span>)}
+          <LinkedBadge row={row} />
         </span>
         <PathLine row={row} />
         {row.pathsDiverge && (

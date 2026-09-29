@@ -1,15 +1,18 @@
 import { RefreshCw, SearchCheck, Star } from 'lucide-react';
 import type { McpConfigDisplay, PluginInterface } from '../../types/generated';
-import { accessHealth, configHealth, visibleToPluginProject } from './pluginHealth';
+import { accessHealth, isAvailableLocally, visibleToPluginProject } from './pluginHealth';
 import { PluginHealthBadge } from './PluginHealthBadge';
 import type { McpPageState } from './useMcpPageState';
 
 const ACCESS_ORDER: PluginInterface[] = ['mcp', 'api', 'cli'];
 
+/** Summary + lanes for the project picked in the Plugins filter panel
+ *  (KT-907): the summary counts what the list shows, so the health of a
+ *  project reads here rather than on a per-project tree in the sidebar. */
 export function PluginProjectOverview({ state }: { state: McpPageState }) {
   const {
     t, projects, configs, matchingConfigs, selectedProjectId, setSelectedConfigId,
-    probeByConfig, probeTestedAtByConfig, driftBySlug, mcpOverview,
+    probeByConfig, probeTestedAtByConfig, driftBySlug, mcpOverview, healthFor,
     testingProjectId, handleTestProject, syncing, handlePreviewRescan,
     rescanPreview, setRescanPreview, handleApplyRescan,
   } = state;
@@ -19,7 +22,8 @@ export function PluginProjectOverview({ state }: { state: McpPageState }) {
     : selectedProjectId === '__none__'
       ? t('disc.noProject')
       : selectedProject?.name ?? t('mcp.allProjects');
-  const scopedConfigs = matchingConfigs.filter(config => visibleToPluginProject(config, selectedProjectId));
+  // `matchingConfigs` already carries the Project filter (usePluginListState).
+  const scopedConfigs = matchingConfigs;
   const testTargets = configs.filter(config => visibleToPluginProject(config, selectedProjectId));
   const healthContext = (config: McpConfigDisplay) => ({
     liveProbe: probeByConfig[config.id],
@@ -27,13 +31,11 @@ export function PluginProjectOverview({ state }: { state: McpPageState }) {
     incomplete: mcpOverview.incomplete_configs.find(item => item.config_id === config.id),
     hasEndpointDrift: (driftBySlug[config.server_id]?.length ?? 0) > 0,
   });
-  const states = scopedConfigs.map(config => configHealth(config, healthContext(config)));
+  const states = scopedConfigs.map(healthFor);
   const errorCount = states.filter(stateValue => stateValue === 'error').length;
   const warningCount = states.filter(stateValue => stateValue === 'warning').length;
   const mcpCount = scopedConfigs.filter(config => config.interfaces.includes('mcp')).length;
-  const localCount = scopedConfigs.filter(config => (
-    config.host_sync !== 'None' || config.interfaces.includes('cli')
-  )).length;
+  const localCount = scopedConfigs.filter(isAvailableLocally).length;
   const isTesting = testingProjectId === selectedProjectId;
 
   return <section className="mcp-project-overview" data-testid="mcp-project-overview">

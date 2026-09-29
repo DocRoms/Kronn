@@ -66,6 +66,42 @@ The principal reviews the six rows above and performs the requested atomic epic
 closure after integration.
 [src: user: 2026-08-30: KT-508 generation 2 reassignment]
 
+## Automation filters (KT-904)
+
+The global Automation page keeps its sidebar to the shared collection chrome:
+the title row, the Favorites / Recent sections, the project tree and the footer.
+It passes `renderSearch: () => null`, so the shell draws no search field, and
+supplies no filter slot. [src: file: frontend/src/pages/WorkflowsPage.tsx:2041]
+
+Search, type, state and project live in `AutomationFilterBar`, the first child
+of the page's main column, above the viewer that lists the selected type. One
+filter set narrows both the project tree (`itemFilter`, the search being
+applied by the shell) and the list. `/` focuses the bar's search from anywhere
+on the page, sidebar included.
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1947]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2271-2287]
+[src: file: frontend/src/components/AutomationFilterBar.tsx:47-70]
+
+| Filter | Rule |
+| --- | --- |
+| Type | All / Workflows / Quick APIs / Quick Prompts / Quick Execs. Choosing a type also opens its list; choosing it again lifts the filter. The chips keep the tour anchors. |
+| State | All / Favorites / Active / Inactive. Only a disabled workflow is inactive: a Quick Prompt, API or Exec has no off switch, so it always counts as active. [src: file: frontend/src/lib/automationFilters.ts:44-51] |
+| Project | A select of the bar: all, no project, or one project. |
+| Counts | Every chip counts what choosing it would show given the other filters and the search. [src: file: frontend/src/lib/automationFilters.ts:82-109] |
+
+On a viewport under 640 px the type, state and project controls fold behind one
+"Filters (n)" button, `n` being the number of those filters that are set; the
+search stays in view. The fold opens in the flow (no floating panel), and while
+open it owns Escape, so a mobile sidebar is not also collapsed.
+[src: file: frontend/src/components/FilterFold.tsx:8]
+[src: file: frontend/src/components/FilterFold.tsx:26-62]
+
+The project tab's Automation sub-tab (`ProjectRepositoryResourcesPanel`) uses
+the same fold and the tab's own `rr-chip` for a type filter, All / QP / QA / QE
+/ Workflow, that stacks with the location filter and the search.
+[src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:364-365]
+[src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:540-573]
+
 ## Favorite restoration rule
 
 `usePersistentIdSet` restores saved ids but neither writes nor prunes before its

@@ -1,0 +1,23 @@
+/* Filter bar of the global Automation page: search, type, state, project.
+   One flex row that wraps, never a column, so no flex-basis becomes a height. */
+.automation-filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--kr-sp-4); min-width: 0; padding: var(--kr-sp-4) var(--kr-sp-8); border-bottom: 1px solid var(--kr-border); background: var(--kr-bg-surface); }
+.automation-filterbar-search { display: flex; flex: 1 1 220px; min-width: 0; min-height: 34px; align-items: center; gap: var(--kr-sp-3); padding: 4px 10px; border: 1px solid var(--kr-border-light); border-radius: var(--kr-r-md); background: var(--kr-bg-input); }
+.automation-filterbar-search:focus-within { border-color: var(--kr-accent); }
+.automation-filterbar-search-icon { flex-shrink: 0; color: var(--kr-text-ghost); }
+.automation-filterbar-input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: none; color: var(--kr-text-primary); font: inherit; font-size: var(--kr-fs-sm); }
+.automation-filterbar-clear-search { display: flex; flex: 0 0 auto; padding: 0; border: 0; background: none; color: var(--kr-text-dim); cursor: pointer; }
+.automation-filterbar-clear-search:hover { color: var(--kr-text-primary); }
+.automation-filterbar-clear-search:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 3px; }
+.automation-filterbar-group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--kr-sp-2); min-width: 0; }
+.automation-filterbar .collection-shell-filter { min-height: 30px; padding: 0 var(--kr-sp-5); border: 1px solid var(--kr-border); border-radius: var(--kr-r-pill); }
+.automation-filterbar .collection-shell-filter[data-active='true'] { border-color: var(--kr-accent-border); }
+.automation-filterbar .automation-project-filter { width: auto; min-width: 150px; max-width: 100%; min-height: 30px; }
+.automation-filterbar-clear { margin-left: 0; }
+
+@media (max-width: 640px) {
+  .automation-filterbar { padding: var(--kr-sp-4); }
+  .automation-filterbar-search { flex-basis: 100%; min-height: 44px; }
+  .automation-filterbar .collection-shell-filter { min-height: 44px; }
+  .automation-filterbar .automation-project-filter { width: 100%; min-height: 44px; }
+  .automation-filterbar-clear { min-height: 44px; }
+}

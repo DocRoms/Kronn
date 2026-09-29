@@ -2,7 +2,20 @@ import type {
   ProjectRepositoryResource,
   ProjectRepositoryResources,
   ProjectRepositorySkill,
+  RepositoryResourceLink,
 } from '../../types/generated';
+
+/** A reference to another resource of the listing, by the target's fields. */
+export const link = (
+  target: Pick<ProjectRepositoryResource, 'id' | 'name' | 'kind'> & { slug?: string },
+  missing = false,
+): RepositoryResourceLink => ({
+  kind: target.kind,
+  id: target.id,
+  slug: missing ? undefined : target.slug ?? target.name.toLowerCase().replace(/\s+/g, '-'),
+  name: target.name,
+  missing,
+});
 
 export const resource = (overrides: Partial<ProjectRepositoryResource> & Pick<ProjectRepositoryResource, 'id' | 'name' | 'kind' | 'status'>): ProjectRepositoryResource => ({
   slug: overrides.name.toLowerCase().replace(/\s+/g, '-'),
@@ -13,6 +26,8 @@ export const resource = (overrides: Partial<ProjectRepositoryResource> & Pick<Pr
   repository_paths: [`kronn/${overrides.kind}/${overrides.name.toLowerCase().replace(/\s+/g, '-')}.yaml`],
   write_preview: [],
   required_secrets: [],
+  uses: [],
+  used_by: [],
   ...overrides,
 });
 

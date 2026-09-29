@@ -212,6 +212,8 @@ stateDiagram-v2
     Integrating --> ChangesRequested: merge conflict (round++)
     Validating --> Applying: validations green on candidate_merge_sha (exit_code == 0)
     Validating --> ChangesRequested: validations red (round++)
+    Working --> Approved: principal re-validates a send-back that did not come from the delivery (KT-862)
+    Provisioning --> Approved: same, while a CLI worker had not yet re-accepted (KT-862)
     Applying --> Done: parent fast-forwarded to candidate under lease/CAS (integrated_sha) → task closed + sub-disc archived
     Applying --> Integrating: target drifted since candidate (CAS mismatch) → rebuild candidate
     Applying --> Blocked: parent dirty at apply time → wait for a clean target
@@ -275,6 +277,8 @@ stateDiagram-v2
 | `ChangesRequested` → `Working` (re-activate) | **Backend** (re-dispatch), worker resumes |
 | `Integrating` → `Validating` (build candidate) / `ChangesRequested` (merge conflict) | **Backend** — never an agent |
 | `Validating` → `Applying` / `ChangesRequested` (validation verdict) | **Backend** — `exit_code` is the verdict |
+| `ChangesRequested` after an integration send-back → `Working` / `Blocked` (worker re-activated with the failure) | **Backend** — the same re-activation as a `request_changes`, plus a notice to the principal that approved (KT-862) |
+| `Working` / `Provisioning` → `Approved` (re-validate the same candidate, no new delivery) | **Principal agent** — only while the approval is restorable: the latest delivery is the approved one, none exists for the current attempt, and the worktree still holds the sent-back HEAD |
 | `Applying` → `Done` (ff-only + close) / `Integrating` (drift) / `Blocked` (dirty target) | **Backend** — never an agent |
 | any non-terminal → `Escalated` (budget/hard-fail) | **Backend** (enforces the limit) |
 | `Escalated` → force-approve (`Approved`) / hand-back (`Working`) / abandon (`Cancelled`) | **User** (human gate) |
@@ -367,6 +371,12 @@ Ordered, each step re-entrant, one durable state per step:
    merge in the ephemeral worktree, persist `candidate_merge_sha`.
 2. **`Validating`** — run validations on the exact `candidate_merge_sha`; record each verdict in
    `task_execution_validation_runs` (§6). Any red run → `ChangesRequested` (round++), nothing else moves.
+   The send-back is not silent (KT-862): in the same checkpoint the worker is re-activated with the
+   command and its output (a CLI worker through a control offer, a native worker through a dispatch)
+   and the principal that approved receives a notice. When the failure did not come from the delivery
+   (a flaky test, the environment), the principal re-runs the validations on the same candidate with
+   `task_exec_resume` — no new delivery; validations already green for that `candidate_merge_sha` are
+   not run again.
 3. **`Applying`** — entered and persisted **before** any parent mutation. This is the durable "intent to
    advance" marker.
 4. Under lease + `backup_ref`, CAS the parent (tip == `candidate_target_sha`, clean) → fast-forward →

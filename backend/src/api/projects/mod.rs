@@ -15,6 +15,7 @@ pub mod dependencies;
 pub mod docker;
 pub mod git;
 pub mod migrate;
+pub mod resource_links;
 pub mod resources;
 pub mod template;
 

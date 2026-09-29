@@ -890,6 +890,10 @@ TOOLS = [
                     "type": "object",
                     "description": "Native-HTTP scope required when worker_scope_intent is scoped.",
                 },
+                "validations": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
             },
             "required": ["task_reference", "worker", "worker_scope_intent"],
         },
@@ -984,8 +988,10 @@ TOOLS = [
     {
         "name": "task_exec_reassign",
         "description": (
-            "Reassign an interrupted, blocked or awaiting-review execution (a pending delivery is "
-            "rejected), keeping its room and evidence. See tool_manual({tool: \"task_exec_reassign\"})."
+            "Amend an execution as its principal, keeping its room and evidence. ONE change per "
+            "call: `worker` reassigns an interrupted, blocked or awaiting-review one; "
+            "`validations` replaces its gates without relaunching. "
+            "See tool_manual({tool: \"task_exec_reassign\"})."
         ),
         "inputSchema": {
             "type": "object",
@@ -998,9 +1004,14 @@ TOOLS = [
                         "Custom targets require their connection_id."
                     ),
                 },
+                "validations": {
+                    "type": "array",
+                    "description": "The COMPLETE new gate set; [] removes every gate.",
+                    "items": {"type": "object"},
+                },
                 "reason": {"type": "string"},
             },
-            "required": ["task_execution_id", "worker", "reason"],
+            "required": ["task_execution_id", "reason"],
         },
     },
     {
@@ -1025,15 +1036,11 @@ TOOLS = [
     {
         "name": "task_exec_deliver",
         "description": (
-            "Submit your DeliveryManifest v1 for review when the task's DoD is met "
-            "(KT-319). Pass your `task_execution_id` and the `manifest` object: the "
-            "backend derives your identity from this bridge's durable session and "
-            "verifies you are the execution's EXACT worker (a different session is "
-            "refused). On success the manifest is persisted, the execution flips to "
-            "AwaitingReview, and a review request wakes the principal in the parent "
-            "room — call this BEFORE announcing 'ready for review'. Your session "
-            "remains in its principal room throughout. A malformed manifest "
-            "is refused, not silently accepted."
+            "Submit your DeliveryManifest v1 when the task's DoD is met. Identity is derived "
+            "from this bridge's durable session, and only the execution's EXACT worker is "
+            "accepted. On success the execution flips to AwaitingReview and the principal is "
+            "woken: call this BEFORE announcing 'ready for review'. A malformed manifest is "
+            "refused."
         ),
         "inputSchema": {
             "type": "object",
@@ -5905,6 +5912,8 @@ def call_task_exec_prepare(args):
     }
     if worker_scope is not None:
         body["worker_scope"] = worker_scope
+    if args.get("validations") is not None:
+        body["validations"] = args["validations"]
     return _task_exec_request("/api/orchestration/tool/prepare", body)
 
 
@@ -6069,22 +6078,39 @@ def call_task_exec_cancel(args):
 
 
 def call_task_exec_reassign(args):
+    """Amend an existing execution as its principal, ONE change per call (KT-839): a
+    typed `worker` reassigns it, the COMPLETE `validations` set replaces its gates
+    without relaunching. `[]` is a real request (drop every gate), so absence is
+    tested with `is None`, never by truthiness."""
     _require_fresh_bridge("task_exec_reassign")
     execution_id = (args.get("task_execution_id") or "").strip()
     worker = args.get("worker")
+    validations = args.get("validations")
     reason = (args.get("reason") or "").strip()
-    if not execution_id or not isinstance(worker, dict) or not reason:
+    if not execution_id or not reason:
+        raise RuntimeError("task_exec_reassign: task_execution_id and reason are required")
+    if (worker is None) == (validations is None):
         raise RuntimeError(
-            "task_exec_reassign: task_execution_id, typed worker and reason are required"
+            "task_exec_reassign makes ONE change per call: pass a typed `worker` to reassign "
+            "the execution, or the complete `validations` array ([] removes every gate) to "
+            f"replace its gates, not both and not neither. {_TASK_EXEC_MANUAL_HINT}"
         )
-    _validate_task_exec_worker(worker, "task_exec_reassign")
+    if worker is not None:
+        if not isinstance(worker, dict):
+            raise RuntimeError("task_exec_reassign: `worker` must be a typed worker object")
+        _validate_task_exec_worker(worker, "task_exec_reassign")
+        change = {"worker": worker}
+    else:
+        if not isinstance(validations, list):
+            raise RuntimeError("task_exec_reassign: `validations` must be an array")
+        change = {"validations": validations}
     source_agent, source_session_id = _task_exec_identity("task_exec_reassign")
     return _task_exec_request(
-        f"/api/orchestration/tool/executions/{execution_id}/reassign",
+        f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/reassign",
         {
             "source_agent": source_agent,
             "source_session_id": source_session_id,
-            "worker": worker,
+            **change,
             "reason": reason,
         },
     )
@@ -9641,6 +9667,27 @@ TOOL_MANUALS = {
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
+        "**Validations contract.** Kronn runs each `command` on the candidate at integration, "
+        "after review — NOT through a shell. The command is split on whitespace into ONE binary "
+        "and its literal arguments, then run like a Quick Exec:\n"
+        "- the binary is a bare allowlisted name: `cargo`, `make`, `node`, `pnpm`, `npm`, `tsc`, "
+        "`eslint`, `vitest`, `python3`, `git`, `gh`, `rtk`, and probes such as `echo`/`true` (a "
+        "refusal lists the exact current set). Never a path, `sh`, `bash`, `env` or `xargs`; "
+        "`cd` and `npx` are not on it;\n"
+        "- no shell syntax: `&&`, `||`, `|`, `;`, `&`, redirections (`>`, `2>&1`), `$(…)`, "
+        "backticks and a leading `VAR=value` are refused, since they would reach the binary as "
+        "literal text. There is no quoting or globbing either;\n"
+        "- the working directory is ALWAYS the root of the execution's worktree. Aim at a "
+        "subdirectory with the tool's own option: `pnpm --dir frontend exec tsc -b --pretty "
+        "false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` (there is "
+        "no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n"
+        "- `timeout_secs` defaults to 600 and is capped at 1800.\n"
+        "Pass `validations` to `task_exec_prepare` to have them checked before launch: a command "
+        "that breaks the contract makes the answer `launchable: false` with reason "
+        "`invalid_validations` and the form that runs, and `task_exec_launch` refuses it the same "
+        "way — it is never accepted to fail at integration. To correct the gates of an "
+        "execution that already exists, without relaunching it, call `task_exec_reassign` with "
+        "`validations`.\n\n"
         "**Worker handoff.** The child room contains the immutable brief, execution id, pinned "
         "worktree/branch and DeliveryManifest v1 shape. Work only in that checkout. The worker "
         "does not merge, approve or close the Planning task. When the DoD is evidenced, call "
@@ -9681,17 +9728,41 @@ TOOL_MANUALS = {
         "cleanliness and checkpoint SHAs, cannot skip provisioning or review, "
         "and returns the existing terminal result when an Applying-origin "
         "resume already succeeded. After reconnect, recover with status rather "
-        "than replaying launch."
+        "than replaying launch.\n\n"
+        "**After an integration send-back.** When a red validation or a merge conflict "
+        "sends an approved delivery back, the worker is relaunched with the command and "
+        "its output and a notice addressed to you names this tool. If the failure did "
+        "not come from the delivery (a flaky test, the environment), call "
+        "`task_exec_resume` to run the integration again on the SAME approved delivery: "
+        "no new delivery is asked of the worker, validations already green for that "
+        "candidate are not run again, and the relaunched worker is stood down. It is "
+        "refused once the worker committed or left changes in the worktree since the "
+        "send-back, and once it delivered again: review that delivery instead."
     ),
     "task_exec_reassign": (
-        "Reassignment is principal-only and preserves the execution room, "
-        "worktree and evidence. From `AwaitingReview` it rejects the pending "
+        "Principal-only, and ONE change per call: pass either a `worker` or `validations`, "
+        "never both and never neither. The execution room, worktree, attempts and evidence "
+        "are preserved either way.\n\n"
+        "**`worker`** reassigns the execution. From `AwaitingReview` it rejects the pending "
         "delivery, which stays in the attempt history, and the new worker starts "
         "the next attempt. Pass the flat typed MessageTarget copied from "
         "`agent_list` (`kind`, `agent_type`, optional exact `cli_session_id` and "
         "tier), never the internal `{target, model, profile_id}` envelope. A "
         "transport change must change `worker.kind`. Native HTTP targets do not "
-        "need an internal connection id; a dynamic Custom target does."
+        "need an internal connection id; a dynamic Custom target does.\n\n"
+        "**`validations`** replaces the gates of an existing, non-terminal execution without "
+        "relaunching it — the fix for a gate that could never run. Pass the COMPLETE new set "
+        "(it replaces the old one, it is not merged; `[]` removes every gate) and a `reason`. "
+        "The set is held to the launch rules (`tool_manual({tool: \"task_exec_prepare\"})`, "
+        "section 'Validations contract'): a command that could never run is refused. The swap "
+        "is journaled on the execution with the actor, the reason and the previous set, and the "
+        "answer returns `previous`, `validations` and `changed` (false when the set was already "
+        "the current one). Earlier validation results are kept as evidence; what integration "
+        "requires is a pass of each CURRENT gate on the exact candidate, so a corrected command "
+        "is simply run at the next integration. Refused while the execution is Integrating, "
+        "Validating or Applying (the running integration started with the old set — retry when "
+        "it settles), once it is Done, Failed or Cancelled, and for an execution of a campaign, "
+        "whose gates are the campaign's shared policy."
     ),
     "task_exec_accept_worker_offer": (
         "Pass only the opaque `offer_id` from the control message. The backend "
