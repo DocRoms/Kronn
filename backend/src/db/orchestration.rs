@@ -4435,6 +4435,113 @@ pub fn reanchor_execution_worker_scope(
     })
 }
 
+const VALIDATIONS_REPLACED: &str = "validations_replaced";
+
+/// What replacing an execution's validations did. `previous` is what the run
+/// carried until now, so the caller can show the swap without reading the journal.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ValidationsReplacement {
+    pub previous: Vec<ValidationSpec>,
+    pub validations: Vec<ValidationSpec>,
+    /// `false` when the requested set equals the current one: nothing was
+    /// written, and no journal entry pretends otherwise.
+    pub changed: bool,
+}
+
+/// Replace the mechanical gates an existing execution will be integrated with,
+/// without relaunching it, and journal the swap with the actor and the reason.
+///
+/// Refused when the swap would be unsafe or meaningless:
+///   • a terminal execution — its history is closed;
+///   • `Integrating` / `Validating` / `Applying` — the integration saga read the
+///     run's gates when it started, so a swap now would not be the set it runs;
+///   • a campaign run — its gates are the campaign's policy, shared by every
+///     execution of that run, not this execution's to change.
+///
+/// Earlier validation results stay where they are: they are evidence about the
+/// commands that were once required, and `assert_execution_can_finish` only asks
+/// for a pass of each CURRENT gate on the exact candidate. The caller has
+/// already held `validations` to the launch boundary's rules.
+pub fn replace_execution_validations(
+    conn: &Connection,
+    exec_id: &str,
+    validations: &[ValidationSpec],
+    actor: &OrchestrationActor,
+    reason: &str,
+) -> Result<ValidationsReplacement> {
+    in_savepoint(conn, |conn| {
+        let execution = get_task_execution(conn, exec_id)?
+            .ok_or_else(|| anyhow::anyhow!("execution not found or caller is not its principal"))?;
+        if execution.status.is_terminal() {
+            bail!(
+                "execution is {}: its validations can no longer change",
+                execution.status.as_str()
+            );
+        }
+        if matches!(
+            execution.status,
+            TaskExecutionStatus::Integrating
+                | TaskExecutionStatus::Validating
+                | TaskExecutionStatus::Applying
+        ) {
+            bail!(
+                "execution is {}: an integration is running with the validations it started with; \
+                 retry once it settles",
+                execution.status.as_str()
+            );
+        }
+        let run = get_orchestration_run(conn, &execution.orchestration_run_id)?
+            .ok_or_else(|| anyhow::anyhow!("orchestration run not found"))?;
+        if run.kind != OrchestrationRunKind::SingleTask {
+            bail!(
+                "execution belongs to campaign run {}: its validations are the campaign's policy, \
+                 shared by every execution of the run",
+                run.id
+            );
+        }
+        let previous = run.validations;
+        let same = |left: &[ValidationSpec], right: &[ValidationSpec]| {
+            serde_json::to_value(left).ok() == serde_json::to_value(right).ok()
+        };
+        if same(&previous, validations) {
+            return Ok(ValidationsReplacement {
+                previous,
+                validations: validations.to_vec(),
+                changed: false,
+            });
+        }
+        let now = Utc::now().to_rfc3339();
+        let updated = conn.execute(
+            "UPDATE orchestration_runs SET validation_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run.id, serde_json::to_string(validations)?, now],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "run vanished before its validations were replaced"
+        );
+        record_execution_event(
+            conn,
+            exec_id,
+            VALIDATIONS_REPLACED,
+            // Not a transition: the status is unchanged, and a from/to pair
+            // would read as one to anything scanning the journal for moves.
+            None,
+            None,
+            actor,
+            serde_json::json!({
+                "previous": previous,
+                "validations": validations,
+                "reason": reason,
+            }),
+        )?;
+        Ok(ValidationsReplacement {
+            previous,
+            validations: validations.to_vec(),
+            changed: true,
+        })
+    })
+}
+
 // ─── Validation runs ─────────────────────────────────────────────────────────
 
 /// Record a validation run against the exact candidate commit (ADR §6). The

@@ -5420,3 +5420,299 @@ fn principal_notices_address_the_pinned_parent_room_cli() {
         "a principal that left the room no longer captures notices"
     );
 }
+
+// ─── KT-839 — the principal corrects an execution's validations ─────────────
+
+fn principal_actor() -> OrchestrationActor {
+    OrchestrationActor {
+        kind: PlanningActorKind::Agent,
+        id: Some("Claude Code".into()),
+        session_id: Some("adhoc-principal".into()),
+        source_message_id: None,
+    }
+}
+
+fn gate(command: &str) -> ValidationSpec {
+    ValidationSpec {
+        command: command.into(),
+        quick_exec_id: None,
+        timeout_secs: None,
+    }
+}
+
+/// An execution launched with `validations`, driven through `path`.
+fn launch_gated(
+    conn: &Connection,
+    task_id: &str,
+    number: i64,
+    validations: Vec<ValidationSpec>,
+    path: &[TaskExecutionStatus],
+) -> (String, String) {
+    seed_task(conn, task_id, number);
+    let mut input = LaunchSingleTaskInput::new(task_id, DISC);
+    input.validations = validations;
+    let outcome = launch_single_task(conn, &input, &backend_actor()).unwrap();
+    let id = outcome.execution.id;
+    for &to in path {
+        assert!(
+            transition_execution(conn, &id, to, &backend_actor(), serde_json::json!({})).unwrap(),
+            "expected transition to {to:?} to be accepted"
+        );
+    }
+    (id, outcome.run.id)
+}
+
+fn run_gates(conn: &Connection, run_id: &str) -> Vec<String> {
+    get_orchestration_run(conn, run_id)
+        .unwrap()
+        .unwrap()
+        .validations
+        .into_iter()
+        .map(|spec| spec.command)
+        .collect()
+}
+
+fn replaced_events(conn: &Connection, exec_id: &str) -> Vec<TaskExecutionEvent> {
+    list_execution_events(conn, exec_id)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.action == "validations_replaced")
+        .collect()
+}
+
+#[test]
+fn replacing_validations_corrects_the_gates_in_place_and_keeps_the_trace() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    // KT-830's shape: approved work sent back because its gate could not run.
+    let broken = "cd frontend && npx tsc -b --pretty false";
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-kt830",
+        830,
+        vec![gate(broken), gate("cargo fmt --check")],
+        &[Provisioning, Working, AwaitingReview, ChangesRequested],
+    );
+    record_validation_run(
+        &conn,
+        &id,
+        Some("candidate-1"),
+        &gate(broken),
+        None,
+        Some(0),
+        Some("refused: `cd` is not in the Quick Exec allowlist"),
+    )
+    .unwrap();
+    let before = get_task_execution(&conn, &id).unwrap().unwrap();
+
+    let fixed = vec![
+        gate("pnpm --dir frontend exec tsc -b --pretty false"),
+        gate("cargo fmt --check"),
+    ];
+    let replacement =
+        replace_execution_validations(&conn, &id, &fixed, &principal_actor(), "cd has no shell")
+            .unwrap();
+
+    assert!(replacement.changed);
+    assert_eq!(
+        replacement
+            .previous
+            .iter()
+            .map(|spec| spec.command.as_str())
+            .collect::<Vec<_>>(),
+        [broken, "cargo fmt --check"]
+    );
+    assert_eq!(
+        run_gates(&conn, &run_id),
+        [
+            "pnpm --dir frontend exec tsc -b --pretty false",
+            "cargo fmt --check"
+        ]
+    );
+
+    // No relaunch: the same execution, in the same status, on the same attempt,
+    // still attached to the same run and worktree lineage.
+    let after = get_task_execution(&conn, &id).unwrap().unwrap();
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.status, ChangesRequested);
+    assert_eq!(after.attempt_no, before.attempt_no);
+    assert_eq!(after.orchestration_run_id, run_id);
+    assert_eq!(after.review_rounds, before.review_rounds);
+
+    // No loss of trace: the failed run is still on record...
+    let runs = list_validation_runs(&conn, &id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].command, broken);
+    assert!(!runs[0].passed());
+    // ...and the swap itself is journaled, attributed, with both sides and why.
+    let events = replaced_events(&conn, &id);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].actor_kind, PlanningActorKind::Agent);
+    assert_eq!(events[0].actor_id.as_deref(), Some("Claude Code"));
+    assert_eq!(
+        events[0].actor_session_id.as_deref(),
+        Some("adhoc-principal")
+    );
+    assert_eq!(events[0].changes["reason"], "cd has no shell");
+    assert_eq!(events[0].changes["previous"][0]["command"], broken);
+    assert_eq!(
+        events[0].changes["validations"][0]["command"],
+        "pnpm --dir frontend exec tsc -b --pretty false"
+    );
+    assert_eq!(
+        (events[0].from_status, events[0].to_status),
+        (None, None),
+        "a swap is not a status transition"
+    );
+
+    // The corrected gate has no result for a candidate yet, so integration will
+    // run it; the broken one no longer stands in the way of finishing.
+    assert!(!has_passing_validation_run(&conn, &id, "candidate-1", &fixed[0]).unwrap());
+}
+
+#[test]
+fn replacing_with_the_current_set_writes_and_journals_nothing() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-noop",
+        1,
+        vec![gate("cargo test")],
+        &[Provisioning, Working],
+    );
+    let updated_at = get_orchestration_run(&conn, &run_id)
+        .unwrap()
+        .unwrap()
+        .updated_at;
+
+    let replacement = replace_execution_validations(
+        &conn,
+        &id,
+        &[gate("cargo test")],
+        &principal_actor(),
+        "same",
+    )
+    .unwrap();
+
+    assert!(!replacement.changed);
+    assert!(replaced_events(&conn, &id).is_empty());
+    assert_eq!(
+        get_orchestration_run(&conn, &run_id)
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        updated_at
+    );
+}
+
+#[test]
+fn replacing_with_an_empty_set_removes_every_gate_and_says_so_in_the_journal() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-empty",
+        1,
+        vec![gate("cargo test")],
+        &[Provisioning, Working],
+    );
+    let replacement =
+        replace_execution_validations(&conn, &id, &[], &principal_actor(), "no gate wanted")
+            .unwrap();
+    assert!(replacement.changed);
+    assert!(run_gates(&conn, &run_id).is_empty());
+    let events = replaced_events(&conn, &id);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].changes["validations"], serde_json::json!([]));
+    assert_eq!(events[0].changes["previous"][0]["command"], "cargo test");
+}
+
+#[test]
+fn replacing_validations_is_refused_when_it_would_not_be_the_set_that_runs() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let mut number = 100;
+    let mut refused = |label: &str, path: &[TaskExecutionStatus], wanted: &str| {
+        number += 1;
+        let (id, run_id) = launch_gated(
+            &conn,
+            &format!("t-refused-{number}"),
+            number,
+            vec![gate("cargo test")],
+            path,
+        );
+        let error = replace_execution_validations(
+            &conn,
+            &id,
+            &[gate("cargo fmt")],
+            &principal_actor(),
+            "r",
+        )
+        .expect_err(label)
+        .to_string();
+        assert!(error.contains(wanted), "{label}: {error}");
+        assert_eq!(
+            run_gates(&conn, &run_id),
+            ["cargo test"],
+            "{label}: a refused swap must change nothing"
+        );
+        assert!(replaced_events(&conn, &id).is_empty(), "{label}");
+    };
+
+    // The running integration read its gates when it started.
+    for (label, last) in [
+        ("integrating", Integrating),
+        ("validating", Validating),
+        ("applying", Applying),
+    ] {
+        let mut path = vec![Provisioning, Working, AwaitingReview, Approved, Integrating];
+        match last {
+            Validating => path.push(Validating),
+            Applying => path.extend([Validating, Applying]),
+            _ => {}
+        }
+        refused(label, &path, "integration is running");
+    }
+    // A closed history is not rewritten.
+    refused(
+        "cancelled",
+        &[Provisioning, Working, Cancelled],
+        "can no longer change",
+    );
+}
+
+#[test]
+fn replacing_validations_is_refused_for_an_execution_of_a_campaign_run() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-campaign",
+        1,
+        vec![gate("cargo test")],
+        &[Provisioning, Working],
+    );
+    // The campaign's gates are shared policy, not this execution's to rewrite.
+    conn.execute(
+        "UPDATE orchestration_runs SET kind = 'campaign' WHERE id = ?1",
+        params![run_id],
+    )
+    .unwrap();
+
+    let error =
+        replace_execution_validations(&conn, &id, &[gate("cargo fmt")], &principal_actor(), "r")
+            .expect_err("a campaign's shared gates")
+            .to_string();
+    assert!(error.contains("campaign"), "{error}");
+    assert_eq!(run_gates(&conn, &run_id), ["cargo test"]);
+}
+
+#[test]
+fn replacing_validations_of_an_unknown_execution_is_refused() {
+    let conn = setup();
+    let error = replace_execution_validations(&conn, "missing", &[], &principal_actor(), "r")
+        .expect_err("unknown execution")
+        .to_string();
+    assert!(error.contains("not found"), "{error}");
+}

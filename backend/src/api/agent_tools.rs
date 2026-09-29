@@ -200,6 +200,7 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
             "task_exec_deliver",
             "task_exec_review",
             "task_exec_cancel",
+            "task_exec_update_validations",
             "task_exec_reassign",
             "agent_job_start",
             "agent_schedule_wake",
@@ -930,6 +931,22 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         "required": ["mode", "path"],
         "additionalProperties": false
     });
+    let validations_schema = |description: &str| {
+        json!({
+            "type": "array",
+            "description": description,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "minLength": 1, "description": "ONE allowlisted binary and literal arguments, no shell, run from the worktree root — contract in tool_manual({tool: \"task_exec_prepare\"})."},
+                    "quick_exec_id": {"type": "string"},
+                    "timeout_secs": {"type": "integer", "minimum": 1}
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }
+        })
+    };
     vec![
         tool(
             "agent_list",
@@ -985,7 +1002,8 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "task_reference": {"type": "string"},
                 "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier."},
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Required sentinel proving the current tool contract was transported. scoped requires worker_scope; generic forbids it."},
-                "worker_scope": worker_scope_schema.clone()
+                "worker_scope": worker_scope_schema.clone(),
+                "validations": validations_schema("Optional: the gates you will launch with. A command that could never run (shell syntax, a binary off the allowlist) makes launchable false, with the form that runs.")
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
         ),
@@ -999,20 +1017,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker_scope": worker_scope_schema,
                 "base_rev": {"type": "string"},
                 "idempotency_key": {"type": "string"},
-                "validations": {
-                    "type": "array",
-                    "description": "Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "command": {"type": "string", "minLength": 1},
-                            "quick_exec_id": {"type": "string"},
-                            "timeout_secs": {"type": "integer", "minimum": 1}
-                        },
-                        "required": ["command"],
-                        "additionalProperties": false
-                    }
-                }
+                "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run.")
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
         ),
@@ -1052,6 +1057,16 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "cleanup_policy": {"type": "string", "enum": ["preserve", "remove_if_clean"]}
             }),
             json!(["task_execution_id", "reason"]),
+        ),
+        tool(
+            "task_exec_update_validations",
+            "Replace the validations of an existing execution as its parent-room principal, without relaunching it: pass the complete new set (it replaces, it does not merge) and a reason. Same rules as launch; the swap is journaled with the previous set. Refused while an integration runs, once terminal, or for a campaign's shared gates. Contract: tool_manual({tool: \"task_exec_update_validations\"}).",
+            json!({
+                "task_execution_id": {"type": "string"},
+                "validations": validations_schema("The complete new set of gates; [] removes every gate."),
+                "reason": {"type": "string"}
+            }),
+            json!(["task_execution_id", "validations", "reason"]),
         ),
         tool(
             "task_exec_reassign",
@@ -1217,6 +1232,7 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
         "task_exec_prepare",
         "task_exec_launch",
         "task_exec_cancel",
+        "task_exec_update_validations",
         "task_exec_reassign",
         "task_exec_review",
         // Durable jobs are a principal/recovery capability. A bounded worker
@@ -2303,6 +2319,15 @@ impl KronnToolExecutor {
                 };
                 let scope_refusal =
                     crate::api::orchestration::worker_scope_refusal(&worker, worker_scope.as_ref());
+                // Optional here, like a scope: when the principal already knows its
+                // gates, an unrunnable one makes the preflight refuse, not the
+                // integration hours later.
+                let validations_refusal = match validations_argument(call) {
+                    Ok(validations) => crate::api::orchestration::validations_refusal(
+                        &validations.unwrap_or_default(),
+                    ),
+                    Err(error) => return fail(call, error),
+                };
                 let parent = discussion_id;
                 match self
                     .state
@@ -2314,7 +2339,7 @@ impl KronnToolExecutor {
                             &parent,
                             &worker,
                         )?;
-                        if let Some(reason) = scope_refusal {
+                        for reason in [scope_refusal, validations_refusal].into_iter().flatten() {
                             preparation.launchable = false;
                             preparation.reasons.push(reason);
                         }
@@ -2380,30 +2405,20 @@ impl KronnToolExecutor {
                 // The principal's mechanical gates are opt-in but never silently
                 // dropped: only a genuinely ABSENT field defaults to no gates.
                 // An explicit `null`, an unknown field (ValidationSpec denies
-                // them), or a structurally-valid-but-empty command/timeout is
-                // refused explicitly rather than folded into an ungated run.
-                let validations = match call.arguments.get("validations") {
-                    None => Vec::new(),
-                    Some(Value::Null) => {
-                        return fail(call, "invalid validations: must be an array, not null")
-                    }
-                    Some(value) => {
-                        let parsed = match serde_json::from_value::<
-                            Vec<crate::models::ValidationSpec>,
-                        >(value.clone())
-                        {
-                            Ok(validations) => validations,
-                            Err(error) => {
-                                return fail(call, format!("invalid validations: {error}"))
-                            }
-                        };
+                // them), a structurally-valid-but-empty command/timeout, or a
+                // command Quick Exec would refuse at integration is refused
+                // explicitly rather than folded into an ungated run.
+                let validations = match validations_argument(call) {
+                    Ok(Some(validations)) => {
                         if let Err(reason) =
-                            crate::api::orchestration::validate_new_validation_specs(&parsed)
+                            crate::api::orchestration::validate_new_validation_specs(&validations)
                         {
                             return fail(call, format!("invalid validations: {reason}"));
                         }
-                        parsed
+                        validations
                     }
+                    Ok(None) => Vec::new(),
+                    Err(error) => return fail(call, error),
                 };
                 match crate::api::orchestration::provision_single_task_execution_with_scope_and_validations(
                     &self.state.db,
@@ -2627,6 +2642,64 @@ impl KronnToolExecutor {
                 )
                 .await;
                 unwrap_api(call, response.success, response.data, response.error)
+            }
+            "task_exec_update_validations" => {
+                let Some(execution_id) = required_string(call, "task_execution_id") else {
+                    return fail(call, "missing required field `task_execution_id`");
+                };
+                let Some(reason) = required_string(call, "reason") else {
+                    return fail(call, "missing required field `reason`");
+                };
+                let validations = match validations_argument(call) {
+                    Ok(Some(validations)) => validations,
+                    Ok(None) => {
+                        return fail(
+                            call,
+                            "missing required field `validations`: the complete new set, [] to remove every gate",
+                        )
+                    }
+                    Err(error) => return fail(call, error),
+                };
+                let execution = {
+                    let discussion_id = discussion_id.clone();
+                    let actor_type = actor_type.clone();
+                    let source_message_id = self.source_message_id.clone();
+                    self.state
+                        .db
+                        .with_conn(move |conn| {
+                            native_execution_for_caller(
+                                conn,
+                                &execution_id,
+                                &discussion_id,
+                                &actor_type,
+                                source_message_id.as_deref(),
+                                true,
+                            )
+                        })
+                        .await
+                };
+                let execution = match execution {
+                    Ok(execution) => execution,
+                    Err(error) => return fail(call, error.to_string()),
+                };
+                let actor = crate::models::PlanningActor {
+                    kind: crate::models::PlanningActorKind::Agent,
+                    id: Some(self.actor_id.clone()),
+                    session_id: self.actor_session_id(),
+                    source_message_id: self.source_message_id.clone(),
+                };
+                match crate::api::orchestration::replace_execution_validations(
+                    &self.state.db,
+                    &execution.id,
+                    validations,
+                    &reason,
+                    actor,
+                )
+                .await
+                {
+                    Ok(replacement) => ok(call, json!(replacement)),
+                    Err((_, message)) => fail(call, message),
+                }
             }
             "task_exec_reassign" => {
                 let Some(execution_id) = required_string(call, "task_execution_id") else {
@@ -3495,6 +3568,23 @@ fn required_string(call: &ToolCall, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The `validations` argument of a principal tool, structure only. `None` is a
+/// genuinely ABSENT field; an explicit `null` is refused, never read as "no
+/// gates". Whether a command can run is decided by
+/// `validate_new_validation_specs`, which each caller applies as its role needs
+/// (launch and update refuse, prepare reports it as a reason).
+fn validations_argument(
+    call: &ToolCall,
+) -> Result<Option<Vec<crate::models::ValidationSpec>>, String> {
+    match call.arguments.get("validations") {
+        None => Ok(None),
+        Some(Value::Null) => Err("invalid validations: must be an array, not null".into()),
+        Some(value) => serde_json::from_value::<Vec<crate::models::ValidationSpec>>(value.clone())
+            .map(Some)
+            .map_err(|error| format!("invalid validations: {error}")),
+    }
+}
+
 fn task_worker_scope_contract(
     call: &ToolCall,
 ) -> Result<
@@ -3759,6 +3849,62 @@ fn tool_manual(name: Option<&str>) -> Value {
              `args` replaces the whole argv, it does not append to it.\n\n\
              The argv rules are the same as for `qe_create_draft`: no shell, one element \
              per argument.",
+        ),
+        (
+            "task_exec_prepare",
+            "Preflight only: nothing is created. Pass the task, the typed `worker` copied from \
+             agent_list, `worker_scope_intent` (`generic`, or `scoped` with a `worker_scope`), and \
+             optionally the `validations` you will launch with. Only `launchable: true` permits a \
+             matching task_exec_launch.\n\n\
+             **Validations** — `[{command, quick_exec_id?, timeout_secs?}]` are YOUR mechanical \
+             gates: Kronn runs them on the candidate at integration, after review, and never \
+             reads them from the worker's manifest. They are NOT run by a shell. Each `command` \
+             is split on whitespace into ONE binary and its literal arguments, then run like a \
+             Quick Exec:\n\
+             • the binary is a bare allowlisted name — `cargo`, `make`, `node`, `pnpm`, `npm`, \
+             `tsc`, `eslint`, `vitest`, `python3`, `git`, `gh`, `rtk`, and probes such as \
+             `echo`/`true` (a refusal lists the exact current set). Never a path, `sh`, `bash`, \
+             `env`, `xargs`; `cd` and `npx` are not on it;\n\
+             • no shell syntax: `&&`, `||`, `|`, `;`, `&`, redirections (`>`, `2>&1`), `$(…)`, \
+             backticks and a leading `VAR=value` are refused — they would reach the binary as \
+             literal text. There is no quoting or globbing either;\n\
+             • the working directory is ALWAYS the root of the execution's worktree. Aim at a \
+             subdirectory with the tool's own option: `pnpm --dir frontend exec tsc -b \
+             --pretty false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` \
+             (there is no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n\
+             • `timeout_secs` defaults to 600 and is capped at 1800.\n\n\
+             A command that breaks this contract makes the preflight answer `launchable: false` \
+             with reason `invalid_validations` and the form that runs, and makes \
+             task_exec_launch refuse it the same way — it is never accepted to fail at \
+             integration. To correct the gates of an execution that already exists, without \
+             relaunching it, use `task_exec_update_validations`.",
+        ),
+        (
+            "task_exec_launch",
+            "Launch exactly what task_exec_prepare accepted: same task, worker, scope intent and \
+             scope, plus one stable `idempotency_key` reused on retry and the same \
+             `validations`. The validation contract — one allowlisted binary and literal \
+             arguments, no shell, run from the worktree root — is in \
+             tool_manual({tool: \"task_exec_prepare\"}); a command that breaks it is refused \
+             here, before anything is created.",
+        ),
+        (
+            "task_exec_update_validations",
+            "Principal-only. Replaces the validations of an existing, non-terminal execution \
+             without relaunching it, so its room, worktree, attempts and evidence stay as they \
+             are. Pass `task_execution_id`, the COMPLETE new `validations` set (it replaces the \
+             old one — it is not merged; `[]` removes every gate) and a `reason`. The set is \
+             held to the launch rules (tool_manual({tool: \"task_exec_prepare\"})): a command \
+             that could never run is refused.\n\n\
+             The swap is journaled on the execution with the actor, the reason and the previous \
+             set, and the answer returns `previous`, `validations` and `changed` (false when the \
+             set was already the current one). Earlier validation results are kept as evidence; \
+             what integration requires is a pass of each CURRENT gate on the exact candidate, so \
+             a corrected command is simply run at the next integration.\n\n\
+             Refused while the execution is Integrating, Validating or Applying (the running \
+             integration started with the old set — retry when it settles), once it is Done, \
+             Failed or Cancelled, and for an execution of a campaign, whose gates are the \
+             campaign's shared policy.",
         ),
     ];
 
@@ -4300,6 +4446,7 @@ mod tests {
                 "task_exec_deliver",
                 "task_exec_review",
                 "task_exec_cancel",
+                "task_exec_update_validations",
                 "task_exec_reassign",
             ]
         );
@@ -4989,12 +5136,69 @@ mod tests {
         );
     }
 
+    /// KT-839 — validations were accepted at launch and refused at integration
+    /// because nothing told a principal that they run without a shell.
+    #[test]
+    fn the_task_exec_manual_states_how_a_validation_actually_runs() {
+        let page = tool_manual(Some("task_exec_prepare"));
+        let text = page["manual"].as_str().expect("task_exec_prepare manual");
+        for fact in [
+            "NOT run by a shell",
+            "ONE binary",
+            "allowlisted",
+            "`cd`",
+            "`&&`",
+            "`VAR=value`",
+            "root of the execution's worktree",
+            "pnpm --dir frontend exec tsc",
+            "cargo test --manifest-path backend/Cargo.toml --target-dir",
+            "invalid_validations",
+            "task_exec_update_validations",
+        ] {
+            assert!(
+                text.contains(fact),
+                "the manual must state `{fact}`: {text}"
+            );
+        }
+        // What the manual promises about the binaries is what Quick Exec allows:
+        // every binary it names as usable is on the allowlist, and the ones it
+        // names as unusable are not.
+        for usable in [
+            "cargo", "make", "node", "pnpm", "npm", "tsc", "eslint", "vitest", "git",
+        ] {
+            assert!(
+                crate::core::quick_exec::ALLOWED_BINARIES.contains(&usable),
+                "`{usable}` is named usable in the manual but is not allowlisted"
+            );
+        }
+        for unusable in ["cd", "npx", "sh", "bash", "env", "xargs"] {
+            assert!(
+                !crate::core::quick_exec::ALLOWED_BINARIES.contains(&unusable),
+                "`{unusable}` is named unusable in the manual but is allowlisted"
+            );
+        }
+
+        assert!(tool_manual(Some("task_exec_launch"))["manual"]
+            .as_str()
+            .expect("launch page")
+            .contains("tool_manual({tool: \"task_exec_prepare\"})"));
+        let update = tool_manual(Some("task_exec_update_validations"));
+        let update = update["manual"].as_str().expect("update page");
+        for fact in ["COMPLETE", "journaled", "Integrating", "campaign"] {
+            assert!(update.contains(fact), "{fact}: {update}");
+        }
+    }
+
     #[test]
     fn every_manual_entry_belongs_to_a_declared_tool_or_the_signal_registry() {
         // A page for a tool nobody can call is documentation of a capability
         // that does not exist — the exact shape that taught models to
         // hallucinate calls (tools.rs).
-        let declared: Vec<String> = tool_catalogue()
+        //
+        // The FULL catalogue: the delegation tools are declared to native agents
+        // too (as a family, when tiering is on), and their pages are the point of
+        // KT-839.
+        let declared: Vec<String> = full_discussion_catalogue()
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();

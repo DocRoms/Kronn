@@ -41,6 +41,19 @@ Release notes for 0.9.3 and earlier are available in the
   Inactive; only a disabled workflow is inactive) next to the type and project
   filters. On a screen narrower than 640 px, the filters of both surfaces fold
   behind one "Filters (n)" button.
+- `task_exec_update_validations({task_execution_id, validations, reason})`: the
+  principal replaces the validations of an existing execution without
+  relaunching it. The set replaces the current one, is held to the launch rules,
+  and is journaled (`validations_replaced`) with the actor, the reason and the
+  previous set; the room, the worktree, the attempts and the earlier validation
+  results are untouched. It is refused while an integration runs, once the
+  execution is terminal, and for a campaign run's shared gates.
+- `task_exec_prepare` accepts the `validations` it will launch with and answers
+  `launchable: false` (reason `invalid_validations`) for one that could never run.
+- `tool_manual({tool: "task_exec_prepare"})` now states how a validation runs: one
+  allowlisted binary and literal arguments, no shell, from the root of the
+  worktree, with `pnpm --dir …` / `cargo … --manifest-path … --target-dir …` as
+  the forms that replace `cd … &&` and `VAR=…`.
 
 ### Changed
 
@@ -88,6 +101,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- `task_exec_launch` no longer accepts a validation Quick Exec can never run
+  (`cd frontend && npx tsc -b`, `CARGO_TARGET_DIR=… cargo test`, a pipe, a
+  binary off the allowlist). It was accepted, the worker delivered, the review
+  approved, and the integration then refused the command (`` `cd` is not in the
+  Quick Exec allowlist ``) and sent an approved task back to `ChangesRequested`.
+  The launch, the campaign policy and the preflight now refuse it up front, with
+  the form that runs.
 - The merge commit Kronn creates when it integrates a task branch now carries
   the `Signed-off-by` of the configured git identity, so a repository that
   enforces the DCO no longer turns the release PR red on it.

@@ -106,6 +106,11 @@ pub enum ProvisionError {
 /// boundary prevents a newly-created run from carrying a timeout that the
 /// validation runner would later refuse. Persisted runs from older Kronn builds
 /// are handled separately by `run_one_validation` so upgrades remain resumable.
+///
+/// The command line is held to the rules its run applies (KT-839): a validation
+/// that Quick Exec will refuse — `cd frontend && …`, a `VAR=` prefix, a binary
+/// off the allowlist — is refused HERE, while the principal can still fix it,
+/// rather than at integration after the worker delivered and the review passed.
 pub(crate) fn validate_new_validation_specs(
     validations: &[crate::models::ValidationSpec],
 ) -> Result<(), String> {
@@ -120,6 +125,14 @@ pub(crate) fn validate_new_validation_specs(
             "command must be non-empty and timeout_secs must be between 1 and {max_timeout} (got {})",
             serde_json::to_string(bad).unwrap_or_default()
         ));
+    }
+    for spec in validations {
+        if let Err(rejection) = crate::core::quick_exec::check_command_line(&spec.command) {
+            return Err(format!(
+                "validation `{}` can never run: {rejection}",
+                spec.command
+            ));
+        }
     }
     Ok(())
 }
@@ -7049,6 +7062,18 @@ pub(crate) fn worker_scope_contract_refusal(
     }
 }
 
+/// Preflight verdict on the gates the principal is about to launch with.
+///
+/// The same predicate the launch boundary enforces, so a `launchable: true`
+/// answer cannot be followed by a launch refused for its validations.
+pub(crate) fn validations_refusal(
+    validations: &[crate::models::ValidationSpec],
+) -> Option<crate::models::CampaignTaskReason> {
+    validate_new_validation_specs(validations)
+        .err()
+        .map(|reason| preparation_reason("invalid_validations", reason))
+}
+
 pub(crate) fn worker_scope_refusal(
     worker: &MessageTarget,
     scope: Option<&TaskWorkerScope>,
@@ -9130,6 +9155,11 @@ pub struct TaskExecPrepareRequest {
     pub worker_scope_intent: Option<TaskWorkerScopeIntent>,
     #[serde(default)]
     pub worker_scope: Option<TaskWorkerScope>,
+    /// The gates the principal intends to launch with. Optional: when given they
+    /// are held to the launch boundary's rules, so a command that could never run
+    /// makes the preflight refuse instead of the integration.
+    #[serde(default)]
+    pub validations: Vec<crate::models::ValidationSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -9203,6 +9233,16 @@ pub struct TaskExecReassignRequest {
     /// are not publicly overridable here; a reassignment always resolves
     /// them from the target's tier, exactly like a fresh launch would.
     pub worker: MessageTarget,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskExecUpdateValidationsRequest {
+    pub source_agent: String,
+    pub source_session_id: String,
+    /// The complete new set: it REPLACES the execution's validations, it is not
+    /// merged into them. An empty list removes every gate.
+    pub validations: Vec<crate::models::ValidationSpec>,
     pub reason: String,
 }
 
@@ -10075,6 +10115,7 @@ pub async fn task_exec_prepare(
     let task = request.task_reference.trim().to_string();
     let worker = request.worker;
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
+    let validations_refusal = validations_refusal(&request.validations);
     let result = state
         .db
         .with_conn(move |conn| {
@@ -10082,7 +10123,7 @@ pub async fn task_exec_prepare(
                 bail!("principal discussion not found or caller is not an active member");
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
-            if let Some(reason) = scope_refusal {
+            for reason in [scope_refusal, validations_refusal].into_iter().flatten() {
                 preparation.launchable = false;
                 preparation.reasons.push(reason);
             }
@@ -10749,6 +10790,95 @@ pub async fn task_exec_reassign(
         }),
     )
     .await
+}
+
+/// Replace the validations of an existing execution (KT-839), for both principal
+/// channels. The set is held to the same rules as at launch — a fix that could
+/// never run would only move the failure back to integration — and the swap is
+/// journaled with its actor and reason, so nothing is relaunched and nothing
+/// about the earlier gates is lost.
+pub(crate) async fn replace_execution_validations(
+    db: &Database,
+    exec_id: &str,
+    validations: Vec<crate::models::ValidationSpec>,
+    reason: &str,
+    actor: OrchestrationActor,
+) -> Result<crate::db::orchestration::ValidationsReplacement, (ApiErrorCode, String)> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err((
+            ApiErrorCode::Validation,
+            "reason is required: it is journaled with the swap".into(),
+        ));
+    }
+    if let Err(detail) = validate_new_validation_specs(&validations) {
+        return Err((
+            ApiErrorCode::Validation,
+            format!("invalid validations: {detail}"),
+        ));
+    }
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        crate::db::orchestration::replace_execution_validations(
+            conn,
+            &id,
+            &validations,
+            &actor,
+            &reason,
+        )
+    })
+    .await
+    .map_err(|error| (ApiErrorCode::Conflict, error.to_string()))
+}
+
+pub async fn task_exec_update_validations(
+    State(state): State<AppState>,
+    Path(exec_id): Path<String>,
+    Json(request): Json<TaskExecUpdateValidationsRequest>,
+) -> Json<ApiResponse<crate::db::orchestration::ValidationsReplacement>> {
+    let Some((agent, session_id)) =
+        caller_fields(&request.source_agent, &request.source_session_id)
+    else {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "durable source_agent and source_session_id are required",
+        ));
+    };
+    let authorized = {
+        let id = exec_id.clone();
+        let (agent, session_id) = (agent.clone(), session_id.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                    .context("execution not found or caller is not its principal")?;
+                principal_cli_is_authorized(
+                    conn,
+                    &execution.parent_discussion_id,
+                    &agent,
+                    &session_id,
+                )
+            })
+            .await
+    };
+    if !matches!(authorized, Ok(true)) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "execution not found or caller is not its principal",
+        ));
+    }
+    match replace_execution_validations(
+        &state.db,
+        &exec_id,
+        request.validations,
+        &request.reason,
+        agent_actor(&agent, Some(&session_id)),
+    )
+    .await
+    {
+        Ok(replacement) => Json(ApiResponse::ok(replacement)),
+        Err((code, message)) => Json(ApiResponse::err_coded(code, message)),
+    }
 }
 
 /// Map a launch-saga refusal/failure to a stable `(code, message)`. `ProvisionError` has
@@ -15293,6 +15423,489 @@ mod tests {
             0,
             "no refused launch may provision an ungated run behind its error"
         );
+    }
+
+    /// Bind a native principal executor to a launchable seeded task, the way the
+    /// neighbouring native-launch tests do.
+    async fn native_principal_with_launchable_task(
+        db: &std::sync::Arc<Database>,
+        repo: &std::path::Path,
+    ) -> (
+        std::sync::Arc<dyn crate::agents::tools::ToolExecutor>,
+        String,
+        String,
+    ) {
+        let (task_ref, parent_id, _pid) = seed(db, repo).await;
+        {
+            let task_ref = task_ref.clone();
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task_ref,
+                    &crate::models::LinkPlanningDiscussionRequest {
+                        discussion_id: parent_id,
+                        placement: Default::default(),
+                        is_primary: true,
+                        position: None,
+                        actor: test_actor(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        }
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let exec = crate::api::agent_tools::KronnToolExecutor::arc(
+            state,
+            Some(parent_id.clone()),
+            AgentType::ClaudeCode,
+            None,
+            None,
+        );
+        (exec, task_ref, parent_id)
+    }
+
+    /// KT-839 — KT-830, KT-828 and KT-847 launched with commands written for a
+    /// shell. Both the preflight and the launch must refuse them, saying which
+    /// form runs, while the principal can still fix them.
+    #[tokio::test]
+    async fn prepare_and_launch_refuse_a_validation_quick_exec_can_never_run() {
+        use crate::agents::tools::ToolCall;
+
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (exec, task_ref, _parent_id) =
+            native_principal_with_launchable_task(&db, repo.path()).await;
+        let call = |name: &str, validations: serde_json::Value| ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: serde_json::json!({
+                "task_reference": task_ref,
+                "worker": serde_json::to_value(native_worker()).unwrap(),
+                "worker_scope_intent": "generic",
+                "base_rev": "main",
+                "idempotency_key": "kt-839-never-runs",
+                "validations": validations,
+            }),
+        };
+
+        for (label, command, culprit) in [
+            (
+                "KT-830 frontend",
+                "cd frontend && npx tsc -b --pretty false",
+                "`cd`",
+            ),
+            (
+                "KT-828 backend",
+                "cd backend && CARGO_TARGET_DIR=/tmp/kronn-target cargo test",
+                "`cd`",
+            ),
+            (
+                "env prefix",
+                "CARGO_TARGET_DIR=/tmp/t cargo test",
+                "environment",
+            ),
+            ("chained", "cargo fmt --check && cargo test", "`&&`"),
+            ("pipe", "cargo test | tail", "pipe"),
+            ("sequence", "cargo fmt; cargo test", "separator"),
+            ("off the allowlist", "npx tsc -b", "`npx`"),
+        ] {
+            let validations = serde_json::json!([{"command": command}]);
+
+            let prepared = exec
+                .execute(&call("task_exec_prepare", validations.clone()))
+                .await;
+            assert!(
+                prepared.ok,
+                "{label}: a preflight answers, it does not fail"
+            );
+            assert_eq!(
+                prepared.content["launchable"], false,
+                "{label}: the preflight must refuse: {:?}",
+                prepared.content
+            );
+            let reason = prepared.content["reasons"]
+                .as_array()
+                .and_then(|reasons| reasons.iter().find(|r| r["code"] == "invalid_validations"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: no invalid_validations reason: {:?}",
+                        prepared.content
+                    )
+                });
+            let detail = reason["detail"].as_str().unwrap();
+            assert!(detail.contains(culprit), "{label}: {detail}");
+            assert!(
+                detail.contains("pnpm --dir frontend exec")
+                    && detail.contains("cargo test --manifest-path"),
+                "{label}: the refusal must give the form that runs: {detail}"
+            );
+
+            let launched = exec.execute(&call("task_exec_launch", validations)).await;
+            assert!(
+                !launched.ok,
+                "{label}: launch accepted it: {:?}",
+                launched.content
+            );
+            let message = launched.content.to_string();
+            assert!(message.contains("can never run"), "{label}: {message}");
+            assert!(
+                message.contains("pnpm --dir frontend exec"),
+                "{label}: {message}"
+            );
+        }
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            0,
+            "a refused launch must not leave a run carrying an unrunnable gate"
+        );
+
+        // The forms the refusal recommends are accepted by the same preflight.
+        let runnable = serde_json::json!([
+            {"command": "pnpm --dir frontend exec tsc -b --pretty false"},
+            {"command": "cargo test --manifest-path backend/Cargo.toml --target-dir /tmp/kronn-target"},
+        ]);
+        let prepared = exec.execute(&call("task_exec_prepare", runnable)).await;
+        assert!(prepared.ok);
+        assert_eq!(
+            prepared.content["launchable"], true,
+            "{:?}",
+            prepared.content["reasons"]
+        );
+    }
+
+    /// KT-839 — the principal can correct the gates of a launched execution
+    /// without cancelling it, and the correction is journaled.
+    #[tokio::test]
+    async fn principal_replaces_the_validations_of_a_launched_execution_without_relaunch() {
+        use crate::agents::tools::ToolCall;
+
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (exec, task_ref, parent_id) =
+            native_principal_with_launchable_task(&db, repo.path()).await;
+        let launched = exec
+            .execute(&ToolCall {
+                id: "launch".into(),
+                name: "task_exec_launch".into(),
+                arguments: serde_json::json!({
+                    "task_reference": task_ref,
+                    "worker": serde_json::to_value(native_worker()).unwrap(),
+                    "worker_scope_intent": "generic",
+                    "base_rev": "main",
+                    "idempotency_key": "kt-839-launch",
+                    "validations": [{"command": "cargo fmt --check"}],
+                }),
+            })
+            .await;
+        assert!(launched.ok, "{:?}", launched.content);
+        let exec_id = launched.content["id"].as_str().unwrap().to_string();
+        let run_id = launched.content["orchestration_run_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let update = |validations: serde_json::Value, reason: &str| ToolCall {
+            id: "update".into(),
+            name: "task_exec_update_validations".into(),
+            arguments: serde_json::json!({
+                "task_execution_id": exec_id,
+                "validations": validations,
+                "reason": reason,
+            }),
+        };
+        let run_validations = |db: std::sync::Arc<Database>, run_id: String| async move {
+            let run = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::get_orchestration_run(conn, &run_id)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            serde_json::to_value(run.validations).unwrap()
+        };
+
+        // A replacement that could never run is refused, and changes nothing.
+        let refused = exec
+            .execute(&update(
+                serde_json::json!([{"command": "cd frontend && npx tsc -b"}]),
+                "still wrong",
+            ))
+            .await;
+        assert!(!refused.ok);
+        assert!(refused
+            .content
+            .to_string()
+            .contains("pnpm --dir frontend exec"));
+        assert_eq!(
+            run_validations(db.clone(), run_id.clone()).await,
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
+
+        // A reason is part of the trace.
+        assert!(!exec.execute(&update(serde_json::json!([]), "  ")).await.ok);
+
+        let fixed = serde_json::json!([
+            {"command": "pnpm --dir frontend exec tsc -b --pretty false", "timeout_secs": 300},
+        ]);
+        let replaced = exec
+            .execute(&update(fixed.clone(), "cd is not runnable; use --dir"))
+            .await;
+        assert!(replaced.ok, "{:?}", replaced.content);
+        assert_eq!(replaced.content["changed"], true);
+        assert_eq!(
+            replaced.content["previous"],
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
+        assert_eq!(replaced.content["validations"], fixed);
+        assert_eq!(run_validations(db.clone(), run_id.clone()).await, fixed);
+
+        // Same execution, same run: nothing was relaunched.
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 1);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            1
+        );
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.status, TaskExecutionStatus::Working);
+        assert_eq!(execution.orchestration_run_id, run_id);
+
+        // The trace names who swapped what for what, and why.
+        let events = {
+            let exec_id = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::orchestration::list_execution_events(conn, &exec_id)
+            })
+            .await
+            .unwrap()
+        };
+        let swaps: Vec<_> = events
+            .iter()
+            .filter(|event| event.action == "validations_replaced")
+            .collect();
+        assert_eq!(swaps.len(), 1, "one swap, one journal entry: {events:#?}");
+        assert_eq!(swaps[0].actor_kind, PlanningActorKind::Agent);
+        assert_eq!(swaps[0].changes["reason"], "cd is not runnable; use --dir");
+        assert_eq!(
+            swaps[0].changes["previous"],
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
+        assert_eq!(swaps[0].changes["validations"], fixed);
+
+        // Replaying it is a no-op that says so, and journals nothing more.
+        let again = exec.execute(&update(fixed, "again")).await;
+        assert!(again.ok);
+        assert_eq!(again.content["changed"], false);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM task_execution_events WHERE action = 'validations_replaced'"
+            )
+            .await,
+            1
+        );
+
+        // Only the principal room may do it.
+        let outsider = crate::api::agent_tools::KronnToolExecutor::arc(
+            AppState::new_defaults(
+                std::sync::Arc::new(tokio::sync::RwLock::new(
+                    crate::core::config::default_config(),
+                )),
+                db.clone(),
+                crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+            ),
+            Some(format!("{parent_id}-elsewhere")),
+            AgentType::ClaudeCode,
+            None,
+            None,
+        );
+        let denied = outsider
+            .execute(&update(serde_json::json!([]), "not mine"))
+            .await;
+        assert!(!denied.ok, "{:?}", denied.content);
+    }
+
+    /// KT-839 — the CLI principal (Claude Code, Codex…) reaches the same two
+    /// guarantees through the HTTP routes its bridge calls.
+    #[tokio::test]
+    async fn cli_principal_preflight_refuses_unrunnable_validations_over_http() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        {
+            let task_ref = task_ref.clone();
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task_ref,
+                    &crate::models::LinkPlanningDiscussionRequest {
+                        discussion_id: parent_id,
+                        placement: Default::default(),
+                        is_primary: true,
+                        position: None,
+                        actor: test_actor(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        }
+        seed_cli_session(&db, 103, &parent_id, "principal").await;
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let request = |validations: serde_json::Value| -> TaskExecPrepareRequest {
+            serde_json::from_value(serde_json::json!({
+                "task_reference": task_ref,
+                "parent_discussion_id": parent_id,
+                "worker": serde_json::to_value(native_worker()).unwrap(),
+                "source_agent": "ClaudeCode",
+                "source_session_id": "principal",
+                "worker_scope_intent": "generic",
+                "validations": validations,
+            }))
+            .expect("prepare request")
+        };
+
+        let Json(refused) = task_exec_prepare(
+            State(state.clone()),
+            Json(request(serde_json::json!([
+                {"command": "cd backend && CARGO_TARGET_DIR=/tmp/t cargo test"}
+            ]))),
+        )
+        .await;
+        let preparation = refused.data.expect("a preflight answers");
+        assert!(!preparation.launchable);
+        let reason = preparation
+            .reasons
+            .iter()
+            .find(|reason| reason.code == "invalid_validations")
+            .expect("invalid_validations reason");
+        assert!(reason.detail.contains("cargo test --manifest-path"));
+
+        let Json(accepted) = task_exec_prepare(
+            State(state),
+            Json(request(serde_json::json!([
+                {"command": "cargo test --manifest-path backend/Cargo.toml --target-dir /tmp/t"}
+            ]))),
+        )
+        .await;
+        let preparation = accepted.data.expect("a preflight answers");
+        assert!(preparation.launchable, "{:#?}", preparation.reasons);
+    }
+
+    #[tokio::test]
+    async fn cli_principal_replaces_execution_validations_over_http_and_a_worker_cannot() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 103, &parent, "principal").await;
+        seed_cli_session(&db, 104, &child, "the-worker-room-cli").await;
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let request = |session: &str, command: &str| TaskExecUpdateValidationsRequest {
+            source_agent: "ClaudeCode".into(),
+            source_session_id: session.into(),
+            validations: vec![ValidationSpec {
+                command: command.into(),
+                quick_exec_id: None,
+                timeout_secs: None,
+            }],
+            reason: "the first set could never run".into(),
+        };
+        let gates = |db: std::sync::Arc<Database>, exec_id: String| async move {
+            db.with_conn(move |conn| {
+                let execution =
+                    crate::db::orchestration::get_task_execution(conn, &exec_id)?.unwrap();
+                Ok(crate::db::orchestration::get_orchestration_run(
+                    conn,
+                    &execution.orchestration_run_id,
+                )?
+                .unwrap()
+                .validations
+                .into_iter()
+                .map(|spec| spec.command)
+                .collect::<Vec<_>>())
+            })
+            .await
+            .unwrap()
+        };
+        let before = exec_of(&db, &exec_id).await;
+
+        // The worker's own room is not the principal room.
+        let Json(denied) = task_exec_update_validations(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(request("the-worker-room-cli", "cargo test")),
+        )
+        .await;
+        assert!(!denied.success);
+        assert!(gates(db.clone(), exec_id.clone()).await.is_empty());
+
+        // The principal cannot swap in a gate that would never run either.
+        let Json(unrunnable) = task_exec_update_validations(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(request("principal", "cd backend && cargo test")),
+        )
+        .await;
+        assert!(!unrunnable.success);
+        assert!(unrunnable
+            .error
+            .unwrap()
+            .contains("cargo test --manifest-path"));
+
+        let Json(replaced) = task_exec_update_validations(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(request(
+                "principal",
+                "cargo test --manifest-path backend/Cargo.toml",
+            )),
+        )
+        .await;
+        assert!(replaced.success, "{:?}", replaced.error);
+        let replacement = replaced.data.unwrap();
+        assert!(replacement.changed);
+        assert!(replacement.previous.is_empty());
+        assert_eq!(
+            gates(db.clone(), exec_id.clone()).await,
+            ["cargo test --manifest-path backend/Cargo.toml"]
+        );
+
+        // Same execution, same status, same worker: nothing was relaunched.
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(
+            (
+                after.id,
+                after.status,
+                after.worker_cli_session_id,
+                after.attempt_no
+            ),
+            (
+                before.id,
+                before.status,
+                before.worker_cli_session_id,
+                before.attempt_no
+            )
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 1);
     }
 
     #[tokio::test]

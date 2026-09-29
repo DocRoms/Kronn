@@ -890,6 +890,15 @@ TOOLS = [
                     "type": "object",
                     "description": "Native-HTTP scope required when worker_scope_intent is scoped.",
                 },
+                "validations": {
+                    "type": "array",
+                    "description": (
+                        "Optional: the gates you will launch with. One that could never run "
+                        "(shell syntax, a binary off the allowlist) makes launchable false, "
+                        "with the form that runs; contract in tool_manual."
+                    ),
+                    "items": {"type": "object"},
+                },
             },
             "required": ["task_reference", "worker", "worker_scope_intent"],
         },
@@ -979,6 +988,28 @@ TOOLS = [
                 "task_execution_id": {"type": "string"},
             },
             "required": ["task_execution_id"],
+        },
+    },
+    {
+        "name": "task_exec_update_validations",
+        "description": (
+            "Replace the validations of an existing execution as its principal, without "
+            "relaunching it: pass the COMPLETE new set (it replaces, it does not merge) and a "
+            "reason. Same rules as launch; the swap is journaled with the previous set. "
+            "See tool_manual({tool: \"task_exec_update_validations\"})."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {"type": "string"},
+                "validations": {
+                    "type": "array",
+                    "description": "The complete new set of gates; [] removes every gate.",
+                    "items": {"type": "object"},
+                },
+                "reason": {"type": "string"},
+            },
+            "required": ["task_execution_id", "validations", "reason"],
         },
     },
     {
@@ -5905,6 +5936,8 @@ def call_task_exec_prepare(args):
     }
     if worker_scope is not None:
         body["worker_scope"] = worker_scope
+    if args.get("validations") is not None:
+        body["validations"] = args["validations"]
     return _task_exec_request("/api/orchestration/tool/prepare", body)
 
 
@@ -6066,6 +6099,29 @@ def call_task_exec_cancel(args):
     return _unwrap(_http(
         "POST", f"/api/orchestration/tool/executions/{execution_id}/cancel", body
     ))
+
+
+def call_task_exec_update_validations(args):
+    _require_fresh_bridge("task_exec_update_validations")
+    execution_id = (args.get("task_execution_id") or "").strip()
+    validations = args.get("validations")
+    reason = (args.get("reason") or "").strip()
+    if not execution_id or not isinstance(validations, list) or not reason:
+        raise RuntimeError(
+            "task_exec_update_validations: task_execution_id, the complete `validations` "
+            "array ([] removes every gate) and a reason are required. "
+            f"{_TASK_EXEC_MANUAL_HINT}"
+        )
+    source_agent, source_session_id = _task_exec_identity("task_exec_update_validations")
+    return _task_exec_request(
+        f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/validations",
+        {
+            "source_agent": source_agent,
+            "source_session_id": source_session_id,
+            "validations": validations,
+            "reason": reason,
+        },
+    )
 
 
 def call_task_exec_reassign(args):
@@ -9641,6 +9697,27 @@ TOOL_MANUALS = {
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
+        "**Validations contract.** Kronn runs each `command` on the candidate at integration, "
+        "after review — NOT through a shell. The command is split on whitespace into ONE binary "
+        "and its literal arguments, then run like a Quick Exec:\n"
+        "- the binary is a bare allowlisted name: `cargo`, `make`, `node`, `pnpm`, `npm`, `tsc`, "
+        "`eslint`, `vitest`, `python3`, `git`, `gh`, `rtk`, and probes such as `echo`/`true` (a "
+        "refusal lists the exact current set). Never a path, `sh`, `bash`, `env` or `xargs`; "
+        "`cd` and `npx` are not on it;\n"
+        "- no shell syntax: `&&`, `||`, `|`, `;`, `&`, redirections (`>`, `2>&1`), `$(…)`, "
+        "backticks and a leading `VAR=value` are refused, since they would reach the binary as "
+        "literal text. There is no quoting or globbing either;\n"
+        "- the working directory is ALWAYS the root of the execution's worktree. Aim at a "
+        "subdirectory with the tool's own option: `pnpm --dir frontend exec tsc -b --pretty "
+        "false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` (there is "
+        "no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n"
+        "- `timeout_secs` defaults to 600 and is capped at 1800.\n"
+        "Pass `validations` to `task_exec_prepare` to have them checked before launch: a command "
+        "that breaks the contract makes the answer `launchable: false` with reason "
+        "`invalid_validations` and the form that runs, and `task_exec_launch` refuses it the same "
+        "way — it is never accepted to fail at integration. To correct the gates of an "
+        "execution that already exists, without relaunching it, use "
+        "`task_exec_update_validations`.\n\n"
         "**Worker handoff.** The child room contains the immutable brief, execution id, pinned "
         "worktree/branch and DeliveryManifest v1 shape. Work only in that checkout. The worker "
         "does not merge, approve or close the Planning task. When the DoD is evidenced, call "
@@ -9692,6 +9769,23 @@ TOOL_MANUALS = {
         "tier), never the internal `{target, model, profile_id}` envelope. A "
         "transport change must change `worker.kind`. Native HTTP targets do not "
         "need an internal connection id; a dynamic Custom target does."
+    ),
+    "task_exec_update_validations": (
+        "Principal-only. Replaces the validations of an existing, non-terminal execution "
+        "without relaunching it, so its room, worktree, attempts and evidence stay as they are. "
+        "Pass `task_execution_id`, the COMPLETE new `validations` set (it replaces the old one — "
+        "it is not merged; `[]` removes every gate) and a `reason`. The set is held to the launch "
+        "rules (`tool_manual({tool: \"task_exec_prepare\"})`, section 'Validations contract'): a "
+        "command that could never run is refused.\n\n"
+        "The swap is journaled on the execution with the actor, the reason and the previous set, "
+        "and the answer returns `previous`, `validations` and `changed` (false when the set was "
+        "already the current one). Earlier validation results are kept as evidence; what "
+        "integration requires is a pass of each CURRENT gate on the exact candidate, so a "
+        "corrected command is simply run at the next integration.\n\n"
+        "Refused while the execution is Integrating, Validating or Applying (the running "
+        "integration started with the old set — retry when it settles), once it is Done, Failed "
+        "or Cancelled, and for an execution of a campaign, whose gates are the campaign's shared "
+        "policy."
     ),
     "task_exec_accept_worker_offer": (
         "Pass only the opaque `offer_id` from the control message. The backend "
@@ -10095,6 +10189,7 @@ _GUARDED_ORCHESTRATION_TOOLS = frozenset({
     "task_exec_launch",
     "task_exec_resume",
     "task_exec_cancel",
+    "task_exec_update_validations",
     "task_exec_reassign",
     "task_exec_accept_worker_offer",
     "task_exec_commit",
@@ -10484,6 +10579,7 @@ DISPATCH = {
     "task_exec_status": call_task_exec_status,
     "task_exec_resume": call_task_exec_resume,
     "task_exec_cancel": call_task_exec_cancel,
+    "task_exec_update_validations": call_task_exec_update_validations,
     "task_exec_reassign": call_task_exec_reassign,
     "task_exec_accept_worker_offer": call_task_exec_accept_worker_offer,
     "task_exec_commit": call_task_exec_commit,

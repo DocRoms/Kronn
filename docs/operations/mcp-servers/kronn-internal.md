@@ -406,6 +406,36 @@ persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
 manifest.
 
+Kronn runs each validation at integration the way it runs a Quick Exec, not
+through a shell: `command` is split on whitespace into ONE binary and its
+literal arguments, the binary must be a bare name on the Quick Exec allowlist
+(`cargo`, `make`, `node`, `pnpm`, `npm`, `tsc`, `eslint`, `vitest`, `python3`,
+`git`, `gh`, `rtk` and a few probes; `cd` and `npx` are not on it), and the
+working directory is always the root of the execution's worktree. `&&`, `||`,
+`|`, `;`, `&`, redirections, `$(…)`, backticks and a leading `VAR=value` are
+shell syntax and are refused, since they would reach the binary as literal
+text. A subdirectory is reached with the tool's own option:
+`pnpm --dir frontend exec tsc -b --pretty false`,
+`cargo test --manifest-path backend/Cargo.toml --target-dir <dir>`.
+`task_exec_prepare` accepts the same optional `validations` and answers
+`launchable: false` with reason `invalid_validations` (naming the form that runs)
+for a command that could never run; `task_exec_launch` refuses it the same way
+before anything is created, so a bad gate is no longer found at integration,
+after the worker delivered and the review passed. The contract is served by
+`tool_manual({tool: "task_exec_prepare"})`.
+`[src: file: backend/src/core/quick_exec.rs]`
+`[src: file: backend/src/api/orchestration.rs]`
+
+To correct the gates of an execution that already exists, the principal calls
+`task_exec_update_validations({task_execution_id, validations, reason})`. The
+set REPLACES the current one (`[]` removes every gate), is held to the launch
+rules, and is journaled on the execution (`validations_replaced`, with the actor,
+the reason and the previous set); nothing is relaunched and earlier validation
+results stay as evidence. It is refused while the execution is Integrating,
+Validating or Applying, once it is Done, Failed or Cancelled, and for an
+execution of a campaign run, whose gates are the campaign's shared policy.
+`[src: file: backend/src/db/orchestration.rs]`
+
 `task_exec_status` returns `next_action.tool = task_exec_resume` only for a
 publicly recoverable Applying-origin checkpoint. The principal may then call
 `task_exec_resume`, which uses the backend's guarded resume path: it rechecks

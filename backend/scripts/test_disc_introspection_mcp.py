@@ -1227,6 +1227,101 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             }),
         ])
 
+    def test_the_manual_states_how_a_validation_actually_runs(self):
+        """KT-839 — validations were accepted at launch and refused at integration
+        because nothing said they run without a shell. The manual now does."""
+        manual = self.mod.TOOL_MANUALS["task_exec_prepare"]
+        for fact in (
+            "NOT through a shell",
+            "ONE binary",
+            "allowlisted",
+            "`cd`",
+            "`&&`",
+            "`VAR=value`",
+            "root of the execution's worktree",
+            "pnpm --dir frontend exec tsc",
+            "cargo test --manifest-path backend/Cargo.toml --target-dir",
+            "`invalid_validations`",
+            "task_exec_update_validations",
+        ):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, manual)
+        # The launch page is the same manual, so the contract cannot be missed
+        # by the agent that only reads the launch description.
+        self.assertIs(self.mod.TOOL_MANUALS["task_exec_launch"], manual)
+
+    def test_prepare_forwards_the_validations_it_is_asked_to_check(self):
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": False}})
+        worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
+        validations = [{"command": "cd frontend && npx tsc -b"}]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_prepare({
+                "task_reference": "KT-839", "worker": worker,
+                "worker_scope_intent": "generic", "validations": validations,
+            })
+        body = http.call_args.args[2]
+        self.assertEqual(body["validations"], validations)
+        schema = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_prepare"
+        )["inputSchema"]
+        self.assertIn("validations", schema["properties"])
+        self.assertNotIn("validations", schema["required"])
+
+    def test_update_validations_replaces_the_set_with_the_derived_identity(self):
+        tools = {item["name"]: item for item in self.mod.TOOLS}
+        schema = tools["task_exec_update_validations"]["inputSchema"]
+        self.assertEqual(
+            schema["required"], ["task_execution_id", "validations", "reason"]
+        )
+        self.assertNotIn("source_agent", schema["properties"])
+        self.assertNotIn("source_session_id", schema["properties"])
+        self.assertIn("task_exec_update_validations", self.mod._GUARDED_ORCHESTRATION_TOOLS)
+        self.assertIn("task_exec_update_validations", self.mod.TOOL_MANUALS)
+
+        http = mock.MagicMock(return_value={"success": True, "data": {"changed": True}})
+        fixed = [{"command": "pnpm --dir frontend exec tsc -b --pretty false"}]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_update_validations({
+                "task_execution_id": "exec-1", "validations": fixed,
+                "reason": "cd is not runnable",
+            })
+            # The empty set is a real request (drop every gate), not a missing one.
+            self.mod.call_task_exec_update_validations({
+                "task_execution_id": "exec-1", "validations": [], "reason": "no gate",
+            })
+            for missing in (
+                {"validations": fixed, "reason": "r"},
+                {"task_execution_id": "exec-1", "reason": "r"},
+                {"task_execution_id": "exec-1", "validations": fixed},
+            ):
+                with self.assertRaises(RuntimeError):
+                    self.mod.call_task_exec_update_validations(missing)
+        identity = {"source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a"}
+        self.assertEqual(http.call_count, 2)
+        http.assert_has_calls([
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/validations", {
+                **identity, "validations": fixed, "reason": "cd is not runnable",
+            }),
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/validations", {
+                **identity, "validations": [], "reason": "no gate",
+            }),
+        ])
+
+    def test_stale_bridge_refuses_update_validations_before_http(self):
+        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        with mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_update_validations({
+                    "task_execution_id": "exec-1", "validations": [], "reason": "r",
+                })
+            self.assertIn("Reconnect", str(refused.exception))
+            http.assert_not_called()
+
     def test_status_forwards_a_bounded_wait_and_refuses_unknown_statuses(self):
         """KT-790 — `wait_for` and `timeout_secs` reach the backend, which bounds
         the wait; a misspelt status fails here rather than waiting for nothing."""

@@ -2029,6 +2029,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::orchestration::task_exec_reassign),
         )
         .route(
+            "/api/orchestration/tool/executions/{id}/validations",
+            post(api::orchestration::task_exec_update_validations),
+        )
+        .route(
             "/api/orchestration/campaigns",
             post(api::orchestration::create_campaign),
         )

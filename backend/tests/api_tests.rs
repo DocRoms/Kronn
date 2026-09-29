@@ -469,6 +469,15 @@ async fn orchestration_cli_tool_routes_require_server_verifiable_identity() {
                 "reason": "test"
             }),
         ),
+        (
+            format!("/api/orchestration/tool/executions/{missing_execution}/validations"),
+            serde_json::json!({
+                "source_agent": "",
+                "source_session_id": "",
+                "validations": [{"command": "cargo test"}],
+                "reason": "test"
+            }),
+        ),
     ];
 
     for (path, body) in calls {
