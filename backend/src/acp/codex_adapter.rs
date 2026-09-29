@@ -33,7 +33,7 @@
 //! Task workers instead reuse the direct worker's narrower launch policy.
 
 use super::adapter_process::{AdapterProcess, StderrTail};
-use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};
+use crate::agents::runner::{AdapterLaunchOptions, PromptCacheUsage, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -214,6 +214,7 @@ enum CodexLineEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        prompt_cache: PromptCacheUsage,
     },
     Fatal(String),
     Skip,
@@ -266,9 +267,20 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
                 .pointer("/usage/output_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            // Codex's `input_tokens` INCLUDES `cached_input_tokens`; the cost
+            // computation needs the two apart, and an absent field must stay
+            // absent rather than read as zero cached tokens.
             CodexLineEvent::Usage {
                 input_tokens,
                 output_tokens,
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: json
+                        .pointer("/usage/cached_input_tokens")
+                        .and_then(Value::as_u64),
+                    cache_write_prompt_tokens: json
+                        .pointer("/usage/cache_write_input_tokens")
+                        .and_then(Value::as_u64),
+                },
             }
         }
         "turn.failed" => CodexLineEvent::Fatal(
@@ -461,12 +473,13 @@ impl AcpTransport for CodexAcpAdapter {
                     CodexLineEvent::Usage {
                         input_tokens,
                         output_tokens,
+                        prompt_cache,
                     } => {
                         let _ = events
                             .send(AcpSessionEvent::Usage {
                                 input_tokens,
                                 output_tokens,
-                                prompt_cache: Default::default(),
+                                prompt_cache,
                             })
                             .await;
                     }
@@ -555,7 +568,11 @@ mod tests {
             ),
             CodexLineEvent::Usage {
                 input_tokens: 3,
-                output_tokens: 5
+                output_tokens: 5,
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: Some(0),
+                    cache_write_prompt_tokens: Some(0),
+                },
             }
         ));
         assert!(matches!(
@@ -566,6 +583,32 @@ mod tests {
             parse_codex_line(r#"{"type":"turn.started"}"#),
             CodexLineEvent::Skip
         ));
+    }
+
+    #[test]
+    fn turn_usage_carries_the_cached_share_of_the_input_and_keeps_absence_absent() {
+        // The real KT-837 counters (`total_token_usage` of the Codex journal).
+        let CodexLineEvent::Usage {
+            input_tokens,
+            output_tokens,
+            prompt_cache,
+        } = parse_codex_line(
+            r#"{"type":"turn.completed","usage":{"input_tokens":25209778,"cached_input_tokens":24851584,"output_tokens":51617,"reasoning_output_tokens":18354}}"#,
+        )
+        else {
+            panic!("turn.completed carries usage");
+        };
+        assert_eq!((input_tokens, output_tokens), (25_209_778, 51_617));
+        assert_eq!(prompt_cache.cached_prompt_tokens, Some(24_851_584));
+        // Not in the payload: not reported, which is not zero.
+        assert_eq!(prompt_cache.cache_write_prompt_tokens, None);
+
+        let CodexLineEvent::Usage { prompt_cache, .. } = parse_codex_line(
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}"#,
+        ) else {
+            panic!("turn.completed carries usage");
+        };
+        assert_eq!(prompt_cache, PromptCacheUsage::default());
     }
 
     /// A fixture "codex" that always reports `thread.started` with a fixed

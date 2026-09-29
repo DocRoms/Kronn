@@ -2087,6 +2087,11 @@ const en: TranslationDict = {
   'disc.tokenCostCliUnknownHint': 'A CLI is joined but no counter is readable: its cost is UNKNOWN, not zero. On one real session, 4.1 billion tokens were stored as zero.',
   'disc.tokenCostUnknown': 'unknown',
   'disc.tokenCostPartial': '({0}/{1} sessions measured)',
+  // KT-894 — the cache told apart from the real input: Codex counts its cache
+  // reads in the total it reports, Claude Code does not.
+  'disc.tokenCostInAppSplit': '{0} in · {1} cache · {2} out',
+  'disc.tokenCostInAppSplitHint': 'Tokens from replies by agents Kronn spawned in this discussion, with the prompt cache told apart from the real input: {0} fresh input, {1} read from the cache, {2} output (split reported by {3} of {4} replies). Cache reads bill at a fraction of fresh input, and the total an agent reports counts them for Codex but not for Claude Code.',
+  'disc.tokenCostInAppSplitPartial': '(split known for {0}/{1} replies)',
   'disc.local': 'Local',
   'disc.system': 'System',
   'disc.largeMessage': 'Large message ({0} KB) — markdown disabled, shown as plain text to avoid freezing the tab.',
@@ -3389,6 +3394,10 @@ const en: TranslationDict = {
   'orch.exec.tokens': 'Tokens',
   'orch.exec.cost': 'In-app cost',
   'orch.exec.costPartial': '(partial)',
+  'orch.exec.costUnknownWhy': '(unknown: {0})',
+  'orch.exec.inAppTokens': 'In-app tokens',
+  'orch.exec.inAppSplit': '{0} fresh input · {1} cache · {2} output',
+  'orch.exec.inAppSplitPartial': '(split known for {0} of {1} replies)',
   'orch.exec.rounds': 'Review rounds',
   'orch.exec.open': 'Open',
   'orch.exec.approve': 'Approve',

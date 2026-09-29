@@ -2087,6 +2087,11 @@ const es: TranslationDict = {
   'disc.tokenCostCliUnknownHint': 'Hay una CLI unida pero ningún contador es legible: su coste es DESCONOCIDO, no cero. En una sesión real, 4100 millones de tokens se guardaron como cero.',
   'disc.tokenCostUnknown': 'desconocido',
   'disc.tokenCostPartial': '({0}/{1} sesiones medidas)',
+  // KT-894 — la caché distinguida de la entrada real: Codex cuenta sus lecturas
+  // de caché en el total que notifica, Claude Code no.
+  'disc.tokenCostInAppSplit': '{0} entrada · {1} caché · {2} salida',
+  'disc.tokenCostInAppSplitHint': 'Tokens de las respuestas de los agentes que Kronn ha lanzado en esta conversación, con la caché del prompt distinguida de la entrada real: {0} de entrada real, {1} leídos de la caché, {2} de salida (desglose conocido en {3} de {4} respuestas). Las lecturas de caché cuestan una fracción de la entrada real, y el total que notifica un agente las cuenta en Codex pero no en Claude Code.',
+  'disc.tokenCostInAppSplitPartial': '(desglose conocido en {0}/{1} respuestas)',
   'disc.local': 'Local',
   'disc.system': 'Sistema',
   'disc.largeMessage': 'Mensaje voluminoso ({0} KB) — markdown desactivado, mostrado como texto plano para no bloquear la pestaña.',
@@ -3378,6 +3383,10 @@ const es: TranslationDict = {
   'orch.exec.tokens': 'Tokens',
   'orch.exec.cost': 'Coste in-app',
   'orch.exec.costPartial': '(parcial)',
+  'orch.exec.costUnknownWhy': '(desconocido: {0})',
+  'orch.exec.inAppTokens': 'Tokens in-app',
+  'orch.exec.inAppSplit': '{0} entrada real · {1} caché · {2} salida',
+  'orch.exec.inAppSplitPartial': '(desglose conocido en {0} de {1} respuestas)',
   'orch.exec.rounds': 'Rondas de revisión',
   'orch.exec.open': 'Abrir',
   'orch.exec.approve': 'Aprobar',

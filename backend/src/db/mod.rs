@@ -34,6 +34,7 @@ pub mod live_page_actions;
 pub mod live_pages;
 pub mod mcps;
 pub mod media_jobs;
+pub mod message_usage;
 pub mod migrations;
 pub mod model_catalog;
 pub mod orchestration;

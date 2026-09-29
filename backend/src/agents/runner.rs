@@ -1610,6 +1610,16 @@ pub struct PromptCacheUsage {
     pub cache_write_prompt_tokens: Option<u64>,
 }
 
+/// One run's reported usage, parts kept apart. `input_tokens` is as the agent
+/// reports it, so whether it already contains the cached share depends on the
+/// agent (see `core::pricing::TokenCounters::from_agent_report`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportedUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub prompt_cache: PromptCacheUsage,
+}
+
 impl PromptCacheUsage {
     /// Read Anthropic's `cache_read_input_tokens` / `cache_creation_input_tokens`.
     pub fn from_anthropic_usage(usage: &serde_json::Value) -> Self {
@@ -1675,6 +1685,19 @@ impl AgentProcess {
 
     pub fn reported_prompt_cache(&self) -> PromptCacheUsage {
         self.usage.lock().unwrap().prompt_cache
+    }
+
+    /// The structured transport's usage with its parts kept apart — what a
+    /// cost is computed from. `None` when nothing was reported. Each agent
+    /// states its input differently (Codex includes the cached share, Claude
+    /// excludes it), so the caller resolves that with the agent type.
+    pub fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        let usage = *self.usage.lock().unwrap();
+        (usage.input_tokens.saturating_add(usage.output_tokens) > 0).then_some(ReportedUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            prompt_cache: usage.prompt_cache,
+        })
     }
 
     /// Fix file ownership after agent execution.

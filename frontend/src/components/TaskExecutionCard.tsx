@@ -35,6 +35,11 @@ export function TaskExecutionCard({
   const actions = allowedActions(exec.status, exec.interrupted_from_status);
   const cli = cliTokens(usage);
   const failing = validation_runs.filter(run => run.exit_code !== 0);
+  // KT-894 — the in-app total is not one unit across agents (Codex counts its
+  // cache reads in it, Claude Code does not), so with a complete split the three
+  // parts are shown instead; a partial split is flagged, never passed off as it.
+  const split = usage.in_app_breakdown;
+  const splitCoversAll = split !== null && split.messages >= usage.in_app_messages;
 
   return (
     <section className="orch-exec" data-testid="orch-exec-card">
@@ -80,11 +85,39 @@ export function TaskExecutionCard({
           )}
         </dd>
 
+        {usage.in_app_messages > 0 && (
+          <>
+            <dt>{t('orch.exec.inAppTokens')}</dt>
+            <dd data-testid="orch-exec-in-app-tokens">
+              {split && splitCoversAll
+                ? t(
+                    'orch.exec.inAppSplit',
+                    split.input_tokens.toLocaleString(),
+                    split.cache_read_tokens.toLocaleString(),
+                    split.output_tokens.toLocaleString(),
+                  )
+                : usage.in_app_tokens.toLocaleString()}
+              {split && !splitCoversAll && (
+                <span className="orch-exec-partial" data-testid="orch-exec-in-app-split-partial">
+                  {t('orch.exec.inAppSplitPartial', split.messages, usage.in_app_messages)}
+                </span>
+              )}
+            </dd>
+          </>
+        )}
+
         <dt>{t('orch.exec.cost')}</dt>
         <dd data-testid="orch-exec-cost">
           {usage.in_app_cost_usd === null ? '—' : `$${usage.in_app_cost_usd.toFixed(4)}`}
           {usage.in_app_cost_is_partial && (
             <span className="orch-exec-partial">{t('orch.exec.costPartial')}</span>
+          )}
+          {/* An unpriced reply says why, instead of a bare dash: a total with
+              no counters, or a served model with no confirmed rate. */}
+          {usage.in_app_cost_unknown_reasons.length > 0 && (
+            <span className="orch-exec-partial" data-testid="orch-exec-cost-unknown">
+              {t('orch.exec.costUnknownWhy', usage.in_app_cost_unknown_reasons.join('; '))}
+            </span>
           )}
         </dd>
 

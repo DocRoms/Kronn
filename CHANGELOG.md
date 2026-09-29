@@ -85,6 +85,24 @@ Release notes for 0.9.3 and earlier are available in the
   `resets 4:20pm (Europe/Paris)`), Settings → Agents now shows "Rearmable at
   16:20" beside the re-arm button. It is a hint only; nothing re-arms
   automatically. See [Provider quota re-arm](docs/operations/provider-quota-rearm.md).
+- The cost shown for an agent reply is no longer a guess. It was the reported
+  token total split 60/40 into input and output at one fixed rate per agent, so
+  a Codex run that was 98.6% cache reads (25.2M tokens, about $13.5 at API
+  rates) showed $111. The cost is now computed from the four counters the
+  runtime reports (input not served from cache, cache reads, cache writes,
+  output) at the rates of the model that served the reply, and Codex's
+  `cached_input_tokens` is now read. When the counters or the model's rate are
+  missing, the cost stays unknown, and the execution card says why (a total
+  only, a model with no confirmed rate). Rates cover the GPT-4.1 to GPT-5.6 and
+  Claude 3.5 to Fable 5.1 families, checked against LiteLLM's price list; a
+  model outside them is unpriced until its rate is confirmed. Replies
+  already stored keep their earlier cost.
+- The in-app token total no longer hides the cache. The discussion header and
+  the execution card show the real input, the cache reads and the output apart
+  once every reply reported them, and flag a split that covers only some
+  replies. The `session_budget` signal reports the four traffic counters and
+  the cache share beside its `traffic_tokens` axis; the axis itself still counts
+  cache reads, as it was calibrated to.
 
 ## [0.14.1] - 2026-09-26
 

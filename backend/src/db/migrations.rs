@@ -779,6 +779,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "202_provider_quota_reset_at",
         include_str!("sql/202_provider_quota_reset_at.sql"),
     ),
+    (
+        "203_message_usage",
+        include_str!("sql/203_message_usage.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

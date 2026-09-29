@@ -21,6 +21,8 @@ function cost(overrides: Partial<Cost> = {}): Cost {
     disc_id: 'd',
     in_app_tokens: 12_000,
     in_app_messages: 4,
+    in_app_breakdown: null,
+    in_app_cost_unknown_reasons: [],
     cli_traffic_tokens: 4_100_000_000,
     cli_billable_tokens: 66_000_000,
     cli_sessions: 2,
@@ -137,6 +139,70 @@ describe('DiscussionTokenCost', () => {
     expect(() => render(<DiscussionTokenCost discussionId="d" t={t} />)).not.toThrow();
     await waitFor(() => expect(telemetry.discussionCost).toHaveBeenCalled());
     expect(screen.queryByTestId('disc-token-cost')).toBeNull();
+  });
+
+  // ── KT-894 — the cache told apart from the real input ────────────────────
+
+  // The real counters of the Codex run KT-837 (`93aac172`): the 25 261 395 total
+  // is 98.6% cache reads.
+  const kt837Split = {
+    messages: 1,
+    input_tokens: 358_194,
+    cache_read_tokens: 24_851_584,
+    cache_write_tokens: null,
+    output_tokens: 51_617,
+  };
+
+  it('tells the cache from the real input instead of one ambiguous total', async () => {
+    mockCost(cost({
+      in_app_tokens: 25_261_395,
+      in_app_messages: 1,
+      in_app_breakdown: kt837Split,
+    }));
+    render(<DiscussionTokenCost discussionId="d" t={t} />);
+
+    const badge = await screen.findByTestId('disc-token-cost');
+    // Three figures apart: 358k real input, 24.9M cache, 52k output.
+    expect(screen.getByTestId('disc-token-cost-split').textContent).toBe(
+      'disc.tokenCostInAppSplit(358k,24.9M,52k)',
+    );
+    // The 25.3M total that hid the cache is no longer what the pill leads with.
+    expect(badge.textContent).not.toContain('25.3M');
+    // And the tooltip states what the parts are.
+    expect(badge.querySelector('[data-part="in-app"]')?.getAttribute('title')).toBe(
+      'disc.tokenCostInAppSplitHint(358k,24.9M,52k,1,1)',
+    );
+    expect(screen.queryByTestId('disc-token-cost-split-partial')).toBeNull();
+  });
+
+  it('keeps the total and flags a split that covers only some replies', async () => {
+    // A sub-sum passed off as the whole would be the same lie one level down.
+    mockCost(cost({
+      in_app_tokens: 12_000,
+      in_app_messages: 4,
+      in_app_breakdown: { ...kt837Split, messages: 1 },
+    }));
+    render(<DiscussionTokenCost discussionId="d" t={t} />);
+
+    const badge = await screen.findByTestId('disc-token-cost');
+    expect(badge.textContent).toContain('12k');
+    expect(screen.queryByTestId('disc-token-cost-split')).toBeNull();
+    expect(screen.getByTestId('disc-token-cost-split-partial').textContent).toContain(
+      'disc.tokenCostInAppSplitPartial(1,4)',
+    );
+  });
+
+  it('shows the plain total, with no split wording, when no reply reported counters', async () => {
+    mockCost(cost({ in_app_breakdown: null }));
+    render(<DiscussionTokenCost discussionId="d" t={t} />);
+
+    const badge = await screen.findByTestId('disc-token-cost');
+    expect(badge.textContent).toContain('12k');
+    expect(screen.queryByTestId('disc-token-cost-split')).toBeNull();
+    expect(screen.queryByTestId('disc-token-cost-split-partial')).toBeNull();
+    expect(badge.querySelector('[data-part="in-app"]')?.getAttribute('title')).toBe(
+      'disc.tokenCostInAppHint',
+    );
   });
 
   it('drops the in-app pill when no agent replied but a CLI did', async () => {

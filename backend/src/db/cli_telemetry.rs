@@ -53,6 +53,17 @@ impl CliSessionTelemetry {
         Some(parts.iter().filter_map(|part| *part).sum())
     }
 
+    /// The four counters apart, for a signal that must tell the cache from the
+    /// real input (KT-894). Absence stays absence.
+    pub fn traffic_breakdown(&self) -> crate::core::session_budget::TrafficBreakdown {
+        crate::core::session_budget::TrafficBreakdown {
+            input_tokens: self.input_tokens,
+            cache_write_tokens: self.cache_creation_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            output_tokens: self.output_tokens,
+        }
+    }
+
     /// Traffic minus cache reads, which bill at roughly a tenth. `None` when the
     /// vendor does not report cache reads: without them "billable" cannot be
     /// derived, and guessing it is how a release note stops being checkable.
@@ -451,6 +462,18 @@ pub struct DiscussionTokenCost {
     /// it covers, and 0 genuinely means no in-app agent replied.
     pub in_app_tokens: i64,
     pub in_app_messages: i64,
+    /// `in_app_tokens` with the prompt cache told apart from the real input
+    /// (KT-894): for Codex the total INCLUDES the cache reads, which were 98.6% of
+    /// one 25M-token run. Covers only the replies that reported their counters —
+    /// `messages` says how many — and is `None` when none did, which is unknown,
+    /// not "all of it was input".
+    #[serde(default)]
+    pub in_app_breakdown: Option<crate::db::message_usage::InAppTokenBreakdown>,
+    /// Why some in-app replies carry no cost, when they do not: a total without
+    /// counters, or a served model with no confirmed rate. Empty when every reply
+    /// that consumed tokens was priced.
+    #[serde(default)]
+    pub in_app_cost_unknown_reasons: Vec<String>,
     /// The CLI side: traffic the vendors reported for the sessions joined here.
     /// `None` when nothing was measured — never 0, because an unmeasured session
     /// is unknown, not free.
@@ -521,6 +544,8 @@ pub fn cost_for_discussion(conn: &Connection, disc_id: &str) -> Result<Discussio
         disc_id: disc_id.to_string(),
         in_app_tokens,
         in_app_messages,
+        in_app_breakdown: crate::db::message_usage::breakdown_for_discussion(conn, disc_id)?,
+        in_app_cost_unknown_reasons: crate::db::message_usage::unknown_cost_reasons(conn, disc_id)?,
         cli_traffic_tokens: (measured > 0).then_some(traffic),
         cli_billable_tokens: (measured > 0 && missing_cache == 0).then_some(traffic - cache_read),
         cli_sessions: sessions,
@@ -568,7 +593,7 @@ pub fn assess_session(
     cli_session_pk: i64,
     budget: &crate::core::session_budget::SessionBudget,
 ) -> Result<crate::core::session_budget::BudgetAssessment> {
-    let traffic = get(conn, cli_session_pk)?.and_then(|row| row.traffic_tokens());
+    let traffic = get(conn, cli_session_pk)?.map(|row| row.traffic_breakdown());
 
     let active_hours =
         active_hours_for_session(conn, cli_session_pk, budget.max_inactive_gap_minutes)?;
@@ -581,7 +606,7 @@ pub fn assess_session(
         |row| row.get(0),
     )?;
 
-    Ok(crate::core::session_budget::assess(
+    Ok(crate::core::session_budget::assess_traffic(
         budget,
         traffic,
         active_hours,
