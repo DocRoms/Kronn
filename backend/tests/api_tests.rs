@@ -3871,7 +3871,10 @@ async fn project_repository_resources_classifies_repository_and_kronn_skills() {
         .iter()
         .find(|skill| skill["id"] == "go")
         .expect("filesystem-detected skill");
-    assert_eq!(detected["provenance"], "repository");
+    // A detected skill is a Kronn suggestion, not a file of the repository.
+    assert_eq!(detected["provenance"], "kronn");
+    assert_eq!(detected["suggested"], true);
+    assert!(detected["suggested_reason"].is_string(), "{detected}");
     let repository_only = present
         .iter()
         .find(|skill| skill["slug"] == "repo-review")
