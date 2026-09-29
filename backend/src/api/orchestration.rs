@@ -6691,6 +6691,41 @@ fn worker_brief_markdown(
         "Avant la livraison, appelle `git_commit` avec les seuls chemins relatifs réellement \
          modifiés et un message concis."
     };
+    // The one merge a worker is allowed: bringing the target branch INTO its own
+    // branch when the principal asks. A worker that meets git's refusal of a
+    // path-limited commit mid-merge otherwise erases MERGE_HEAD, and the
+    // single-parent commit it then makes turns into add/add conflicts at
+    // integration (KT-854).
+    let target_integration = if !can_run_shell {
+        String::new()
+    } else if mediated_host_commit {
+        "## Intégrer la branche cible\n\
+         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+         1. Lance `git merge --no-commit --no-ff <cible>` dans ton worktree.\n\
+         2. En cas de conflit, résous-le dans les fichiers.\n\
+         3. Appelle `task_exec_commit` avec les fichiers résolus et un message : Kronn termine \
+            la fusion avec ses deux parents et le sign-off. Sans conflit, nomme au moins un \
+            fichier que la fusion apporte ou que tu modifies.\n\
+         N'efface jamais `.git/MERGE_HEAD` et ne lance ni `git merge --abort` ni `git reset` \
+         pour recommiter à la main : un commit à un seul parent fait apparaître les fichiers de \
+         la cible comme « ajoutés des deux côtés » à l'intégration. Si `task_exec_commit` \
+         refuse (conflits non résolus, chemin indexé étranger), il n'a rien changé : corrige \
+         puis rappelle-le.\n\n"
+            .to_string()
+    } else {
+        "## Intégrer la branche cible\n\
+         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+         1. Lance `git merge --signoff <cible>` dans ton worktree.\n\
+         2. En cas de conflit, résous-le, `git add` les fichiers résolus, puis termine avec \
+            `git commit -s --no-edit` — sans chemin ni `-m` : git refuse un commit limité à des \
+            chemins pendant une fusion.\n\
+         N'efface jamais `.git/MERGE_HEAD` pour recommiter à la main : un commit à un seul \
+         parent fait apparaître les fichiers de la cible comme « ajoutés des deux côtés » à \
+         l'intégration.\n\n"
+            .to_string()
+    };
     format!(
         "# {reference} — {title}\n\n\
          ## Objectif\n{objective}\n\n\
@@ -6708,9 +6743,10 @@ fn worker_brief_markdown(
          {mechanical_scope}\
          ## Contraintes\n\
          - Travaille UNIQUEMENT dans ce worktree ; ne touche jamais un autre checkout.\n\
-         - Pas de `git push`, pas de force-push, pas de merge : l'intégration \
+         - Pas de `git push`, pas de force-push, pas de merge vers la cible : l'intégration \
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
+         {target_integration}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -6737,6 +6773,7 @@ fn worker_brief_markdown(
         mechanical_scope = mechanical_scope,
         human_arbitration = human_arbitration,
         parent_milestones = parent_milestones,
+        target_integration = target_integration,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -12763,6 +12800,71 @@ mod tests {
         assert!(brief.contains("N'utilise pas `git commit`"), "{brief}");
         assert!(!brief.contains("opaque-dod-id"), "{brief}");
         assert!(!brief.contains("`head_sha` : le HEAD exact"), "{brief}");
+    }
+
+    /// KT-854: the brief says how to bring the target branch in without erasing
+    /// the merge state, for each way a worker can commit — and never tells a
+    /// worker without a shell to run a merge it cannot run.
+    #[test]
+    fn worker_brief_explains_how_to_integrate_the_target_without_erasing_merge_state() {
+        let brief_for = |can_run_shell: bool, native_delivery_projection: bool| {
+            worker_brief_markdown(
+                "KT-854",
+                "Intégration",
+                "Objectif",
+                &[],
+                "/wt/kt854",
+                "kronn/task/KT-854",
+                "abc1234",
+                can_run_shell,
+                native_delivery_projection,
+                None,
+            )
+        };
+
+        let mediated = brief_for(true, true);
+        for needle in [
+            "## Intégrer la branche cible",
+            "git merge --no-commit --no-ff <cible>",
+            "Appelle `task_exec_commit` avec les fichiers résolus",
+            "deux parents",
+            "N'efface jamais `.git/MERGE_HEAD`",
+            "ajoutés des deux côtés",
+        ] {
+            assert!(mediated.contains(needle), "missing `{needle}`: {mediated}");
+        }
+        assert!(
+            mediated.contains("pas de merge vers la cible"),
+            "the blanket merge ban must not contradict the integration section: {mediated}"
+        );
+
+        let self_committing = brief_for(true, false);
+        assert!(
+            self_committing.contains("## Intégrer la branche cible"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("git merge --signoff <cible>"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("git commit -s --no-edit"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("N'efface jamais `.git/MERGE_HEAD`"),
+            "{self_committing}"
+        );
+        assert!(
+            !self_committing.contains("task_exec_commit"),
+            "a worker that commits itself has no task_exec_commit: {self_committing}"
+        );
+
+        let no_shell = brief_for(false, true);
+        assert!(
+            !no_shell.contains("## Intégrer la branche cible"),
+            "{no_shell}"
+        );
     }
 
     #[test]

@@ -5680,7 +5680,10 @@ def _visible_tools():
             "Kronn derives and revalidates the execution, child room, provider, "
             "dispatch and attached managed worktree, then performs Git server-side. "
             "Pass only relative `files` and a concise `message`; there is no amend, "
-            "push, branch, ref or repository-path capability. After success, call "
+            "push, branch, ref or repository-path capability. During an unfinished "
+            "merge (integrating the target branch), name the files you resolved: Kronn "
+            "finishes the merge with both parents, or refuses and says why without "
+            "touching the merge state — never delete MERGE_HEAD. After success, call "
             "`task_exec_deliver` with the semantic delivery assertions."
         ),
         "inputSchema": {

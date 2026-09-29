@@ -649,19 +649,35 @@ pub fn git_commit_payload_with_data_dir_lock(
         normalized.insert(relative.to_string_lossy().to_string());
     }
     let normalized: Vec<String> = normalized.into_iter().collect();
-    let committed = crate::api::git_ops::run_git_commit_with_child_lock(
-        &canonical_root,
-        &normalized,
-        message,
-        false,
-        false,
-        data_dir_lock,
-    )?;
+    // Git refuses a path-limited commit while a merge is unfinished. Finish the
+    // merge with both parents rather than leave the worker to erase MERGE_HEAD.
+    let finishing_merge = crate::api::git_ops::merge_in_progress(&canonical_root);
+    let committed = if finishing_merge {
+        crate::api::git_ops::run_git_merge_commit_with_child_lock(
+            &canonical_root,
+            &normalized,
+            message,
+            false,
+            data_dir_lock,
+        )?
+    } else {
+        crate::api::git_ops::run_git_commit_with_child_lock(
+            &canonical_root,
+            &normalized,
+            message,
+            false,
+            false,
+            data_dir_lock,
+        )?
+    };
     let mut payload = json!({
         "hash": committed.hash,
         "message": committed.message,
         "files": normalized,
     });
+    if finishing_merge {
+        payload["merge_commit"] = json!(true);
+    }
     if !removed_trailers.is_empty() {
         payload["removed_trailers"] = json!(removed_trailers);
         payload["note"] = json!(
@@ -3450,6 +3466,137 @@ mod tests {
         assert_eq!(status["changes"][0]["path"], json!("b.txt"));
         let still_staged = git_read(repo.path(), &["diff", "--cached", "--name-only"]).unwrap();
         assert_eq!(still_staged.trim(), "b.txt");
+    }
+
+    /// A branch `target` that edits `a.txt` and adds `t.txt`, while `main` edits
+    /// `a.txt` differently. Returns the target tip; nothing is merged yet.
+    #[cfg(unix)]
+    fn diverge_from_target(repo: &Path) -> String {
+        git_read(repo, &["checkout", "-b", "target"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "target\n").unwrap();
+        std::fs::write(repo.join("t.txt"), "t\n").unwrap();
+        git_read(repo, &["add", "."]).unwrap();
+        git_read(repo, &["commit", "-m", "target work"]).unwrap();
+        let target = git_read(repo, &["rev-parse", "HEAD"]).unwrap();
+        git_read(repo, &["checkout", "main"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        git_read(repo, &["commit", "-am", "main work"]).unwrap();
+        target.trim().to_string()
+    }
+
+    fn merge_head_exists(repo: &Path) -> bool {
+        repo.join(".git/MERGE_HEAD").exists()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_finishes_a_merge_with_both_parents() {
+        let repo = tiny_repo();
+        let target = diverge_from_target(repo.path());
+        let ours = git_read(repo.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        // The worker merges the target in its shell and hits a conflict.
+        let _ = git_read(repo.path(), &["merge", "--no-edit", "target"]);
+        assert!(merge_head_exists(repo.path()));
+        std::fs::write(repo.path().join("a.txt"), "main and target\n").unwrap();
+
+        let committed =
+            git_commit_payload(repo.path(), &["a.txt".into()], "merge: integrate target").unwrap();
+
+        assert_eq!(committed["merge_commit"], json!(true));
+        assert!(
+            !merge_head_exists(repo.path()),
+            "finishing the merge consumes MERGE_HEAD"
+        );
+        let parents = git_read(repo.path(), &["log", "-1", "--format=%P"]).unwrap();
+        assert_eq!(
+            parents.split_whitespace().collect::<Vec<_>>(),
+            [ours.as_str(), target.as_str()],
+            "the commit keeps both parents, ours first"
+        );
+        let body = git_read(repo.path(), &["log", "-1", "--format=%B"]).unwrap();
+        assert!(body.contains("Signed-off-by: T <t@t.t>"), "{body}");
+        // The target's own file arrived through the merge, not through `files`.
+        let arrived = git_read(repo.path(), &["show", "HEAD:t.txt"]).unwrap();
+        assert_eq!(arrived, "t\n");
+        let resolved = git_read(repo.path(), &["show", "HEAD:a.txt"]).unwrap();
+        assert_eq!(resolved, "main and target\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_names_unresolved_conflicts_and_leaves_the_merge_alone() {
+        let repo = tiny_repo();
+        diverge_from_target(repo.path());
+        let ours = git_read(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        let _ = git_read(repo.path(), &["merge", "--no-edit", "target"]);
+        std::fs::write(repo.path().join("notes.txt"), "notes\n").unwrap();
+
+        let refused =
+            git_commit_payload(repo.path(), &["notes.txt".into()], "premature").unwrap_err();
+
+        assert!(
+            refused.contains("unresolved conflicts in: a.txt"),
+            "{refused}"
+        );
+        assert!(refused.contains("MERGE_HEAD"), "{refused}");
+        assert!(
+            merge_head_exists(repo.path()),
+            "a refusal must not consume the merge"
+        );
+        assert_eq!(git_read(repo.path(), &["rev-parse", "HEAD"]).unwrap(), ours);
+        let staged = git_read(repo.path(), &["diff", "--cached", "--name-only"]).unwrap();
+        assert!(
+            !staged.contains("notes.txt"),
+            "a refused commit stages nothing: {staged}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_refuses_a_stray_staged_path_while_finishing_a_clean_merge() {
+        let repo = tiny_repo();
+        git_read(repo.path(), &["checkout", "-b", "target"]).unwrap();
+        std::fs::write(repo.path().join("t.txt"), "t\n").unwrap();
+        git_read(repo.path(), &["add", "."]).unwrap();
+        git_read(repo.path(), &["commit", "-m", "target work"]).unwrap();
+        git_read(repo.path(), &["checkout", "main"]).unwrap();
+        std::fs::write(repo.path().join("m.txt"), "m\n").unwrap();
+        git_read(repo.path(), &["add", "."]).unwrap();
+        git_read(repo.path(), &["commit", "-m", "main work"]).unwrap();
+        // `--no-commit` leaves a conflict-free merge waiting for a commit.
+        git_read(repo.path(), &["merge", "--no-commit", "--no-ff", "target"]).unwrap();
+        std::fs::write(repo.path().join("stray.txt"), "stray\n").unwrap();
+        // `m.txt` differs between the two sides only because OUR side added it:
+        // the merge does not touch it, so an edit staged there is not the merge's.
+        std::fs::write(repo.path().join("m.txt"), "m, edited by hand\n").unwrap();
+        git_read(repo.path(), &["add", "stray.txt", "m.txt"]).unwrap();
+
+        let refused = git_commit_payload(repo.path(), &["t.txt".into()], "integrate").unwrap_err();
+
+        assert!(refused.contains("stray.txt"), "{refused}");
+        assert!(refused.contains("m.txt"), "{refused}");
+        assert!(!refused.contains("t.txt"), "{refused}");
+        assert!(merge_head_exists(repo.path()));
+
+        git_read(
+            repo.path(),
+            &["restore", "--staged", "--", "stray.txt", "m.txt"],
+        )
+        .unwrap();
+        git_commit_payload(repo.path(), &["t.txt".into()], "integrate").unwrap();
+
+        let parents = git_read(repo.path(), &["log", "-1", "--format=%P"]).unwrap();
+        assert_eq!(parents.split_whitespace().count(), 2);
+        let tree = git_read(repo.path(), &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
+        assert!(
+            tree.contains("t.txt") && !tree.contains("stray.txt"),
+            "{tree}"
+        );
+        let m = git_read(repo.path(), &["show", "HEAD:m.txt"]).unwrap();
+        assert_eq!(m, "m\n", "the unstaged hand edit stayed out of the commit");
     }
 
     #[test]

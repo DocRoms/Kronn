@@ -63,6 +63,20 @@ Release notes for 0.9.3 and earlier are available in the
   by default too; start the backend with `KRONN_CLAUDE_AUTO_MEMORY=1` to keep it
   there. See [Claude auto-memory](docs/operations/claude-auto-memory.md).
 
+### Fixed
+
+- The merge commit Kronn creates when it integrates a task branch now carries
+  the `Signed-off-by` of the configured git identity, so a repository that
+  enforces the DCO no longer turns the release PR red on it.
+- `task_exec_commit` (and `git_commit` for native workers) can finish a merge in
+  progress: when a worker integrates the target branch into its own, Kronn
+  commits the merge with both parents and the sign-off instead of failing on
+  git's "cannot do a partial commit during a merge". It refuses, without
+  touching the merge state, while a conflict is unresolved or a path outside the
+  merge and `files` is staged. The worker brief now says how to integrate the
+  target branch and never to erase `MERGE_HEAD`: a single-parent commit made
+  the target's files look added on both sides at integration.
+
 ## [0.14.1] - 2026-09-26
 
 ### Added
