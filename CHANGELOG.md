@@ -36,6 +36,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The Plugins sidebar no longer carries a per-project tree, so each plugin is
+  listed once (a global plugin used to appear once per project, and again
+  under "No project"). It is a flat list: Favorites and "Recently tested"
+  (both collapsible, and taken out of the full list) then "All plugins", each
+  row keeping its scope chips ("All projects · 3 projects"). Project, Health
+  (error / to check / ready) and Local sync (available in local CLIs / not
+  synced) join Type in the filter panel; the filter icon stays lit while one is
+  set, and "Clear filters" resets them all. The Project filter drives the
+  overview panel, whose summary and "Test all" / "Test the project" button
+  follow it. A plugin's scope is now edited only from the Access tab of its
+  sheet.
 - `not_published`, `repository_modified` and `kronn_modified` are now
   `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
   only in the repository is `repository_only`. A resource that exists on both

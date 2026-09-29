@@ -596,29 +596,59 @@
 .mcp-health-dot[data-state='warning'] { background: var(--kr-warning); }
 .mcp-health-dot[data-state='error'] { background: var(--kr-error); }
 
-.mcp-project-selector {
-  display: flex;
-  width: 100%;
-  align-items: center;
+/* Plugins filter panel (KT-907): Type / Project / Health / Local sync stack in
+   one full-width column, so the panel never scrolls sideways at 400px. */
+.mcp-filter-stack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--kr-sp-2);
-  padding: 8px 10px;
-  border: 0;
-  border-radius: var(--kr-r-sm);
-  background: transparent;
+  min-width: 0;
+}
+.mcp-filter-field {
+  display: grid;
+  gap: var(--kr-sp-1);
+  min-width: 0;
   color: var(--kr-text-muted);
-  font: inherit;
   font-size: var(--kr-fs-xs);
-  text-align: left;
+  font-weight: 600;
+}
+.mcp-filter-field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 26px 5px 9px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-weight: 400;
+  text-overflow: ellipsis;
   cursor: pointer;
 }
-.mcp-project-selector:hover,
-.mcp-project-selector:focus-visible,
-.mcp-project-selector[aria-current='page'],
-.mcp-page .disc-group-btn[data-selected='true'] {
-  background: var(--kr-accent-bg);
+.mcp-filter-field select:hover,
+.mcp-filter-field select:focus-visible { border-color: var(--kr-accent-border); }
+.mcp-filter-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  justify-self: start;
+  padding: 3px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+.mcp-filter-clear:hover,
+.mcp-filter-clear:focus-visible {
+  border-color: var(--kr-accent-border);
   color: var(--kr-text-primary);
 }
-.mcp-project-selector .disc-group-count { margin-left: auto; }
+.disc-empty .mcp-filter-clear { display: flex; margin: var(--kr-sp-3) auto 0; }
 
 .mcp-filter-empty {
   grid-column: 1 / -1;

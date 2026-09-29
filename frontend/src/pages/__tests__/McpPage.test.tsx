@@ -115,13 +115,18 @@ const getAddPluginButton = () => {
 const openPlugin = (label: string) => {
   fireEvent.click(screen.getAllByRole('button', { name: `${label} — Voir les détails` })[0]);
 };
-const getProjectButton = (label: string) => {
-  const button = screen.getAllByRole('button').find(candidate => (
-    candidate.classList.contains('disc-group-btn') && candidate.textContent?.includes(label)
-  ));
-  if (!button) throw new Error(`Project button not found: ${label}`);
-  return button;
+const openFilters = () => {
+  const trigger = screen.getByRole('button', { name: 'Filtrer les plugins' });
+  if (trigger.getAttribute('aria-expanded') !== 'true') fireEvent.click(trigger);
 };
+const setFilter = (name: string, value: string) => {
+  openFilters();
+  fireEvent.change(screen.getByRole('combobox', { name }), { target: { value } });
+};
+const listedConfigIds = (container: HTMLElement) => Array.from(
+  container.querySelectorAll<HTMLElement>('.mcp-sidebar-plugin-row'),
+  row => row.dataset.configId,
+);
 
 describe('McpPage', () => {
   it('keeps the built-in plugin visible when no configurable plugin exists', () => {
@@ -231,13 +236,16 @@ describe('McpPage', () => {
         { access: 'api', ok: false, code: 'unauthorized', summary: 'raw backend text', tested_at: '2026-09-27T12:01:00Z' },
       ],
     });
+    const other = makeConfig('c2', 'slack', 'Slack', {
+      include_general: false, project_ids: ['p2'], project_names: ['Beta'],
+    });
     const overview: McpOverview = {
-      servers: [makeServer('github', 'GitHub')], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')], configs: [config, other], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
     };
-    const { container } = wrap(<McpPage projects={[makeProject('p1', 'Alpha')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const { container } = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    expect(getProjectButton('Alpha').querySelector('.mcp-health-dot[data-state="error"]')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Alpha/ }));
+    setFilter('Projet', 'p1');
+    expect(listedConfigIds(container)).toEqual(['c1']);
     expect(screen.getByRole('heading', { name: 'Ce que reçoivent les agents de Alpha' })).toBeInTheDocument();
     expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('1 plugins');
     expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('1 en erreur');
@@ -266,12 +274,16 @@ describe('McpPage', () => {
     vi.mocked(mcpsApi.testAll).mockResolvedValue({ results: [] });
     wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    fireEvent.click(getProjectButton('Alpha'));
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
+
+    setFilter('Projet', 'p1');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester le projet');
     await act(async () => { fireEvent.click(screen.getByTestId('mcp-test-project')); });
     expect(mcpsApi.probeConfig).toHaveBeenCalledTimes(1);
     expect(mcpsApi.probeConfig).toHaveBeenCalledWith('alpha-config');
 
-    fireEvent.click(document.querySelector('.mcp-project-selector') as HTMLButtonElement);
+    setFilter('Projet', '__all__');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
     await act(async () => { fireEvent.click(screen.getByTestId('mcp-test-project')); });
     expect(mcpsApi.testAll).toHaveBeenCalledTimes(1);
   });
@@ -415,12 +427,14 @@ describe('McpPage', () => {
     expect(within(footer).getByText('/')).toBeInTheDocument();
   });
 
-  it('orders Favorites before the persistent project tree and restores project collapse', () => {
+  it('lists every plugin once, Favorites first, with no project tree', () => {
     localStorage.setItem('kronn:collection-favorites:plugins', JSON.stringify(['general-config']));
     const configs = [
       makeConfig('global-config', 'global', 'Global plugin', {
         is_global: true,
         include_general: false,
+        project_ids: ['p1', 'p2', 'p3'],
+        project_names: ['Alpha', 'Beta', 'Gamma'],
       }),
       makeConfig('general-config', 'general', 'General plugin'),
       makeConfig('shared-config', 'shared', 'Shared plugin', {
@@ -437,41 +451,166 @@ describe('McpPage', () => {
       configs,
       customized_contexts: [], incompatibilities: [], incomplete_configs: [],
     };
-    const projects = [makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')];
+    const projects = [makeProject('p1', 'Alpha'), makeProject('p2', 'Beta'), makeProject('p3', 'Gamma')];
     const first = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     const list = first.container.querySelector('.mcp-sidebar-items') as HTMLElement;
     const topSections = list.querySelectorAll(':scope > .disc-sidebar-section');
     expect(topSections).toHaveLength(2);
     expect(topSections[0]).toHaveClass('disc-sidebar-favorites');
-    expect(topSections[1]).toHaveClass('disc-sidebar-projects');
+    expect(topSections[1]).toHaveClass('mcp-sidebar-all');
     expect(within(topSections[0] as HTMLElement).getByRole('button', { name: 'General plugin — Voir les détails' })).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'General plugin — Voir les détails' })).toHaveLength(2);
-    expect(screen.getAllByRole('button', { name: 'Shared plugin — Voir les détails' })).toHaveLength(2);
-    expect(screen.queryByRole('button', { name: /Récents/ })).toBeNull();
 
-    expect(screen.getByRole('button', { name: /Tous les plugins/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Sans projet/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Alpha/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Beta/ })).toBeInTheDocument();
+    // A global plugin visible to three projects is still one row, and so is every other plugin.
+    for (const label of ['Global plugin', 'General plugin', 'Shared plugin', 'Orphan plugin']) {
+      expect(screen.getAllByRole('button', { name: `${label} — Voir les détails` })).toHaveLength(1);
+    }
+    expect(listedConfigIds(first.container)).toHaveLength(4);
+    const globalRow = list.querySelector('[data-config-id="global-config"]') as HTMLElement;
+    expect(within(globalRow).getByText('Tous les projets · 3 projets')).toBeInTheDocument();
 
-    const alphaHeader = screen.getByRole('button', { name: /Alpha/ });
-    const alphaGroup = alphaHeader.parentElement as HTMLElement;
-    fireEvent.click(alphaHeader);
-    expect(alphaHeader).toHaveAttribute('aria-expanded', 'false');
-    expect(within(alphaGroup).queryByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeNull();
-    expect(localStorage.getItem('kronn:mcpCollapsedGroups')).toContain('p1');
+    // No per-project tree, group or selector any more.
+    expect(list.querySelector('.disc-sidebar-projects, .disc-project-tree')).toBeNull();
+    expect(document.querySelector('.mcp-project-selector')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Sans projet/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Alpha/ })).toBeNull();
+
+    const allHeader = screen.getByRole('button', { name: /Tous les plugins/ });
+    fireEvent.click(allHeader);
+    expect(allHeader).toHaveAttribute('aria-expanded', 'false');
+    expect(within(topSections[1] as HTMLElement).queryByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeNull();
+    expect(JSON.parse(localStorage.getItem('kronn:mcpCollapsedGroups') ?? '[]')).toEqual(['all']);
 
     first.unmount();
     wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    const restoredAlphaHeader = screen.getByRole('button', { name: /Alpha/ });
-    const restoredAlphaGroup = restoredAlphaHeader.parentElement as HTMLElement;
-    expect(restoredAlphaHeader).toHaveAttribute('aria-expanded', 'false');
+    const restoredHeader = screen.getByRole('button', { name: /Tous les plugins/ });
+    expect(restoredHeader).toHaveAttribute('aria-expanded', 'false');
     fireEvent.change(screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' }), {
       target: { value: 'Shared plugin' },
     });
-    expect(restoredAlphaHeader).toHaveAttribute('aria-expanded', 'true');
-    expect(within(restoredAlphaGroup).getByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeInTheDocument();
+    expect(restoredHeader).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeInTheDocument();
+  });
+
+  it('keeps favorite and recently tested plugins out of the full list', () => {
+    localStorage.setItem('kronn:collection-favorites:plugins', JSON.stringify(['fav-config']));
+    const probe = [{ access: 'mcp' as const, ok: true, code: 'ok' as const, summary: '', tested_at: '2026-09-27T12:00:00Z' }];
+    const configs = [
+      makeConfig('fav-config', 'fav', 'Fav plugin', { last_probes: probe }),
+      makeConfig('tested-config', 'tested', 'Tested plugin', { last_probes: probe }),
+      makeConfig('plain-config', 'plain', 'Plain plugin'),
+    ];
+    const overview: McpOverview = {
+      servers: configs.map(config => makeServer(config.server_id, config.server_name)),
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    const idsIn = (selector: string) => Array.from(
+      container.querySelectorAll<HTMLElement>(`${selector} .mcp-sidebar-plugin-row`),
+      row => row.dataset.configId,
+    );
+    expect(idsIn('.disc-sidebar-favorites')).toEqual(['fav-config']);
+    expect(idsIn('.mcp-sidebar-recent')).toEqual(['tested-config']);
+    expect(idsIn('.mcp-sidebar-all')).toEqual(['plain-config']);
+    expect(listedConfigIds(container)).toHaveLength(3);
+  });
+
+  it('filters by project, health and local sync, and clears every filter at once', () => {
+    const alpha = makeConfig('alpha-config', 'alpha', 'Alpha plugin', {
+      include_general: false, project_ids: ['p1'], project_names: ['Alpha'],
+      last_probes: [{ access: 'mcp', ok: true, code: 'ok', summary: '', tested_at: '2026-09-27T12:00:00Z' }],
+    });
+    const beta = makeConfig('beta-config', 'beta', 'Beta plugin', {
+      include_general: false, project_ids: ['p2'], project_names: ['Beta'], secrets_broken: true,
+    });
+    const shared = makeConfig('shared-config', 'shared', 'Shared plugin', {
+      is_global: true, include_general: false, host_sync: 'GlobalOnly',
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('alpha', 'Alpha plugin'), makeServer('beta', 'Beta plugin'), makeServer('shared', 'Shared plugin')],
+      configs: [alpha, beta, shared], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const { container } = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const ids = () => listedConfigIds(container).sort();
+    const trigger = screen.getByRole('button', { name: 'Filtrer les plugins' });
+    const panelClear = () => within(document.getElementById('mcp-filter-options') as HTMLElement)
+      .queryByRole('button', { name: 'Effacer les filtres' });
+
+    expect(ids()).toEqual(['alpha-config', 'beta-config', 'shared-config']);
+    expect(trigger).toHaveAttribute('data-active', 'false');
+
+    // The panel offers Type, Project, Health and Local sync.
+    openFilters();
+    expect(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' })).toBeInTheDocument();
+    const projectOptions = within(screen.getByRole('combobox', { name: 'Projet' })).getAllByRole('option');
+    expect(projectOptions.map(option => option.textContent)).toEqual(['Tous les projets', 'Sans projet', 'Alpha', 'Beta']);
+    expect(within(screen.getByRole('combobox', { name: 'Santé' })).getAllByRole('option')).toHaveLength(4);
+    expect(screen.getByRole('combobox', { name: 'Synchro locale' })).toBeInTheDocument();
+    expect(panelClear()).toBeNull();
+
+    // Project: restricts the list, the summary and the test button.
+    setFilter('Projet', 'p2');
+    expect(ids()).toEqual(['beta-config', 'shared-config']);
+    expect(screen.getByRole('heading', { name: 'Ce que reçoivent les agents de Beta' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('2 plugins');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester le projet');
+    expect(localStorage.getItem('kronn:mcpSelectedProject')).toBe('p2');
+
+    // Health, then local sync, narrow it down further.
+    setFilter('Santé', 'error');
+    expect(ids()).toEqual(['beta-config']);
+    expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('1 en erreur');
+    setFilter('Synchro locale', 'local');
+    expect(ids()).toEqual([]);
+    expect(screen.getByText('Aucun plugin ne correspond à ce filtre.')).toBeInTheDocument();
+
+    // The filter icon stays active while the panel is closed.
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(trigger).toHaveAttribute('data-active', 'true');
+
+    // Clearing from the empty state resets every filter.
+    fireEvent.click(screen.getByRole('button', { name: 'Effacer les filtres' }));
+    expect(ids()).toEqual(['alpha-config', 'beta-config', 'shared-config']);
+    expect(trigger).toHaveAttribute('data-active', 'false');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
+    expect(localStorage.getItem('kronn:mcpSelectedProject')).toBe('__all__');
+    openFilters();
+    expect(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' })).toHaveValue('all');
+    expect(screen.getByRole('combobox', { name: 'Projet' })).toHaveValue('__all__');
+    expect(screen.getByRole('combobox', { name: 'Santé' })).toHaveValue('all');
+    expect(screen.getByRole('combobox', { name: 'Synchro locale' })).toHaveValue('all');
+
+    // ... and so does the panel's own button.
+    setFilter('Projet', 'p1');
+    setFilter('Santé', 'ok');
+    expect(ids()).toEqual(['alpha-config']);
+    fireEvent.click(panelClear() as HTMLElement);
+    expect(ids()).toEqual(['alpha-config', 'beta-config', 'shared-config']);
+    expect(screen.getByRole('combobox', { name: 'Projet' })).toHaveValue('__all__');
+    expect(screen.getByRole('combobox', { name: 'Santé' })).toHaveValue('all');
+    expect(panelClear()).toBeNull();
+  });
+
+  it('falls back to all projects when the filtered project no longer exists', () => {
+    const configs = [
+      makeConfig('alpha-config', 'alpha', 'Alpha plugin', { include_general: false, project_ids: ['p1'], project_names: ['Alpha'] }),
+      makeConfig('beta-config', 'beta', 'Beta plugin', { include_general: false, project_ids: ['p2'], project_names: ['Beta'] }),
+    ];
+    const overview: McpOverview = {
+      servers: [makeServer('alpha', 'Alpha plugin'), makeServer('beta', 'Beta plugin')],
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const view = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    setFilter('Projet', 'p1');
+    expect(listedConfigIds(view.container)).toEqual(['alpha-config']);
+
+    view.rerender(<I18nProvider>
+      <McpPage projects={[makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />
+    </I18nProvider>);
+    expect(listedConfigIds(view.container).sort()).toEqual(['alpha-config', 'beta-config']);
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
   });
 
   it('opens plugin creation in an accessible modal and restores focus when it closes', () => {
@@ -673,7 +812,7 @@ describe('McpPage', () => {
     );
     const search = screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' });
     const searchHeader = search.closest('.collection-shell-header');
-    const filterTrigger = screen.getByRole('button', { name: 'Filtrer les plugins par type' });
+    const filterTrigger = screen.getByRole('button', { name: 'Filtrer les plugins' });
     const sortTrigger = screen.getByRole('button', { name: 'Trier les plugins' });
 
     expect(filterTrigger).toHaveClass('collection-shell-search-action', 'collection-shell-search-action-icon');
@@ -702,7 +841,7 @@ describe('McpPage', () => {
     const filterOptions = document.querySelector('.collection-shell-search-options');
     expect(filterOptions).toBe(searchHeader?.nextElementSibling);
     expect(filterOptions?.nextElementSibling).toHaveClass('mcp-collection-toolbar');
-    expect(filterOptions?.querySelector('.list-controls')).not.toBeNull();
+    expect(filterOptions?.querySelector('.mcp-filter-stack')).not.toBeNull();
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
       target: { value: 'api' },
@@ -965,7 +1104,7 @@ describe('McpPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Inverser l’ordre' }));
     expect(cardOrder()).toEqual(['cli-config', 'api-config', 'mcp-config']);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Filtrer les plugins par type' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Filtrer les plugins' }));
     fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
       target: { value: 'api' },
     });

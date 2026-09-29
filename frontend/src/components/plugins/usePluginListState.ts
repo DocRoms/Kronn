@@ -8,7 +8,7 @@ import { userError } from '../../lib/userError';
 import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, McpRescanReport, HostSyncMode, PluginInterface, PluginKind, Project } from '../../types/generated';
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { hasAgentScope, slugify } from './mcpPageHelpers';
-import { visibleToPluginProject } from './pluginHealth';
+import { configHealth, isAvailableLocally, visibleToPluginProject, type PluginHealthState } from './pluginHealth';
 
 const MCP_COLLAPSED_GROUPS_STORAGE_KEY = 'kronn:mcpCollapsedGroups';
 
@@ -53,6 +53,8 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     } catch { return false; }
   });
   const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
+  const [mcpHealthFilter, setMcpHealthFilter] = useState<'all' | PluginHealthState>('all');
+  const [mcpSyncFilter, setMcpSyncFilter] = useState<'all' | 'local' | 'none'>('all');
   const [mcpSearchPanel, setMcpSearchPanel] = useState<'filters' | 'sort' | null>(null);
   const [sidebarOpen, setSidebarOpen] = usePersistentSidebarOpen('kronn:plugins:sidebarCollapsed', isMobile);
   const [collapsedMcpGroups, setCollapsedMcpGroups] = useState<Set<string>>(readCollapsedMcpGroups);
@@ -70,7 +72,7 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     } catch { /* localStorage may be unavailable in private/restricted browser modes. */ }
   }, [collapsedMcpGroups]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
-  const [selectedProjectId, setSelectedProjectId] = useState(() => {
+  const [storedProjectId, setSelectedProjectId] = useState(() => {
     try {
       const saved = localStorage.getItem('kronn:mcpSelectedProject') ?? '__all__';
       return saved === '__all__' || saved === '__none__' || projects.some(project => project.id === saved)
@@ -84,10 +86,18 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
   const [rescanPreview, setRescanPreview] = useState<McpRescanReport | null>(null);
   const [portabilityMode, setPortabilityMode] = useState<'export' | 'import' | null>(null);
 
+  // A project deleted since the filter was saved must not leave the list
+  // filtered by something the Project select can no longer show. Derived, not
+  // reset: `projects` can be momentarily empty while it loads, and the saved
+  // choice should survive that.
+  const selectedProjectId = storedProjectId === '__all__' || storedProjectId === '__none__'
+    || projects.some(project => project.id === storedProjectId)
+    ? storedProjectId
+    : '__all__';
   useEffect(() => {
-    try { localStorage.setItem('kronn:mcpSelectedProject', selectedProjectId); }
+    try { localStorage.setItem('kronn:mcpSelectedProject', storedProjectId); }
     catch { /* navigation preference remains in memory */ }
-  }, [selectedProjectId]);
+  }, [storedProjectId]);
 
   // Endpoints that keep failing, grouped by plugin. A spec is written once and
   // never re-checked against the API, so when it drifts nothing says so — this
@@ -414,6 +424,22 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
   );
   const builtinConfig = configs.find(isBuiltinConfig);
 
+  const healthFor = (cfg: McpConfigDisplay) => configHealth(cfg, {
+    liveProbe: probeByConfig[cfg.id],
+    liveTestedAt: probeTestedAtByConfig[cfg.id],
+    incomplete: mcpOverview.incomplete_configs.find(item => item.config_id === cfg.id),
+    hasEndpointDrift: (driftBySlug[cfg.server_id]?.length ?? 0) > 0,
+  });
+  const activeFilterCount = [
+    mcpKindFilter !== 'all', selectedProjectId !== '__all__', mcpHealthFilter !== 'all', mcpSyncFilter !== 'all',
+  ].filter(Boolean).length;
+  const clearPluginFilters = () => {
+    setMcpKindFilter('all');
+    setSelectedProjectId('__all__');
+    setMcpHealthFilter('all');
+    setMcpSyncFilter('all');
+  };
+
   // KT-828 — the badge/filter classification is computed once server-side
   // (`effective_kind`/`interfaces`) so it can't drift from what the agent
   // actually uses. The API/MCP filters read `interfaces` rather than
@@ -426,7 +452,11 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
         || (mcpKindFilter === 'mcp' && cfg.interfaces.includes('mcp'))
         || (mcpKindFilter === 'api' && cfg.interfaces.includes('api'))
         || (mcpKindFilter === 'cli' && cfg.effective_kind === 'cli');
-      return matchesKind;
+      const matchesSync = mcpSyncFilter === 'all' || isAvailableLocally(cfg) === (mcpSyncFilter === 'local');
+      return matchesKind
+        && visibleToPluginProject(cfg, selectedProjectId)
+        && matchesSync
+        && (mcpHealthFilter === 'all' || healthFor(cfg) === mcpHealthFilter);
     })
     .sort((a, b) => {
       const aKind = a.effective_kind;
@@ -466,7 +496,10 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     !query || pluginSearchLabel(config).toLocaleLowerCase().includes(query)
   ));
 
+  // The built-in card is not a scoped config: any project / health / sync
+  // filter is a question it cannot answer, so it steps aside.
   const builtinMatchesList = (mcpKindFilter === 'all' || mcpKindFilter === 'mcp')
+    && selectedProjectId === '__all__' && mcpHealthFilter === 'all' && mcpSyncFilter === 'all'
     && (!mcpSearch || t('mcp.builtin.tileTitle').toLowerCase().includes(mcpSearch.toLowerCase()));
 
   useEffect(() => {
@@ -480,7 +513,8 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     editingLabelId, setEditingLabelId, editingLabelText, setEditingLabelText, handleSaveLabel,
 
     mcpSearch, setMcpSearch, mcpSort, setMcpSort, mcpSortReversed, setMcpSortReversed,
-    mcpKindFilter, setMcpKindFilter, mcpSearchPanel, setMcpSearchPanel,
+    mcpKindFilter, setMcpKindFilter, mcpHealthFilter, setMcpHealthFilter, mcpSyncFilter, setMcpSyncFilter,
+    activeFilterCount, clearPluginFilters, mcpSearchPanel, setMcpSearchPanel,
     sidebarOpen, setSidebarOpen, collapsedMcpGroups, setCollapsedMcpGroups,
     selectedConfigIds, setSelectedConfigIds, favoriteConfigIds, toggleConfigFavorite,
     selectedConfigId, setSelectedConfigId, selectedProjectId, setSelectedProjectId,
@@ -499,6 +533,6 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     contextEditor, setContextEditor, contextSaving, handleOpenContext, handleSaveContext,
 
     servers, configs, totalConfigs, globalConfigs, isBuiltinConfig, builtinConfig, builtinMatchesList,
-    visibleConfigs, matchingConfigs, pluginSearchLabel,
+    visibleConfigs, matchingConfigs, pluginSearchLabel, healthFor,
   };
 }
