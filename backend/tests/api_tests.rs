@@ -6561,10 +6561,9 @@ async fn stats_tokens_mixed_known_and_unknown_totals_are_partial() {
 }
 
 #[tokio::test]
-async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
-    // A justified pricing-table estimate for a non-Claude agent must use
-    // that agent's own price, never Claude's — and must be flagged as an
-    // estimate, not presented as an exact measurement.
+async fn stats_tokens_a_bare_codex_total_is_unknown_not_priced_by_a_split() {
+    // A token total without its input/cache/output split has no honest price:
+    // it is counted as unknown, never estimated with any agent's table.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -6589,12 +6588,9 @@ async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
         .iter()
         .find(|p| p["provider"] == "OpenAI")
         .expect("Codex buckets into OpenAI");
-    assert_eq!(openai["cost"]["has_estimate"], true);
+    assert_eq!(openai["cost"]["has_estimate"], false);
     assert_eq!(openai["cost"]["has_recorded"], false);
-    let known = openai["cost"]["estimated_usd"].as_f64().unwrap();
-    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44 — well under
-    // Claude's 0.78 for the same token count, proving no cross-pricing.
-    assert!((known - 0.44).abs() < 0.01, "expected ~0.44, got {known}");
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 100000);
 }
 
 #[tokio::test]
@@ -6878,11 +6874,9 @@ async fn stats_tokens_recorded_zero_cost_stays_distinct_from_a_sibling_null_row(
 }
 
 #[tokio::test]
-async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and_estimated() {
-    // An agent WITH pricing-table coverage (Codex) can still have some rows
-    // recorded and others missing entirely. The missing sub-part must be
-    // priced with Codex's own table (estimated_usd), never folded into the
-    // recorded sum and never treated as fully covered by the recorded rows.
+async fn stats_tokens_a_missing_sub_part_stays_unknown_beside_the_recorded_rows() {
+    // Some Codex rows carry a cost and others only a total. The missing part
+    // is never folded into the recorded sum, nor priced by a guessed split.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -6915,15 +6909,8 @@ async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and
     assert_eq!(openai["tokens_used"], 101000);
     assert_eq!(openai["cost"]["recorded_usd"], 0.05);
     assert_eq!(openai["cost"]["has_recorded"], true);
-    assert_eq!(openai["cost"]["has_estimate"], true);
-    let estimated = openai["cost"]["estimated_usd"].as_f64().unwrap();
-    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44, computed only
-    // over the 100K missing tokens, not the 1K that were already recorded.
-    assert!(
-        (estimated - 0.44).abs() < 0.01,
-        "expected ~0.44, got {estimated}"
-    );
-    assert_eq!(openai["cost"]["unknown_cost_tokens"], 0);
+    assert_eq!(openai["cost"]["has_estimate"], false);
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 100000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
