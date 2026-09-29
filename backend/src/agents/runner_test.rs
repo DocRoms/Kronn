@@ -7970,9 +7970,13 @@ Suite de la réponse.";
     #[cfg(unix)]
     #[tokio::test]
     async fn the_memory_switch_is_only_set_for_claude_code() {
+        // Another CLI inherits the parent's value untouched: Kronn neither sets
+        // nor clears it (a session launched by Kronn already carries it).
+        let inherited =
+            std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY").unwrap_or_else(|_| "unset".into());
         assert_eq!(
             auto_memory_switch_seen_by("codex", Some("disc"), None, None, None).await,
-            "unset"
+            inherited
         );
     }
 
