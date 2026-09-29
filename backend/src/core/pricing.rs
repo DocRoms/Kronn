@@ -184,6 +184,17 @@ const fn anthropic(input_per_m: f64, output_per_m: f64) -> ModelRates {
     }
 }
 
+/// Rates copied as published, for models whose cache read is not a fixed
+/// fraction of input.
+const fn listed(input: f64, cache_read: f64, cache_write: Option<f64>, output: f64) -> ModelRates {
+    ModelRates {
+        input_per_m: input,
+        cache_read_per_m: cache_read,
+        cache_write_per_m: cache_write,
+        output_per_m: output,
+    }
+}
+
 /// Model id (dated and `-latest` suffixes removed) -> rates.
 const MODEL_RATES: &[(&str, ModelRates)] = &[
     // OpenAI
@@ -195,6 +206,14 @@ const MODEL_RATES: &[(&str, ModelRates)] = &[
     ("gpt-5", openai(1.25, 0.125, 10.0)),
     ("gpt-5-codex", openai(1.25, 0.125, 10.0)),
     ("gpt-5-mini", openai(0.25, 0.025, 2.0)),
+    // Checked against LiteLLM's model_prices_and_context_window.json (2026-09-29).
+    ("gpt-5.4", openai(2.5, 0.25, 15.0)),
+    ("gpt-5.4-mini", openai(0.75, 0.075, 4.5)),
+    ("gpt-5.5", openai(5.0, 0.5, 30.0)),
+    ("gpt-5.6", openai(4.0, 0.4, 20.0)),
+    ("gpt-5.6-sol", openai(4.0, 0.4, 20.0)),
+    ("gpt-5.6-terra", openai(2.0, 0.2, 12.0)),
+    ("gpt-5.6-luna", openai(0.2, 0.02, 1.2)),
     // Anthropic
     ("claude-3-5-haiku", anthropic(0.8, 4.0)),
     ("claude-haiku-4-5", anthropic(1.0, 5.0)),
@@ -204,6 +223,12 @@ const MODEL_RATES: &[(&str, ModelRates)] = &[
     ("claude-opus-4", anthropic(15.0, 75.0)),
     ("claude-opus-4-1", anthropic(15.0, 75.0)),
     ("claude-opus-4-5", anthropic(5.0, 25.0)),
+    ("claude-opus-5", anthropic(5.0, 25.0)),
+    ("claude-opus-5-5", listed(4.0, 0.2, Some(5.0), 20.0)),
+    ("claude-sonnet-5", anthropic(2.0, 10.0)),
+    ("claude-sonnet-5-5", anthropic(2.0, 10.0)),
+    ("claude-fable-5", anthropic(10.0, 50.0)),
+    ("claude-fable-5-1", listed(10.0, 0.25, Some(12.5), 50.0)),
 ];
 
 /// Drop a trailing `-latest`, `-YYYY-MM-DD` or `-YYYYMMDD` so a snapshot id

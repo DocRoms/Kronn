@@ -67,9 +67,8 @@ fn the_cache_is_billed_at_the_cache_rate_not_the_input_rate() {
 
 #[test]
 fn a_model_without_a_confirmed_rate_is_unknown_not_borrowed_from_another() {
-    // The model KT-837 actually ran on has no confirmed rate in the table.
     assert_eq!(
-        message_cost("Codex", Some("gpt-5.6-sol"), Some(&kt837())),
+        message_cost("Codex", Some("gpt-5.7-unlisted"), Some(&kt837())),
         CostOutcome::Unknown(UnknownCost::NoRateForModel)
     );
     // A sibling id must not resolve to the family it merely starts with.
@@ -207,7 +206,7 @@ fn snapshot_suffixes_resolve_to_their_family_and_nothing_else_does() {
         rates_for_model("gpt-4.1")
     );
     for model in [
-        "gpt-5.6-sol",
+        "gpt-5.7-unlisted",
         "gpt-4.1-preview",
         "claude-sonnet-4-5[1m]",
         "unknown",
@@ -281,7 +280,7 @@ fn a_reply_with_only_a_total_is_persisted_unknown_with_its_reason() {
 
 #[test]
 fn a_reply_on_a_model_without_a_rate_is_persisted_unknown_with_its_reason() {
-    let priced = codex_reply(Some("gpt-5.6-sol"), 25_261_395, Some(kt837()));
+    let priced = codex_reply(Some("gpt-5.7-unlisted"), 25_261_395, Some(kt837()));
     assert_eq!(priced.cost_usd, None);
     assert_eq!(priced.cost_unknown, Some(UnknownCost::NoRateForModel));
     // The counters survive: the split is still worth showing without a price.
@@ -307,4 +306,11 @@ fn local_inference_stays_free_with_only_a_total() {
     let priced = price_reply("Ollama", Some("qwen3:32b"), 12_000, None, None);
     assert_eq!(priced.cost_usd, Some(0.0));
     assert_eq!(priced.cost_unknown, None);
+}
+
+#[test]
+fn kt837_on_the_model_it_really_ran_on_costs_about_twelve_dollars() {
+    // gpt-5.6-sol: 4 $/M input, 0.40 $/M cache read, 20 $/M output.
+    let cost = usd(message_cost("Codex", Some("gpt-5.6-sol"), Some(&kt837())));
+    assert!((cost - 12.405_749_6).abs() < 1e-6, "got {cost}");
 }
