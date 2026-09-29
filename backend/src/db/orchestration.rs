@@ -1850,10 +1850,15 @@ pub fn interrupt_undelivered_execution_for_dispatch(
 /// Turn a hard provider quota into an explicit human checkpoint. There is no
 /// automatic retry here: the same exhausted account would only burn another
 /// call. Provider fallback, when configured, is selected by KT-321 upstream.
+///
+/// `reset_at` is the reset instant the provider's own refusal announced, when
+/// it gave one (KT-838). It is kept only so a human can be told when to
+/// re-arm; it never re-arms anything by itself (KT-593).
 pub fn escalate_execution_for_dispatch_quota(
     conn: &Connection,
     dispatch_job_id: &str,
     provider: &str,
+    reset_at: Option<DateTime<Utc>>,
 ) -> Result<Option<(String, String)>> {
     let Some(execution) = get_execution_for_dispatch(conn, dispatch_job_id)? else {
         return Ok(None);
@@ -1880,10 +1885,27 @@ pub fn escalate_execution_for_dispatch_quota(
         )?;
     }
     let transaction = conn.unchecked_transaction()?;
+    // A refusal that names no reset keeps the previous announcement only while
+    // it is still ahead of us: the same outage is then still running, whereas a
+    // passed one belongs to an outage that is over.
+    let previous_reset: Option<String> = transaction
+        .query_row(
+            "SELECT reset_at FROM provider_quota_generations WHERE provider = ?1",
+            [provider],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let now_stamp = quota_reset_stamp(Utc::now());
+    let reset_at = reset_at
+        .map(quota_reset_stamp)
+        .or_else(|| previous_reset.filter(|previous| *previous > now_stamp));
     transaction.execute(
-        "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES (?1, 1) \
-         ON CONFLICT(provider) DO UPDATE SET latest_generation = latest_generation + 1",
-        [provider],
+        "INSERT INTO provider_quota_generations (provider, latest_generation, reset_at) \
+         VALUES (?1, 1, ?2) \
+         ON CONFLICT(provider) DO UPDATE SET latest_generation = latest_generation + 1, \
+             reset_at = excluded.reset_at",
+        params![provider, reset_at],
     )?;
     let generation: i64 = transaction.query_row(
         "SELECT latest_generation FROM provider_quota_generations WHERE provider = ?1",
@@ -1929,11 +1951,13 @@ pub fn escalate_execution_for_dispatch_quota(
 /// `reassign_native_execution`), as does cancelling or otherwise completing
 /// it — never a guessed provider-side reset schedule.
 ///
-/// `exclude_exec_id` lets a reassignment of the very execution that raised the
-/// escalation target the same provider again (the human's explicit "quota is
-/// back, retry" signal) without being blocked by its own still-open row; a
-/// fresh `agent_list`/launch preflight for any other task passes `None` and
-/// sees every open escalation for the provider.
+/// `exclude_exec_id` keeps an execution from being refused by its own
+/// still-open row; a fresh `agent_list`/launch preflight for any other task
+/// passes `None` and sees every open escalation for the provider. Retrying the
+/// provider that raised the escalation does not go through this refusal at
+/// all: reassigning the execution to the same provider is itself the human's
+/// "quota is back" signal and re-arms the whole generation (KT-838, see
+/// [`is_quota_retry_on_same_provider`]).
 pub fn provider_has_open_quota_exhaustion(
     conn: &Connection,
     provider: &str,
@@ -1961,8 +1985,50 @@ pub fn provider_has_open_quota_exhaustion(
     .map_err(Into::into)
 }
 
+/// The canonical stored form of a reset instant. One fixed-width UTC shape, so
+/// two stamps compare correctly as plain strings.
+fn quota_reset_stamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// The reset instant the provider announced for its current quota outage
+/// (KT-838), when its refusal gave one. Display only: it never re-arms.
+pub fn provider_quota_reset_at(conn: &Connection, provider: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT reset_at FROM provider_quota_generations WHERE provider = ?1",
+            [provider],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// True when reassigning `exec_id` to `provider` is the human retrying the very
+/// provider whose quota stopped it: the execution is `Escalated` with the
+/// `quota_exhausted:<provider>` marker for that same provider (KT-838).
+pub fn is_quota_retry_on_same_provider(
+    conn: &Connection,
+    exec_id: &str,
+    provider: &str,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM task_execution_recovery r
+             JOIN task_executions e ON e.id = r.task_execution_id
+             WHERE e.id = ?1
+               AND e.status = 'Escalated'
+               AND r.recovery_reason = ?2
+         )",
+        params![exec_id, format!("quota_exhausted:{provider}")],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 /// Records a human-confirmed provider re-arm without mutating historical
-/// executions or recovery rows. Replaying the same key is a no-op.
+/// executions or recovery rows. Replaying the same key is a no-op. Safe to call
+/// inside a caller's transaction: it only opens a savepoint.
 pub fn rearm_provider_quota(
     conn: &Connection,
     provider: &str,
@@ -1970,37 +2036,37 @@ pub fn rearm_provider_quota(
     actor_kind: &str,
     actor_id: Option<&str>,
 ) -> Result<bool> {
-    let transaction = conn.unchecked_transaction()?;
-    let now = Utc::now().to_rfc3339();
-    let inserted = transaction.execute(
-        "INSERT OR IGNORE INTO provider_quota_rearm_events \
-         (id, provider, idempotency_key, actor_kind, actor_id, rearmed_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            Uuid::new_v4().to_string(),
-            provider,
-            idempotency_key,
-            actor_kind,
-            actor_id,
-            now
-        ],
-    )?;
-    if inserted > 0 {
-        let acknowledged_generation: i64 = transaction.query_row(
-            "SELECT COALESCE((SELECT latest_generation FROM provider_quota_generations WHERE provider = ?1), 0)",
-            [provider],
-            |row| row.get(0),
+    in_savepoint(conn, |conn| {
+        let now = Utc::now().to_rfc3339();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO provider_quota_rearm_events \
+             (id, provider, idempotency_key, actor_kind, actor_id, rearmed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                provider,
+                idempotency_key,
+                actor_kind,
+                actor_id,
+                now
+            ],
         )?;
-        transaction.execute(
-            "INSERT INTO provider_quota_rearms \
-             (provider, rearmed_at, idempotency_key, acknowledged_generation) VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(provider) DO UPDATE SET rearmed_at = excluded.rearmed_at, \
-                 idempotency_key = excluded.idempotency_key, acknowledged_generation = excluded.acknowledged_generation",
-            params![provider, now, idempotency_key, acknowledged_generation],
-        )?;
-    }
-    transaction.commit()?;
-    Ok(inserted > 0)
+        if inserted > 0 {
+            let acknowledged_generation: i64 = conn.query_row(
+                "SELECT COALESCE((SELECT latest_generation FROM provider_quota_generations WHERE provider = ?1), 0)",
+                [provider],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO provider_quota_rearms \
+                 (provider, rearmed_at, idempotency_key, acknowledged_generation) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(provider) DO UPDATE SET rearmed_at = excluded.rearmed_at, \
+                     idempotency_key = excluded.idempotency_key, acknowledged_generation = excluded.acknowledged_generation",
+                params![provider, now, idempotency_key, acknowledged_generation],
+            )?;
+        }
+        Ok(inserted > 0)
+    })
 }
 
 /// Move an execution to `Blocked` and stamp a human-readable reason plus a structured

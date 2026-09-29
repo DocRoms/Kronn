@@ -2995,6 +2995,7 @@ const es: TranslationDict = {
   'config.agentAuthRequired': 'Autenticación necesaria',
   'config.agentAuthRequiredHint': 'El runner no se iniciará hasta que su autenticación esté lista.',
   'config.quotaBlocked': 'Un envío real informó que la cuota de este proveedor está agotada. Reactívalo solo después de confirmar que la cuota vuelve a estar disponible.',
+  'config.quotaRearmableAt': 'Se puede reactivar a las {0} (hora de reinicio anunciada por el proveedor).',
   'config.quotaRearm': 'Reactivar proveedor',
   'config.quotaRearmConfirm': '¿Reactivar {0}? Esto permite nuevas delegaciones, pero no reinicia, cancela ni modifica trabajos anteriores.',
   'config.quotaRearmed': '{0} está reactivado para nuevas delegaciones.',

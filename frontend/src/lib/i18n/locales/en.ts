@@ -2995,6 +2995,7 @@ const en: TranslationDict = {
   'config.agentAuthRequired': 'Authentication required',
   'config.agentAuthRequiredHint': 'The runner will not start until its authentication is ready.',
   'config.quotaBlocked': 'A real dispatch reported this provider quota exhausted. Re-arm it only after you have confirmed the quota is available again.',
+  'config.quotaRearmableAt': 'Rearmable at {0} (reset time announced by the provider).',
   'config.quotaRearm': 'Re-arm provider',
   'config.quotaRearmConfirm': 'Re-arm {0}? This allows new delegations but does not restart, cancel, or alter earlier work.',
   'config.quotaRearmed': '{0} is re-armed for new delegations.',

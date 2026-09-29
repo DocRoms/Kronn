@@ -5448,7 +5448,13 @@ export type ProposeResult = { accepted: boolean, reason: string | null, warnings
  * Read-only quota state shown to a human in Agent settings.  Re-arming is a
  * separate human-only HTTP action; it is intentionally absent from agent tools.
  */
-export type ProviderQuotaState = { provider: AgentType, blocked: boolean, };
+export type ProviderQuotaState = { provider: AgentType, blocked: boolean,
+/**
+ * UTC instant (RFC 3339) at which the provider's own refusal said the
+ * quota resets, when it said so. Shown as "rearmable at HH:MM"; nothing
+ * re-arms automatically on it (KT-593).
+ */
+reset_at: string | null, };
 
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost: CostAggregate, };
 

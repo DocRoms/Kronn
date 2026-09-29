@@ -1528,6 +1528,72 @@ pub(crate) fn is_hard_quota_exhausted(output: &str) -> bool {
         || lower.contains("http 402")
 }
 
+/// The instant a provider's own quota refusal says the quota comes back
+/// (KT-838). Claude Code words it `resets 4:20pm (Europe/Paris)`; a weekly
+/// limit adds the day: `resets Oct 3, 4pm (Europe/Paris)`.
+///
+/// Only a wall-clock time that names its IANA zone is resolved: the backend may
+/// run in a container whose local zone says nothing about the user's, and a
+/// guessed instant would tell a human to re-arm at the wrong hour. Anything
+/// else, or an instant already past or more than 45 days out, is `None` — the
+/// caller then simply has no time to show.
+pub(crate) fn announced_quota_reset(
+    output: &str,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    use chrono::{Datelike, NaiveDate, NaiveTime, TimeZone};
+    static RESET_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r"(?i)\bresets?\s+(?:at\s+)?(?:(?P<mon>[a-z]{3,9})\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s+(?:at\s+)?)?(?P<hour>\d{1,2})(?::(?P<min>\d{2}))?\s*(?P<ampm>am|pm)\s*\((?P<tz>[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+|UTC)\)",
+        )
+        .expect("static quota reset regex")
+    });
+    let caps = RESET_RE.captures(output)?;
+    let tz: chrono_tz::Tz = caps["tz"].parse().ok()?;
+    let hour12: u32 = caps["hour"].parse().ok()?;
+    let minute: u32 = caps
+        .name("min")
+        .map_or(Some(0), |m| m.as_str().parse().ok())?;
+    if !(1..=12).contains(&hour12) || minute > 59 {
+        return None;
+    }
+    let pm = caps["ampm"].eq_ignore_ascii_case("pm");
+    let time = NaiveTime::from_hms_opt(hour12 % 12 + if pm { 12 } else { 0 }, minute, 0)?;
+    let at = |date: NaiveDate| {
+        tz.from_local_datetime(&date.and_time(time))
+            .earliest()
+            .map(|local| local.with_timezone(&Utc))
+    };
+    let today = now.with_timezone(&tz).date_naive();
+    let reset = match (caps.name("mon"), caps.name("day")) {
+        (Some(mon), Some(day)) => {
+            let month = [
+                "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+            ]
+            .iter()
+            .position(|name| mon.as_str().to_lowercase().starts_with(name))?
+                as u32
+                + 1;
+            let day: u32 = day.as_str().parse().ok()?;
+            // A date already gone this year is next year's (a `Jan 2` seen in December).
+            [today.year(), today.year() + 1]
+                .into_iter()
+                .find_map(|year| {
+                    at(NaiveDate::from_ymd_opt(year, month, day)?).filter(|when| *when > now)
+                })?
+        }
+        _ => {
+            let same_day = at(today)?;
+            if same_day > now {
+                same_day
+            } else {
+                at(today.succ_opt()?)?
+            }
+        }
+    };
+    (reset > now && reset <= now + chrono::Duration::days(45)).then_some(reset)
+}
+
 pub(crate) fn detect_agent_error_hint(
     output: &str,
     agent_type: &crate::models::AgentType,
@@ -2450,8 +2516,79 @@ mod orchestrate_validation_tests {
 
 #[cfg(test)]
 mod error_hint_tests {
-    use super::{detect_agent_error_hint, is_hard_quota_exhausted, is_transient_provider_overload};
+    use super::{
+        announced_quota_reset, detect_agent_error_hint, is_hard_quota_exhausted,
+        is_transient_provider_overload,
+    };
     use crate::models::AgentType;
+
+    fn utc(stamp: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn a_claude_refusal_announces_its_reset_in_the_zone_it_names() {
+        // KT-838: the refusal seen on 26-27/09. Paris is UTC+2 in September.
+        let refusal = "You've hit your limit · resets 4:20pm (Europe/Paris)";
+        assert!(is_hard_quota_exhausted(refusal));
+        assert_eq!(
+            announced_quota_reset(refusal, utc("2026-09-27T10:00:00Z")),
+            Some(utc("2026-09-27T14:20:00Z"))
+        );
+        // Already past today in that zone: the next occurrence.
+        assert_eq!(
+            announced_quota_reset(refusal, utc("2026-09-27T15:00:00Z")),
+            Some(utc("2026-09-28T14:20:00Z"))
+        );
+        // The hour alone, and the 12-hour clock's two midpoints.
+        assert_eq!(
+            announced_quota_reset("resets 4pm (Europe/Paris)", utc("2026-09-27T10:00:00Z")),
+            Some(utc("2026-09-27T14:00:00Z"))
+        );
+        assert_eq!(
+            announced_quota_reset("resets 12am (UTC)", utc("2026-09-27T10:00:00Z")),
+            Some(utc("2026-09-28T00:00:00Z"))
+        );
+        assert_eq!(
+            announced_quota_reset("resets 12:30pm (UTC)", utc("2026-09-27T10:00:00Z")),
+            Some(utc("2026-09-27T12:30:00Z"))
+        );
+    }
+
+    #[test]
+    fn a_dated_reset_resolves_to_that_day_and_rolls_over_the_new_year() {
+        assert_eq!(
+            announced_quota_reset(
+                "You've hit your limit · resets Oct 3, 4pm (Europe/Paris)",
+                utc("2026-09-27T10:00:00Z")
+            ),
+            Some(utc("2026-10-03T14:00:00Z"))
+        );
+        assert_eq!(
+            announced_quota_reset("resets Jan 2 at 9am (UTC)", utc("2026-12-30T10:00:00Z")),
+            Some(utc("2027-01-02T09:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn a_reset_that_cannot_be_trusted_is_not_announced() {
+        let now = utc("2026-09-27T10:00:00Z");
+        // No zone: the backend's own zone says nothing about the user's.
+        assert_eq!(announced_quota_reset("resets 4:20pm", now), None);
+        assert_eq!(
+            announced_quota_reset("resets 4:20pm (Nowhere/Land)", now),
+            None
+        );
+        // Not a wall-clock time, or not a reset at all.
+        assert_eq!(announced_quota_reset("resets in 3 hours (UTC)", now), None);
+        assert_eq!(announced_quota_reset("You've hit your limit", now), None);
+        assert_eq!(announced_quota_reset("resets 13pm (UTC)", now), None);
+        assert_eq!(announced_quota_reset("resets 4:75pm (UTC)", now), None);
+        // A date so far out it is a misparse rather than a quota window.
+        assert_eq!(announced_quota_reset("resets Dec 30, 4pm (UTC)", now), None);
+    }
 
     #[test]
     fn a_529_from_claude_code_is_worth_retrying() {

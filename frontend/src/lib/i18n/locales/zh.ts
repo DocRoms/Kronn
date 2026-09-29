@@ -2964,6 +2964,7 @@ const zh: TranslationDict = {
   "config.agentAuthRequired": "需要认证",
   "config.agentAuthRequiredHint": "代理运行前需完成认证。",
   "config.quotaBlocked": "真实调度报告此提供商配额已用尽。只有确认配额再次可用后才重新启用。",
+  "config.quotaRearmableAt": "可在 {0} 重新启用（提供商公布的重置时间）。",
   "config.quotaRearm": "重新启用提供商",
   "config.quotaRearmConfirm": "要重新启用 {0} 吗？这将允许新的委派，但不会重启、取消或修改之前的工作。",
   "config.quotaRearmed": "{0} 已重新启用，可用于新的委派。",

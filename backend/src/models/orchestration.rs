@@ -1235,6 +1235,11 @@ pub struct TaskWorkerCatalogue {
 pub struct ProviderQuotaState {
     pub provider: AgentType,
     pub blocked: bool,
+    /// UTC instant (RFC 3339) at which the provider's own refusal said the
+    /// quota resets, when it said so. Shown as "rearmable at HH:MM"; nothing
+    /// re-arms automatically on it (KT-593).
+    #[serde(default)]
+    pub reset_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

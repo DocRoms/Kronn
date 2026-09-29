@@ -3005,6 +3005,7 @@ const fr: TranslationDict = {
   'config.agentAuthRequired': 'Authentification requise',
   'config.agentAuthRequiredHint': 'Le runner ne sera pas lancé tant que son authentification n’est pas prête.',
   'config.quotaBlocked': 'Un vrai dispatch a signalé que le quota de ce fournisseur est épuisé. Réarmez-le uniquement après avoir confirmé que le quota est de nouveau disponible.',
+  'config.quotaRearmableAt': 'Réarmable à {0} (heure de remise à zéro annoncée par le fournisseur).',
   'config.quotaRearm': 'Réarmer le fournisseur',
   'config.quotaRearmConfirm': 'Réarmer {0} ? Cela autorise les nouvelles délégations sans redémarrer, annuler ni modifier les travaux précédents.',
   'config.quotaRearmed': '{0} est réarmé pour les nouvelles délégations.',

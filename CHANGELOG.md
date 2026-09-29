@@ -76,6 +76,15 @@ Release notes for 0.9.3 and earlier are available in the
   merge and `files` is staged. The worker brief now says how to integrate the
   target branch and never to erase `MERGE_HEAD`: a single-parent commit made
   the target's files look added on both sides at integration.
+- One exhausted provider quota that escalated several executions no longer
+  keeps each of them from going back to that provider: reassigning one of them
+  to the same provider now counts as the human "the quota is back" signal for
+  the whole outage and re-arms it, so the others stop blocking whichever is
+  reassigned first. A new real quota failure blocks the provider again.
+- When the provider's refusal announces a reset time (Claude Code's
+  `resets 4:20pm (Europe/Paris)`), Settings → Agents now shows "Rearmable at
+  16:20" beside the re-arm button. It is a hint only; nothing re-arms
+  automatically. See [Provider quota re-arm](docs/operations/provider-quota-rearm.md).
 
 ## [0.14.1] - 2026-09-26
 

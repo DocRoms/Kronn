@@ -114,6 +114,16 @@ const AGENT_MODELS_URL: Partial<Record<keyof ModelTiersConfig, string>> = {
   copilot_cli: 'https://docs.github.com/en/copilot',
 };
 
+/** KT-838 — the provider's announced reset instant as a local "16:20", or
+ *  null when it announced none (or something unreadable). Display only. */
+function formatQuotaResetTime(resetAt: string | null | undefined): string | null {
+  if (!resetAt) return null;
+  const at = new Date(resetAt);
+  return Number.isNaN(at.getTime())
+    ? null
+    : at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 function editableTiers(tiers: ModelTiersConfig) {
   return Object.fromEntries(Object.entries(tiers).map(([key, value]) => [key, {
     economy: value.economy ?? '', default: value.default ?? '', reasoning: value.reasoning ?? '',
@@ -706,7 +716,9 @@ export function AgentsSection({
           };
           const tf = tokenField[agent.agent_type];
           const authReady = agent.auth_ready !== false;
-          const quotaBlocked = providerQuotaStates?.some(state => state.provider === agent.agent_type && state.blocked) ?? false;
+          const quotaState = providerQuotaStates?.find(state => state.provider === agent.agent_type && state.blocked);
+          const quotaBlocked = quotaState !== undefined;
+          const quotaResetTime = formatQuotaResetTime(quotaState?.reset_at);
           const isFullAccess = agent.agent_type === 'ClaudeCode'
             ? agentAccess?.claude_code?.full_access ?? false
             : agent.agent_type === 'Codex'
@@ -908,7 +920,17 @@ export function AgentsSection({
                     ))}
                     {quotaBlocked && (
                       <div className="set-agent-runtime-warning" role="alert">
-                        <span>{t('config.quotaBlocked')}</span>
+                        <span>
+                          {t('config.quotaBlocked')}
+                          {quotaResetTime && (
+                            <>
+                              {' '}
+                              <strong data-testid={`agent-quota-reset-${agent.agent_type}`}>
+                                {t('config.quotaRearmableAt', quotaResetTime)}
+                              </strong>
+                            </>
+                          )}
+                        </span>
                         <button
                           type="button"
                           className="set-compression-copy-btn"
