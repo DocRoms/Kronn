@@ -48,6 +48,14 @@ Release notes for 0.9.3 and earlier are available in the
   on a conflict does).
 - The lock records `N2` rather than `N0` for a workflow or a Quick API, and
   `N1` for prompts, skills and Quick Execs.
+- The router skill `.agents/skills/kronn/SKILL.md`, written on every
+  publication, now briefs an agent that opens the repository without Kronn:
+  what `kronn/` is (index, lock, levels N0/N1/N2), how to run a Quick Prompt, a
+  Quick Exec (secrets passed by name through the environment, never written)
+  and a skill by hand, what only Kronn can run (workflows, Quick APIs, living
+  artifacts), why and where to install Kronn (links from the README) and to
+  read a Quick Exec before running it. The file carries its model version
+  (`metadata.version`); a copy a human edited is still refused, not replaced.
 - Claude Code sessions launched by Kronn no longer load the workstation's
   automatic memory (`MEMORY.md`): `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is set for
   workflow Agent steps, `task_exec` principals and workers, about 8.8k fewer
