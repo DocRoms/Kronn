@@ -1,25 +1,36 @@
 import type { Page, Locator } from '@playwright/test';
 
+/** The automation types of the sidebar's type chip, as `data-kind-option` and
+ *  `data-value` spell them (`AUTOMATION_KIND_FILTERS` in the app). `all` is
+ *  the chip's resting value. */
+export type AutomationKind = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
+export type AutomationKindFilter = AutomationKind | 'all';
+
 /**
- * Automation page (= "Workflows" page in the codebase). Resource kinds are
- * exposed from the sidebar and creation goes through the shared
- * "Create or import" dialog opened by the green + button.
+ * Automation page (= "Workflows" page in the codebase). The resource types are
+ * picked on the type chip of the sidebar (`AutomationSidebarControls`, "All"
+ * until one is chosen) and creation goes through the shared "Create or
+ * import" dialog opened by the green + button.
  */
 export class WorkflowsPage {
   constructor(private readonly page: Page) {}
 
-  // ─── Sub-tab buttons ────────────────────────────────────────────────
-  /** "Workflows" sub-tab button. */
-  get tabWorkflows(): Locator {
-    return this.page.getByRole('button', { name: /^Workflows\b/i }).first();
+  // ─── Type chip ──────────────────────────────────────────────────────
+  /** Type chip under the sidebar search. `data-value` holds the chosen type
+   *  (`all` by default) and `data-active` is `true` once one is chosen. */
+  get kindChip(): Locator {
+    return this.page.locator('[data-tour-id="automation-filter-type"]');
   }
-  /** "Quick Prompts" sub-tab button. */
-  get tabQuickPrompts(): Locator {
-    return this.page.getByRole('button', { name: /Quick Prompts/i });
+  /** Listbox the type chip opens (one option per type, plus "All"). */
+  get kindMenu(): Locator {
+    return this.page.getByRole('listbox', {
+      name: /Filtre par type d.automatisation|Automation type filter|Filtro por tipo de automatización|自动化类型筛选/i,
+    });
   }
-  /** "Quick APIs" sub-tab button. */
-  get tabQuickApis(): Locator {
-    return this.page.getByRole('button', { name: /Quick APIs/i });
+  /** One option of the type listbox, addressed by type rather than by its
+   *  translated, counted label. `aria-selected` tells whether it is chosen. */
+  kindOption(kind: AutomationKindFilter): Locator {
+    return this.kindMenu.locator(`[data-kind-option="${kind}"]`);
   }
 
   // ─── Unified creation dialog ──────────────────────────────────
@@ -62,9 +73,18 @@ export class WorkflowsPage {
   }
 
   // ─── Actions ────────────────────────────────────────────────────────
-  async clickQuickPromptsTab() { await this.tabQuickPrompts.click(); }
-  async clickQuickApisTab() { await this.tabQuickApis.click(); }
-  async clickWorkflowsTab() { await this.tabWorkflows.click(); }
+  /** Open the type listbox (no-op when it already is). */
+  async openKindMenu() {
+    if (!(await this.kindMenu.isVisible())) await this.kindChip.click();
+    await this.kindMenu.waitFor({ state: 'visible' });
+  }
+
+  /** Choose a type on the chip: the sidebar then lists that type only. */
+  async selectKind(kind: AutomationKindFilter) {
+    await this.openKindMenu();
+    await this.kindOption(kind).click();
+    await this.kindMenu.waitFor({ state: 'hidden' });
+  }
 
   /** Open the shared automation creation chooser. */
   async openCreationDialog() {

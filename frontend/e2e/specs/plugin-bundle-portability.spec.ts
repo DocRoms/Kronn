@@ -72,9 +72,13 @@ test('exports a selection and imports it again through the Plugins UI', async ({
   await expect(importDialog.getByText(/1 configuration\(s\) créée\(s\)/)).toBeVisible();
   expect(createdConfigIds.size).toBe(1);
 
-  await expect(importDialog.getByRole('checkbox', {
-    name: /Global — tous les projets/,
-  })).toBeChecked();
+  // The import scope is the shared plugin scope editor (KT-831): "All
+  // projects" is a pressed toggle button there, and the documented import
+  // default.
+  await expect(importDialog.getByRole('button', {
+    name: 'Tous les projets',
+    exact: true,
+  })).toHaveAttribute('aria-pressed', 'true');
   await importDialog.getByRole('button', {
     name: /Appliquer la portée et terminer/,
   }).click();

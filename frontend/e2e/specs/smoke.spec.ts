@@ -25,8 +25,11 @@ test.describe('Kronn smoke', () => {
     const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
-    await expect(workflows.tabQuickPrompts).toBeVisible({ timeout: 5_000 });
-    await expect(workflows.tabQuickApis).toBeVisible();
+    // Quick Prompts and Quick APIs are reached from the sidebar's type chip.
+    await expect(workflows.kindChip).toBeVisible({ timeout: 5_000 });
+    await workflows.openKindMenu();
+    await expect(workflows.kindOption('quickPrompts')).toBeVisible();
+    await expect(workflows.kindOption('quickApis')).toBeVisible();
   });
 
   test('Quick APIs tab opens the unified creation chooser', async ({ page }) => {
@@ -37,7 +40,7 @@ test.describe('Kronn smoke', () => {
     const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
-    await workflows.clickQuickApisTab();
+    await workflows.selectKind('quickApis');
     await workflows.openCreationDialog();
     await expect(workflows.creationDialog).toBeVisible();
     await expect(workflows.newWorkflowButton).toBeVisible();

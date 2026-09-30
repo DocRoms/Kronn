@@ -48,14 +48,14 @@ test('exports, imports and replays a discussion idempotently', async ({ page, re
   expect(bundlePath).toBeTruthy();
   if (!bundlePath) throw new Error('Playwright returned no downloaded bundle path');
 
-  // The sidebar's "Other actions" panel is a disclosure of plain buttons, not an ARIA menu:
-  // it never implemented arrow-key navigation, so the menu/menuitem roles were
-  // dropped rather than left as a contract the widget did not honour.
+  // The sidebar's "Other actions" is the shared CollectionShell menu: a
+  // trigger button, then a role="menu" whose entries are menuitems (it walks
+  // them with the arrow keys).
   const openImportPicker = async () => {
     await page.getByRole('button', { name: 'Autres actions' }).click();
     await page
-      .getByRole('group', { name: 'Autres actions' })
-      .getByRole('button', { name: 'Importer une discussion' })
+      .getByRole('menu', { name: 'Autres actions' })
+      .getByRole('menuitem', { name: 'Importer une discussion' })
       .click();
   };
   await openImportPicker();

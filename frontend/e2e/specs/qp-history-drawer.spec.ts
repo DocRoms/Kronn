@@ -69,7 +69,7 @@ test.describe('0.8.5 — QP history drawer', () => {
     const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
-    await workflows.clickQuickPromptsTab();
+    await workflows.selectKind('quickPrompts');
 
     const toggles = page.locator('[data-testid="qp-history-toggle"]');
     const count = await toggles.count();
