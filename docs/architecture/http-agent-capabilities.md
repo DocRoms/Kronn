@@ -276,6 +276,68 @@ exact byte counts and an unchanged window through all four family loads.
 [src: file: backend/src/agents/runner.rs]
 [src: file: backend/src/agents/runner_test.rs]
 
+## Audits (KT-924)
+
+An audit's only deliverable is files under `docs/`, so the gate
+`agent_can_audit` admits an agent only if it can write there. It used to
+refuse Ollama and LiteLLM on the premise that the HTTP path "has neither a
+filesystem nor a tool loop". KT-338 had already made that false: the file tools
+above are executed server-side. What was still missing was the scope — those
+tools bound themselves to a discussion's workspace, and the audit pipeline passed
+the agent no executor at all, so lifting the gate alone would have produced steps
+that "succeed" without writing anything.
+
+**Who is accepted.** The CLI agents (Claude Code, Codex, OpenCode, Gemini CLI,
+Kiro, GitHub Copilot), Ollama and LiteLLM
+[src: file: backend/src/api/audit/mod.rs:1239]. NVIDIA is refused because it is
+a hosted service the user was never asked to send a whole repository to; Custom
+because it needs a named connection an audit cannot select; Vibe because it has
+no file tools. Both launch endpoints (Full and partial) share the gate and its
+refusal message, which lists the accepted agents and is pinned to the gate by a
+test [src: file: backend/src/api/audit/mod.rs:1271]. Admitting NVIDIA or Custom
+later is a product decision about what leaves the machine, not a wiring one.
+
+**How an audit step reaches the project.** Both pipelines start the step's agent
+through one launcher [src: file: backend/src/api/audit/agent_launch.rs]. A CLI
+agent is spawned exactly as before. An HTTP agent gets a
+`KronnToolExecutor::audit_arc`, scoped to the project directory the pipeline
+already resolved (`resolve_host_path`, so it is right inside a container) rather
+than a workspace row or a project looked up by id
+[src: file: backend/src/api/agent_tools.rs:181]. The bounds are KT-338's, unchanged:
+every path is canonicalised against that root and refused when it leaves it, by
+`..`, by an absolute path or by a symlink; there is no shell; a truncated read
+says so.
+
+**What the audit's tools are.** Narrower than a workflow Agent step's:
+`read_file`, `list_files`, `find_files`, `search_text`, `git_status`, `git_diff`,
+`git_log` to read, and `write_file`, `edit_file`, `edit_lines`,
+`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:206].
+No `web_fetch` (it would send the model off the project), no `git_commit` (the
+audit never commits), no plan, REST-plugin or discussion tools. A call to any
+other name is refused before a handler sees it.
+
+**A step that writes nothing is a failure.** This is not new machinery — it is
+why the gates exist. An HTTP run that answers in prose instead of calling a tool
+ends cleanly, so its exit code says "success"; the output validator and the
+rewrite proof are what record the step as failed when its target is missing,
+still the template, or byte-identical to before the agent ran
+[src: file: backend/src/api/audit/validation.rs]. The final review step has no
+target file and is judged on the exit code alone, for an HTTP agent as for a CLI
+one.
+
+**Stopping.** An HTTP agent's request and tool loop are a task, not a process:
+killing the lifeline PID does not stop it. A Full audit therefore registers a
+cancellation token per step, and `cancel_audit` trips it
+[src: file: backend/src/api/audit/full.rs]. The partial audit has no cancel path
+today, for any agent.
+
+**What this does not change.** The per-tool call ceilings of a run still apply
+(twelve `write_file` calls, for instance, before the tool is withdrawn), and an
+audit has nobody to ask for more, so a step that hits one ends with what it has
+and is judged by the gates. Whether those ceilings suit a step that writes many
+files is a question for the bench this was built for, not something to tune here
+unmeasured — see the rule at the top of this file.
+
 ## Judging a future request
 
 ### Workflow authoring (KT-673)
@@ -323,6 +385,9 @@ Ask which side of *execution* it falls on.
 - Reading anything already inside the workspace, or one public URL: **in scope**, subject to
   the existing bounds.
 - Producing or editing files in the workspace: **in scope** since 2026-08-18.
+- Running an audit step: **in scope** since 0.14.2 (KT-924) for Ollama and LiteLLM,
+  with the file tools scoped to the project and nothing beyond them — see
+  [Audits](#audits-kt-924).
 - Running a Quick Exec the human already saved: **in scope** since 0.13.0. It is execution,
   but of an argv Kronn owns, with no shell and inside the project that saved it.
 - Generating an image or a video on a configured connection: **in scope** since 0.13.0, with

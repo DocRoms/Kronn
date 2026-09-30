@@ -224,7 +224,7 @@ Frontend modal includes **drag & drop file upload** for documents. Files uploade
 
 ### Pre-audit briefing (optional)
 
-`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Agents without filesystem access (Vibe) are excluded from briefing/audit.
+`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Vibe (API-only) is excluded from the briefing. The audit itself is open to the CLI agents (Claude Code, Codex, OpenCode, Gemini CLI, Kiro, GitHub Copilot) and, since 0.14.2, to Ollama and LiteLLM, whose native file tools Kronn runs scoped to the project — see [HTTP-agent capabilities](http-agent-capabilities.md#audits-kt-924). Vibe, NVIDIA and Custom are refused with a message naming who is accepted [src: file: backend/src/api/audit/mod.rs:1239].
 
 ### CI pipeline
 

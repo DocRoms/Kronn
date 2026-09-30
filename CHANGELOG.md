@@ -142,6 +142,23 @@ Release notes for 0.9.3 and earlier are available in the
   nightly-triage"); "Align all" follows the same rule. Writing or loading a
   single resource announces its dependencies and includes them by default;
   leaving them out warns that it will only partly work.
+- An audit, Full or partial, can run on Ollama or LiteLLM (KT-924). Both were
+  refused on the ground that an HTTP agent has no filesystem, which stopped being
+  true when Kronn gave them native file tools: the audit now hands the agent
+  those tools, scoped to the project. Every path is canonicalised against the
+  project and refused when it leaves it (`..`, an absolute path, a symlink), there
+  is no shell, and a truncated read says so. The audit's agent is offered only
+  `read_file`, `list_files`, `find_files`, `search_text`, `git_status`,
+  `git_diff`, `git_log` and the four write tools — no `web_fetch`, no
+  `git_commit`, no plan or REST-plugin tools. The model and endpoint come from the
+  tiers and endpoints set in Settings → Agents, like a discussion or a workflow
+  step. A step whose agent writes nothing is still recorded as failed, whether it
+  left its file missing, still the template, or untouched. Stop reaches an HTTP
+  agent's request and tool loop, which a process kill cannot. The refusal that
+  remains (Vibe, NVIDIA, Custom) now names the agents that are accepted, and the
+  audit's agent picker offers Ollama and LiteLLM. NVIDIA and Custom stay refused:
+  sending a whole repository to a hosted service is a decision the audit does not
+  take for you.
 
 ### Changed
 

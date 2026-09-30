@@ -264,11 +264,12 @@ pub async fn full_audit(
     let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
-        return sse_error(format!(
-            "{agent_type:?} cannot run audits: it has no filesystem access, so the docs/ deliverables would silently never be written. Pick a CLI agent."
-        ));
+        return sse_error(super::audit_refusal_message(&agent_type));
     }
     let agent_label = format!("{:?}", agent_type);
+    // Snapshot the HTTP provider settings once for the whole run (a no-op for a
+    // CLI agent): every step resolves the same models and endpoints.
+    let agent_launcher = super::agent_launch::AuditAgentLauncher::new(&state, &agent_type).await;
 
     let tokens = {
         let config = state.config.read().await;
@@ -1109,16 +1110,26 @@ pub async fn full_audit(
                 None => full_prompt.clone(),
             };
 
-            match runner::start_agent_with_config(runner::AgentStartConfig {
-                full_access: true,
-                tier: audit_tier,
-                // Audit admission currently accepts CLI providers only. The
-                // auditor already has its bounded source/citation prompt; keep
-                // native HTTP tools explicitly absent so a future provider
-                // expansion cannot inherit mutation capabilities by omission.
-                tools: None,
-                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &attempt_prompt, &tokens)
-            }).await {
+            // An HTTP agent's loop is a task: Stop reaches it through this
+            // token, the counterpart of the PID a CLI agent is killed by.
+            // Registered BEFORE the start, which for an HTTP agent awaits the
+            // provider's first response (minutes, on a cold local model): a Stop
+            // in that window must still find it.
+            let attempt_cancel = agent_launcher.is_http().then(tokio_util::sync::CancellationToken::new);
+            if let Some(cancel) = &attempt_cancel {
+                if let Ok(mut tracker) = audit_tracker.lock() {
+                    tracker.http_cancels.insert(project_id.clone(), cancel.clone());
+                }
+            }
+            match agent_launcher.start(
+                &agent_type,
+                audit_tier,
+                &project_path,
+                &project_path_str,
+                &attempt_prompt,
+                &tokens,
+                attempt_cancel.clone(),
+            ).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation
                     if let Some(pid) = process.child.id() {
@@ -1255,6 +1266,7 @@ pub async fn full_audit(
                     // Unregister PID
                     if let Ok(mut tracker) = audit_tracker.lock() {
                         tracker.running_pids.remove(&project_id);
+                        tracker.http_cancels.remove(&project_id);
                     }
 
                     // PER-ATTEMPT boundary: enforce mode can retry the same
@@ -1644,6 +1656,9 @@ pub async fn full_audit(
                 }
                 Err(e) => {
                     tracing::error!("Audit step {} failed to start: {}", step, e);
+                    if let Ok(mut tracker) = audit_tracker.lock() {
+                        tracker.http_cancels.remove(&project_id);
+                    }
                     any_step_warning = true;
                     warned_steps.push(step as u32);
                     let err = serde_json::json!({
@@ -2595,6 +2610,10 @@ pub async fn cancel_audit(
             ));
         };
         tracker.cancelled.insert(project_id.clone());
+        // An HTTP agent runs in a task, not in the process killed below.
+        if let Some(cancel) = tracker.http_cancels.remove(&project_id) {
+            cancel.cancel();
+        }
         if let Some(pid) = tracker.running_pids.remove(&project_id) {
             tracing::info!(
                 "Killing audit agent process (PID {}) for project {}",

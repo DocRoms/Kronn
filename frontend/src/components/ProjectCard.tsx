@@ -593,8 +593,8 @@ export function ProjectCard({
 
   // Briefing agent: an explicit audit pick stays valid (audit-capable ⊂
   // briefing-capable), otherwise fall back to any BRIEFING-capable agent —
-  // never the audit list, which is empty when only Ollama is installed
-  // while the briefing legitimately works with it.
+  // never the audit list, which is narrower (an API-only agent can brief
+  // without being able to write the audit's docs).
   const briefingAgentPick = (auditAgentChoice && agents.some(a => a.agent_type === auditAgentChoice && canRunBriefing(a)))
     ? auditAgentChoice
     : (agents.filter(canRunBriefing)[0]?.agent_type ?? 'ClaudeCode');

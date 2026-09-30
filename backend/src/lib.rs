@@ -71,6 +71,10 @@ pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
 pub struct AuditTracker {
     /// Currently running child PID per project (if any)
     pub running_pids: HashMap<String, u32>,
+    /// Cancellation of the step's agent per project, for an HTTP agent: its
+    /// provider and tool loop run in a task, so killing the lifeline process in
+    /// `running_pids` alone would leave it reading and writing files (KT-924).
+    pub http_cancels: HashMap<String, tokio_util::sync::CancellationToken>,
     /// Projects whose audit should be cancelled
     pub cancelled: HashSet<String>,
     /// Live progress snapshot per project — empty when no audit runs.

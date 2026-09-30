@@ -21,6 +21,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
+#[path = "agent_audit_scope_tests.rs"]
+mod audit_scope_tests;
+
+#[cfg(test)]
 #[path = "agent_quick_prompt_tests.rs"]
 mod quick_prompt_tests;
 
@@ -66,6 +70,11 @@ pub struct KronnToolExecutor {
     /// Principal-authored mechanical target for a tiny native HTTP worker.
     /// Kept separate from the prompt so the runner can freeze its catalogue.
     worker_scope: Option<crate::models::TaskWorkerScope>,
+    /// An audit step (KT-924): the directory the file tools are scoped to, already
+    /// resolved by the pipeline. Present only for `audit_arc`, and it narrows the
+    /// catalogue to `AUDIT_TOOLS` — an audit has no discussion to scope a
+    /// workspace to and no business with the plan, the REST plugins or the web.
+    audit_workspace: Option<std::path::PathBuf>,
 }
 
 impl KronnToolExecutor {
@@ -81,6 +90,7 @@ impl KronnToolExecutor {
             source_dispatch_job_id: None,
             worker_room: false,
             worker_scope: None,
+            audit_workspace: None,
         }
     }
 
@@ -104,6 +114,7 @@ impl KronnToolExecutor {
             source_dispatch_job_id,
             worker_room: false,
             worker_scope: None,
+            audit_workspace: None,
         })
     }
 
@@ -130,6 +141,7 @@ impl KronnToolExecutor {
             source_dispatch_job_id,
             worker_room: true,
             worker_scope,
+            audit_workspace: None,
         })
     }
 
@@ -153,8 +165,67 @@ impl KronnToolExecutor {
             source_dispatch_job_id: None,
             worker_room: false,
             worker_scope: None,
+            audit_workspace: None,
         })
     }
+
+    /// Native file tools for an HTTP agent running an audit step (KT-924).
+    ///
+    /// `workspace` is the project directory the pipeline already resolved, handed
+    /// over as-is rather than re-read from the database: it is the very directory
+    /// the audit validates, snapshots and redacts, and `resolve_host_path` has
+    /// already mapped it inside a container. Every path the model names is
+    /// canonicalised against it and refused when it leaves it, exactly as for a
+    /// discussion (KT-338). The catalogue is `AUDIT_TOOLS`: no shell, no web, no
+    /// commit, nothing that reaches beyond the project.
+    pub fn audit_arc(
+        state: AppState,
+        workspace: std::path::PathBuf,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        std::sync::Arc::new(Self {
+            state,
+            disc_id: None,
+            project_id: None,
+            workflow_run_id: None,
+            actor_id: "Kronn audit".into(),
+            actor_type: None,
+            source_message_id: None,
+            source_dispatch_job_id: None,
+            worker_room: false,
+            worker_scope: None,
+            audit_workspace: Some(workspace),
+        })
+    }
+}
+
+/// The tools an audit step hands an HTTP agent: read the project, write its
+/// `docs/` deliverables, read its git history. Deliberately narrower than
+/// `workflow_workspace_tool_catalogue`: `web_fetch` would send the model off the
+/// project, `git_commit` would mutate history the audit never asked it to touch,
+/// and the discussion readers have no room to read.
+pub(crate) const AUDIT_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "edit_lines",
+    "insert_after_line",
+    "list_files",
+    "find_files",
+    "search_text",
+    "git_status",
+    "git_diff",
+    "git_log",
+];
+
+fn audit_tool_catalogue() -> Vec<Value> {
+    crate::api::agent_workspace_tools::tool_definitions()
+        .into_iter()
+        .filter(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .is_some_and(|name| AUDIT_TOOLS.contains(&name))
+        })
+        .collect()
 }
 
 fn ok(call: &ToolCall, content: Value) -> ToolOutcome {
@@ -1323,6 +1394,9 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
 #[async_trait::async_trait]
 impl ToolExecutor for KronnToolExecutor {
     fn catalogue(&self) -> Vec<Value> {
+        if self.audit_workspace.is_some() {
+            return audit_tool_catalogue();
+        }
         let mut catalogue = tool_catalogue();
         if self.workflow_run_id.is_none() {
             // A discussion run gets the web and its workspace: without them an
@@ -1400,6 +1474,18 @@ impl ToolExecutor for KronnToolExecutor {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+        // A model can name a tool it was never offered. In an audit the catalogue
+        // is the whole contract, so anything outside it is refused before dispatch
+        // reaches a handler that would honour it (`api_call`, plan writes…).
+        if self.audit_workspace.is_some() && !AUDIT_TOOLS.contains(&call.name.as_str()) {
+            return fail(
+                call,
+                format!(
+                    "tool `{}` is not available during an audit; use only the file tools declared on this request",
+                    call.name
+                ),
+            );
+        }
         if self.workflow_run_id.is_some()
             && !self.catalogue().iter().any(|tool| {
                 tool["function"]["name"]
@@ -2896,6 +2982,11 @@ impl KronnToolExecutor {
     /// `None` stays a readable refusal (a room attached to nothing): never a
     /// fallback to the server's cwd, which would hand the model the whole host.
     async fn workspace_root(&self) -> Option<std::path::PathBuf> {
+        // An audit hands its directory over explicitly (`audit_arc`): it is
+        // neither a discussion's workspace row nor a project looked up by id.
+        if let Some(root) = &self.audit_workspace {
+            return Some(root.clone());
+        }
         // A workflow step has no discussion but does carry a project, and a project
         // is a directory. Refusing the file tools there was the same mistake as
         // demanding a `discussion_workspaces` row from a discussion: the path was

@@ -12,7 +12,6 @@ use axum::{
 };
 use chrono::Utc;
 
-use crate::agents::runner;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -233,13 +232,16 @@ pub async fn partial_audit(
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
         let msg = serde_json::json!({
-            "error": format!("{agent_type:?} cannot run audits: no filesystem access — the refreshed docs would never be written.")
+            "error": super::audit_refusal_message(&agent_type)
         });
         let stream: SseStream = Box::pin(futures::stream::once(async move {
             Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
         }));
         return Sse::new(stream);
     }
+    // Same wiring as the Full pipeline: an HTTP agent gets file tools scoped to
+    // this project (a no-op for a CLI agent).
+    let agent_launcher = super::agent_launch::AuditAgentLauncher::new(&state, &agent_type).await;
     let requested_steps = resolved_steps;
     let total_requested = requested_steps.len();
     let audit_tracker = state.audit_tracker.clone();
@@ -498,15 +500,15 @@ pub async fn partial_audit(
                 Some(fb) => format!("{full_prompt}\n\n{fb}"),
                 None => full_prompt.clone(),
             };
-            match runner::start_agent_with_config(runner::AgentStartConfig {
-                full_access: true,
-                tier: audit_tier,
-                // Drift audit is deliberately CLI-only and consumes the
-                // prepared evidence in its prompt. Native tools stay explicit
-                // here so no future HTTP enablement silently broadens scope.
-                tools: None,
-                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &attempt_prompt, &tokens)
-            }).await {
+            match agent_launcher.start(
+                &agent_type,
+                audit_tier,
+                &project_path,
+                &project_path_str,
+                &attempt_prompt,
+                &tokens,
+                None,
+            ).await {
                 Ok(mut process) => {
                     while let Some(line) = process.next_line().await {
                         let chunk = serde_json::json!({ "text": line, "step": step });
