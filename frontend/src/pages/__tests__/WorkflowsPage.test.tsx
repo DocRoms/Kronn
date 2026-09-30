@@ -44,6 +44,10 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  projects: {
+    usedSkills: vi.fn().mockResolvedValue([]),
+    usedSkillFile: vi.fn(),
+  },
   profiles: {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn(),
@@ -527,6 +531,50 @@ describe('WorkflowsPage', () => {
       expect(within(sidebar).getByRole('button', { name: 'Workflows 2' })).toHaveAttribute('aria-expanded', 'false');
     });
 
+    // KT-921 — "Je ne peux pas plier la première catégorie (Workflows)": the
+    // first group holds the automation that is open, and used to be forced
+    // open for that reason.
+    it('folds and unfolds the first group too — the one holding the open automation — by type and by project', async () => {
+      mockWorkflowsApi.get.mockResolvedValueOnce({
+        id: 'wf-alpha', name: 'Alpha flow', project_id: 'p-alpha', trigger: { type: 'Manual' },
+        steps: [], actions: [], safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+        workspace_config: null, concurrency_limit: null, enabled: true, pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } as Workflow);
+      const { sidebar, groupBy } = await showLibrary();
+      await act(async () => {
+        fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha flow' }));
+      });
+      await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-alpha'));
+      expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+
+      const foldsAndUnfolds = (header: HTMLElement, hidden: string[]) => {
+        expect(header).toHaveAttribute('aria-expanded', 'true');
+        fireEvent.click(header);
+        expect(header).toHaveAttribute('aria-expanded', 'false');
+        for (const row of hidden) expect(rows(sidebar)).not.toContain(row);
+        // The automation stays open in the main column while its row is folded away.
+        expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+        fireEvent.click(header);
+        expect(header).toHaveAttribute('aria-expanded', 'true');
+        for (const row of hidden) expect(rows(sidebar)).toContain(row);
+      };
+
+      // By type: the first group is Workflows, and it holds the open workflow.
+      expect(groupHeaders(sidebar)[0]).toBe('Workflows 2');
+      foldsAndUnfolds(within(sidebar).getByRole('button', { name: 'Workflows 2' }), ['Ouvrir Alpha flow', 'Ouvrir Beta flow']);
+
+      // By project: the first group is Alpha, which holds it too.
+      fireEvent.click(groupBy('Projet'));
+      expect(groupHeaders(sidebar)[0]).toBe('Alpha 2');
+      foldsAndUnfolds(within(sidebar).getByRole('button', { name: 'Alpha 2' }), ['Ouvrir Alpha flow', 'Ouvrir Alpha prompt']);
+
+      // Flat: there is no group, hence no header to fold — and no row is lost.
+      fireEvent.click(groupBy('Aucun'));
+      expect(sidebar.querySelector('.automation-group-header')).toBeNull();
+      expect(rows(sidebar)).toHaveLength(5);
+    });
+
     it('counts each type in the type list, "Tout" first, and narrows the list to the chosen one', async () => {
       const { sidebar, typeOptions } = await showLibrary();
       expect(automationTypeChip()).toHaveTextContent('Tout');
@@ -829,10 +877,12 @@ describe('WorkflowsPage', () => {
     fireEvent.click(within(firstSidebar).getByRole('button', { name: 'Ouvrir Shared CLI' }));
     expect(await screen.findByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
 
-    // The group of the open automation stays open whatever was folded.
+    // The group of the open automation folds like any other (KT-921): the
+    // automation itself stays open in the main column.
     const execsGroup = within(firstSidebar).getByRole('button', { name: 'Quick Execs (CLI) 1' });
     fireEvent.click(execsGroup);
-    expect(execsGroup).toHaveAttribute('aria-expanded', 'true');
+    expect(execsGroup).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
     const workflowsGroup = within(firstSidebar).getByRole('button', { name: 'Workflows 1' });
     fireEvent.click(workflowsGroup);
     expect(workflowsGroup).toHaveAttribute('aria-expanded', 'false');
@@ -840,13 +890,17 @@ describe('WorkflowsPage', () => {
     const search = screen.getByRole('textbox', { name: 'Rechercher une automatisation…' });
     fireEvent.change(search, { target: { value: 'Shared' } });
     expect(workflowsGroup).toHaveAttribute('aria-expanded', 'true');
+    expect(execsGroup).toHaveAttribute('aria-expanded', 'true');
     fireEvent.change(search, { target: { value: '' } });
     expect(workflowsGroup).toHaveAttribute('aria-expanded', 'false');
+    expect(execsGroup).toHaveAttribute('aria-expanded', 'false');
     first.unmount();
 
     await wrap(<WorkflowsPage projects={[]} />);
     const restoredSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
     expect(within(restoredSidebar).getByRole('button', { name: 'Workflows 1' }))
+      .toHaveAttribute('aria-expanded', 'false');
+    expect(within(restoredSidebar).getByRole('button', { name: 'Quick Execs (CLI) 1' }))
       .toHaveAttribute('aria-expanded', 'false');
     expect(await screen.findByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
   });

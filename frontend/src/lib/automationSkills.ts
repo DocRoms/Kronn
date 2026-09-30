@@ -2,7 +2,7 @@
 // it has no run, no variables and no server-side favorite or modification date.
 // What the page needs from it lives here, pure, so the sidebar, the sheet and
 // the tests read one definition.
-import type { Project, Skill } from '../types/generated';
+import type { Project, ProjectUsedSkill, Skill } from '../types/generated';
 
 export const SKILL_FAVORITES_STORAGE_KEY = 'kronn:automationSkillFavorites';
 
@@ -44,4 +44,113 @@ export function writeSkillFavorites(ids: ReadonlySet<string>): void {
  *  vendored into it, or one the user wrote. */
 export function skillOrigin(skill: Pick<Skill, 'is_builtin' | 'external'>): 'kronn' | 'personal' | 'external' {
   return skill.external ? 'external' : skill.is_builtin ? 'kronn' : 'personal';
+}
+
+/** Id of a skill only a project's repository holds. Scoped by project: the same
+ *  folder name in two repositories is two skills, with two SKILL.md. */
+export function repositorySkillId(projectId: string, slug: string): string {
+  return `repository:${projectId}:${slug}`;
+}
+
+export function isRepositorySkillId(id: string): boolean {
+  return id.startsWith('repository:');
+}
+
+/** Where a repository-held skill lives, and why the project uses it. */
+export interface RepositorySkillOrigin {
+  projectId: string;
+  /** The native skill folder holding it (`.agents/skills`). */
+  root: string;
+  /** Repository-relative path of its SKILL.md. */
+  relativePath: string;
+  /** "Use in Kronn" pointed at it. */
+  referenced: boolean;
+  /** `kronn.lock` lists it: Kronn wrote it into the repository. */
+  published: boolean;
+}
+
+/** A skill as the Automation sidebar lists it: from the Kronn catalog, or one
+ *  only a repository holds. */
+export interface AutomationSkillEntry {
+  /** The catalog skill id, or `repositorySkillId`. */
+  id: string;
+  skill: Skill;
+  /** Every project using it, whichever way (attached, referenced, published). */
+  projectIds: string[];
+  /** Set for a skill only a repository holds. */
+  repository?: RepositorySkillOrigin;
+  /** Used by at least one project. The others are only *available*: the
+   *  sidebar folds them away instead of listing the whole catalog. */
+  used: boolean;
+}
+
+function repositorySkill(used: ProjectUsedSkill): Skill {
+  // A repository skill has no catalog row: the sheet reads its SKILL.md from
+  // the repository, and the rest of a catalog skill's fields do not apply.
+  return {
+    id: repositorySkillId(used.project_id, used.slug),
+    name: used.name || used.slug,
+    description: '',
+    icon: '📂',
+    category: 'Domain',
+    content: '',
+    is_builtin: false,
+    token_estimate: 0,
+  };
+}
+
+/**
+ * The skills the sidebar lists, with the projects using each of them.
+ *
+ * A project uses a skill when it lists it among its default skills, when
+ * "Use in Kronn" points it at a native skill of its repository (KT-897), or
+ * when Kronn published it into the repository (`kronn.lock`). A catalog skill
+ * used by no project is kept, marked `used: false`. A native skill the catalog
+ * does not hold is listed under its project only; a project the page does not
+ * know cannot use anything.
+ */
+export function automationSkillEntries(
+  catalog: readonly Skill[],
+  projects: readonly ProjectSkills[],
+  usedSkills: readonly ProjectUsedSkill[],
+): AutomationSkillEntry[] {
+  const known = new Set(projects.map(project => project.id));
+  const publishedBy = new Map<string, Set<string>>();
+  const repositoryOnly: ProjectUsedSkill[] = [];
+  for (const used of usedSkills) {
+    if (!known.has(used.project_id)) continue;
+    if (used.skill_id) {
+      const ids = publishedBy.get(used.skill_id) ?? new Set<string>();
+      ids.add(used.project_id);
+      publishedBy.set(used.skill_id, ids);
+    } else {
+      repositoryOnly.push(used);
+    }
+  }
+  const entries: AutomationSkillEntry[] = catalog.map(skill => {
+    const using = new Set([
+      ...projectsUsingSkill(skill.id, projects).map(project => project.id),
+      ...(publishedBy.get(skill.id) ?? []),
+    ]);
+    // Kept in the order the page received the projects.
+    const projectIds = projects.filter(project => using.has(project.id)).map(project => project.id);
+    return { id: skill.id, skill, projectIds, used: projectIds.length > 0 };
+  });
+  for (const used of repositoryOnly) {
+    const skill = repositorySkill(used);
+    entries.push({
+      id: skill.id,
+      skill,
+      projectIds: [used.project_id],
+      repository: {
+        projectId: used.project_id,
+        root: used.root,
+        relativePath: used.relative_path,
+        referenced: used.referenced,
+        published: used.published,
+      },
+      used: true,
+    });
+  }
+  return entries;
 }

@@ -5349,9 +5349,45 @@ repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
+/**
+ * The `SKILL.md` of a used skill, as the repository holds it now: masked the
+ * way every repository text is, and cut when it is larger than a sheet can
+ * carry.
+ */
+export type ProjectSkillFile = { relative_path: string, content: string, truncated: boolean, };
+
 export type ProjectSkillRoot = { path: string, skill_count: number, };
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
+
+/**
+ * A skill a project uses that its `default_skill_ids` do not tell: a native
+ * `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
+ * because Kronn published it into the repository. The Automation page reads
+ * these for every project at once, so nothing here renders or compares.
+ */
+export type ProjectUsedSkill = { project_id: string,
+/**
+ * The catalog skill this is, when the catalog knows its slug (a skill
+ * Kronn published from its catalog). `None`: only the repository holds it.
+ */
+skill_id?: string, slug: string, name: string,
+/**
+ * The native skill folder holding it (`.agents/skills`).
+ */
+root: string,
+/**
+ * Repository-relative path of its `SKILL.md`.
+ */
+relative_path: string,
+/**
+ * "Use in Kronn" pointed at it: read from the source on every use.
+ */
+referenced: boolean,
+/**
+ * `kronn.lock` lists it: Kronn wrote it into the repository.
+ */
+published: boolean, };
 
 /**
  * Project defaults for worktree preparation hooks. Workflow hooks override them

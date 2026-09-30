@@ -20,6 +20,7 @@ pub mod resource_prewarm;
 pub mod resources;
 pub mod skill_migration;
 pub mod template;
+pub mod used_skills;
 
 pub use anti_hallu_inject::*;
 pub use bootstrap::*;
@@ -32,6 +33,7 @@ pub use migrate::*;
 pub use resources::*;
 pub use skill_migration::*;
 pub use template::*;
+pub use used_skills::{used_skill_file, used_skills};
 
 /// 0.8.3 — Format the list of OTHER Kronn-registered projects as a
 /// candidate pool for the audit agent to look for companion-repo

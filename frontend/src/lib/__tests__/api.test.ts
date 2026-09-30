@@ -301,6 +301,22 @@ describe('api module', () => {
       );
     });
 
+    it('usedSkills lists them for every project, and usedSkillFile reads one SKILL.md by path, encoded', async () => {
+      mockFetchResponse([]);
+      const { projects } = await getApi();
+      await projects.usedSkills();
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/projects/used-skills',
+        expect.objectContaining({ method: 'GET' }),
+      );
+      mockFetchResponse({ relative_path: '.agents/skills/a b/SKILL.md', content: '# Skill', truncated: false });
+      await projects.usedSkillFile('proj-1', '.agents/skills/a b/SKILL.md');
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        '/api/projects/proj-1/repository-resources/skills/content?relative_path=.agents%2Fskills%2Fa%20b%2FSKILL.md',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
     it('gitCommit sends files and message', async () => {
       mockFetchResponse({ hash: 'abc1234', message: 'fix bug' });
       const { projects } = await getApi();

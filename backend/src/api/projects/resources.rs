@@ -396,7 +396,7 @@ fn kind_needs_approval(kind: ProjectRepositoryResourceKind) -> bool {
     )
 }
 
-fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
+pub(super) fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
     let path = root.join(relative);
     crate::core::fs_guard::assert_contained_no_symlink(root, &path).ok()?;
     std::fs::read(path).ok()
@@ -410,7 +410,7 @@ const MAX_CONTENT_BYTES: usize = 512 * 1024;
 /// The text of one side of one file as the answer carries it: masked first,
 /// whichever side it comes from, then cut — so a secret straddling the cut is
 /// never half shown.
-fn side_text(bytes: &[u8]) -> (String, bool) {
+pub(super) fn side_text(bytes: &[u8]) -> (String, bool) {
     let text = crate::core::repository_resources::masked_text(bytes);
     if text.len() <= MAX_CONTENT_BYTES {
         return (text.as_str().to_string(), false);

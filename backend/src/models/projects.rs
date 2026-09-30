@@ -419,6 +419,42 @@ pub struct RepositoryNativeSkillRequest {
     pub overwrite_kronn_changes: bool,
 }
 
+/// A skill a project uses that its `default_skill_ids` do not tell: a native
+/// `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
+/// because Kronn published it into the repository. The Automation page reads
+/// these for every project at once, so nothing here renders or compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectUsedSkill {
+    pub project_id: String,
+    /// The catalog skill this is, when the catalog knows its slug (a skill
+    /// Kronn published from its catalog). `None`: only the repository holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skill_id: Option<String>,
+    pub slug: String,
+    pub name: String,
+    /// The native skill folder holding it (`.agents/skills`).
+    pub root: String,
+    /// Repository-relative path of its `SKILL.md`.
+    pub relative_path: String,
+    /// "Use in Kronn" pointed at it: read from the source on every use.
+    pub referenced: bool,
+    /// `kronn.lock` lists it: Kronn wrote it into the repository.
+    pub published: bool,
+}
+
+/// The `SKILL.md` of a used skill, as the repository holds it now: masked the
+/// way every repository text is, and cut when it is larger than a sheet can
+/// carry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectSkillFile {
+    pub relative_path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
 /// What "Migrate everything to `.agents/skills`" would do, computed without
 /// touching the repository: one line per skill folder that moves (source →
 /// target) and one per slug whose copies differ and need the user's choice.

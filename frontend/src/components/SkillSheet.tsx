@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ExternalLink, Settings, Star } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
-import { projectsUsingSkill, skillOrigin } from '../lib/automationSkills';
+import { projectsUsingSkill, skillOrigin, type RepositorySkillOrigin } from '../lib/automationSkills';
 import type { Project, Skill } from '../types/generated';
 import { ConfirmDeleteButton } from './ConfirmDeleteButton';
 import { CopyIdPill } from './CopyIdPill';
@@ -39,12 +39,21 @@ function SkillFavorite({ skill, pinned, onTogglePinned }: FavoriteProps & { skil
   );
 }
 
-function SkillBadges({ skill }: { skill: Skill }) {
+function SkillBadges({ skill, repository }: { skill: Skill; repository?: Pick<RepositorySkillOrigin, 'root'> }) {
   const { t } = useT();
   return (
     <>
-      <span className="skill-sheet-badge" data-testid="skill-category">{t(`skills.${skill.category.toLowerCase()}`)}</span>
-      <span className="skill-sheet-badge" data-origin={skillOrigin(skill)}>{t(ORIGIN_LABEL[skillOrigin(skill)])}</span>
+      {repository ? (
+        // A skill only the repository holds has no catalog category: its origin says where it lives.
+        <span className="skill-sheet-badge" data-origin="repository" data-testid="skill-origin">
+          {t('automation.skill.originRepository', repository.root)}
+        </span>
+      ) : (
+        <>
+          <span className="skill-sheet-badge" data-testid="skill-category">{t(`skills.${skill.category.toLowerCase()}`)}</span>
+          <span className="skill-sheet-badge" data-origin={skillOrigin(skill)}>{t(ORIGIN_LABEL[skillOrigin(skill)])}</span>
+        </>
+      )}
       {skill.token_estimate > 0 && (
         <span className="skill-sheet-badge" title={t('config.tokenCostHint')}>~{skill.token_estimate} tok</span>
       )}
@@ -55,12 +64,14 @@ function SkillBadges({ skill }: { skill: Skill }) {
 interface CardProps extends FavoriteProps {
   skill: Skill;
   projectCount: number;
+  /** Set for a skill only a repository holds. */
+  repository?: Pick<RepositorySkillOrigin, 'root'>;
   onOpen: () => void;
 }
 
 /** A skill in the main column while none is open: same card as the other
  *  types, opening its sheet. */
-export function SkillCard({ skill, pinned, onTogglePinned, projectCount, onOpen }: CardProps) {
+export function SkillCard({ skill, pinned, onTogglePinned, projectCount, repository, onOpen }: CardProps) {
   const { t } = useT();
   return (
     <div className="qp-card skill-card" data-kind="skill">
@@ -81,16 +92,26 @@ export function SkillCard({ skill, pinned, onTogglePinned, projectCount, onOpen 
       </div>
       {skill.description && <p className="qp-card-desc">{skill.description}</p>}
       <div className="qp-card-meta">
-        <SkillBadges skill={skill} />
+        <SkillBadges skill={skill} repository={repository} />
         <span className="skill-card-projects">{t('automation.skill.projectCount', projectCount)}</span>
       </div>
     </div>
   );
 }
 
+/** What the SKILL.md section shows while there is no text to show. */
+export type SkillContentStatus = 'loading' | { error: string };
+
 interface SheetProps extends FavoriteProps {
   skill: Skill;
   projects: readonly Project[];
+  /** The projects using the skill, when default skills do not tell it all: a
+   *  skill referenced or published from a repository (KT-921). */
+  usedBy?: readonly Project[];
+  /** Set for a skill only a repository holds: its SKILL.md is read from there. */
+  repository?: Pick<RepositorySkillOrigin, 'root'>;
+  /** Set while the SKILL.md is being read from the repository, or when it cannot be. */
+  contentStatus?: SkillContentStatus;
   /** Present for a skill the user wrote; a built-in one cannot be deleted. */
   onDelete?: () => Promise<void>;
   /** Opens the existing Settings screen, the only place a skill is edited. */
@@ -101,10 +122,10 @@ interface SheetProps extends FavoriteProps {
 /** The sheet of a skill, read in place: what it is, who uses it, and its
  *  SKILL.md rendered as safe Markdown (never raw HTML) or as source. There is
  *  no launch and no variable here — a skill is read, not run. */
-export function SkillSheet({ skill, projects, pinned, onTogglePinned, onDelete, onOpenSettings, onError }: SheetProps) {
+export function SkillSheet({ skill, projects, usedBy, repository, contentStatus, pinned, onTogglePinned, onDelete, onOpenSettings, onError }: SheetProps) {
   const { t } = useT();
   const [view, setView] = useState<TextView>('rendered');
-  const users = projectsUsingSkill(skill.id, projects);
+  const users = usedBy ?? projectsUsingSkill(skill.id, projects);
   const sourceUrl = skill.external && skill.source_url && /^https?:\/\//i.test(skill.source_url)
     ? skill.source_url
     : null;
@@ -125,7 +146,7 @@ export function SkillSheet({ skill, projects, pinned, onTogglePinned, onDelete, 
       </header>
       <div className="skill-sheet-body">
         <div className="skill-sheet-meta">
-          <SkillBadges skill={skill} />
+          <SkillBadges skill={skill} repository={repository} />
           {sourceUrl && (
             <a className="skill-sheet-link" href={sourceUrl} target="_blank" rel="noopener noreferrer">
               <ExternalLink size={11} aria-hidden="true" /> {t('skills.source')}
@@ -162,14 +183,18 @@ export function SkillSheet({ skill, projects, pinned, onTogglePinned, onDelete, 
               ))}
             </div>
           </div>
-          {skill.content.trim()
+          {contentStatus === 'loading' ? (
+            <p className="skill-sheet-muted" role="status">{t('automation.skill.contentLoading')}</p>
+          ) : contentStatus ? (
+            <p className="skill-sheet-muted" role="alert">{t('automation.skill.contentError', contentStatus.error)}</p>
+          ) : skill.content.trim()
             ? <FileText text={skill.content} markdown={view === 'rendered'} />
             : <p className="skill-sheet-muted">{t('projects.repositoryResources.content.empty')}</p>}
         </section>
 
         <footer className="skill-sheet-actions">
           <p className="skill-sheet-muted">
-            {t(skill.is_builtin ? 'automation.skill.builtinHint' : 'automation.skill.editHint')}
+            {t(repository ? 'automation.skill.repositoryHint' : skill.is_builtin ? 'automation.skill.builtinHint' : 'automation.skill.editHint')}
           </p>
           <div className="skill-sheet-buttons">
             {onOpenSettings && (

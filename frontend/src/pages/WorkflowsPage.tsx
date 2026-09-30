@@ -5,7 +5,7 @@ import { useIsMobile } from '../hooks/useMediaQuery';
 import { usePersistentSidebarOpen } from '../hooks/usePersistentSidebarOpen';
 import { useT } from '../lib/I18nContext';
 import { isWorkflowRunning } from '../lib/runFilters';
-import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, externalApi as externalApiConnections } from '../lib/api';
+import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, skills as skillsApi, projects as projectsApi, profiles as profilesApi, directives as directivesApi, externalApi as externalApiConnections } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { userError } from '../lib/userError';
 import { useApi } from '../hooks/useApi';
@@ -31,6 +31,7 @@ import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
 import { SkillCard, SkillSheet } from '../components/SkillSheet';
+import { RepositorySkillSheet } from '../components/RepositorySkillSheet';
 import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
 import { PromptVariableInput } from '../components/workflows/PromptVariableInput';
 import { promptVariableEffectiveValue } from '../lib/promptVariableControl';
@@ -61,9 +62,11 @@ import {
 } from '../components/AutomationSidebarControls';
 import {
   SKILL_UPDATED_AT,
-  projectsUsingSkill,
+  automationSkillEntries,
+  isRepositorySkillId,
   readSkillFavorites,
   writeSkillFavorites,
+  type RepositorySkillOrigin,
 } from '../lib/automationSkills';
 import {
   AUTOMATION_KIND_LABEL_KEYS,
@@ -129,8 +132,12 @@ type AutomationResource = {
   kind: AutomationTab;
   name: string;
   projectId: string | null;
-  /** Skills only: every project that lists the skill (empty: "No project"). */
+  /** Skills only: every project that uses the skill (empty: "No project"). */
   projectIds?: string[];
+  /** Skills only: used by no project. Kept out of the list until asked for. */
+  available?: boolean;
+  /** Skills only: set for a skill only a project's repository holds. */
+  repository?: RepositorySkillOrigin;
   pinned: boolean;
   searchText: string;
   meta: string;
@@ -395,6 +402,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<string>>(
     readCollapsedAutomationSections,
   );
+  // The skills no project uses (KT-921) are folded away below the list until
+  // asked for: "Voir les skills disponibles". This session only.
+  const [availableSkillsOpen, setAvailableSkillsOpen] = useState(false);
   const [quickPromptSort, setQuickPromptSort] = useState<QuickPromptSort>('name');
   const [quickPromptSortReversed, setQuickPromptSortReversed] = useState(false);
   const [quickPromptAgentFilter, setQuickPromptAgentFilter] = useState<string>('all');
@@ -414,6 +424,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // directives). Empty-array fallback keeps the form rendering during the
   // first paint before the API resolves.
   const { data: skillsCatalog, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
+  // KT-921 — the skills a project uses without listing them among its default
+  // skills: native ones "Use in Kronn" pointed at, and the ones Kronn published.
+  const { data: usedSkillList, hasLoaded: usedSkillsLoaded, error: usedSkillsError } = useApi(() => projectsApi.usedSkills(), []);
+  const skillEntries = useMemo(
+    () => automationSkillEntries(skillsCatalog ?? [], projects, usedSkillList ?? []),
+    [projects, skillsCatalog, usedSkillList],
+  );
+  const skillEntryById = useMemo(() => new Map(skillEntries.map(entry => [entry.id, entry])), [skillEntries]);
   const { data: profilesCatalog } = useApi(() => profilesApi.list(), []);
   const { data: directivesCatalog } = useApi(() => directivesApi.list(), []);
   const externalAgentTargets = useMemo<AgentSwitchTarget[]>(() =>
@@ -488,9 +506,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     quickExecList && selectedQuickExecId
       && !quickExecList.some(item => item.id === selectedQuickExecId),
   );
+  // A skill only a repository holds is known once the used-skills list came
+  // back (or failed): until then it is not "gone", just not there yet.
   const invalidSkillSelection = Boolean(
     skillsCatalog && selectedSkillId
-      && !skillsCatalog.some(item => item.id === selectedSkillId),
+      && !skillEntryById.has(selectedSkillId)
+      && (!isRepositorySkillId(selectedSkillId) || usedSkillsLoaded || usedSkillsError),
   );
   useEffect(() => {
     const resourceId = tab === 'workflows'
@@ -841,17 +862,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         pinned: quickExec.pinned, searchText: `${quickExec.name} ${quickExec.description ?? ''} ${quickExec.command} ${quickExec.output_format}`,
         meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`, icon: quickExec.icon, updatedAt: quickExec.updated_at, quickExec,
       })),
-      ...(skillsCatalog ?? []).map(skill => {
+      ...skillEntries.map(({ skill, projectIds, repository, used }) => ({
         // A project that no longer exists (or is hidden from this page) cannot
-        // hold the skill: it then reads as attached to none.
-        const projectIds = projectsUsingSkill(skill.id, projects).map(project => project.id);
-        return {
-          id: `skills:${skill.id}`, resourceId: skill.id, kind: 'skills' as const, name: skill.name, projectId: null, projectIds,
-          pinned: skillFavorites.has(skill.id), searchText: `${skill.name} ${skill.description}`,
-          meta: `${t(`skills.${skill.category.toLowerCase()}`)} · ${t(skill.is_builtin ? 'skills.builtin' : 'skills.custom')}`,
-          icon: skill.icon || '✨', updatedAt: SKILL_UPDATED_AT, skill,
-        };
-      }),
+        // use the skill: it then reads as used by none.
+        id: `skills:${skill.id}`, resourceId: skill.id, kind: 'skills' as const, name: skill.name, projectId: null, projectIds,
+        available: !used, repository,
+        pinned: skillFavorites.has(skill.id),
+        searchText: `${skill.name} ${skill.description} ${repository?.relativePath ?? ''}`,
+        meta: repository
+          ? t('automation.skill.originRepository', repository.root)
+          : `${t(`skills.${skill.category.toLowerCase()}`)} · ${t(skill.is_builtin ? 'skills.builtin' : 'skills.custom')}`,
+        icon: skill.icon || '✨', updatedAt: SKILL_UPDATED_AT, skill,
+      })),
     ].map(resource => ({ ...resource, lastOpenedAt: automationLastOpened[resource.id] ?? null }));
     // The Recent chip is a history: newest opening first, favorites not pulled up.
     return sortAutomationResources(
@@ -860,7 +882,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       automationSortReversed,
       { pinnedFirst: !automationRecentFilter },
     );
-  }, [automationLastOpened, automationRecentFilter, automationSort, automationSortReversed, projects, quickApiList, quickExecList, quickPromptList, skillFavorites, skillsCatalog, t, workflows]);
+  }, [automationLastOpened, automationRecentFilter, automationSort, automationSortReversed, quickApiList, quickExecList, quickPromptList, skillEntries, skillFavorites, t, workflows]);
   const visibleQuickPrompts = selectedQuickPromptId
     ? (quickPromptList ?? []).filter(item => item.id === selectedQuickPromptId)
     : sortedQuickPrompts;
@@ -870,13 +892,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const visibleQuickExecs = selectedQuickExecId
     ? (quickExecList ?? []).filter(item => item.id === selectedQuickExecId)
     : (quickExecList ?? []);
-  const selectedSkill = selectedSkillId
-    ? (skillsCatalog ?? []).find(item => item.id === selectedSkillId) ?? null
-    : null;
-  const sortedSkills = useMemo(
-    () => [...(skillsCatalog ?? [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true })),
-    [skillsCatalog],
+  const selectedSkillEntry = selectedSkillId ? skillEntryById.get(selectedSkillId) ?? null : null;
+  const selectedSkill = selectedSkillEntry?.skill ?? null;
+  // The cards of the Skills type: the skills a project uses, then — folded
+  // away — the ones no project does.
+  const sortedSkillEntries = useMemo(
+    () => [...skillEntries].sort((a, b) => a.skill.name.localeCompare(b.skill.name, undefined, { sensitivity: 'base', numeric: true })),
+    [skillEntries],
   );
+  const usedSkillEntries = sortedSkillEntries.filter(entry => entry.used);
+  const availableSkillEntries = sortedSkillEntries.filter(entry => !entry.used);
   useEffect(() => {
     if (!invalidWorkflowSelection && !invalidQuickPromptSelection
       && !invalidQuickApiSelection && !invalidQuickExecSelection && !invalidSkillSelection) return;
@@ -1346,9 +1371,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       case 'skills': await skillsApi.delete(resource.resourceId); break;
     }
   }, []);
-  /** A built-in skill cannot be deleted: it gets no delete entry and no
-   *  selection box, so a bulk delete never picks it up. */
-  const deletable = (resource: AutomationResource) => !resource.skill?.is_builtin;
+  /** A built-in skill cannot be deleted, and neither can one that lives in a
+   *  repository (nothing of it is in Kronn to delete): it gets no delete entry
+   *  and no selection box, so a bulk delete never picks it up. */
+  const deletable = (resource: AutomationResource) => !resource.skill?.is_builtin && !resource.repository;
 
   const handleDelete = async (id: string) => {
     // The red trash button once fired straight away — one mis-click destroyed
@@ -2009,6 +2035,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     });
   };
 
+  const toggleAvailableSkills = () => {
+    // A search lays the section open (see `renderList`).
+    if (automationQuery.trim()) return;
+    setAvailableSkillsOpen(open => !open);
+  };
+
   const setAutomationGroupBy = (groupBy: AutomationGroupBy) => {
     setAutomationGroupByState(groupBy);
     writeAutomationGroupBy(groupBy);
@@ -2054,11 +2086,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  const totalAutomationResources = workflows.length
-    + (quickApiList?.length ?? 0)
-    + (quickPromptList?.length ?? 0)
-    + (quickExecList?.length ?? 0)
-    + (skillsCatalog?.length ?? 0);
+  // What the list shows on its own: the skills no project uses are counted
+  // only once a search brings them in (see `renderList`).
+  const searching = Boolean(automationQuery.trim());
+  const listedAutomationResources = searching
+    ? automationResources
+    : automationResources.filter(resource => !resource.available);
+  const totalAutomationResources = listedAutomationResources.length;
   const automationHasSelection = Boolean(
     selectedId || selectedQuickApiId || selectedQuickPromptId || selectedQuickExecId || selectedSkillId
       || showCreate || editingWorkflow || showCreateQA || editingQA
@@ -2087,8 +2121,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     groupBy: automationGroupBy,
     onGroupByChange: setAutomationGroupBy,
     filters: automationFilters,
-    kindCounts: countAutomationKinds(automationResources, automationFilters),
-    projectCounts: countAutomationProjects(automationResources, automationFilters),
+    kindCounts: countAutomationKinds(listedAutomationResources, automationFilters),
+    projectCounts: countAutomationProjects(listedAutomationResources, automationFilters),
     projects,
     onKindChange: selectAutomationKindFilter,
     onPinnedChange: setAutomationPinnedFilter,
@@ -2259,15 +2293,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               else if (resource.skill) toggleSkillFavorite(resource.skill.id);
             };
             // A type group already says the type: the row keeps the rest.
-            const rowMeta = (resource: AutomationResource) => (
-              automationGroupBy === 'kind' ? resource.meta : `${kindName(resource.kind)} · ${resource.meta}`
+            const rowMeta = (resource: AutomationResource, typeGroup: boolean) => (
+              typeGroup ? resource.meta : `${kindName(resource.kind)} · ${resource.meta}`
             );
-            const renderResource = (resource: AutomationResource, groupKey: string) => (
+            const renderResource = (resource: AutomationResource, groupKey: string, typeGroup = automationGroupBy === 'kind') => (
               <AutomationResourceRow
                 key={`${groupKey}-${resource.id}`}
                 resourceId={resource.resourceId}
                 name={resource.name}
-                meta={rowMeta(resource)}
+                meta={rowMeta(resource, typeGroup)}
                 icon={resource.icon}
                 running={resource.workflow ? isWorkflowRunning(resource.workflow.last_run?.status) : false}
                 active={activeResource(resource)}
@@ -2282,19 +2316,29 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onDelete={deletable(resource) ? deleteFor(resource) : undefined}
               />
             );
-            const groups = groupAutomations(visibleItems, automationGroupBy, automationProjectOrder);
+            // The skills no project uses are not part of the groups: they wait
+            // below them, folded, for "Voir les skills disponibles". The same
+            // in the three groupings.
+            const availableSkills = visibleItems.filter(resource => resource.available);
+            const groups = groupAutomations(
+              visibleItems.filter(resource => !resource.available),
+              automationGroupBy,
+              automationProjectOrder,
+            );
             const groupName = (group: AutomationGroup<AutomationResource>) => (
               group.by === 'kind' ? kindName(group.id as AutomationTab)
                 : group.id === null ? t('disc.noProject')
                   : projects.find(project => project.id === group.id)?.name ?? group.id
             );
             // A group stays open while searching and while selecting several
-            // rows, and while it holds the automation that is open.
+            // rows. Any other fold is the user's, the group of the automation
+            // that is open included: it must fold like the others.
             const isGroupCollapsed = (group: AutomationGroup<AutomationResource>) => (
-              !canMultiSelect && !automationQuery.trim()
-                && collapsedAutomationSections.has(group.key)
-                && !group.items.some(activeResource)
+              !canMultiSelect && !searching && collapsedAutomationSections.has(group.key)
             );
+            // Closed unless asked for; a search (which found them) lays it open.
+            const availableCollapsed = !canMultiSelect && !searching && !availableSkillsOpen;
+            const availableLabel = t('automation.skill.availableToggle', availableSkills.length);
             return (
               <div className="disc-sidebar-list automation-sidebar-items" data-tour-id="automation-kinds">
                 {groups.map(group => {
@@ -2324,7 +2368,23 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     </div>
                   );
                 })}
-                {groups.length === 0 && (
+                {availableSkills.length > 0 && (
+                  <div className="automation-group" data-group="skills:available">
+                    <button
+                      type="button"
+                      className="automation-group-header"
+                      aria-expanded={!availableCollapsed}
+                      aria-label={availableLabel}
+                      onClick={toggleAvailableSkills}
+                    >
+                      <ChevronRight size={10} className="disc-chevron" data-expanded={!availableCollapsed} aria-hidden="true" />
+                      <span className="automation-group-dot" data-kind="skills" aria-hidden="true" />
+                      <span className="automation-group-name">{availableLabel}</span>
+                    </button>
+                    {!availableCollapsed && availableSkills.map(resource => renderResource(resource, 'skills:available', true))}
+                  </div>
+                )}
+                {groups.length === 0 && availableSkills.length === 0 && (
                   <div className="disc-empty">
                     {t('automation.noSearchResults')}
                     {activeAutomationFilterCount(automationFilters) > 0 && (
@@ -4053,38 +4113,74 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           Settings, the one screen that has an editor for it. */}
       {tab === 'skills' && (
         <div>
-          {selectedSkill ? (
-            <SkillSheet
-              key={selectedSkill.id}
-              skill={selectedSkill}
-              projects={projects}
-              pinned={skillFavorites.has(selectedSkill.id)}
-              onTogglePinned={() => toggleSkillFavorite(selectedSkill.id)}
-              onOpenSettings={onNavigateSettings}
-              onError={message => toastProp?.(message, 'error')}
-              onDelete={selectedSkill.is_builtin ? undefined : async () => {
-                await skillsApi.delete(selectedSkill.id);
-                setSelectedSkillId(null);
-                refetchSkills();
-              }}
-            />
-          ) : sortedSkills.length === 0 ? (
+          {selectedSkill && selectedSkillEntry ? (
+            selectedSkillEntry.repository ? (
+              <RepositorySkillSheet
+                key={selectedSkill.id}
+                skill={selectedSkill}
+                repository={selectedSkillEntry.repository}
+                usedBy={projects.filter(project => selectedSkillEntry.projectIds.includes(project.id))}
+                pinned={skillFavorites.has(selectedSkill.id)}
+                onTogglePinned={() => toggleSkillFavorite(selectedSkill.id)}
+              />
+            ) : (
+              <SkillSheet
+                key={selectedSkill.id}
+                skill={selectedSkill}
+                projects={projects}
+                usedBy={projects.filter(project => selectedSkillEntry.projectIds.includes(project.id))}
+                pinned={skillFavorites.has(selectedSkill.id)}
+                onTogglePinned={() => toggleSkillFavorite(selectedSkill.id)}
+                onOpenSettings={onNavigateSettings}
+                onError={message => toastProp?.(message, 'error')}
+                onDelete={selectedSkill.is_builtin ? undefined : async () => {
+                  await skillsApi.delete(selectedSkill.id);
+                  setSelectedSkillId(null);
+                  refetchSkills();
+                }}
+              />
+            )
+          ) : skillEntries.length === 0 ? (
             <div className="wf-empty">
               <p className="wf-empty-title">{t('automation.skill.empty')}</p>
               <p className="wf-empty-hint">{t('automation.skill.emptyHint')}</p>
             </div>
           ) : (
             <div className="qp-list">
-              {sortedSkills.map(skill => (
+              {usedSkillEntries.map(entry => (
                 <SkillCard
-                  key={skill.id}
-                  skill={skill}
-                  pinned={skillFavorites.has(skill.id)}
-                  onTogglePinned={() => toggleSkillFavorite(skill.id)}
-                  projectCount={projectsUsingSkill(skill.id, projects).length}
-                  onOpen={() => openSkill(skill)}
+                  key={entry.id}
+                  skill={entry.skill}
+                  pinned={skillFavorites.has(entry.id)}
+                  onTogglePinned={() => toggleSkillFavorite(entry.id)}
+                  projectCount={entry.projectIds.length}
+                  repository={entry.repository}
+                  onOpen={() => openSkill(entry.skill)}
                 />
               ))}
+              {availableSkillEntries.length > 0 && (
+                <div className="skill-available" data-group="skills:available">
+                  <button
+                    type="button"
+                    className="automation-group-header"
+                    aria-expanded={availableSkillsOpen || searching}
+                    onClick={toggleAvailableSkills}
+                  >
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={availableSkillsOpen || searching} aria-hidden="true" />
+                    <span className="automation-group-name">{t('automation.skill.availableToggle', availableSkillEntries.length)}</span>
+                  </button>
+                  {(availableSkillsOpen || searching) && availableSkillEntries.map(entry => (
+                    <SkillCard
+                      key={entry.id}
+                      skill={entry.skill}
+                      pinned={skillFavorites.has(entry.id)}
+                      onTogglePinned={() => toggleSkillFavorite(entry.id)}
+                      projectCount={entry.projectIds.length}
+                      onOpen={() => openSkill(entry.skill)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

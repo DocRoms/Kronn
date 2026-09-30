@@ -147,6 +147,43 @@ describe('SkillSheet', () => {
   });
 });
 
+describe('SkillSheet — a skill only a repository holds (KT-921)', () => {
+  const repository = { root: '.agents/skills' };
+  const repositorySkill = (over: Partial<Skill> = {}) => skill({ id: 'repository:alpha:block-migration', name: 'block-migration', description: '', content: CONTENT, ...over });
+
+  it('says where the skill lives instead of a catalog category, and where it is edited', () => {
+    renderSheet({ skill: repositorySkill(), repository });
+    expect(screen.getByTestId('skill-origin')).toHaveTextContent('automation.skill.originRepository:.agents/skills');
+    expect(screen.queryByTestId('skill-category')).toBeNull();
+    expect(screen.getByText('automation.skill.repositoryHint')).toBeInTheDocument();
+    expect(screen.queryByText('automation.skill.editHint')).toBeNull();
+  });
+
+  it('lists the projects it is given rather than the ones that attach the skill', () => {
+    renderSheet({ skill: repositorySkill(), repository, usedBy: [projects[2]] });
+    expect(within(screen.getByTestId('skill-projects')).getAllByRole('listitem').map(item => item.textContent)).toEqual(['Gamma']);
+  });
+
+  it('says the SKILL.md is being read, then that it cannot be — and renders it once it is there', () => {
+    const { rerender } = renderSheet({ skill: repositorySkill({ content: '' }), repository, contentStatus: 'loading' });
+    expect(within(screen.getByTestId('skill-content')).getByRole('status')).toHaveTextContent('automation.skill.contentLoading');
+    expect(screen.queryByTestId('content-rendered')).toBeNull();
+
+    rerender(<SkillSheet skill={repositorySkill({ content: '' })} projects={projects} repository={repository} contentStatus={{ error: 'cannot read' }} pinned={false} onTogglePinned={noop} />);
+    expect(within(screen.getByTestId('skill-content')).getByRole('alert')).toHaveTextContent('automation.skill.contentError:cannot read');
+
+    rerender(<SkillSheet skill={repositorySkill()} projects={projects} repository={repository} pinned={false} onTogglePinned={noop} />);
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(within(screen.getByTestId('skill-content')).getByRole('heading', { level: 1, name: 'Review carefully' })).toBeInTheDocument();
+  });
+
+  it('gives its card the same origin', () => {
+    render(<SkillCard skill={repositorySkill()} pinned={false} onTogglePinned={noop} projectCount={1} repository={repository} onOpen={noop} />);
+    expect(screen.getByTestId('skill-origin')).toHaveTextContent('automation.skill.originRepository:.agents/skills');
+  });
+});
+
 describe('SkillCard', () => {
   it('opens the sheet from the list of the main column', () => {
     const onOpen = vi.fn();

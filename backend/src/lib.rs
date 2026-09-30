@@ -915,10 +915,17 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/discover-repos",
             post(api::discover::discover_repos),
         )
+        // KT-921 — the skills each project uses that its attached ones do not
+        // tell (referenced native skills, skills Kronn published).
+        .route("/api/projects/used-skills", get(api::projects::used_skills))
         .route("/api/projects/{id}", get(api::projects::get))
         .route(
             "/api/projects/{id}/repository-resources",
             get(api::projects::repository_resources),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/content",
+            get(api::projects::used_skill_file),
         )
         .route(
             "/api/projects/{id}/repository-resources/comparison",

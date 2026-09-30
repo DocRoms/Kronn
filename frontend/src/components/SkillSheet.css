@@ -25,6 +25,7 @@
   font-weight: 600;
 }
 .skill-sheet-badge[data-origin='external'] { border-color: var(--kr-accent-border); color: var(--kr-accent); }
+.skill-sheet-badge[data-origin='repository'] { border-color: var(--kr-success); color: var(--kr-success); }
 .skill-sheet-link { display: inline-flex; align-items: center; gap: 4px; color: var(--kr-accent); font-size: var(--kr-fs-xs); text-decoration: none; }
 .skill-sheet-link:hover, .skill-sheet-link:focus-visible { text-decoration: underline; }
 .skill-sheet-description { margin: 0; max-width: 920px; color: var(--kr-text-secondary); font-size: var(--kr-fs-sm); line-height: 1.5; }
@@ -71,3 +72,7 @@
 }
 
 .skill-card-projects { color: var(--kr-text-muted); font-size: var(--kr-fs-sm); }
+
+/* "Voir les skills disponibles" under the cards of the skills a project uses (KT-921). */
+.skill-available { display: flex; flex-direction: column; gap: var(--kr-sp-4); }
+.skill-available > .automation-group-header { padding-inline: 0; }

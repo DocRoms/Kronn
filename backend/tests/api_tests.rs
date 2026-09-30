@@ -4130,6 +4130,95 @@ async fn skill_migration_routes_show_the_recap_then_move_without_overwriting() {
         .is_file());
 }
 
+// KT-921 — a native skill "used in Kronn" from a repository is listed for its
+// project by the Automation page, and its SKILL.md is served from the repository.
+#[tokio::test]
+async fn a_native_skill_used_in_kronn_is_listed_with_its_folder_and_its_skill_md_is_served() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    let skill_path = project_directory
+        .path()
+        .join(".agents/skills/block-migration/SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill_path,
+        "---\nname: Block migration\ndescription: Moves a block\n---\n\nRun the codemod.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project_directory.path().join(".agents/skills/unused")).unwrap();
+    std::fs::write(
+        project_directory.path().join(".agents/skills/unused/SKILL.md"),
+        "---\nname: Unused\ndescription: Nobody uses it\n---\n\nNot referenced.\n",
+    )
+    .unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["front-euronews", "front_euronews", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    // Nothing is used yet: the static route answers, not `/api/projects/{id}`.
+    let (status, none) = get_json(app.clone(), "/api/projects/used-skills").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(none["success"], true, "{none}");
+    assert_eq!(none["data"], serde_json::json!([]));
+
+    let (_, used) = post_json(
+        app.clone(),
+        "/api/projects/front-euronews/repository-resources/skills/use",
+        serde_json::json!({ "relative_path": ".agents/skills/block-migration/SKILL.md" }),
+    )
+    .await;
+    assert_eq!(used["success"], true, "{used}");
+
+    let (_, listed) = get_json(app.clone(), "/api/projects/used-skills").await;
+    assert_eq!(
+        listed["data"],
+        serde_json::json!([{
+            "project_id": "front-euronews",
+            "slug": "block-migration",
+            "name": "Block migration",
+            "root": ".agents/skills",
+            "relative_path": ".agents/skills/block-migration/SKILL.md",
+            "referenced": true,
+            "published": false,
+        }]),
+        "the folder skill nobody referenced stays out"
+    );
+
+    let (status, file) = get_json(
+        app.clone(),
+        "/api/projects/front-euronews/repository-resources/skills/content?relative_path=.agents%2Fskills%2Fblock-migration%2FSKILL.md",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(file["success"], true, "{file}");
+    assert!(file["data"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Run the codemod."));
+    assert_eq!(file["data"]["truncated"], false);
+
+    let (_, refused) = get_json(
+        app,
+        "/api/projects/front-euronews/repository-resources/skills/content?relative_path=.agents%2Fskills%2Funused%2FSKILL.md",
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(refused["data"].is_null());
+}
+
 #[tokio::test]
 async fn live_page_create_publish_and_read_round_trip() {
     let app = test_app();

@@ -16,6 +16,8 @@ import type {
   ProjectRepositoryResourceKind,
   ProjectRepositoryResourceMutation,
   ProjectRepositoryResources,
+  ProjectSkillFile,
+  ProjectUsedSkill,
   PublishProjectRepositoryResourceRequest,
   RepositoryNativeSkillRequest,
   SkillMigrationPlan,
@@ -919,6 +921,17 @@ export const projects = {
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/import`, request),
   approveRepositoryResource: (id: string, request: ApproveProjectRepositoryResourceRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/approve`, request),
+  /** Every project's used skills that `default_skill_ids` do not tell — the
+   *  native skills "Use in Kronn" pointed at and the ones Kronn published —
+   *  for the Automation page's Skills type. */
+  usedSkills: () => api<ProjectUsedSkill[]>('GET', '/projects/used-skills'),
+  /** The `SKILL.md` of one of those, read from the repository when its sheet
+   *  opens. */
+  usedSkillFile: (id: string, relativePath: string) =>
+    api<ProjectSkillFile>(
+      'GET',
+      `/projects/${encodeURIComponent(id)}/repository-resources/skills/content?relative_path=${encodeURIComponent(relativePath)}`,
+    ),
   useNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/use`, request),
   copyNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>

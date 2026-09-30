@@ -66,6 +66,7 @@ vi.mock('../../lib/api', () => ({
     importWorkflow: vi.fn(),
   },
   skills: { list: vi.fn().mockResolvedValue([]), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
+  projects: { usedSkills: vi.fn().mockResolvedValue([]), usedSkillFile: vi.fn() },
   profiles: { list: vi.fn().mockResolvedValue([]), get: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   directives: { list: vi.fn().mockResolvedValue([]), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   quickPrompts: mockQuickPromptsApi,

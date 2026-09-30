@@ -222,6 +222,34 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The Automation sidebar folds every group, the first one included (KT-921).
+  The group that held the open automation was forced open, and the first group
+  (Workflows) almost always does: clicking its header did nothing. A group now
+  folds and unfolds like the others, whatever it holds, by type or by project;
+  the open automation stays open in the main column. A search or a multiple
+  selection still lays the groups open. With "None" there is no group, hence
+  nothing to fold.
+
+- The Skills type lists the skills a project actually uses, wherever they come
+  from (KT-921). A native skill of a repository that you "used in Kronn" from
+  the AI & automation tab (`block-migration` in `.agents/skills/`, say) had no
+  place on the Automation page, which only read the Kronn catalog and the
+  projects' default skills. It now sits under its project, with where it lives
+  ("Repository · .agents/skills"), and its sheet shows the `SKILL.md` read from
+  the repository — masked and rendered as safe Markdown like any repository
+  file, and read only for a skill the project really uses. So does a skill Kronn
+  published into a repository (`kronn.lock`). Such a skill is edited in its
+  repository: the sheet offers neither the Config link nor a delete. New routes:
+  `GET /api/projects/used-skills` (all projects at once, two small reads each)
+  and `GET /api/projects/:id/repository-resources/skills/content`.
+
+- The Automation list no longer shows the whole skills catalog (KT-921). In
+  "All" and in Skills, only the skills used by at least one project are listed
+  — attached, referenced from a repository, or published into it. The others
+  wait at the bottom, folded, under "Voir les skills disponibles (N)", in the
+  three groupings. A search still finds them and lays the section open; the
+  type and project counters and the library total count what the list shows.
+
 - The AI & automation tab of a project with many automations no longer takes
   seconds to load (about 5.2 s in front_euronews, the same on every read).
   Each read rendered every automation and masked its secrets again, and built
