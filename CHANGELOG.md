@@ -64,7 +64,8 @@ Release notes for 0.9.3 and earlier are available in the
   show given the others.
 - The global Automation page filters by state (All / Favorites / Active /
   Inactive; only a disabled workflow is inactive) next to the type and project
-  filters. On a screen narrower than 640 px, the filters of both surfaces fold
+  filters, and sorts its sidebar by name, last modification or type (favorites
+  stay first). On a screen narrower than 640 px, the project tab's filters fold
   behind one "Filters (n)" button.
 - `task_exec_update_validations({task_execution_id, validations, reason})`: the
   principal replaces the validations of an existing execution without
@@ -115,10 +116,12 @@ Release notes for 0.9.3 and earlier are available in the
   overview panel, whose summary and "Test all" / "Test the project" button
   follow it. A plugin's scope is now edited only from the Access tab of its
   sheet.
-- The global Automation page's sidebar keeps only the shared collection
-  chrome (title row, Favorites, Recent, project tree, footer). Its search, type
-  chips and project select moved into a filter bar above the list; every
-  feature they offered is still there, and `/` still reaches the search.
+- The global Automation page's search, Filter and Sort are back in the sidebar,
+  under the title, as on Plugins and Discussions. The Filter panel unfolds
+  under the search with a full-width select each for Type (with counts), State
+  and Project, and "Clear filters"; the icon stays lit while one is set. The
+  filter bar KT-904 had put above the list is removed, and `/` still reaches
+  the search.
 - `not_published`, `repository_modified` and `kronn_modified` are now
   `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
   only in the repository is `repository_only`. A resource that exists on both

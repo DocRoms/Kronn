@@ -66,39 +66,41 @@ The principal reviews the six rows above and performs the requested atomic epic
 closure after integration.
 [src: user: 2026-08-30: KT-508 generation 2 reassignment]
 
-## Automation filters (KT-904)
+## Automation filters (KT-904, moved to the sidebar by KT-912)
 
-The global Automation page keeps its sidebar to the shared collection chrome:
-the title row, the Favorites / Recent sections, the project tree and the footer.
-It passes `renderSearch: () => null`, so the shell draws no search field, and
-supplies no filter slot. [src: file: frontend/src/pages/WorkflowsPage.tsx:2041]
+The global Automation page puts its search, Filter and Sort in the sidebar,
+under the title row, exactly where Plugins (KT-907) and Discussions have them.
+The shell draws the search field (`globalSearchShortcut`, `showSearchClear`);
+the page fills the two slots Plugins fills: `sidebarHeaderEnd` for the Filter
+and Sort icons and `afterSidebarHeader` for their panels. Nothing sits above the
+list any more: the main column is the viewer only, and `AutomationFilterBar` is
+gone. [src: file: frontend/src/pages/WorkflowsPage.tsx:2032]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2075]
+[src: file: frontend/src/components/AutomationToolbar.tsx:49]
+[src: file: frontend/src/components/AutomationToolbar.tsx:136]
 
-Search, type, state and project live in `AutomationFilterBar`, the first child
-of the page's main column, above the viewer that lists the selected type. One
-filter set narrows both the project tree (`itemFilter`, the search being
-applied by the shell) and the list. `/` focuses the bar's search from anywhere
-on the page, sidebar included.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1947]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2271-2287]
-[src: file: frontend/src/components/AutomationFilterBar.tsx:47-70]
+One filter set narrows both the project tree and the list (`itemFilter`, the
+search being applied by the shell). `/` focuses the search from anywhere on the
+page, sidebar included. The pure rules stay in `lib/automationFilters.ts`.
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1980]
 
 | Filter | Rule |
 | --- | --- |
-| Type | All / Workflows / Quick APIs / Quick Prompts / Quick Execs. Choosing a type also opens its list; choosing it again lifts the filter. The chips keep the tour anchors. |
-| State | All / Favorites / Active / Inactive. Only a disabled workflow is inactive: a Quick Prompt, API or Exec has no off switch, so it always counts as active. [src: file: frontend/src/lib/automationFilters.ts:44-51] |
-| Project | A select of the bar: all, no project, or one project. |
-| Counts | Every chip counts what choosing it would show given the other filters and the search. [src: file: frontend/src/lib/automationFilters.ts:82-109] |
+| Type | A full-width `<select>`: All / Workflows / Quick APIs / Quick Prompts / Quick Execs, each option with its count. Choosing a type also opens its list; "All" lifts the filter. It carries the tour anchor `automation-filter-type`, which the four type steps of the tour target (they open the panel and pick their type). [src: file: frontend/src/components/tour/tourSteps.ts:258] |
+| State | A `<select>`: All / Favorites / Active / Inactive, with counts. Only a disabled workflow is inactive: a Quick Prompt, API or Exec has no off switch, so it always counts as active. [src: file: frontend/src/lib/automationFilters.ts:44-51] |
+| Project | A `<select>`: all, no project, or one project. |
+| Counts | Every option counts what choosing it would show given the other filters and the search. [src: file: frontend/src/lib/automationFilters.ts:82-109] |
+| Clear | "Clear filters" resets type, state and project (not the search, which has its own ✕). It shows in the panel and in the empty list while a filter is set. The Filter icon stays lit for as long as one is. [src: file: frontend/src/pages/WorkflowsPage.tsx:1949] |
+| Sort | Name / Last modified / Type, plus a reverse toggle. Favorites stay first whatever the criterion; the direction only flips each side of that line. [src: file: frontend/src/lib/automationSort.ts:68] |
 
-On a viewport under 640 px the type, state and project controls fold behind one
-"Filters (n)" button, `n` being the number of those filters that are set; the
-search stays in view. The fold opens in the flow (no floating panel), and while
-open it owns Escape, so a mobile sidebar is not also collapsed.
-[src: file: frontend/src/components/FilterFold.tsx:8]
-[src: file: frontend/src/components/FilterFold.tsx:26-62]
+The panels stack one select per row in a single shrinkable column, so nothing
+scrolls sideways at 400 px, where the sidebar is the usual drawer. There is no
+chip row and no "Filters (n)" fold on this page any more (`FilterFold` remains
+for the project tab below).
 
-The project tab's Automation sub-tab (`ProjectRepositoryResourcesPanel`) uses
-the same fold and the tab's own `rr-chip` for a type filter, All / QP / QA / QE
-/ Workflow, that stacks with the location filter and the search.
+The project tab's Automation sub-tab (`ProjectRepositoryResourcesPanel`) is
+unchanged: it keeps the fold and the tab's own `rr-chip` for a type filter, All
+/ QP / QA / QE / Workflow, that stacks with the location filter and the search.
 [src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:364-365]
 [src: file: frontend/src/components/ProjectRepositoryResourcesPanel.tsx:540-573]
 

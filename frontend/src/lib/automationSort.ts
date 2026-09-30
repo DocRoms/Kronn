@@ -1,7 +1,10 @@
 import type { QuickApi, QuickPrompt } from '../types/generated';
+import { AUTOMATION_KIND_FILTERS, type AutomationKind } from './automationFilters';
 
 export type QuickPromptSort = 'name' | 'updated' | 'usage';
 export type QuickApiSort = 'name' | 'updated' | 'endpoint';
+/** Sort of the sidebar of the global Automation page (all four kinds mixed). */
+export type AutomationSort = 'name' | 'updated' | 'kind';
 
 const collator = new Intl.Collator(undefined, {
   sensitivity: 'base',
@@ -47,5 +50,35 @@ export function sortQuickApis(
       result = byName(a, b);
     }
     return reversed ? -result : result;
+  });
+}
+
+export interface SortableAutomation {
+  kind: AutomationKind;
+  name: string;
+  pinned: boolean;
+  updatedAt: string;
+}
+
+/**
+ * Orders the automations of the global page. Favorites stay first whatever the
+ * criterion, as they always were; the criterion and its direction order each
+ * side of that line, so "reverse" never sinks a favorite below the rest.
+ */
+export function sortAutomationResources<T extends SortableAutomation>(
+  resources: readonly T[],
+  sort: AutomationSort,
+  reversed = false,
+): T[] {
+  return [...resources].sort((a, b) => {
+    let result: number;
+    if (sort === 'updated') {
+      result = b.updatedAt.localeCompare(a.updatedAt) || byName(a, b);
+    } else if (sort === 'kind') {
+      result = AUTOMATION_KIND_FILTERS.indexOf(a.kind) - AUTOMATION_KIND_FILTERS.indexOf(b.kind) || byName(a, b);
+    } else {
+      result = byName(a, b);
+    }
+    return Number(b.pinned) - Number(a.pinned) || (reversed ? -result : result);
   });
 }

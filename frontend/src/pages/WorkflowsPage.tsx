@@ -55,8 +55,14 @@ import { ConfirmDeleteButton } from '../components/ConfirmDeleteButton';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
 import { CollectionProjectTree } from '../components/CollectionProjectTree';
-import { AutomationFilterBar } from '../components/AutomationFilterBar';
 import {
+  AutomationToolbarPanel,
+  AutomationToolbarToggle,
+  type AutomationSearchPanel,
+  type AutomationToolbarState,
+} from '../components/AutomationToolbar';
+import {
+  activeAutomationFilterCount,
   countAutomationKinds,
   countAutomationStates,
   matchesAutomationFilters,
@@ -65,8 +71,10 @@ import {
   type AutomationStateFilter,
 } from '../lib/automationFilters';
 import {
+  sortAutomationResources,
   sortQuickApis,
   sortQuickPrompts,
+  type AutomationSort,
   type QuickApiSort,
   type QuickPromptSort,
 } from '../lib/automationSort';
@@ -332,6 +340,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     postImprovedQpId ? 'quickPrompts' : 'all',
   );
   const [automationStateFilter, setAutomationStateFilter] = useState<AutomationStateFilter>('all');
+  const [automationSearchPanel, setAutomationSearchPanel] = useState<AutomationSearchPanel>(null);
+  const [automationSort, setAutomationSort] = useState<AutomationSort>('name');
+  const [automationSortReversed, setAutomationSortReversed] = useState(false);
   const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<string>>(
     readCollapsedAutomationSections,
   );
@@ -728,7 +739,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     return groups;
   }, [workflows, t]);
 
-  const automationResources = useMemo<AutomationResource[]>(() => [
+  const automationResources = useMemo<AutomationResource[]>(() => sortAutomationResources([
     ...workflows.map(workflow => ({
       id: `workflows:${workflow.id}`, resourceId: workflow.id, kind: 'workflows' as const, name: workflow.name, projectId: workflow.project_id,
       pinned: workflow.pinned, searchText: `${workflow.name} ${workflow.project_name ?? ''} ${workflow.trigger_type}`,
@@ -750,7 +761,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       pinned: quickExec.pinned, searchText: `${quickExec.name} ${quickExec.description ?? ''} ${quickExec.command} ${quickExec.output_format}`,
       meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`, icon: quickExec.icon, updatedAt: quickExec.updated_at, quickExec,
     })),
-  ].sort((left, right) => Number(right.pinned) - Number(left.pinned) || left.name.localeCompare(right.name)), [quickApiList, quickExecList, quickPromptList, workflows]);
+  ], automationSort, automationSortReversed), [automationSort, automationSortReversed, quickApiList, quickExecList, quickPromptList, workflows]);
   const visibleQuickPrompts = selectedQuickPromptId
     ? (quickPromptList ?? []).filter(item => item.id === selectedQuickPromptId)
     : sortedQuickPrompts;
@@ -1853,10 +1864,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     else setShowCreateQE(true);
   };
 
+  // Choosing a type in the Filter panel also opens its list; "All" lifts it.
   const selectAutomationKind = (kind: AutomationTab) => {
     clearAutomationEditors();
     setTab(kind);
-    setAutomationKindFilter(current => current === kind ? 'all' : kind);
+    setAutomationKindFilter(kind);
     if (kind === 'workflows') {
       setSelectedId(null);
       setDetailWorkflow(null);
@@ -1934,6 +1946,27 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     if (kind === 'all') setAutomationKindFilter('all');
     else selectAutomationKind(kind);
   };
+  const clearAutomationFilters = () => {
+    setAutomationKindFilter('all');
+    setAutomationStateFilter('all');
+    setAutomationProjectFilter('all');
+  };
+  const automationToolbar: AutomationToolbarState = {
+    filters: automationFilters,
+    kindCounts: automationKindCounts,
+    stateCounts: automationStateCounts,
+    projects,
+    panel: automationSearchPanel,
+    setPanel: setAutomationSearchPanel,
+    sort: automationSort,
+    setSort: setAutomationSort,
+    sortReversed: automationSortReversed,
+    setSortReversed: setAutomationSortReversed,
+    onKindChange: selectAutomationKindFilter,
+    onStateChange: setAutomationStateFilter,
+    onProjectChange: setAutomationProjectFilter,
+    onClear: clearAutomationFilters,
+  };
   return (
     <div className="automation-page" data-has-selection={automationHasSelection}>
       <CollectionShell<AutomationResource>
@@ -1943,7 +1976,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         items={automationResources}
         getId={resource => resource.id}
         getLabel={resource => resource.searchText}
-        // The search is applied by the shell; the bar owns the other filters.
+        // The search is applied by the shell; the Filter panel owns the rest.
         itemFilter={resource => matchesAutomationFilters(resource, automationFilters, ['query'])}
         persistence={{
           query: automationQuery,
@@ -1996,6 +2029,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           const resource = automationResources.find(item => item.id === id);
           if (resource) openAutomationResource(resource);
         }}
+        globalSearchShortcut
+        showSearchClear
         showControls={false}
         isMobile={isMobile}
         sidebarOpen={sidebarOpen}
@@ -2036,9 +2071,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </ContextHelp>
         </>}
         slots={{
-          // The search and every filter live in the bar above the list: the
-          // sidebar keeps the title row, the project tree and its footer.
-          renderSearch: () => null,
+          // Search, Filter and Sort sit under the title, as on Plugins (KT-912).
+          afterSidebarHeader: <AutomationToolbarPanel toolbar={automationToolbar} />,
+          sidebarHeaderEnd: <AutomationToolbarToggle toolbar={automationToolbar} />,
           renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
             const sidebarWorkflows = visibleItems.flatMap(resource => resource.workflow ? [resource.workflow] : []);
             const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);
@@ -2252,7 +2287,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </div>
 
           {sidebarWorkflows.length + sidebarQuickApis.length + sidebarQuickPrompts.length + sidebarQuickExecs.length === 0 && (
-            <div className="disc-empty">{t('automation.noSearchResults')}</div>
+            <div className="disc-empty">
+              {t('automation.noSearchResults')}
+              {activeAutomationFilterCount(automationFilters) > 0 && (
+                <button type="button" className="automation-filter-clear" onClick={clearAutomationFilters}>
+                  {t('collection.clearFilters')}
+                </button>
+              )}
+            </div>
           )}
         </div>
             </>;
@@ -2266,24 +2308,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         }}
       />
 
-      {/* Search and filters sit above the list, not in the sidebar, which
-          keeps only the project tree. The bar narrows the tree and the list. */}
-      <div className="automation-main">
-      <AutomationFilterBar
-        filters={automationFilters}
-        kindCounts={automationKindCounts}
-        stateCounts={automationStateCounts}
-        projects={projects}
-        onQueryChange={setAutomationQuery}
-        onKindChange={selectAutomationKindFilter}
-        onStateChange={setAutomationStateFilter}
-        onProjectChange={setAutomationProjectFilter}
-        onClear={() => {
-          setAutomationKindFilter('all');
-          setAutomationStateFilter('all');
-          setAutomationProjectFilter('all');
-        }}
-      />
       <section className="automation-viewer">
       {showAutomationActions && (
         <div
@@ -4353,7 +4377,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         </div>
       )}
       </section>
-      </div>
     </div>
   );
 }

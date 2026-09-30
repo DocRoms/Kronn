@@ -253,8 +253,19 @@ function openDemoDiscussion() {
   openButton?.click();
 }
 
-function openAutomationTab(tourId: string) {
-  document.querySelector<HTMLButtonElement>(`[data-tour-id="${tourId}"]`)?.click();
+/** The Automation types are one `<select>` in the sidebar's Filter panel
+ *  (KT-912): open the panel, then pick the type as a click on its chip did. */
+function openAutomationKind(kind: string) {
+  const typeSelector = '[data-tour-id="automation-filter-type"]';
+  if (!document.querySelector(typeSelector)) {
+    document.querySelector<HTMLElement>('[data-tour-id="automation-filters"]')?.click();
+  }
+  const select = document.querySelector<HTMLSelectElement>(typeSelector);
+  if (!select || select.value === kind) return;
+  // React tracks the value itself: go through the native setter so its
+  // `change` listener sees a real edit.
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(select, kind);
+  select.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 function revealCopyableIds() {
@@ -604,8 +615,8 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'automation-workflow',
     page: 'workflows',
-    beforeStep: () => openAutomationTab('automation-kind-workflow'),
-    selector: '[data-tour-id="automation-kind-workflow"]',
+    beforeStep: () => openAutomationKind('workflows'),
+    selector: '[data-tour-id="automation-filter-type"]',
     titleKey: 'tour.automationWorkflow.title',
     descKey: 'tour.automationWorkflow.desc',
     position: 'bottom',
@@ -614,8 +625,8 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'automation-quick-api',
     page: 'workflows',
-    beforeStep: () => openAutomationTab('automation-kind-quick-api'),
-    selector: '[data-tour-id="automation-kind-quick-api"]',
+    beforeStep: () => openAutomationKind('quickApis'),
+    selector: '[data-tour-id="automation-filter-type"]',
     titleKey: 'tour.automationQuickApi.title',
     descKey: 'tour.automationQuickApi.desc',
     position: 'bottom',
@@ -624,8 +635,8 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'automation-quick-prompt',
     page: 'workflows',
-    beforeStep: () => openAutomationTab('automation-kind-quick-prompt'),
-    selector: '[data-tour-id="automation-kind-quick-prompt"]',
+    beforeStep: () => openAutomationKind('quickPrompts'),
+    selector: '[data-tour-id="automation-filter-type"]',
     titleKey: 'tour.automationQuickPrompt.title',
     descKey: 'tour.automationQuickPrompt.desc',
     position: 'bottom',
@@ -634,8 +645,8 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'automation-quick-exec',
     page: 'workflows',
-    beforeStep: () => openAutomationTab('automation-kind-quick-exec'),
-    selector: '[data-tour-id="automation-kind-quick-exec"]',
+    beforeStep: () => openAutomationKind('quickExecs'),
+    selector: '[data-tour-id="automation-filter-type"]',
     titleKey: 'tour.automationQuickExec.title',
     descKey: 'tour.automationQuickExec.desc',
     position: 'bottom',

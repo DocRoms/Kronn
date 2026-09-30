@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QuickApi, QuickPrompt } from '../../types/generated';
-import { sortQuickApis, sortQuickPrompts } from '../automationSort';
+import { sortAutomationResources, sortQuickApis, sortQuickPrompts, type SortableAutomation } from '../automationSort';
 
 const quickPrompt = (id: string, name: string, updatedAt: string): QuickPrompt => ({
   id,
@@ -72,5 +72,40 @@ describe('automation list sorting', () => {
     expect(sortQuickApis(source, 'updated').map(item => item.id)).toEqual(['z', 'b', 'a']);
     expect(sortQuickApis(source, 'endpoint').map(item => item.id)).toEqual(['b', 'a', 'z']);
     expect(sortQuickApis(source, 'endpoint', true).map(item => item.id)).toEqual(['z', 'a', 'b']);
+  });
+});
+
+describe('sorting the global Automation sidebar (KT-912)', () => {
+  const resource = (
+    id: string,
+    kind: SortableAutomation['kind'],
+    pinned = false,
+    updatedAt = '2026-01-01T00:00:00Z',
+  ): SortableAutomation & { id: string } => ({ id, kind, name: id, pinned, updatedAt });
+  const source = [
+    resource('Zeta', 'workflows', false, '2026-01-01T00:00:00Z'),
+    resource('beta', 'quickExecs', false, '2026-03-01T00:00:00Z'),
+    resource('Gamma', 'quickPrompts', true, '2026-02-01T00:00:00Z'),
+    resource('alpha', 'quickApis', false, '2026-02-15T00:00:00Z'),
+    resource('Delta', 'workflows', true, '2026-01-15T00:00:00Z'),
+  ];
+  const ids = (items: Array<{ id: string }>) => items.map(item => item.id);
+
+  it('sorts by name without mutating the source, favorites staying first', () => {
+    expect(ids(sortAutomationResources(source, 'name'))).toEqual(['Delta', 'Gamma', 'alpha', 'beta', 'Zeta']);
+    expect(ids(source)).toEqual(['Zeta', 'beta', 'Gamma', 'alpha', 'Delta']);
+  });
+
+  it('reverses each side of the favorites line, never sinking a favorite', () => {
+    expect(ids(sortAutomationResources(source, 'name', true))).toEqual(['Gamma', 'Delta', 'Zeta', 'beta', 'alpha']);
+  });
+
+  it('sorts by last modification, newest first', () => {
+    expect(ids(sortAutomationResources(source, 'updated'))).toEqual(['Gamma', 'Delta', 'beta', 'alpha', 'Zeta']);
+    expect(ids(sortAutomationResources(source, 'updated', true))).toEqual(['Delta', 'Gamma', 'Zeta', 'alpha', 'beta']);
+  });
+
+  it('sorts by type in the order of the tour, then by name', () => {
+    expect(ids(sortAutomationResources(source, 'kind'))).toEqual(['Delta', 'Gamma', 'Zeta', 'alpha', 'beta']);
   });
 });

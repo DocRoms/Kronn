@@ -206,6 +206,21 @@ const chooseAutomationAction = (name: string) => {
   fireEvent.click(within(dialog).getByRole('button', { name }));
 };
 
+/** The Type select of the sidebar's Filter panel (KT-912), opened on demand. */
+const automationTypeSelect = () => {
+  if (!document.getElementById('automation-filter-options')) {
+    fireEvent.click(screen.getByRole('button', { name: 'Filtrer les automatisations' }));
+  }
+  return screen.getByRole('combobox', { name: 'Filtre par type d’automatisation' });
+};
+
+/** Picks a type by the text of its option, e.g. `/Quick Prompts \(1\)/`. */
+const chooseAutomationType = async (label: RegExp | string) => {
+  const select = automationTypeSelect();
+  const option = within(select).getByRole('option', { name: label }) as HTMLOptionElement;
+  await act(async () => { fireEvent.change(select, { target: { value: option.value } }); });
+};
+
 describe('WorkflowsPage', () => {
   it('renders the automation empty state through the real page adapter', async () => {
     await wrap(<WorkflowsPage projects={[]} />);
@@ -285,7 +300,7 @@ describe('WorkflowsPage', () => {
     expect(screen.getByRole('heading', { name: 'Nouveau prompt' })).toBeInTheDocument();
   });
 
-  it('keeps the sidebar to the project tree and puts search and filters in a bar above the list', async () => {
+  it('puts search, Filter and Sort in the sidebar under the title, and no bar above the list', async () => {
     const alpha = {
       id: 'wf-alpha', name: 'Alpha report', project_id: 'p-alpha', project_name: 'Alpha',
       trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
@@ -307,30 +322,25 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[{ id: 'p-alpha', name: 'Alpha' } as never]} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    // The sidebar is the KT-855 collection sidebar and nothing else: no filter
-    // button, no chip, no select and no search field of its own.
-    expect(within(sidebar).queryByRole('textbox')).toBeNull();
-    expect(within(sidebar).queryByRole('combobox')).toBeNull();
-    expect(within(sidebar).queryByRole('button', { name: /Filtrer/ })).toBeNull();
-    expect(sidebar.querySelector('[data-tour-id^="automation-kind-"]')).toBeNull();
-    expect(sidebar.querySelector('.collection-shell-search-action, .automation-kind-filters, .collection-shell-filter')).toBeNull();
+    // Same place as Plugins and Discussions: right under the title row.
+    const titlebar = sidebar.querySelector('.collection-shell-titlebar') as HTMLElement;
+    const header = sidebar.querySelector('.collection-shell-header') as HTMLElement;
+    expect(titlebar.nextElementSibling).toBe(header);
+    const search = within(header).getByRole('textbox', { name: 'Rechercher une automatisation…' });
+    expect(search).toHaveAttribute('aria-keyshortcuts', '/');
+    const filterButton = within(header).getByRole('button', { name: 'Filtrer les automatisations' });
+    expect(filterButton).toHaveAttribute('data-tour-id', 'automation-filters');
+    expect(within(header).getByRole('button', { name: 'Trier les automatisations' })).toBeInTheDocument();
+
+    // Nothing is left above the list: the main column is the viewer only.
+    expect(screen.queryByRole('search', { name: 'Filtres des automatisations' })).toBeNull();
+    expect(document.querySelector('.automation-filterbar, .automation-main')).toBeNull();
+    expect(document.querySelector('.automation-page')?.children).toHaveLength(2);
+    expect(document.querySelector('.automation-page > .automation-viewer')).not.toBeNull();
     const projectsSection = sidebar.querySelector('.disc-sidebar-projects') as HTMLElement;
     expect(within(projectsSection).getByRole('button', { name: /Sans projet/ })).toBeInTheDocument();
     expect(within(projectsSection).getByRole('button', { name: /^Alpha 1$/ })).toBeInTheDocument();
 
-    // The bar sits beside the sidebar, above the viewer, in the same page.
-    const bar = screen.getByRole('search', { name: 'Filtres des automatisations' });
-    expect(sidebar.contains(bar)).toBe(false);
-    expect(bar.nextElementSibling).toHaveClass('automation-viewer');
-    const kinds = within(bar).getAllByRole('button').filter(button => button.dataset.tourId?.startsWith('automation-kind-'));
-    expect(kinds.map(button => button.dataset.tourId)).toEqual([
-      'automation-kind-workflow',
-      'automation-kind-quick-api',
-      'automation-kind-quick-prompt',
-      'automation-kind-quick-exec',
-    ]);
-
-    const search = within(bar).getByRole('textbox', { name: 'Rechercher une automatisation…' });
     fireEvent.change(search, { target: { value: 'Alpha' } });
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
     expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
@@ -344,20 +354,23 @@ describe('WorkflowsPage', () => {
     fireEvent.keyDown(alphaRow, { key: '/' });
     expect(search).toHaveFocus();
 
-    // The project filter is a select of the bar, always in reach.
-    const projectFilter = within(bar).getByRole('combobox', { name: 'Filtrer les automatisations par projet' });
+    // The project filter is a select of the Filter panel, cumulating with the search.
+    fireEvent.click(filterButton);
+    const panel = sidebar.querySelector('#automation-filter-options') as HTMLElement;
+    const projectFilter = within(panel).getByRole('combobox', { name: 'Filtrer les automatisations par projet' });
     fireEvent.change(projectFilter, { target: { value: 'p-alpha' } });
-    expect(within(bar).getByRole('button', { name: 'Effacer les filtres' })).toBeInTheDocument();
+    expect(filterButton).toHaveAttribute('data-active', 'true');
+    expect(within(panel).getByRole('button', { name: 'Effacer les filtres' })).toBeInTheDocument();
 
-    fireEvent.click(within(bar).getByRole('button', { name: 'Effacer la recherche' }));
+    fireEvent.click(within(header).getByRole('button', { name: 'Effacer la recherche' }));
     expect(search).toHaveValue('');
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
     expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
 
-    fireEvent.click(within(bar).getByRole('button', { name: 'Effacer les filtres' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Effacer les filtres' }));
     expect(projectFilter).toHaveValue('all');
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Beta report' })).toBeInTheDocument();
-    expect(within(bar).queryByRole('button', { name: 'Effacer les filtres' })).toBeNull();
+    expect(within(panel).queryByRole('button', { name: 'Effacer les filtres' })).toBeNull();
 
     await act(async () => {
       fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' }));
@@ -370,7 +383,7 @@ describe('WorkflowsPage', () => {
 
   });
 
-  describe('filter bar (KT-904)', () => {
+  describe('sidebar filters (KT-912)', () => {
     const summary = (id: string, name: string, over: Partial<WorkflowSummary> = {}): WorkflowSummary => ({
       id, name, project_id: null, project_name: null,
       trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
@@ -389,6 +402,7 @@ describe('WorkflowsPage', () => {
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     } as QuickExec);
 
+    /** Mounts the library and opens the Filter panel of the sidebar. */
     async function showLibrary() {
       mockWorkflowsApi.list.mockResolvedValueOnce([
         summary('wf-alpha', 'Alpha flow', { project_id: 'p-alpha', project_name: 'Alpha', pinned: true }),
@@ -406,81 +420,135 @@ describe('WorkflowsPage', () => {
           agentAccess={fullConfig}
         />,
       );
+      const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+      const filterButton = within(sidebar).getByRole('button', { name: 'Filtrer les automatisations' });
+      fireEvent.click(filterButton);
+      const panel = sidebar.querySelector('#automation-filter-options') as HTMLElement;
       return {
-        bar: screen.getByRole('search', { name: 'Filtres des automatisations' }),
-        sidebar: screen.getByRole('complementary', { name: 'Automatisation' }),
+        sidebar,
+        panel,
+        filterButton,
+        search: within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' }),
+        type: within(panel).getByRole('combobox', { name: 'Filtre par type d’automatisation' }),
+        state: within(panel).getByRole('combobox', { name: 'Filtre par état d’automatisation' }),
+        project: within(panel).getByRole('combobox', { name: 'Filtrer les automatisations par projet' }),
       };
     }
+    const optionTexts = (select: HTMLElement) => within(select).getAllByRole('option').map(option => option.textContent);
     // The project tree lists each automation once; Favorites and Recent repeat some.
     const rows = (sidebar: HTMLElement) => within(sidebar.querySelector('.disc-sidebar-projects') as HTMLElement)
       .queryAllByRole('button', { name: /^Ouvrir / })
       .map(button => button.getAttribute('aria-label'));
 
-    it('counts each type, and narrows the tree and the list to the chosen one', async () => {
-      const { bar, sidebar } = await showLibrary();
-      expect(within(bar).getByRole('button', { name: 'Tous (5)' })).toHaveAttribute('aria-pressed', 'true');
-      expect(within(bar).getByRole('button', { name: 'Workflows (2)' })).toBeInTheDocument();
-      expect(within(bar).getByRole('button', { name: 'Quick APIs (0)' })).toBeInTheDocument();
-      expect(within(bar).getByRole('button', { name: 'Quick Prompts (2)' })).toBeInTheDocument();
-      expect(within(bar).getByRole('button', { name: 'Quick Execs (CLI) (1)' })).toBeInTheDocument();
+    it('counts each type in the Type select, and narrows the tree to the chosen one', async () => {
+      const { sidebar, type } = await showLibrary();
+      expect(optionTexts(type)).toEqual([
+        'Tous (5)', 'Workflows (2)', 'Quick APIs (0)', 'Quick Prompts (2)', 'Quick Execs (CLI) (1)',
+      ]);
+      expect(type).toHaveValue('all');
 
-      await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: 'Quick Prompts (2)' })); });
-      expect(within(bar).getByRole('button', { name: 'Quick Prompts (2)' })).toHaveAttribute('aria-pressed', 'true');
+      await act(async () => { fireEvent.change(type, { target: { value: 'quickPrompts' } }); });
+      expect(type).toHaveValue('quickPrompts');
       expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Gamma prompt', 'Ouvrir Alpha prompt']));
 
-      // Choosing it again lifts the filter, like the chips always did.
-      await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: 'Quick Prompts (2)' })); });
-      expect(within(bar).getByRole('button', { name: 'Tous (5)' })).toHaveAttribute('aria-pressed', 'true');
+      // "Tous" lifts the filter.
+      await act(async () => { fireEvent.change(type, { target: { value: 'all' } }); });
+      expect(type).toHaveValue('all');
       expect(rows(sidebar)).toContain('Ouvrir Beta flow');
     });
 
-    it('stacks type, state, project and search, each chip counting what the others leave', async () => {
-      const { bar, sidebar } = await showLibrary();
+    it('stacks type, state, project and search, each count reading what the others leave', async () => {
+      const { sidebar, panel, search, type, state } = await showLibrary();
 
       // État: favorites keep the two pinned ones.
-      fireEvent.click(within(bar).getByRole('button', { name: 'Favoris (2)' }));
+      fireEvent.change(state, { target: { value: 'favorites' } });
       expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Alpha flow', 'Ouvrir Gamma prompt']));
-      // The type chips now count within the favorites only.
-      expect(within(bar).getByRole('button', { name: 'Workflows (1)' })).toBeInTheDocument();
-      expect(within(bar).getByRole('button', { name: 'Quick Prompts (1)' })).toBeInTheDocument();
-      expect(within(bar).getByRole('button', { name: 'Quick Execs (CLI) (0)' })).toBeInTheDocument();
+      // The type counts now read within the favorites only.
+      expect(optionTexts(type)).toEqual([
+        'Tous (2)', 'Workflows (1)', 'Quick APIs (0)', 'Quick Prompts (1)', 'Quick Execs (CLI) (0)',
+      ]);
 
       // + type: only the favorite workflow is left.
-      await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: 'Workflows (1)' })); });
+      await act(async () => { fireEvent.change(type, { target: { value: 'workflows' } }); });
       expect(rows(sidebar)).toEqual(['Ouvrir Alpha flow']);
 
       // + search that matches nothing of it.
-      fireEvent.change(within(bar).getByRole('textbox', { name: 'Rechercher une automatisation…' }), {
-        target: { value: 'gamma' },
-      });
+      fireEvent.change(search, { target: { value: 'gamma' } });
       expect(rows(sidebar)).toEqual([]);
       expect(within(sidebar).getByText('Aucune automatisation ne correspond à ces filtres.')).toBeInTheDocument();
+      // The empty list offers the way out as well.
+      const emptyClear = within(sidebar.querySelector('.disc-empty') as HTMLElement).getByRole('button', { name: 'Effacer les filtres' });
+      expect(emptyClear).toBeInTheDocument();
 
-      // Clearing the chips leaves the search in force.
-      fireEvent.click(within(bar).getByRole('button', { name: 'Effacer les filtres' }));
+      // Clearing the filters leaves the search in force.
+      fireEvent.click(within(panel).getByRole('button', { name: 'Effacer les filtres' }));
       expect(rows(sidebar)).toEqual(['Ouvrir Gamma prompt']);
+      expect(search).toHaveValue('gamma');
+      expect(type).toHaveValue('all');
+      expect(state).toHaveValue('all');
+      expect(within(panel).queryByRole('button', { name: 'Effacer les filtres' })).toBeNull();
+    });
+
+    it('filters by project, without project or one project, and clears from the empty list', async () => {
+      const { sidebar, filterButton, project, type } = await showLibrary();
+      expect(optionTexts(project)).toEqual(['Tous les projets', 'Sans projet', 'Alpha']);
+
+      fireEvent.change(project, { target: { value: 'p-alpha' } });
+      expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Alpha flow', 'Ouvrir Alpha prompt']));
+      fireEvent.change(project, { target: { value: '__global__' } });
+      expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Beta flow', 'Ouvrir Gamma prompt', 'Ouvrir Delta exec']));
+
+      // + a type with no automation left in that project: the empty list clears it.
+      await act(async () => { fireEvent.change(type, { target: { value: 'quickApis' } }); });
+      expect(rows(sidebar)).toEqual([]);
+      const emptyClear = within(sidebar.querySelector('.disc-empty') as HTMLElement).getByRole('button', { name: 'Effacer les filtres' });
+      fireEvent.click(emptyClear);
+      expect(project).toHaveValue('all');
+      expect(type).toHaveValue('all');
+      expect(rows(sidebar)).toHaveLength(5);
+      // The icon lights up while a filter is in force, and only then.
+      expect(filterButton).toHaveAttribute('data-active', 'true'); // panel still open
+      fireEvent.click(filterButton);
+      expect(filterButton).toHaveAttribute('data-active', 'false');
     });
 
     it('tells the active from the inactive workflows, and keeps the always-on Quick items active', async () => {
-      const { bar, sidebar } = await showLibrary();
-      expect(within(bar).getByRole('button', { name: 'Actives (4)' })).toBeInTheDocument();
-      expect(within(bar).getByRole('button', { name: 'Inactives (1)' })).toBeInTheDocument();
+      const { sidebar, state } = await showLibrary();
+      expect(optionTexts(state)).toEqual(['Tous les états (5)', 'Favoris (2)', 'Actives (4)', 'Inactives (1)']);
 
-      fireEvent.click(within(bar).getByRole('button', { name: 'Inactives (1)' }));
+      fireEvent.change(state, { target: { value: 'inactive' } });
       expect(rows(sidebar)).toEqual(['Ouvrir Beta flow']);
 
-      fireEvent.click(within(bar).getByRole('button', { name: 'Actives (4)' }));
+      fireEvent.change(state, { target: { value: 'active' } });
       expect(rows(sidebar)).not.toContain('Ouvrir Beta flow');
       expect(rows(sidebar)).toHaveLength(4);
+    });
+
+    it('sorts the sidebar from the Sort panel, favorites staying on top', async () => {
+      const { sidebar, filterButton } = await showLibrary();
+      fireEvent.click(filterButton);
+      const sortButton = within(sidebar).getByRole('button', { name: 'Trier les automatisations' });
+      expect(sortButton).toHaveAttribute('data-active', 'false');
+      const inTree = (label: string) => rows(sidebar).indexOf(label);
+
+      // The tree lists "Sans projet" first: by name, Delta exec comes before Beta flow's reverse.
+      expect(inTree('Ouvrir Beta flow')).toBeLessThan(inTree('Ouvrir Delta exec'));
+      fireEvent.click(sortButton);
+      expect(sortButton).toHaveAttribute('aria-expanded', 'true');
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Inverser l’ordre' }));
+      expect(inTree('Ouvrir Delta exec')).toBeLessThan(inTree('Ouvrir Beta flow'));
+      expect(sortButton).toHaveAttribute('data-active', 'true');
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Rétablir l’ordre par défaut' }));
+      expect(inTree('Ouvrir Beta flow')).toBeLessThan(inTree('Ouvrir Delta exec'));
     });
 
     it('still selects several rows and deletes them from a filtered sidebar', async () => {
       mockWorkflowsApi.delete.mockClear();
       mockWorkflowsApi.delete.mockResolvedValue(undefined);
       vi.stubGlobal('confirm', vi.fn(() => true));
-      const { bar } = await showLibrary();
-      await act(async () => { fireEvent.click(within(bar).getByRole('button', { name: 'Workflows (2)' })); });
-      fireEvent.click(within(bar).getByRole('button', { name: 'Inactives (1)' }));
+      const { type, state } = await showLibrary();
+      await act(async () => { fireEvent.change(type, { target: { value: 'workflows' } }); });
+      fireEvent.change(state, { target: { value: 'inactive' } });
 
       await act(async () => { fireEvent.click(screen.getByLabelText('Autres actions')); });
       await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: /Sélection multiple/ })); });
@@ -492,30 +560,16 @@ describe('WorkflowsPage', () => {
       expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-beta');
     });
 
-    it('folds type, state and project behind a "Filtres (n)" button at 400 px, and keeps the search out of it', async () => {
+    it('stacks the three selects in the drawer at 400 px, with the search in reach', async () => {
       vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-      const { bar } = await showLibrary();
+      const { sidebar, panel, search } = await showLibrary();
 
-      // Folded: no chip and no select in the bar, one full-width button, and the search stays.
-      expect(within(bar).queryByRole('button', { name: /^Workflows/ })).toBeNull();
-      expect(within(bar).queryByRole('combobox')).toBeNull();
-      expect(within(bar).getByRole('textbox', { name: 'Rechercher une automatisation…' })).toBeInTheDocument();
-      const fold = within(bar).getByRole('button', { name: 'Filtres' });
-      expect(fold).toHaveAttribute('aria-expanded', 'false');
-      expect(fold).toHaveClass('kr-filter-fold-toggle');
-
-      fireEvent.click(fold);
-      expect(fold).toHaveAttribute('aria-expanded', 'true');
-      expect(fold).toHaveAttribute('aria-controls', document.querySelector('.kr-filter-fold-panel')?.id);
-      fireEvent.click(within(bar).getByRole('button', { name: 'Workflows (2)' }));
-      fireEvent.click(within(bar).getByRole('button', { name: 'Favoris (1)' }));
-
-      // The button says how many are set, folded or not.
-      expect(within(bar).getByRole('button', { name: 'Filtres (2)' })).toBe(fold);
-      fireEvent.keyDown(within(bar).getByRole('button', { name: 'Workflows (1)' }), { key: 'Escape' });
-      expect(fold).toHaveAttribute('aria-expanded', 'false');
-      expect(fold).toHaveFocus();
-      expect(within(bar).queryByRole('button', { name: /^Workflows/ })).toBeNull();
+      expect(sidebar).toHaveAttribute('data-mobile', 'true');
+      expect(search).toBeInTheDocument();
+      // No chip row to overflow and no fold: one column, one select per row.
+      expect(sidebar.querySelector('.collection-shell-filter')).toBeNull();
+      expect(panel.querySelectorAll('.automation-filter-stack > .automation-filter-field > select')).toHaveLength(3);
+      expect(within(panel).getAllByRole('combobox')).toHaveLength(3);
     });
   });
 
@@ -552,8 +606,8 @@ describe('WorkflowsPage', () => {
 
     await wrap(<WorkflowsPage projects={[]} />);
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    expect(screen.getByRole('search', { name: 'Filtres des automatisations' })
-      .querySelector('[data-tour-id="automation-kind-quick-exec"]'))
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Filtrer les automatisations' }));
+    expect(within(sidebar).getByRole('combobox', { name: 'Filtre par type d’automatisation' }))
       .toHaveTextContent('Quick Execs (CLI) (1)');
     await act(async () => {
       fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir CloudWatch errors' }));
@@ -692,7 +746,7 @@ describe('WorkflowsPage', () => {
 
     await wrap(<WorkflowsPage projects={[]} />);
 
-    expect(screen.getByRole('button', { name: /Quick Prompts/ })).toHaveAttribute('data-active', 'true');
+    expect(automationTypeSelect()).toHaveValue('quickPrompts');
     expect(sessionStorage.getItem('kronn:postQpImproved')).toBeNull();
   });
 
@@ -749,9 +803,10 @@ describe('WorkflowsPage', () => {
     expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
 
     // The layout should use column direction on mobile (flex-direction: column)
-    // Just verify no crash and content is accessible
-    const body = document.body.textContent!;
-    expect(body).toContain('Workflows');
+    // Just verify no crash and content is accessible: the filters live in the
+    // sidebar, whose Type select lists the Workflows.
+    expect(screen.getByRole('textbox', { name: 'Rechercher une automatisation…' })).toBeDefined();
+    expect(within(automationTypeSelect()).getByRole('option', { name: /^Workflows/ })).toBeDefined();
 
     // Restore default matchMedia
     Object.defineProperty(window, 'matchMedia', {
@@ -1444,8 +1499,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Quick Prompts/ }));
-    expect(screen.getByRole('button', { name: /Quick Prompts/ })).toHaveAttribute('data-active', 'true');
+    await chooseAutomationType(/Quick Prompts/);
+    expect(automationTypeSelect()).toHaveValue('quickPrompts');
 
     await act(async () => {
       page.rerender(
@@ -1465,7 +1520,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
     expect(mockWorkflowsApi.getRun).toHaveBeenCalledWith('wf-lab', 'run-from-page');
     await waitFor(() => expect(onInitialSelectionConsumed).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole('button', { name: /Workflows/ })).toHaveAttribute('data-active', 'true');
+    expect(automationTypeSelect()).toHaveValue('workflows');
     expect(screen.getByText('Éditer')).toBeInTheDocument();
   });
 
@@ -1854,9 +1909,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         agentAccess={fullConfig}
       />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
-    });
+    await chooseAutomationType(/Quick Prompts \(1\)/);
 
     const card = container.querySelector('[data-qp-id="qp-release-notes"]');
     expect(card).toHaveAttribute('data-kind', 'prompt');
@@ -1898,9 +1951,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         agentAccess={fullConfig}
       />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(2\)/ }));
-    });
+    await chooseAutomationType(/Quick Prompts \(2\)/);
 
     fireEvent.change(screen.getByLabelText('Filtrer les Quick Prompts par agent'), {
       target: { value: 'Codex' },
@@ -1940,9 +1991,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         agentAccess={fullConfig}
       />,
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
-    });
+    await chooseAutomationType(/Quick Prompts \(1\)/);
 
     const trigger = screen.getByRole('button', {
       name: /Changer l'agent ou le mode IA du QP « Review release »/,
@@ -2003,9 +2052,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         onNavigateDiscussion={onNavigateDiscussion}
       />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(0\)/ }));
-    });
+    await chooseAutomationType(/Quick APIs \(0\)/);
 
     const actionDialog = openAutomationActions();
     expect(within(actionDialog).getByRole('button', { name: 'Importer' })).toHaveAttribute(
@@ -2071,7 +2118,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([qp]);
 
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />);
-    fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
+    await chooseAutomationType(/Quick Prompts \(1\)/);
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir Selected prompt' }));
 
     const actionDialog = openAutomationActions();
@@ -2215,9 +2262,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     const { container } = await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(3\)/ }));
-    });
+    await chooseAutomationType(/Quick APIs \(3\)/);
     fireEvent.change(screen.getByLabelText('Trier les Quick APIs'), {
       target: { value: 'endpoint' },
     });

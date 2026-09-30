@@ -124,4 +124,30 @@ describe('tour anchors exist in the app', () => {
       'automation-ai',
     ]);
   });
+
+  it('points the four Automation type steps at the Type select of the sidebar Filter panel (KT-912)', () => {
+    const kinds = ['workflows', 'quickApis', 'quickPrompts', 'quickExecs'];
+    const steps = ['automation-workflow', 'automation-quick-api', 'automation-quick-prompt', 'automation-quick-exec']
+      .map(id => TOUR_STEPS.find(step => step.id === id));
+    expect(steps.map(step => step?.selector)).toEqual(kinds.map(() => '[data-tour-id="automation-filter-type"]'));
+
+    // The panel is closed at first: the step opens it, then picks its type.
+    const changes: string[] = [];
+    document.body.innerHTML = '<button data-tour-id="automation-filters"></button>';
+    document.querySelector('[data-tour-id="automation-filters"]')!.addEventListener('click', () => {
+      if (document.querySelector('[data-tour-id="automation-filter-type"]')) return;
+      document.body.insertAdjacentHTML('beforeend', [
+        '<select data-tour-id="automation-filter-type">',
+        '<option value="all"></option>',
+        ...kinds.map(kind => `<option value="${kind}"></option>`),
+        '</select>',
+      ].join(''));
+      document.querySelector('[data-tour-id="automation-filter-type"]')!
+        .addEventListener('change', event => changes.push((event.target as HTMLSelectElement).value));
+    });
+
+    steps.forEach(step => step?.beforeStep?.());
+    expect(changes).toEqual(kinds);
+    document.body.innerHTML = '';
+  });
 });

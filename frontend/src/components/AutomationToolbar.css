@@ -1,0 +1,70 @@
+/* Automation sidebar filter / sort panels (KT-912) — the same look as the
+   Plugins panels (McpPage.css, KT-907): one full-width select per filter,
+   stacked, so the panel never scrolls sideways at 400 px. */
+.automation-sidebar .collection-shell-search-options {
+  min-width: 0;
+  overflow-x: clip;
+}
+.automation-sidebar .collection-shell-search-options .list-controls { min-width: 0; }
+.automation-sidebar .collection-shell-search-options .list-control {
+  flex: 1;
+  min-width: 0;
+}
+.automation-sidebar .collection-shell-search-options .list-control select {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.automation-filter-stack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+.automation-filter-field {
+  display: grid;
+  gap: var(--kr-sp-1);
+  min-width: 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+.automation-filter-field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 26px 5px 9px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.automation-filter-field select:hover,
+.automation-filter-field select:focus-visible { border-color: var(--kr-accent-border); }
+.automation-filter-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  justify-self: start;
+  padding: 3px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+.automation-filter-clear:hover,
+.automation-filter-clear:focus-visible {
+  border-color: var(--kr-accent-border);
+  color: var(--kr-text-primary);
+}
+.disc-empty .automation-filter-clear { display: flex; margin: var(--kr-sp-3) auto 0; }
