@@ -294,7 +294,9 @@ describe('WorkflowsPage — skills (KT-914)', () => {
 
   it('lists only the skills, as cards that open their sheet, when the Skills type is picked', async () => {
     await wrap(page());
-    await act(async () => { fireEvent.click(within(typeList()).getByRole('option', { name: 'Skills (3)' })); });
+    // `typeList()` opens the menu with its own click: resolve it outside `act`, which would hold the render back.
+    const skillsOption = within(typeList()).getByRole('option', { name: 'Skills (3)' });
+    await act(async () => { fireEvent.click(skillsOption); });
     expect(typeChip()).toHaveAttribute('data-value', 'skills');
     expect(openButtons(list())).toEqual(['Ouvrir Orphan', 'Ouvrir Review', 'Ouvrir Rust']);
 

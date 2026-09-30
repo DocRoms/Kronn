@@ -121,6 +121,9 @@ vi.mock('../../lib/api', () => ({
   // WorkflowWizard loads the MCP overview at mount (ApiCall plugin picker).
   mcps: {
     overview: vi.fn().mockResolvedValue({ servers: [], configs: [], customized_contexts: [], incompatibilities: [] }),
+    // Opening a Quick Prompt from the sidebar (KT-916 Récents tests) mounts QuickPromptForm, which reads
+    // the project's environment names.
+    projectEnvironmentNames: vi.fn().mockResolvedValue([]),
     registry: vi.fn().mockResolvedValue([]),
   },
   // 0.8.10 — WorkflowWizard fetches installed Ollama models at mount for the

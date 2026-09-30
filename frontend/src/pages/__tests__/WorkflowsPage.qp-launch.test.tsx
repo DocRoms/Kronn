@@ -743,7 +743,8 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     await act(async () => { fireEvent.click(compareBtn); });
 
     // Click the toggle-all link — when all selected, it flips to "none".
-    const toggleAll = screen.getByText(/Aucun|None|Ninguno/);
+    // Scoped to the link: the sidebar's "Grouper par" control also has an "Aucun" button (KT-916).
+    const toggleAll = screen.getByText(/Aucun|None|Ninguno/, { selector: '.qp-compare-toggle-all' });
     await act(async () => { fireEvent.click(toggleAll); });
 
     const launchCta = screen.getByTestId('qp-compare-agents-launch') as HTMLButtonElement;
