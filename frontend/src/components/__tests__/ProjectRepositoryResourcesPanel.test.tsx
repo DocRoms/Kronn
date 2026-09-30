@@ -1474,6 +1474,103 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toBeDisabled();
     });
 
+    describe('a skill the Kronn catalog provides and this project does not have', () => {
+      const CATALOG_TEXT = '---\nname: rust\ndescription: Write idiomatic Rust.\n---\n\n# Idiomatic Rust\n\nPrefer iterators.\n';
+      const fromKronnOnly = (id: string) => ({
+        files: [{ path: `.agents/skills/${id}/SKILL.md`, kronn: CATALOG_TEXT, truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
+      const withCatalogSkills = () => listing({
+        skills_present: [skill({ id: 'kept', name: 'Kept', status: 'up_to_date', repository_paths: ['.agents/skills/kept/SKILL.md'] })],
+        skills_available: [
+          skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only', is_builtin: true }),
+          skill({ id: 'custom-review', name: 'House review', provenance: 'kronn', status: 'kronn_only' }),
+        ],
+      });
+
+      it.each([
+        ['a built-in one', 'Rust', 'rust'],
+        ['one written by the user', 'House review', 'custom-review'],
+      ])('opens %s in the sheet: the SKILL.md rendered, Kronn selected, the repository mode off and why', async (_kind, name, id) => {
+        repositoryResourceComparison.mockResolvedValue(fromKronnOnly(id));
+        await show(withCatalogSkills());
+        openCatalog();
+        expect(repositoryResourceComparison).not.toHaveBeenCalled();
+
+        fireEvent.click(rowOf(name));
+        const dialog = within(await screen.findByRole('dialog'));
+
+        expect(await dialog.findByRole('heading', { name: 'Idiomatic Rust' })).toBeInTheDocument();
+        expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'skill', id);
+        const repository = dialog.getByRole('button', { name: `${R}content.mode.repository` });
+        expect(repository).toBeDisabled();
+        expect(repository.closest('span')).toHaveAttribute('title', `${R}content.disabled.absent_repository`);
+        expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toHaveAttribute('aria-pressed', 'true');
+        expect(dialog.getByRole('button', { name: `${R}content.mode.diff` })).toBeDisabled();
+        // Read as source on request, like any skill.
+        fireEvent.click(dialog.getByRole('button', { name: `${R}content.source` }));
+        expect(dialog.getByTestId('content-source')).toHaveTextContent('description: Write idiomatic Rust.');
+      });
+
+      it('opens from the name, the row menu and the row itself, not only from one of them', async () => {
+        repositoryResourceComparison.mockResolvedValue(fromKronnOnly('rust'));
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(within(rowOf('Rust')).getByRole('button', { name: 'Rust' }));
+        expect(await screen.findByRole('dialog')).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+        fireEvent.click(within(rowOf('Rust')).getByRole('button', { name: `${R}moreActions:Rust` }));
+        fireEvent.click(screen.getByRole('menuitem', { name: `${R}action.view` }));
+        expect(await screen.findByRole('dialog')).toBeInTheDocument();
+      });
+
+      it('keeps "Attach to the project" in the sheet and runs it as from the row', async () => {
+        repositoryResourceComparison.mockResolvedValue(fromKronnOnly('rust'));
+        setDefaultSkills.mockResolvedValue(true);
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(rowOf('Rust'));
+        const sheet = within(await screen.findByRole('dialog'));
+        await sheet.findByTestId('resource-content');
+        fireEvent.click(sheet.getByRole('button', { name: `${R}action.attach` }));
+
+        const confirm = within(await screen.findByRole('dialog'));
+        expect(confirm.getByText(`${R}effect.attach:Rust`)).toBeInTheDocument();
+        fireEvent.click(confirm.getByRole('button', { name: `${R}action.attach` }));
+        await waitFor(() => expect(setDefaultSkills).toHaveBeenCalledWith('project-1', ['kept', 'rust']));
+      });
+
+      it('still attaches from the row without opening the sheet', async () => {
+        setDefaultSkills.mockResolvedValue(true);
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(actionIn(rowOf('Rust'), 'attach'));
+
+        expect(await screen.findByText(`${R}effect.attach:Rust`)).toBeInTheDocument();
+        expect(repositoryResourceComparison).not.toHaveBeenCalled();
+      });
+
+      it('says when its content could not be loaded and tries again', async () => {
+        repositoryResourceComparison.mockRejectedValueOnce(new Error('boom'));
+        repositoryResourceComparison.mockResolvedValueOnce(fromKronnOnly('rust'));
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(rowOf('Rust'));
+        const dialog = within(await screen.findByRole('dialog'));
+        expect(await dialog.findByRole('alert')).toHaveTextContent(`${R}compare.loadFailed`);
+        fireEvent.click(dialog.getByRole('button', { name: `${R}compare.retry` }));
+
+        expect(await dialog.findByRole('heading', { name: 'Idiomatic Rust' })).toBeInTheDocument();
+      });
+    });
+
     it('puts the mode picker across the full width of the sheet at 400 px, and the sheet full screen', () => {
       const rules = sheetsCss.slice(sheetsCss.indexOf('@media (max-width: 640px)'));
       expect(rules).toMatch(/\.rr-modal[^{]*\{[^}]*width: 100%; height: 100%/);

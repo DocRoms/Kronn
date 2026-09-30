@@ -3453,6 +3453,36 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     assert!(files[0]["kronn"].as_str().unwrap().contains("Kronn edit"));
     assert!(!comparison.to_string().contains("literal-secret-value"));
 
+    // A secret typed by hand into the repository file, which Kronn never held,
+    // is masked in the answer too: in the text of that side, in the diff and in
+    // the field-by-field view.
+    let typed_text = std::fs::read_to_string(&resource_path).unwrap().replace(
+        "\"description\": \"\"",
+        "\"description\": \"run with api_key=typed-by-hand-e2e\"",
+    );
+    assert!(typed_text.contains("typed-by-hand-e2e"));
+    std::fs::write(&resource_path, typed_text).unwrap();
+    let (_, typed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/comparison?kind=quick_exec&id=qe-portable",
+    )
+    .await;
+    assert_eq!(typed["success"], true, "{typed}");
+    assert!(
+        !typed.to_string().contains("typed-by-hand-e2e"),
+        "a secret typed into the repository file leaked: {typed}"
+    );
+    assert!(typed["data"]["files"][0]["repository"]
+        .as_str()
+        .unwrap()
+        .contains("api_key=***REDACTED***"));
+    assert!(typed["data"]["diff"]
+        .as_str()
+        .unwrap()
+        .contains("api_key=***REDACTED***"));
+    // The rest of the flow starts again from the file as it was.
+    std::fs::write(&resource_path, format!("{published_text}\n")).unwrap();
+
     let (_, refused) = post_json(
         app.clone(),
         "/api/projects/portable-project/repository-resources/import",

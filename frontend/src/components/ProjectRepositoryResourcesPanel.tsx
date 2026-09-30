@@ -376,9 +376,9 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const excludedCount = alignExcludedCount(rows, activeTab);
   const selectedForPublication = [...rows.skills, ...rows.automation, ...rows.artifacts]
     .filter(row => row.state === 'kronn_only' && !row.suggested && selected.has(row.key));
-  const sheetRow = sheet
-    ? [...rows.skills, ...rows.automation, ...rows.artifacts].find(row => row.key === sheet.key)
-    : undefined;
+  // Every listed row opens its sheet, the catalog skills ("available in Kronn,
+  // not in this project") included.
+  const sheetRow = sheet ? allRows(rows).find(row => row.key === sheet.key) : undefined;
   const attentionByTab = (tab: ProjectRepositoryResourcesTab) => attentionAll.filter(item => item.row.group === tab).length;
   const visibleAttention = attentionOpen ? attention : attention.slice(0, ATTENTION_VISIBLE);
   const transferKindSide = transfer ? transferSide(transfer.kind) : null;

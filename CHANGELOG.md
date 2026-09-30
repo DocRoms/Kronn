@@ -65,8 +65,15 @@ Release notes for 0.9.3 and earlier are available in the
   `GET .../repository-resources/comparison`, which now answers for every
   resource, not only the ones that differ: `files` lists each file with its
   `repository` and `kronn` text (either absent when that side has no file, cut
-  and flagged `truncated` past 512 KiB). The listing still carries no content
-  (KT-913).
+  and flagged `truncated` past 512 KiB). Both sides are masked the same way,
+  the repository's too — a secret typed by hand into a file in Git never
+  reaches the texts, the diffs or the field view — while a `secret://NAME`
+  reference stays readable. The listing still carries no content (KT-913).
+- The skills the Kronn catalog provides that a project does not have yet
+  ("Available in Kronn, not in this project": built-in ones and the ones a user
+  wrote) open their sheet like every other row: the `SKILL.md` as Kronn holds
+  it, rendered or as source, with the repository mode off ("not in the
+  repository") and "Attach to the project" unchanged (KT-913).
 - A native skill outside `kronn/` can be used in Kronn without `kronn.lock`
   (`POST .../repository-resources/skills/use`: a read-only reference to its
   path) or copied into Kronn as a managed skill

@@ -257,10 +257,13 @@ fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
 /// diff is built from the whole file, whatever is cut.
 const MAX_CONTENT_BYTES: usize = 512 * 1024;
 
+/// The text of one side of one file as the answer carries it: masked first,
+/// whichever side it comes from, then cut — so a secret straddling the cut is
+/// never half shown.
 fn side_text(bytes: &[u8]) -> (String, bool) {
-    let text = String::from_utf8_lossy(bytes);
+    let text = crate::core::repository_resources::masked_text(bytes);
     if text.len() <= MAX_CONTENT_BYTES {
-        return (text.into_owned(), false);
+        return (text.as_str().to_string(), false);
     }
     let mut end = MAX_CONTENT_BYTES;
     while !text.is_char_boundary(end) {
@@ -269,10 +272,10 @@ fn side_text(bytes: &[u8]) -> (String, bool) {
     (text[..end].to_string(), true)
 }
 
-/// Every file a resource has on either side, with its text on each: the
-/// repository's as it stands, Kronn's as the masked rendering a publish would
-/// write. A file neither side holds is left out; `first` (the main file) comes
-/// first, the rest in path order.
+/// Every file a resource has on either side, with its text on each, both masked
+/// the same way: the repository's as it stands in the file, Kronn's as the
+/// rendering a publish would write. A file neither side holds is left out;
+/// `first` (the main file) comes first, the rest in path order.
 fn resource_file_contents(
     root: &Path,
     repository_paths: &[String],
@@ -310,6 +313,8 @@ fn resource_file_contents(
 
 /// One unified diff per file the resource is written to, repository side
 /// against Kronn side; a file present on one side only diffs against nothing.
+/// Both sides are the masked texts, so the diff shows no more than the files'
+/// contents do and a secret held by both never reads as a difference.
 fn resource_file_diffs(
     root: &Path,
     entry: &crate::core::repository_resources::RepositoryLockResource,
@@ -325,8 +330,10 @@ fn resource_file_diffs(
                 .get(path)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            let diff =
-                crate::core::repository_resources::unified_diff(&repository_bytes, kronn_bytes);
+            let diff = crate::core::repository_resources::unified_diff(
+                crate::core::repository_resources::masked_text(&repository_bytes).as_bytes(),
+                crate::core::repository_resources::masked_text(kronn_bytes).as_bytes(),
+            );
             (!diff.is_empty()).then(|| RepositoryResourceFileDiff {
                 path: path.clone(),
                 diff,
@@ -395,10 +402,18 @@ fn resource_comparison(
         crate::core::repository_resources::read_resource(root, entry)
             .ok()
             .map(|(document, _)| {
-                crate::core::repository_resources::field_diff(
+                let mut fields = crate::core::repository_resources::field_diff(
                     &document.resource,
                     &rendered.document.resource,
-                )
+                );
+                // The repository's values are as someone typed them: masked
+                // like the file texts above. Kronn's are masked by the rendering.
+                for field in &mut fields {
+                    if let Some(value) = field.repository.as_mut() {
+                        crate::core::repository_resources::mask_value_strings(value);
+                    }
+                }
+                fields
             })
             .unwrap_or_default()
     } else {
@@ -451,7 +466,10 @@ fn legacy_skill_comparison(
             ..RepositoryResourceComparison::default()
         };
     }
-    let diff = crate::core::repository_resources::unified_diff(&repository, kronn);
+    let diff = crate::core::repository_resources::unified_diff(
+        crate::core::repository_resources::masked_text(&repository).as_bytes(),
+        crate::core::repository_resources::masked_text(kronn).as_bytes(),
+    );
     if diff.is_empty() {
         return RepositoryResourceComparison {
             files,
@@ -1515,10 +1533,12 @@ fn skill_comparison(
 ///
 /// Both sides of one row of the listing, built when its sheet opens: the text
 /// of each file on each side that holds it and, where the two differ, the
-/// diffs. The Kronn side comes from the same masked rendering a publish would
-/// write, so no secret value can be read here that the repository files would
-/// not hold. A resource with only one side carries that side's text and no diff;
-/// one with both in sync carries the same text twice and no diff.
+/// diffs. Both sides are masked: the Kronn side comes from the rendering a
+/// publish would write, and every text of the answer — the repository's files
+/// too, which may hold a secret typed in by hand — goes through the same
+/// masking before it is cut, diffed or sent. A resource with only one side
+/// carries that side's text and no diff; one with both in sync carries the same
+/// text twice and no diff.
 pub async fn repository_resource_comparison(
     State(state): State<AppState>,
     AxumPath(project_id): AxumPath<String>,
@@ -4145,6 +4165,127 @@ mod tests {
             .unwrap()
             .contains("Edited in Git."));
         assert!(file.kronn.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_secret_typed_into_a_repository_file_reaches_neither_its_text_nor_a_diff() {
+        const TYPED_PASSWORD: &str = "leak-probe-typed-by-hand";
+        const TYPED_KEY: &str = "sk-zyxwvutsrqponmlkjihgfedcba9876543210";
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_execs::insert_quick_exec(conn, &sample_exec("project-1"))?;
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt("project-1", "qp-1", "Review the change."),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        attach_skills(&state, &project_id, &["rust"]).await;
+        for (kind, id) in [
+            (ProjectRepositoryResourceKind::QuickExec, "qe-1"),
+            (ProjectRepositoryResourceKind::QuickPrompt, "qp-1"),
+            (ProjectRepositoryResourceKind::Skill, "rust"),
+        ] {
+            let published = publish_repository_resource(
+                State(state.clone()),
+                AxumPath(project_id.clone()),
+                Json(PublishProjectRepositoryResourceRequest {
+                    kind,
+                    id: id.into(),
+                    overwrite_repository_changes: false,
+                }),
+            )
+            .await;
+            assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        }
+
+        // Someone types a secret into each file in Git; Kronn's side has none.
+        let append = |relative: &str, text: String| {
+            let path = root.path().join(relative);
+            let mut content = std::fs::read_to_string(&path).unwrap();
+            content.push_str(&text);
+            std::fs::write(path, content).unwrap();
+        };
+        append(
+            "kronn/prompts/prompt-qp-1.md",
+            format!("\nDeploy with password={TYPED_PASSWORD} and the key {TYPED_KEY}.\n"),
+        );
+        append(
+            ".agents/skills/rust/SKILL.md",
+            format!("\nLog in with the key {TYPED_KEY}.\n"),
+        );
+        let exec_path = root.path().join("kronn/quick-execs/lint.yaml");
+        let edited = std::fs::read_to_string(&exec_path).unwrap().replace(
+            "\"description\": \"\"",
+            &format!("\"description\": \"run with api_key={TYPED_PASSWORD}\""),
+        );
+        assert!(edited.contains(TYPED_PASSWORD), "the exec file holds it");
+        std::fs::write(&exec_path, edited).unwrap();
+
+        let cases = [
+            (
+                ProjectRepositoryResourceKind::QuickPrompt,
+                "qp-1",
+                "kronn/prompts/prompt-qp-1.md",
+            ),
+            (
+                ProjectRepositoryResourceKind::Skill,
+                "rust",
+                ".agents/skills/rust/SKILL.md",
+            ),
+            (
+                ProjectRepositoryResourceKind::QuickExec,
+                "qe-1",
+                "kronn/quick-execs/lint.yaml",
+            ),
+        ];
+        for (kind, id, path) in cases {
+            let comparison = compare(&state, &project_id, kind, id)
+                .await
+                .0
+                .data
+                .expect("comparison");
+            let shown = serde_json::to_string(&comparison).unwrap();
+            for secret in [TYPED_PASSWORD, TYPED_KEY] {
+                assert!(
+                    !shown.contains(secret),
+                    "{secret} from the repository file leaked into the {id} comparison"
+                );
+            }
+            // The repository text is there, with the secret masked out of it…
+            let repository = file_of(&comparison, path).repository.as_deref().unwrap();
+            assert!(repository.contains("***REDACTED***"), "{id}: {repository}");
+            // …and the diff shows the masked line, not the secret.
+            let diff = comparison.diff.as_deref().expect("the sides now differ");
+            assert!(diff.contains("***REDACTED***"), "{id}: {diff}");
+        }
+        let exec = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickExec,
+            "qe-1",
+        )
+        .await
+        .0
+        .data
+        .expect("comparison");
+        let description = exec
+            .field_diff
+            .iter()
+            .find(|item| item.field == "description")
+            .expect("the description differs");
+        assert!(description
+            .repository
+            .as_ref()
+            .and_then(|value| value.as_str())
+            .is_some_and(|text| text.contains("api_key=***REDACTED***")));
     }
 
     #[tokio::test]

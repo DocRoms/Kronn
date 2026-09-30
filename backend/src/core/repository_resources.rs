@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -347,6 +347,131 @@ static RENDER_MEMO: LazyLock<ContentMemo<RenderedRepositoryResource>> =
 /// whose secrets were actually masked, `hits` the ones served from memory.
 pub fn render_memo_stats() -> MemoStats {
     RENDER_MEMO.stats()
+}
+
+/// Upper bound on what the masked-text memo keeps: opening a sheet masks each
+/// file of the resource on both sides, and a sheet reopened later asks for the
+/// same texts.
+const MASKED_TEXT_MEMO_BUDGET: usize = 32 * 1024 * 1024;
+
+static MASKED_TEXT_MEMO: LazyLock<ContentMemo<String>> =
+    LazyLock::new(|| ContentMemo::new(MASKED_TEXT_MEMO_BUDGET));
+
+/// How the masked-text memo has answered so far, like [`render_memo_stats`].
+pub fn masked_text_memo_stats() -> MemoStats {
+    MASKED_TEXT_MEMO.stats()
+}
+
+/// What the masking writes in place of a secret value.
+const MASK: &str = "***REDACTED***";
+
+/// A `secret://NAME` reference in `text`, as the rendering writes it in place of
+/// a secret value: `NAME` is what the secret is called, not its value. A name
+/// that would itself be masked is someone's secret typed in the place of one,
+/// not a reference.
+fn references_shielded(text: &str) -> Option<String> {
+    const PREFIX: &str = "secret://";
+    let mut shielded = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut found = false;
+    while let Some(start) = rest.find(PREFIX) {
+        let after = &rest[start + PREFIX.len()..];
+        let name_len = after
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            .count();
+        let name = &after[..name_len];
+        let is_reference =
+            !name.is_empty() && crate::core::redact::redact_for_audit_artifact(name).1 == 0;
+        shielded.push_str(&rest[..start]);
+        if is_reference {
+            // Already in the shape the masking writes, so the patterns leave
+            // it as it is: what is left to mask is what is not a reference.
+            shielded.push_str(MASK);
+            found = true;
+            rest = &after[name_len..];
+        } else {
+            shielded.push_str(PREFIX);
+            rest = after;
+        }
+    }
+    shielded.push_str(rest);
+    found.then_some(shielded)
+}
+
+/// `text` with every secret value masked. The references to a secret that
+/// Kronn's rendering writes stay readable on a line where they are all there is
+/// to hide: the masking patterns would take `password=secret://NAME` for a
+/// password, and the sheet would lose the name of the secret the resource needs.
+/// A line that holds anything else to mask is masked whole, references included.
+fn mask_secrets(text: &str) -> String {
+    use crate::core::redact::redact_for_audit_artifact as redact;
+    if !text.contains("secret://") {
+        return redact(text).0;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let shielded: Vec<Option<String>> =
+        lines.iter().map(|line| references_shielded(line)).collect();
+    if shielded.iter().all(Option::is_none) {
+        return redact(text).0;
+    }
+    // One pass over the whole text, with the references of every line standing
+    // in as the mask: patterns that read across lines still see all of it.
+    let residual = lines
+        .iter()
+        .zip(&shielded)
+        .map(|(line, shielded)| shielded.as_deref().unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let masked = redact(&residual).0;
+    let masked_lines: Vec<&str> = masked.split('\n').collect();
+    if masked_lines.len() != lines.len() {
+        return redact(text).0;
+    }
+    // A line the pass left exactly as shielded had nothing else to hide: it
+    // gets its references back. Any other line stays as the pass wrote it.
+    lines
+        .iter()
+        .zip(&shielded)
+        .zip(&masked_lines)
+        .map(|((line, shielded), masked)| match shielded {
+            Some(shielded) if shielded == masked => *line,
+            _ => *masked,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `bytes` as text with every secret value masked: what a comparison may put in
+/// an answer, whichever side the file comes from. A repository file can hold a
+/// secret someone typed into it by hand, and Kronn's own rendering is masked
+/// already, so the same pass on both sides keeps one from showing what the other
+/// hides, and a secret present on both never reads as a difference. Memoized by
+/// the content, so a file is masked once however often it is asked for.
+pub fn masked_text(bytes: &[u8]) -> Arc<String> {
+    let key = content_memo::fingerprint(&[b"masked-text", bytes]);
+    MASKED_TEXT_MEMO
+        .get_or_try_insert(
+            &key,
+            |text: &String| text.len(),
+            || Ok::<_, std::convert::Infallible>(mask_secrets(&String::from_utf8_lossy(bytes))),
+        )
+        .unwrap_or_else(|never| match never {})
+}
+
+/// Masks every string of a JSON value the way [`masked_text`] masks a file.
+pub fn mask_value_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            let masked = masked_text(text.as_bytes());
+            if masked.as_str() != text.as_str() {
+                *text = masked.as_str().to_string();
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(mask_value_strings),
+        Value::Object(map) => map.values_mut().for_each(mask_value_strings),
+        _ => {}
+    }
 }
 
 fn rendered_weight(rendered: &RenderedRepositoryResource) -> usize {
@@ -2069,6 +2194,92 @@ mod tests {
             assert!(everything.contains("secret://KRONN_QUICKPROMPT_MEMO_LEAK_PROBE_"));
         }
         assert_eq!(fresh.hash, cached.hash);
+    }
+
+    #[test]
+    fn masked_text_keeps_the_references_of_a_rendering_and_hides_anything_else() {
+        // Kronn's own rendering: every secret is a reference already, and the
+        // text shows the names the resource needs.
+        let rendered = render_quick_prompt(
+            &sample_prompt("Use password=masked-text-probe-1 and the key sk-abcdefghijklmnopqrstuvwxyz0123456789."),
+            "masked-text",
+        )
+        .unwrap();
+        let file = rendered.files.values().next().unwrap();
+        let shown = masked_text(file);
+        assert_eq!(shown.as_bytes(), file.as_slice(), "nothing left to hide");
+        assert!(shown.contains("password=secret://KRONN_QUICKPROMPT_MASKED_TEXT_"));
+        assert!(shown.contains("\"prompt_template\": \"Use password=secret://"));
+
+        // A secret typed into a file by hand is hidden, wherever it sits.
+        for (text, secret) in [
+            (
+                "Use password=hunter2-typed-by-hand.",
+                "hunter2-typed-by-hand",
+            ),
+            (r#"{"token": "tok-typed-by-hand"}"#, "tok-typed-by-hand"),
+            (
+                "key sk-abcdefghijklmnopqrstuvwxyz0123456789 here",
+                "sk-abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+        ] {
+            let shown = masked_text(text.as_bytes());
+            assert!(!shown.contains(secret), "{secret} survived: {shown}");
+            assert!(shown.contains("***REDACTED***"), "{shown}");
+        }
+
+        // Next to a reference it is hidden just the same. A line with anything
+        // else to mask is masked whole, references included; the lines around
+        // it keep theirs.
+        let mixed = masked_text(b"password=secret://NEEDED_ONE and password=typed-beside-it");
+        assert!(!mixed.contains("typed-beside-it"), "{mixed}");
+        assert!(!mixed.contains("NEEDED_ONE"), "{mixed}");
+        let lines = masked_text(
+            b"password=secret://NEEDED_ONE\npassword=typed-on-the-next-line\n\"token\": \"secret://NEEDED_TWO\"\n",
+        );
+        assert!(!lines.contains("typed-on-the-next-line"), "{lines}");
+        assert_eq!(
+            lines.lines().collect::<Vec<_>>(),
+            [
+                "password=secret://NEEDED_ONE",
+                "password=***REDACTED***",
+                "\"token\": \"secret://NEEDED_TWO\"",
+            ]
+        );
+
+        // A "reference" whose name is a secret is not one.
+        let disguised = masked_text(b"token=secret://ghp_abcdefghijklmnopqrstuvwxyz1234567890");
+        assert!(
+            !disguised.contains("ghp_abcdefghijklmnopqrstuvwxyz1234567890"),
+            "{disguised}"
+        );
+
+        // Masked once, then served from memory; invalid UTF-8 is read lossily.
+        let before = masked_text_memo_stats();
+        masked_text("password=memo-probe-once".as_bytes());
+        masked_text("password=memo-probe-once".as_bytes());
+        assert!(masked_text_memo_stats().hits > before.hits);
+        assert!(!masked_text(&[b'a', 0xff, b'b']).is_empty());
+    }
+
+    #[test]
+    fn masking_the_strings_of_a_value_reaches_every_level() {
+        let mut value = serde_json::json!({
+            "args": ["--flag", "password=nested-probe-secret"],
+            "inner": {"note": "key sk-abcdefghijklmnopqrstuvwxyz0123456789", "n": 3},
+            "ref": "secret://KEEP_ME",
+        });
+        mask_value_strings(&mut value);
+        let shown = value.to_string();
+        assert!(!shown.contains("nested-probe-secret"), "{shown}");
+        assert!(
+            !shown.contains("sk-abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("secret://KEEP_ME") && shown.contains("\"n\":3"),
+            "{shown}"
+        );
     }
 
     fn skill_with(name: &str, description: &str, body: &str) -> Skill {
