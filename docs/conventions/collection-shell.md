@@ -66,44 +66,79 @@ The principal reviews the six rows above and performs the requested atomic epic
 closure after integration.
 [src: user: 2026-08-30: KT-508 generation 2 reassignment]
 
-## Automation filters (KT-904, moved to the sidebar by KT-912)
+## Automation sidebar (KT-904, moved to the sidebar by KT-912, regrouped by KT-916)
 
-The global Automation page puts its search, Filter and Sort in the sidebar,
-under the title row, exactly where Plugins (KT-907) and Discussions have them.
-The shell draws the search field (`globalSearchShortcut`, `showSearchClear`);
-the page fills the two slots Plugins fills: `sidebarHeaderEnd` for the Filter
-and Sort icons and `afterSidebarHeader` for their panels. Nothing sits above the
-list any more: the main column is the viewer only, and `AutomationFilterBar` is
-gone. [src: file: frontend/src/pages/WorkflowsPage.tsx:2032]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2075]
-[src: file: frontend/src/components/AutomationToolbar.tsx:49]
-[src: file: frontend/src/components/AutomationToolbar.tsx:136]
+The global Automation page puts its search, "Group by" and filters in the
+sidebar, from top to bottom: the title row (`Automatisation · N`, the `+`, help,
+the ⋯ menu and the collapse button), the search, a "Group by" control, the
+filter chips, then the list. The shell draws the title row and the search field
+(`globalSearchShortcut`, `showSearchClear`); the page fills three slots:
+`afterSidebarHeader` for the control and the chips, `moreActionsMenuExtra` for
+the sort, and `renderList` for the groups. The search has the row to itself: the
+old Filter and Sort icons, the panel of three `<select>` (KT-912) and
+`AutomationToolbar` are gone, as `AutomationFilterBar` was before them. Nothing
+sits above the list: the main column is the viewer only.
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2211]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2213]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2221]
+[src: file: frontend/src/components/AutomationSidebarControls.tsx:47]
 
-One filter set narrows both the project tree and the list (`itemFilter`, the
-search being applied by the shell). `/` focuses the search from anywhere on the
-page, sidebar included. The pure rules stay in `lib/automationFilters.ts`.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1980]
+One filter set narrows the list (`itemFilter`, the search being applied by the
+shell). `/` focuses the search from anywhere on the page, sidebar included. The
+pure rules stay in `lib/automationFilters.ts`.
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2114]
+[src: file: frontend/src/lib/automationFilters.ts:97]
 
-| Filter | Rule |
+"Group by" is a segmented control, **Type / Project / None**, Type by default,
+remembered per user in this browser (`kronn:automationGroupBy`, every access
+guarded by try/catch). The groups come from `groupAutomations`; each header has
+a dot, the name, the count and a fold, and the rows under it are 44 px tall (name,
+then trigger, steps and the state of the last run for a workflow). A group's
+fold is kept like the old sections (`kronn:automationCollapsedSections`, keys
+namespaced by grouping: `kind:<type>`, `project:<id>`); a search, a multiple
+selection and the group of the open automation always keep it open.
+[src: file: frontend/src/lib/automationFilters.ts:181]
+[src: file: frontend/src/lib/automationSidebarPrefs.ts:17]
+
+| Grouping | Rule |
 | --- | --- |
-| Type | A full-width `<select>`: All / Workflows / Quick APIs / Quick Prompts / Quick Execs / Skills, each option with its count. Choosing a type also opens its list; "All" lifts the filter. It carries the tour anchor `automation-filter-type`, which the four automation type steps of the tour target (they open the panel and pick their type). [src: file: frontend/src/components/tour/tourSteps.ts:258] |
-| State | A `<select>`: All / Favorites / Active / Inactive, with counts. Only a disabled workflow is inactive: a Quick Prompt, API or Exec has no off switch, so it always counts as active. [src: file: frontend/src/lib/automationFilters.ts:44-51] |
-| Project | A `<select>`: all, no project, or one project. A skill is attached to every project that lists it in `default_skill_ids`, so it matches each of them (and "no project" when none does). [src: file: frontend/src/lib/automationFilters.ts:56-67] |
-| Counts | Every option counts what choosing it would show given the other filters and the search. [src: file: frontend/src/lib/automationFilters.ts:82-109] |
-| Clear | "Clear filters" resets type, state and project (not the search, which has its own ✕). It shows in the panel and in the empty list while a filter is set. The Filter icon stays lit for as long as one is. [src: file: frontend/src/pages/WorkflowsPage.tsx:1949] |
-| Sort | Name / Last modified / Type, plus a reverse toggle. Favorites stay first whatever the criterion; the direction only flips each side of that line. [src: file: frontend/src/lib/automationSort.ts:68] |
+| Type | One group per type, in the order Workflows / Quick Prompts / Quick APIs / Quick Execs / Skills, empty ones left out. The row no longer repeats its type. [src: file: frontend/src/lib/automationFilters.ts:13] |
+| Project | One group per project (by name), then "No project". A skill is attached to every project that lists it in `default_skill_ids`, so it sits under each of them (KT-914). Automations whose only projects are hidden from the page are not listed, as in the old project tree. |
+| None | One flat list, in the sort order. The row names its type again. |
+
+The filters are chips on a line that wraps:
+
+| Chip | Rule |
+| --- | --- |
+| Type | Reads "All" until a type is picked. A click opens the list of types (All, then the five types), each with its count; choosing one also opens its list in the main column, "All" lifts the filter. It carries the tour anchor `automation-filter-type` (and `data-value`, the chosen type), which the four automation type steps of the tour target: they open the list and pick their type. [src: file: frontend/src/components/tour/tourSteps.ts:260] |
+| Pinned, Active, Recent | Independent toggles that stack. "Active" leaves out only a disabled workflow: a Quick Prompt, API, Exec or Skill has no off switch, so it always counts as active. "Recent" keeps what was opened lately and orders it by last opening, favorites not pulled up. [src: file: frontend/src/lib/automationFilters.ts:74] |
+| Project | "+ Project" opens the list of the projects that hold something (and "No project"), each with its count; the choice shows as a removable chip `name ×`, whose name reopens the list. [src: file: frontend/src/lib/automationFilters.ts:142] |
+| Counts | Every count reads what choosing it would show given the other filters and the search. [src: file: frontend/src/lib/automationFilters.ts:123] |
+| Clear | "Clear filters" shows only while a chip is set (a type other than "All" counts), resets every chip and leaves the search alone (it has its own ✕). The empty list offers it too. [src: file: frontend/src/lib/automationFilters.ts:113] |
+
+The "Recent" history is this browser's (`kronn:automationLastOpened`): opening
+an automation from the sidebar stamps it, and only the latest 20 are kept.
+[src: file: frontend/src/lib/automationSidebarPrefs.ts:61]
+
+The sort is set from the header's ⋯ menu, above "Select multiple": Name, Last
+modified, Last opened (`menuitemradio`) and a reverse toggle (`menuitemcheckbox`),
+which the shell's arrow keys walk like any menu item. Favorites stay first
+whatever the criterion; the direction only flips each side of that line.
+[src: file: frontend/src/components/AutomationSidebarControls.tsx:274]
+[src: file: frontend/src/lib/automationSort.ts:75]
+[src: file: frontend/src/components/CollectionShell.tsx:333]
 
 Skills (KT-914) are read from the catalog, not created here: the row opens a
 read-only sheet (`SkillSheet`) whose `SKILL.md` reuses the safe Markdown of the
 repository resources, and editing stays in Config › Skills. A skill has no
 server-side pin or modification date, so its favorites are kept in the browser
-and it ranks after every dated automation in Recent.
+and it ranks after every dated automation when sorted by last modification.
 [src: file: frontend/src/lib/automationSkills.ts:1] [src: file: frontend/src/components/SkillSheet.tsx:1]
 
-The panels stack one select per row in a single shrinkable column, so nothing
-scrolls sideways at 400 px, where the sidebar is the usual drawer. There is no
-chip row and no "Filters (n)" fold on this page any more (`FilterFold` remains
-for the project tab below).
+At 400 px, where the sidebar is the usual drawer, nothing scrolls sideways: the
+chips wrap onto new lines, "Group by" takes the full width, and a list opens over
+the width of the controls instead of hanging off its chip. There is no "Filters
+(n)" fold on this page any more (`FilterFold` remains for the project tab below).
 
 The project tab's Automation sub-tab (`ProjectRepositoryResourcesPanel`) is
 unchanged: it keeps the fold and the tab's own `rr-chip` for a type filter, All

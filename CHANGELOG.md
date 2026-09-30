@@ -160,6 +160,24 @@ Release notes for 0.9.3 and earlier are available in the
   and Project, and "Clear filters"; the icon stays lit while one is set. The
   filter bar KT-904 had put above the list is removed, and `/` still reaches
   the search.
+- The Automation sidebar is regrouped and lighter (KT-916). Under the search, a
+  "Group by" control — Type, Project or None, Type by default and remembered in
+  this browser — splits the list into collapsible groups (a coloured dot, the
+  name and the count), or keeps it flat. The panel of three selects and the
+  separate Sort button are gone: the filters are chips on a line that wraps —
+  a type chip that reads "All" until you pick one (its list shows each type with
+  its count), "Pinned", "Active" and "Recent" toggles that stack with it and with
+  the search, and "+ Project", which turns into a removable `project ×` chip.
+  "Clear filters" appears only while a chip is set. Rows are 44 px: name, then
+  the trigger, the step count and the state of the last run for a workflow; the
+  pin and the ⋯ menu still show on hover. The Favorites and Recent sections are
+  replaced by the "Pinned" and "Recent" chips ("Recent" keeps the last 20
+  automations you opened, latest first). The order is set from the header's ⋯
+  menu: name, last modified, last opened, and reverse. A skill still sits under
+  every project that lists it. The type list is now in the order Workflows,
+  Quick Prompts, Quick APIs, Quick Execs, Skills, and the "Inactive" state
+  filter is gone (an inactive workflow is shown by its ○ icon; "Active" hides
+  it).
 - `not_published`, `repository_modified` and `kronn_modified` are now
   `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
   only in the repository is `repository_only`. A resource that exists on both

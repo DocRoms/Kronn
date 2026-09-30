@@ -118,7 +118,8 @@ export interface CollectionShellSlots<TItem> {
   /** Extra items in the shared "…" menu, alongside the built-in "select
    *  multiple" one (e.g. "mark all read", "import"). The menu closes itself
    *  on any click inside it (bubbling), so an item only needs its own
-   *  `onClick` for its actual action. */
+   *  `onClick` for its actual action. Arrow keys walk every `menuitem`,
+   *  `menuitemradio` and `menuitemcheckbox` button of the menu. */
   moreActionsMenuExtra?: () => React.ReactNode;
   /** Extra custom content in the selection-mode title-actions row, rendered
    *  before the mapped `actions` — for a control that doesn't fit the plain
@@ -329,7 +330,7 @@ export function CollectionShell<TItem>({
 
   useEffect(() => {
     if (!menuOpen) return;
-    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus();
+    menuRef.current?.querySelector<HTMLButtonElement>('[role^="menuitem"]:not([disabled])')?.focus();
     const close = (event: PointerEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) closeMenu(true);
     };
@@ -407,7 +408,7 @@ export function CollectionShell<TItem>({
 
   const onMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]'))
       .filter(item => !item.disabled);
     if (items.length === 0) return;
     const current = items.indexOf(document.activeElement as HTMLButtonElement);

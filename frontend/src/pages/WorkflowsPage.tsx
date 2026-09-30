@@ -11,7 +11,7 @@ import { userError } from '../lib/userError';
 import { useApi } from '../hooks/useApi';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
-  AgentType, AgentsConfig, ModelTier, StepResult, QuickPrompt, CreateQuickPromptRequest,
+  AgentType, AgentsConfig, ModelTier, RunStatus, StepResult, QuickPrompt, CreateQuickPromptRequest,
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
   JsonValue, Skill,
 } from '../types/generated';
@@ -47,7 +47,6 @@ import { describeRedacted, exportRedactionNotice, redactedFieldsIn } from '../li
 import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
-import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { ListControls } from '../components/ListControls';
@@ -55,13 +54,11 @@ import { CopyIdPill } from '../components/CopyIdPill';
 import { ConfirmDeleteButton } from '../components/ConfirmDeleteButton';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
-import { CollectionProjectTree } from '../components/CollectionProjectTree';
 import {
-  AutomationToolbarPanel,
-  AutomationToolbarToggle,
-  type AutomationSearchPanel,
-  type AutomationToolbarState,
-} from '../components/AutomationToolbar';
+  AutomationSidebarControls,
+  AutomationSortMenuItems,
+  type AutomationControlsState,
+} from '../components/AutomationSidebarControls';
 import {
   SKILL_UPDATED_AT,
   projectsUsingSkill,
@@ -69,15 +66,26 @@ import {
   writeSkillFavorites,
 } from '../lib/automationSkills';
 import {
+  AUTOMATION_KIND_LABEL_KEYS,
+  NO_AUTOMATION_FILTERS,
   activeAutomationFilterCount,
-  automationProjectIds,
   countAutomationKinds,
-  countAutomationStates,
+  countAutomationProjects,
+  groupAutomations,
   matchesAutomationFilters,
   type AutomationFilters,
+  type AutomationGroup,
+  type AutomationGroupBy,
   type AutomationKindFilter,
-  type AutomationStateFilter,
 } from '../lib/automationFilters';
+import {
+  readAutomationGroupBy,
+  readAutomationLastOpened,
+  withAutomationOpened,
+  writeAutomationGroupBy,
+  writeAutomationLastOpened,
+  type AutomationLastOpened,
+} from '../lib/automationSidebarPrefs';
 import {
   sortAutomationResources,
   sortQuickApis,
@@ -128,6 +136,8 @@ type AutomationResource = {
   meta: string;
   icon: string;
   updatedAt: string;
+  /** Epoch ms of the last opening from this sidebar; null: not lately. */
+  lastOpenedAt: number | null;
   workflow?: WorkflowSummary;
   quickApi?: QuickApi;
   quickPrompt?: QuickPrompt;
@@ -273,6 +283,14 @@ function readCollapsedAutomationSections(): Set<string> {
   }
 }
 
+/** The dot of a project group: one colour per project, kept across sessions
+ *  (derived from its id, as the organisation colours of the project tree are). */
+function projectDotColor(projectId: string | null): string {
+  if (!projectId) return 'var(--kr-text-dim)';
+  const hue = [...projectId].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 360, 0);
+  return `hsl(${hue}, 50%, 60%)`;
+}
+
 interface WorkflowsPageProps {
   projects: Project[];
   installedAgentTypes?: AgentType[];
@@ -318,6 +336,19 @@ const TRIGGER_LABELS: Record<string, string> = {
   manual: 'Manuel',
 };
 
+/** How a workflow's last run reads in its sidebar row. */
+const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
+  Pending: 'run.status.queued',
+  Running: 'run.status.running',
+  Success: 'run.status.success',
+  Partial: 'run.status.partial',
+  Failed: 'run.status.failed',
+  Cancelled: 'run.status.cancelled',
+  WaitingApproval: 'run.status.waiting_approval',
+  StoppedByGuard: 'run.status.stopped_by_guard',
+  Interrupted: 'run.status.interrupted',
+};
+
 const RUN_FETCH_PAGE_SIZE = 10;
 const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
@@ -352,8 +383,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [automationKindFilter, setAutomationKindFilter] = useState<AutomationTab | 'all'>(
     postImprovedQpId ? 'quickPrompts' : 'all',
   );
-  const [automationStateFilter, setAutomationStateFilter] = useState<AutomationStateFilter>('all');
-  const [automationSearchPanel, setAutomationSearchPanel] = useState<AutomationSearchPanel>(null);
+  const [automationPinnedFilter, setAutomationPinnedFilter] = useState(false);
+  const [automationActiveFilter, setAutomationActiveFilter] = useState(false);
+  const [automationRecentFilter, setAutomationRecentFilter] = useState(false);
+  // "Group by" is remembered per user (this browser), the last openings feed
+  // the Recent chip and the "last opened" sort.
+  const [automationGroupBy, setAutomationGroupByState] = useState<AutomationGroupBy>(readAutomationGroupBy);
+  const [automationLastOpened, setAutomationLastOpened] = useState<AutomationLastOpened>(readAutomationLastOpened);
   const [automationSort, setAutomationSort] = useState<AutomationSort>('name');
   const [automationSortReversed, setAutomationSortReversed] = useState(false);
   const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<string>>(
@@ -775,40 +811,56 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     return groups;
   }, [workflows, t]);
 
-  const automationResources = useMemo<AutomationResource[]>(() => sortAutomationResources([
-    ...workflows.map(workflow => ({
-      id: `workflows:${workflow.id}`, resourceId: workflow.id, kind: 'workflows' as const, name: workflow.name, projectId: workflow.project_id,
-      pinned: workflow.pinned, searchText: `${workflow.name} ${workflow.project_name ?? ''} ${workflow.trigger_type}`,
-      meta: `${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type} · ${workflow.step_count} step${workflow.step_count > 1 ? 's' : ''}`,
-      icon: workflow.enabled ? '⚡' : '○', updatedAt: workflow.created_at, workflow,
-    })),
-    ...(quickApiList ?? []).map(quickApi => ({
-      id: `quickApis:${quickApi.id}`, resourceId: quickApi.id, kind: 'quickApis' as const, name: quickApi.name, projectId: quickApi.project_id,
-      pinned: quickApi.pinned, searchText: `${quickApi.name} ${quickApi.description ?? ''} ${quickApi.api_plugin_slug} ${quickApi.api_endpoint_path}`,
-      meta: `${quickApi.api_method ?? 'GET'} · ${quickApi.api_endpoint_path}`, icon: quickApi.icon, updatedAt: quickApi.updated_at, quickApi,
-    })),
-    ...(quickPromptList ?? []).map(quickPrompt => ({
-      id: `quickPrompts:${quickPrompt.id}`, resourceId: quickPrompt.id, kind: 'quickPrompts' as const, name: quickPrompt.name, projectId: quickPrompt.project_id,
-      pinned: quickPrompt.pinned, searchText: `${quickPrompt.name} ${quickPrompt.description ?? ''} ${AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent}`,
-      meta: AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent, icon: quickPrompt.icon, updatedAt: quickPrompt.updated_at, quickPrompt,
-    })),
-    ...(quickExecList ?? []).map(quickExec => ({
-      id: `quickExecs:${quickExec.id}`, resourceId: quickExec.id, kind: 'quickExecs' as const, name: quickExec.name, projectId: quickExec.project_id,
-      pinned: quickExec.pinned, searchText: `${quickExec.name} ${quickExec.description ?? ''} ${quickExec.command} ${quickExec.output_format}`,
-      meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`, icon: quickExec.icon, updatedAt: quickExec.updated_at, quickExec,
-    })),
-    ...(skillsCatalog ?? []).map(skill => {
-      // A project that no longer exists (or is hidden from this page) cannot
-      // hold the skill: it then reads as attached to none.
-      const projectIds = projectsUsingSkill(skill.id, projects).map(project => project.id);
-      return {
-        id: `skills:${skill.id}`, resourceId: skill.id, kind: 'skills' as const, name: skill.name, projectId: null, projectIds,
-        pinned: skillFavorites.has(skill.id), searchText: `${skill.name} ${skill.description}`,
-        meta: `${t(`skills.${skill.category.toLowerCase()}`)} · ${t(skill.is_builtin ? 'skills.builtin' : 'skills.custom')}`,
-        icon: skill.icon || '✨', updatedAt: SKILL_UPDATED_AT, skill,
-      };
-    }),
-  ], automationSort, automationSortReversed), [automationSort, automationSortReversed, projects, quickApiList, quickExecList, quickPromptList, skillFavorites, skillsCatalog, t, workflows]);
+  const automationResources = useMemo<AutomationResource[]>(() => {
+    const resources = [
+      ...workflows.map(workflow => {
+        const lastRunKey = workflow.last_run ? WORKFLOW_RUN_STATUS_KEYS[workflow.last_run.status] : undefined;
+        return {
+          id: `workflows:${workflow.id}`, resourceId: workflow.id, kind: 'workflows' as const, name: workflow.name, projectId: workflow.project_id,
+          pinned: workflow.pinned, searchText: `${workflow.name} ${workflow.project_name ?? ''} ${workflow.trigger_type}`,
+          meta: [
+            TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type,
+            `${workflow.step_count} step${workflow.step_count > 1 ? 's' : ''}`,
+            lastRunKey ? t(lastRunKey) : null,
+          ].filter(Boolean).join(' · '),
+          icon: workflow.enabled ? '⚡' : '○', updatedAt: workflow.created_at, workflow,
+        };
+      }),
+      ...(quickApiList ?? []).map(quickApi => ({
+        id: `quickApis:${quickApi.id}`, resourceId: quickApi.id, kind: 'quickApis' as const, name: quickApi.name, projectId: quickApi.project_id,
+        pinned: quickApi.pinned, searchText: `${quickApi.name} ${quickApi.description ?? ''} ${quickApi.api_plugin_slug} ${quickApi.api_endpoint_path}`,
+        meta: `${quickApi.api_method ?? 'GET'} · ${quickApi.api_endpoint_path}`, icon: quickApi.icon, updatedAt: quickApi.updated_at, quickApi,
+      })),
+      ...(quickPromptList ?? []).map(quickPrompt => ({
+        id: `quickPrompts:${quickPrompt.id}`, resourceId: quickPrompt.id, kind: 'quickPrompts' as const, name: quickPrompt.name, projectId: quickPrompt.project_id,
+        pinned: quickPrompt.pinned, searchText: `${quickPrompt.name} ${quickPrompt.description ?? ''} ${AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent}`,
+        meta: AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent, icon: quickPrompt.icon, updatedAt: quickPrompt.updated_at, quickPrompt,
+      })),
+      ...(quickExecList ?? []).map(quickExec => ({
+        id: `quickExecs:${quickExec.id}`, resourceId: quickExec.id, kind: 'quickExecs' as const, name: quickExec.name, projectId: quickExec.project_id,
+        pinned: quickExec.pinned, searchText: `${quickExec.name} ${quickExec.description ?? ''} ${quickExec.command} ${quickExec.output_format}`,
+        meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`, icon: quickExec.icon, updatedAt: quickExec.updated_at, quickExec,
+      })),
+      ...(skillsCatalog ?? []).map(skill => {
+        // A project that no longer exists (or is hidden from this page) cannot
+        // hold the skill: it then reads as attached to none.
+        const projectIds = projectsUsingSkill(skill.id, projects).map(project => project.id);
+        return {
+          id: `skills:${skill.id}`, resourceId: skill.id, kind: 'skills' as const, name: skill.name, projectId: null, projectIds,
+          pinned: skillFavorites.has(skill.id), searchText: `${skill.name} ${skill.description}`,
+          meta: `${t(`skills.${skill.category.toLowerCase()}`)} · ${t(skill.is_builtin ? 'skills.builtin' : 'skills.custom')}`,
+          icon: skill.icon || '✨', updatedAt: SKILL_UPDATED_AT, skill,
+        };
+      }),
+    ].map(resource => ({ ...resource, lastOpenedAt: automationLastOpened[resource.id] ?? null }));
+    // The Recent chip is a history: newest opening first, favorites not pulled up.
+    return sortAutomationResources(
+      resources,
+      automationRecentFilter ? 'opened' : automationSort,
+      automationSortReversed,
+      { pinnedFirst: !automationRecentFilter },
+    );
+  }, [automationLastOpened, automationRecentFilter, automationSort, automationSortReversed, projects, quickApiList, quickExecList, quickPromptList, skillFavorites, skillsCatalog, t, workflows]);
   const visibleQuickPrompts = selectedQuickPromptId
     ? (quickPromptList ?? []).filter(item => item.id === selectedQuickPromptId)
     : sortedQuickPrompts;
@@ -1928,7 +1980,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     else setShowCreateQE(true);
   };
 
-  // Choosing a type in the Filter panel also opens its list; "All" lifts it.
+  // Choosing a type on the type chip also opens its list; "All" lifts it.
   const selectAutomationKind = (kind: AutomationTab) => {
     clearAutomationEditors();
     setTab(kind);
@@ -1947,10 +1999,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  const isAutomationSectionCollapsed = (kind: string) => (
-    !automationQuery.trim() && collapsedAutomationSections.has(kind)
-  );
-
   const toggleAutomationSection = (section: string) => {
     if (automationQuery.trim()) return;
     setCollapsedAutomationSections(current => {
@@ -1960,7 +2008,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       return next;
     });
   };
-  const toggleFavoritesSection = () => toggleAutomationSection('favorites');
+
+  const setAutomationGroupBy = (groupBy: AutomationGroupBy) => {
+    setAutomationGroupByState(groupBy);
+    writeAutomationGroupBy(groupBy);
+  };
 
   const openQuickPrompt = (quickPrompt: QuickPrompt) => {
     clearAutomationEditors();
@@ -1983,6 +2035,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setSelectedSkillId(skill.id);
   };
   const openAutomationResource = (resource: AutomationResource) => {
+    // Feeds the Recent chip and the "last opened" sort.
+    const opened = withAutomationOpened(automationLastOpened, resource.id);
+    setAutomationLastOpened(opened);
+    writeAutomationLastOpened(opened);
     if (resource.workflow) {
       clearAutomationEditors();
       setTab('workflows');
@@ -2010,37 +2066,41 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   );
   const automationFilters: AutomationFilters = {
     kind: automationKindFilter,
-    state: automationStateFilter,
+    pinned: automationPinnedFilter,
+    active: automationActiveFilter,
     projectId: automationProjectFilter,
+    recent: automationRecentFilter,
     query: automationQuery,
   };
-  const automationKindCounts = countAutomationKinds(automationResources, automationFilters);
-  const automationStateCounts = countAutomationStates(automationResources, automationFilters);
   const selectAutomationKindFilter = (kind: AutomationKindFilter) => {
     if (kind === 'all') setAutomationKindFilter('all');
     else selectAutomationKind(kind);
   };
   const clearAutomationFilters = () => {
-    setAutomationKindFilter('all');
-    setAutomationStateFilter('all');
-    setAutomationProjectFilter('all');
+    setAutomationKindFilter(NO_AUTOMATION_FILTERS.kind);
+    setAutomationPinnedFilter(NO_AUTOMATION_FILTERS.pinned);
+    setAutomationActiveFilter(NO_AUTOMATION_FILTERS.active);
+    setAutomationProjectFilter(NO_AUTOMATION_FILTERS.projectId);
+    setAutomationRecentFilter(NO_AUTOMATION_FILTERS.recent);
   };
-  const automationToolbar: AutomationToolbarState = {
+  const automationControls: AutomationControlsState = {
+    groupBy: automationGroupBy,
+    onGroupByChange: setAutomationGroupBy,
     filters: automationFilters,
-    kindCounts: automationKindCounts,
-    stateCounts: automationStateCounts,
+    kindCounts: countAutomationKinds(automationResources, automationFilters),
+    projectCounts: countAutomationProjects(automationResources, automationFilters),
     projects,
-    panel: automationSearchPanel,
-    setPanel: setAutomationSearchPanel,
-    sort: automationSort,
-    setSort: setAutomationSort,
-    sortReversed: automationSortReversed,
-    setSortReversed: setAutomationSortReversed,
     onKindChange: selectAutomationKindFilter,
-    onStateChange: setAutomationStateFilter,
+    onPinnedChange: setAutomationPinnedFilter,
+    onActiveChange: setAutomationActiveFilter,
+    onRecentChange: setAutomationRecentFilter,
     onProjectChange: setAutomationProjectFilter,
     onClear: clearAutomationFilters,
   };
+  // Project groups are listed by name; the resources are already sorted.
+  const automationProjectOrder = [...projects]
+    .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true }))
+    .map(project => project.id);
   return (
     <div className="automation-page" data-has-selection={automationHasSelection}>
       <CollectionShell<AutomationResource>
@@ -2050,7 +2110,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         items={automationResources}
         getId={resource => resource.id}
         getLabel={resource => resource.searchText}
-        // The search is applied by the shell; the Filter panel owns the rest.
+        // The search is applied by the shell; the chips own the rest.
         itemFilter={resource => matchesAutomationFilters(resource, automationFilters, ['query'])}
         persistence={{
           query: automationQuery,
@@ -2147,25 +2207,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </ContextHelp>
         </>}
         slots={{
-          // Search, Filter and Sort sit under the title, as on Plugins (KT-912).
-          afterSidebarHeader: <AutomationToolbarPanel toolbar={automationToolbar} />,
-          sidebarHeaderEnd: <AutomationToolbarToggle toolbar={automationToolbar} />,
+          // Under the search: the "Group by" control and the filter chips (KT-916).
+          afterSidebarHeader: <AutomationSidebarControls controls={automationControls} />,
+          // The order of the list is set from the ⋯ menu of the header.
+          moreActionsMenuExtra: () => (
+            <AutomationSortMenuItems
+              sort={automationSort}
+              onSortChange={setAutomationSort}
+              reversed={automationSortReversed}
+              onReversedChange={setAutomationSortReversed}
+            />
+          ),
           renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
-            const sidebarWorkflows = visibleItems.flatMap(resource => resource.workflow ? [resource.workflow] : []);
-            const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);
-            const sidebarQuickPrompts = visibleItems.flatMap(resource => resource.quickPrompt ? [resource.quickPrompt] : []);
-            const sidebarQuickExecs = visibleItems.flatMap(resource => resource.quickExec ? [resource.quickExec] : []);
-            const sidebarSkills = visibleItems.flatMap(resource => resource.skill ? [resource.skill] : []);
-            // Selection mode renders each item only in the canonical project
-            // tree, avoiding duplicate checkboxes in Favorites and Recents.
-            const sidebarFavoriteCount = canMultiSelect ? 0 : visibleItems.filter(resource => resource.pinned).length;
-            const rowProps = (kind: AutomationTab, resourceId: string) => {
-              const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
-              return resource ? getRowProps(resource) : undefined;
-            };
-            const deleteFor = (kind: AutomationTab, resourceId: string) => async () => {
-              const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
-              if (!resource) return;
+            const deleteFor = (resource: AutomationResource) => async () => {
               if (!confirm(t('collection.deleteConfirm', 1))) return;
               try {
                 await deleteAutomationResource(resource);
@@ -2181,10 +2235,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               refetchQE();
               refetchSkills();
             };
-            const selectionFor = (kind: AutomationTab, resourceId: string) => {
-              if (!canMultiSelect) return undefined;
-              const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
-              if (!resource || !deletable(resource)) return undefined;
+            const selectionFor = (resource: AutomationResource) => {
+              if (!canMultiSelect || !deletable(resource)) return undefined;
               return {
                 checked: isMultiSelected(resource),
                 onToggle: () => toggleMultiSelection(resource.id),
@@ -2198,211 +2250,92 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     : resource.kind === 'skills' ? tab === 'skills' && selectedSkillId === resource.resourceId
                       : tab === 'quickExecs' && selectedQuickExecId === resource.resourceId
             );
-            const kindName = (kind: AutomationTab) => t(
-              kind === 'workflows' ? 'wf.tabWorkflows'
-                : kind === 'quickApis' ? 'wf.tabQuickApis'
-                  : kind === 'quickPrompts' ? 'wf.tabQuickPrompts'
-                    : kind === 'skills' ? 'wf.tabSkills' : 'wf.tabQuickExecs',
+            const kindName = (kind: AutomationTab) => t(AUTOMATION_KIND_LABEL_KEYS[kind]);
+            const togglePinned = (resource: AutomationResource) => {
+              if (resource.workflow) void handleTogglePin(resource.workflow);
+              else if (resource.quickApi) void toggleQuickFavorite('quickApis', resource.quickApi.id, resource.quickApi.pinned, quickApisApi.setPinned, refetchQA);
+              else if (resource.quickPrompt) void toggleQuickFavorite('quickPrompts', resource.quickPrompt.id, resource.quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP);
+              else if (resource.quickExec) void toggleQuickFavorite('quickExecs', resource.quickExec.id, resource.quickExec.pinned, quickExecsApi.setPinned, refetchQE);
+              else if (resource.skill) toggleSkillFavorite(resource.skill.id);
+            };
+            // A type group already says the type: the row keeps the rest.
+            const rowMeta = (resource: AutomationResource) => (
+              automationGroupBy === 'kind' ? resource.meta : `${kindName(resource.kind)} · ${resource.meta}`
             );
-            const renderResource = (resource: AutomationResource, prefix: string) => {
-              const open = () => {
-                if (resource.workflow) { clearAutomationEditors(); setTab('workflows'); void openDetail(resource.workflow.id); }
-                else if (resource.quickApi) openQuickApi(resource.quickApi);
-                else if (resource.quickPrompt) openQuickPrompt(resource.quickPrompt);
-                else if (resource.quickExec) openQuickExec(resource.quickExec);
-                else if (resource.skill) openSkill(resource.skill);
-              };
-              const togglePinned = () => {
-                if (resource.workflow) void handleTogglePin(resource.workflow);
-                else if (resource.quickApi) void toggleQuickFavorite('quickApis', resource.quickApi.id, resource.quickApi.pinned, quickApisApi.setPinned, refetchQA);
-                else if (resource.quickPrompt) void toggleQuickFavorite('quickPrompts', resource.quickPrompt.id, resource.quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP);
-                else if (resource.quickExec) void toggleQuickFavorite('quickExecs', resource.quickExec.id, resource.quickExec.pinned, quickExecsApi.setPinned, refetchQE);
-                else if (resource.skill) toggleSkillFavorite(resource.skill.id);
-              };
-              return <AutomationResourceRow
-                key={`${prefix}-${resource.id}`}
+            const renderResource = (resource: AutomationResource, groupKey: string) => (
+              <AutomationResourceRow
+                key={`${groupKey}-${resource.id}`}
                 resourceId={resource.resourceId}
                 name={resource.name}
-                meta={`${kindName(resource.kind)} · ${resource.meta}`}
+                meta={rowMeta(resource)}
                 icon={resource.icon}
                 running={resource.workflow ? isWorkflowRunning(resource.workflow.last_run?.status) : false}
                 active={activeResource(resource)}
                 pinned={resource.pinned}
-                openLabel={prefix === 'recent'
-                  ? `${t('disc.recent')} · ${t('automation.openResource', resource.name)}`
-                  : t('automation.openResource', resource.name)}
+                openLabel={t('automation.openResource', resource.name)}
                 pinLabel={t('wf.pin')}
                 unpinLabel={t('wf.unpin')}
-                actionItemName={prefix === 'recent' ? `${t('disc.recent')} · ${resource.name}` : undefined}
-                onOpen={open}
-                onTogglePinned={togglePinned}
+                onOpen={() => openAutomationResource(resource)}
+                onTogglePinned={() => togglePinned(resource)}
                 rowProps={getRowProps(resource)}
-                selection={selectionFor(resource.kind, resource.resourceId)}
-                onDelete={deletable(resource) ? deleteFor(resource.kind, resource.resourceId) : undefined}
-              />;
-            };
-            const recentResources = canMultiSelect ? [] : [...visibleItems]
-              .filter(resource => !resource.pinned)
-              .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
-              .slice(0, 10);
-            return <>
-        <div className="disc-sidebar-list automation-sidebar-items" data-tour-id="automation-kinds">
-          {sidebarFavoriteCount > 0 && (
-            <div
-              className="disc-sidebar-section disc-sidebar-favorites automation-sidebar-section"
-              data-expanded={!isAutomationSectionCollapsed('favorites')}
-            >
-              <CollectionFavoritesHeader
-                label={t('disc.favorites')}
-                count={sidebarFavoriteCount}
-                expanded={!isAutomationSectionCollapsed('favorites')}
-                onToggle={toggleFavoritesSection}
+                selection={selectionFor(resource)}
+                onDelete={deletable(resource) ? deleteFor(resource) : undefined}
               />
-              {!isAutomationSectionCollapsed('favorites') && sidebarWorkflows.filter(item => item.pinned).map(workflow => (
-                <AutomationResourceRow
-                  key={`favorite-workflow-${workflow.id}`}
-                  resourceId={workflow.id}
-                  name={workflow.name}
-                  meta={`${t('wf.tabWorkflows')} · ${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type}`}
-                  icon={workflow.enabled ? '⚡' : '○'}
-                  running={isWorkflowRunning(workflow.last_run?.status)}
-                  active={tab === 'workflows' && selectedId === workflow.id}
-                  pinned={workflow.pinned}
-                  openLabel={t('automation.openResource', workflow.name)}
-                  pinLabel={t('wf.pin')}
-                  unpinLabel={t('wf.unpin')}
-                  onOpen={() => { clearAutomationEditors(); setTab('workflows'); void openDetail(workflow.id); }}
-                  onTogglePinned={() => { void handleTogglePin(workflow); }}
-                  rowProps={rowProps('workflows', workflow.id)}
-                  selection={selectionFor('workflows', workflow.id)}
-                  onDelete={deleteFor('workflows', workflow.id)}
-                />
-              ))}
-              {!isAutomationSectionCollapsed('favorites') && sidebarQuickApis.filter(item => item.pinned).map(quickApi => (
-                <AutomationResourceRow
-                  key={`favorite-quick-api-${quickApi.id}`}
-                  resourceId={quickApi.id}
-                  name={quickApi.name}
-                  meta={`${t('wf.tabQuickApis')} · ${quickApi.api_method ?? 'GET'}`}
-                  icon={quickApi.icon}
-                  active={tab === 'quickApis' && selectedQuickApiId === quickApi.id}
-                  pinned={quickApi.pinned}
-                  openLabel={t('automation.openResource', quickApi.name)}
-                  pinLabel={t('wf.pin')}
-                  unpinLabel={t('wf.unpin')}
-                  onOpen={() => openQuickApi(quickApi)}
-                  onTogglePinned={() => { void toggleQuickFavorite('quickApis', quickApi.id, quickApi.pinned, quickApisApi.setPinned, refetchQA); }}
-                  rowProps={rowProps('quickApis', quickApi.id)}
-                  selection={selectionFor('quickApis', quickApi.id)}
-                  onDelete={deleteFor('quickApis', quickApi.id)}
-                />
-              ))}
-              {!isAutomationSectionCollapsed('favorites') && sidebarQuickPrompts.filter(item => item.pinned).map(quickPrompt => (
-                <AutomationResourceRow
-                  key={`favorite-quick-prompt-${quickPrompt.id}`}
-                  resourceId={quickPrompt.id}
-                  name={quickPrompt.name}
-                  meta={`${t('wf.tabQuickPrompts')} · ${AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent}`}
-                  icon={quickPrompt.icon}
-                  active={tab === 'quickPrompts' && selectedQuickPromptId === quickPrompt.id}
-                  pinned={quickPrompt.pinned}
-                  openLabel={t('automation.openResource', quickPrompt.name)}
-                  pinLabel={t('wf.pin')}
-                  unpinLabel={t('wf.unpin')}
-                  onOpen={() => openQuickPrompt(quickPrompt)}
-                  onTogglePinned={() => { void toggleQuickFavorite('quickPrompts', quickPrompt.id, quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP); }}
-                  rowProps={rowProps('quickPrompts', quickPrompt.id)}
-                  selection={selectionFor('quickPrompts', quickPrompt.id)}
-                  onDelete={deleteFor('quickPrompts', quickPrompt.id)}
-                />
-              ))}
-              {!isAutomationSectionCollapsed('favorites') && sidebarQuickExecs.filter(item => item.pinned).map(quickExec => (
-                <AutomationResourceRow
-                  key={`favorite-quick-exec-${quickExec.id}`}
-                  resourceId={quickExec.id}
-                  name={quickExec.name}
-                  meta={`${t('wf.tabQuickExecs')} · ${quickExec.output_format.toUpperCase()}`}
-                  icon={quickExec.icon}
-                  active={tab === 'quickExecs' && selectedQuickExecId === quickExec.id}
-                  pinned={quickExec.pinned}
-                  openLabel={t('automation.openResource', quickExec.name)}
-                  pinLabel={t('wf.pin')}
-                  unpinLabel={t('wf.unpin')}
-                  onOpen={() => openQuickExec(quickExec)}
-                  onTogglePinned={() => { void toggleQuickFavorite('quickExecs', quickExec.id, quickExec.pinned, quickExecsApi.setPinned, refetchQE); }}
-                  rowProps={rowProps('quickExecs', quickExec.id)}
-                  selection={selectionFor('quickExecs', quickExec.id)}
-                  onDelete={deleteFor('quickExecs', quickExec.id)}
-                />
-              ))}
-              {!isAutomationSectionCollapsed('favorites') && sidebarSkills.filter(item => skillFavorites.has(item.id)).map(skill => (
-                <AutomationResourceRow
-                  key={`favorite-skill-${skill.id}`}
-                  resourceId={skill.id}
-                  name={skill.name}
-                  meta={`${t('wf.tabSkills')} · ${t(`skills.${skill.category.toLowerCase()}`)}`}
-                  icon={skill.icon || '✨'}
-                  active={tab === 'skills' && selectedSkillId === skill.id}
-                  pinned
-                  openLabel={t('automation.openResource', skill.name)}
-                  pinLabel={t('wf.pin')}
-                  unpinLabel={t('wf.unpin')}
-                  onOpen={() => openSkill(skill)}
-                  onTogglePinned={() => toggleSkillFavorite(skill.id)}
-                  rowProps={rowProps('skills', skill.id)}
-                  selection={selectionFor('skills', skill.id)}
-                  onDelete={skill.is_builtin ? undefined : deleteFor('skills', skill.id)}
-                />
-              ))}
-            </div>
-          )}
-
-          {recentResources.length > 0 && (
-            <div className="disc-sidebar-section disc-sidebar-recent automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('recent')}>
-              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleAutomationSection('recent')} aria-expanded={!isAutomationSectionCollapsed('recent')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('recent')} />
-                <Clock size={10} /><span>{t('disc.recent')}</span><span className="disc-group-count">{recentResources.length}</span>
-              </button>
-              {!isAutomationSectionCollapsed('recent') && recentResources.map(resource => renderResource(resource, 'recent'))}
-            </div>
-          )}
-
-          <div className="disc-sidebar-section disc-sidebar-projects automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('projects')}>
-            <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleAutomationSection('projects')} aria-expanded={!isAutomationSectionCollapsed('projects')}>
-              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('projects')} />
-              <GitBranch size={10} /><span>{t('projects.title')}</span><span className="disc-group-count">{visibleItems.length}</span>
-            </button>
-            {!isAutomationSectionCollapsed('projects') && (
-              <CollectionProjectTree
-                projects={projects}
-                items={visibleItems}
-                getProjectId={resource => resource.projectId}
-                // A skill listed by several projects appears under each of them
-                // (and under "No project" when none); the flat lists above and
-                // the counters still see it once.
-                getProjectIds={resource => automationProjectIds(resource)}
-                isItemActive={activeResource}
-                collapsedGroups={canMultiSelect || automationQuery.trim() ? new Set() : collapsedAutomationSections}
-                onToggleGroup={toggleAutomationSection}
-                renderGroup={({ items }) => items.map(resource => renderResource(resource, 'project'))}
-                labels={{ noProject: t('disc.noProject'), local: t('disc.local') }}
-                noProjectIcon={<WorkflowIcon size={10} />}
-              />
-            )}
-          </div>
-
-          {sidebarWorkflows.length + sidebarQuickApis.length + sidebarQuickPrompts.length + sidebarQuickExecs.length + sidebarSkills.length === 0 && (
-            <div className="disc-empty">
-              {t('automation.noSearchResults')}
-              {activeAutomationFilterCount(automationFilters) > 0 && (
-                <button type="button" className="automation-filter-clear" onClick={clearAutomationFilters}>
-                  {t('collection.clearFilters')}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-            </>;
+            );
+            const groups = groupAutomations(visibleItems, automationGroupBy, automationProjectOrder);
+            const groupName = (group: AutomationGroup<AutomationResource>) => (
+              group.by === 'kind' ? kindName(group.id as AutomationTab)
+                : group.id === null ? t('disc.noProject')
+                  : projects.find(project => project.id === group.id)?.name ?? group.id
+            );
+            // A group stays open while searching and while selecting several
+            // rows, and while it holds the automation that is open.
+            const isGroupCollapsed = (group: AutomationGroup<AutomationResource>) => (
+              !canMultiSelect && !automationQuery.trim()
+                && collapsedAutomationSections.has(group.key)
+                && !group.items.some(activeResource)
+            );
+            return (
+              <div className="disc-sidebar-list automation-sidebar-items" data-tour-id="automation-kinds">
+                {groups.map(group => {
+                  const collapsed = isGroupCollapsed(group);
+                  return (
+                    <div key={group.key} className="automation-group" data-group={group.key}>
+                      {group.by !== 'none' && (
+                        <button
+                          type="button"
+                          className="automation-group-header"
+                          aria-expanded={!collapsed}
+                          aria-label={`${groupName(group)} ${group.items.length}`}
+                          onClick={() => toggleAutomationSection(group.key)}
+                        >
+                          <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} aria-hidden="true" />
+                          <span
+                            className="automation-group-dot"
+                            data-kind={group.by === 'kind' ? group.id ?? undefined : undefined}
+                            style={group.by === 'project' ? { background: projectDotColor(group.id) } : undefined}
+                            aria-hidden="true"
+                          />
+                          <span className="automation-group-name">{groupName(group)}</span>
+                          <span className="automation-group-count">{group.items.length}</span>
+                        </button>
+                      )}
+                      {!collapsed && group.items.map(resource => renderResource(resource, group.key))}
+                    </div>
+                  );
+                })}
+                {groups.length === 0 && (
+                  <div className="disc-empty">
+                    {t('automation.noSearchResults')}
+                    {activeAutomationFilterCount(automationFilters) > 0 && (
+                      <button type="button" className="automation-chip-clear" onClick={clearAutomationFilters}>
+                        {t('collection.clearFilters')}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
           },
           sidebarFooter: <CollectionSidebarFooter
             label={t('automation.sidebarHint')}

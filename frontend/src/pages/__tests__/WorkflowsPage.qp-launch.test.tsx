@@ -1,16 +1,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { WorkflowsPage } from '../WorkflowsPage';
 import type { AgentsConfig, QuickPrompt } from '../../types/generated';
 
-/** Shows the Quick Prompts through the sidebar's Filter panel (KT-912). */
+/** Shows the Quick Prompts through the type chip of the sidebar (KT-916). */
 const showQuickPrompts = async () => {
-  if (!document.getElementById('automation-filter-options')) {
-    fireEvent.click(await screen.findByRole('button', { name: 'Filtrer les automatisations' }));
-  }
-  const select = screen.getByRole('combobox', { name: 'Filtre par type d’automatisation' });
-  await act(async () => { fireEvent.change(select, { target: { value: 'quickPrompts' } }); });
+  fireEvent.click(await screen.findByRole('button', { name: /^Type d’automatisation : / }));
+  const list = screen.getByRole('listbox', { name: 'Filtre par type d’automatisation' });
+  await act(async () => { fireEvent.click(within(list).getByRole('option', { name: /^Quick Prompts/ })); });
 };
 
 
@@ -780,7 +778,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     // The Batch button is rendered for QPs with at least 1 var. Click it to
     // open the batch form, then assert the label calls out the first var only.
     await waitFor(() => {
-      expect(screen.getAllByText('Analyse ticket')).toHaveLength(3);
+      expect(screen.getAllByText('Analyse ticket')).toHaveLength(2);
     });
     // Find the batch icon button — it has title `qp.batch.launch` ("Batch").
     const batchBtn = document.querySelector('button[title*="Batch"], button[title*="atch"]');

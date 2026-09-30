@@ -7,8 +7,9 @@ import type { Project, Skill } from '../types/generated';
 export const SKILL_FAVORITES_STORAGE_KEY = 'kronn:automationSkillFavorites';
 
 /** A skill carries no modification date. Every skill shares this one, which
- *  ranks it after every dated automation in "Recent" without ever breaking the
- *  order of the others (an unparseable date would). */
+ *  ranks it after every dated automation when the list is sorted by last
+ *  change, without ever breaking the order of the others (an unparseable date
+ *  would). */
 export const SKILL_UPDATED_AT = '1970-01-01T00:00:00.000Z';
 
 type ProjectSkills = Pick<Project, 'id' | 'name' | 'default_skill_ids'>;

@@ -125,29 +125,34 @@ describe('tour anchors exist in the app', () => {
     ]);
   });
 
-  it('points the four Automation type steps at the Type select of the sidebar Filter panel (KT-912)', () => {
+  it('points the four Automation type steps at the type chip of the sidebar (KT-916)', async () => {
     const kinds = ['workflows', 'quickApis', 'quickPrompts', 'quickExecs'];
     const steps = ['automation-workflow', 'automation-quick-api', 'automation-quick-prompt', 'automation-quick-exec']
       .map(id => TOUR_STEPS.find(step => step.id === id));
     expect(steps.map(step => step?.selector)).toEqual(kinds.map(() => '[data-tour-id="automation-filter-type"]'));
 
-    // The panel is closed at first: the step opens it, then picks its type.
-    const changes: string[] = [];
-    document.body.innerHTML = '<button data-tour-id="automation-filters"></button>';
-    document.querySelector('[data-tour-id="automation-filters"]')!.addEventListener('click', () => {
-      if (document.querySelector('[data-tour-id="automation-filter-type"]')) return;
-      document.body.insertAdjacentHTML('beforeend', [
-        '<select data-tour-id="automation-filter-type">',
-        '<option value="all"></option>',
-        ...kinds.map(kind => `<option value="${kind}"></option>`),
-        '</select>',
-      ].join(''));
-      document.querySelector('[data-tour-id="automation-filter-type"]')!
-        .addEventListener('change', event => changes.push((event.target as HTMLSelectElement).value));
+    // The chip reads "All" and its list is closed at first: the step opens the
+    // list (rendered after the click, as React does), then picks its type.
+    const picked: string[] = [];
+    document.body.innerHTML = '<button data-tour-id="automation-filter-type" data-value="all" aria-expanded="false"></button>';
+    const chip = document.querySelector<HTMLElement>('[data-tour-id="automation-filter-type"]')!;
+    chip.addEventListener('click', () => {
+      chip.setAttribute('aria-expanded', 'true');
+      setTimeout(() => {
+        document.body.insertAdjacentHTML('beforeend', ['all', ...kinds]
+          .map(kind => `<button data-kind-option="${kind}"></button>`).join(''));
+        document.querySelectorAll<HTMLElement>('[data-kind-option]').forEach(option => option.addEventListener('click', () => {
+          const kind = option.getAttribute('data-kind-option')!;
+          picked.push(kind);
+          chip.setAttribute('data-value', kind);
+          chip.setAttribute('aria-expanded', 'false');
+          document.querySelectorAll('[data-kind-option]').forEach(node => node.remove());
+        }));
+      }, 0);
     });
 
-    steps.forEach(step => step?.beforeStep?.());
-    expect(changes).toEqual(kinds);
+    for (const step of steps) await step?.beforeStep?.();
+    expect(picked).toEqual(kinds);
     document.body.innerHTML = '';
   });
 });

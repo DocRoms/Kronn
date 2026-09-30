@@ -105,7 +105,37 @@ describe('sorting the global Automation sidebar (KT-912)', () => {
     expect(ids(sortAutomationResources(source, 'updated', true))).toEqual(['Delta', 'Gamma', 'Zeta', 'alpha', 'beta']);
   });
 
-  it('sorts by type in the order of the tour, then by name', () => {
+  it('sorts by type in the order of the type list, then by name', () => {
     expect(ids(sortAutomationResources(source, 'kind'))).toEqual(['Delta', 'Gamma', 'Zeta', 'alpha', 'beta']);
+  });
+
+  describe('by last opening (KT-916)', () => {
+    const opened = (id: string, lastOpenedAt: number | null, pinned = false): SortableAutomation & { id: string } => ({
+      id, kind: 'workflows', name: id, pinned, updatedAt: '2026-01-01T00:00:00Z', lastOpenedAt,
+    });
+    const history = [
+      opened('Never', null),
+      opened('Old', 100),
+      opened('Pinned', 50, true),
+      opened('Fresh', 300),
+      opened('Also never', null),
+    ];
+
+    it('puts the latest opening first and what was never opened after it, by name', () => {
+      expect(ids(sortAutomationResources(history, 'opened'))).toEqual(['Pinned', 'Fresh', 'Old', 'Also never', 'Never']);
+    });
+
+    it('reverses the order of each side of the favorites line', () => {
+      expect(ids(sortAutomationResources(history, 'opened', true))).toEqual(['Pinned', 'Never', 'Also never', 'Old', 'Fresh']);
+    });
+
+    it('is a plain history, favorites not pulled up, for the Recent chip', () => {
+      expect(ids(sortAutomationResources(history, 'opened', false, { pinnedFirst: false })))
+        .toEqual(['Fresh', 'Old', 'Pinned', 'Also never', 'Never']);
+    });
+
+    it('reads an absent date as never opened', () => {
+      expect(ids(sortAutomationResources([resource('B', 'workflows'), opened('A', 10)], 'opened'))).toEqual(['A', 'B']);
+    });
   });
 });

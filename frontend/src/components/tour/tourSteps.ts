@@ -253,19 +253,21 @@ function openDemoDiscussion() {
   openButton?.click();
 }
 
-/** The Automation types are one `<select>` in the sidebar's Filter panel
- *  (KT-912): open the panel, then pick the type as a click on its chip did. */
-function openAutomationKind(kind: string) {
-  const typeSelector = '[data-tour-id="automation-filter-type"]';
-  if (!document.querySelector(typeSelector)) {
-    document.querySelector<HTMLElement>('[data-tour-id="automation-filters"]')?.click();
+/** The Automation types are one chip in the sidebar (KT-916): it shows the
+ *  chosen type (`data-value`) and opens the list of types on a click. Open that
+ *  list, then pick the type as a click on its row does; the chip stays in place
+ *  as the step's anchor. */
+async function openAutomationKind(kind: string) {
+  const chip = document.querySelector<HTMLElement>('[data-tour-id="automation-filter-type"]');
+  if (!chip || chip.getAttribute('data-value') === kind) return;
+  if (chip.getAttribute('aria-expanded') !== 'true') chip.click();
+  // React renders the list after the click returns, not during it: wait for
+  // the row (bounded) before picking it.
+  const optionSelector = `[data-kind-option="${kind}"]`;
+  for (let attempt = 0; attempt < 20 && !document.querySelector(optionSelector); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
-  const select = document.querySelector<HTMLSelectElement>(typeSelector);
-  if (!select || select.value === kind) return;
-  // React tracks the value itself: go through the native setter so its
-  // `change` listener sees a real edit.
-  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(select, kind);
-  select.dispatchEvent(new Event('change', { bubbles: true }));
+  document.querySelector<HTMLElement>(optionSelector)?.click();
 }
 
 function revealCopyableIds() {
