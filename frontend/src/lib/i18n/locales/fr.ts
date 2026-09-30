@@ -3166,6 +3166,7 @@ const fr: TranslationDict = {
   'config.extApi.noConnections': 'Aucune connexion API externe pour le moment.',
   'config.extApi.deleteConfirm': 'Supprimer la connexion « {0} » ?',
   'config.extApi.testConnection': 'Tester la connexion',
+  'config.extApi.billingError': 'Le fournisseur demande un paiement ou un rechargement de crédits (HTTP 402). Vérifiez le solde et la facturation de votre compte API, puis relancez le test.',
   'config.extApi.testRequired': 'Testez cette connexion pour charger les modèles disponibles.',
   'config.extApi.modelsLocked': 'Disponible après un test de connexion réussi.',
   'config.extApi.mediaTitle': 'Génération média',

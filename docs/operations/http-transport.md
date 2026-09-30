@@ -105,3 +105,15 @@ under an unrelated agent.
   connection (Settings → External API → Test). If the provider's catalogue
   now tags that model as image/video-only, the refusal is correct — pick a
   chat-capable model for that connection's tier.
+- **HTTP 402 / billing error during a connection test:** check the provider's
+  API account balance and billing, then test again. This is handled for every
+  preset during catalogue discovery, OpenRouter key validation and model
+  invocation. It stops the test immediately: later model errors cannot hide
+  the billing failure. The form and saved connection card show a translated
+  message; provider response bodies and credentials remain private.
+  [src: file: backend/src/api/external_api_connections.rs:464]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:334]
+  Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
+  credit, even when the key can load `/v1/models`. Previously the generic
+  fallback could hide this behind a later HTTP 400 from a TTS model.
+  [src: url: https://mimo.mi.com/docs/en-US/api/guidance/error-codes]

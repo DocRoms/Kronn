@@ -3025,7 +3025,7 @@ export interface UpsertExternalApiConnection {
 
 export interface ExternalApiConnectionTestResult {
   ok: boolean;
-  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
+  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'billing_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
   models: string[];
   /** Capability-bearing union from provider-specific catalogue routes. Older
    * backends omit it; callers keep `models` as the chat-only fallback. */

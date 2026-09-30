@@ -343,6 +343,8 @@ async fn probe_models(
 /// deployments without turning the test into a catalogue sweep.
 const MAX_FALLBACK_PROBES: usize = 4;
 
+const BILLING_ERROR_HINT: &str = "The provider requires payment or additional credits (HTTP 402). Check your API account balance and billing, then test again.";
+
 /// Hint shown when a probed model answers a non-2xx status.
 ///
 /// The generic arm names the model on purpose: a bare status told the operator
@@ -376,6 +378,13 @@ async fn probe_openrouter_credential(
         .bearer_auth(api_key);
     match request.send().await {
         Ok(response) if response.status().is_success() => None,
+        Ok(response) if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
+            Some(TestConnectionResponse {
+                status: "billing_error".into(),
+                hint: Some(BILLING_ERROR_HINT.into()),
+                ..Default::default()
+            })
+        }
         Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
             let hint = if !api_key.starts_with("sk-or-v1-")
                 && api_key.len() == 64
@@ -451,6 +460,15 @@ async fn probe_auth(
         .bearer_auth(api_key)
         .json(&body);
     match request.send().await {
+        // Billing failures must stop the fallback before a later model error
+        // can hide the reason this account cannot generate a response.
+        Ok(response) if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
+            Some(TestConnectionResponse {
+                status: "billing_error".into(),
+                hint: Some(BILLING_ERROR_HINT.into()),
+                ..Default::default()
+            })
+        }
         Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
             // A 401/403 here has TWO possible causes and the message must not
             // pick one: the key may be rejected, or the key may be valid while
@@ -527,6 +545,13 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
         request = request.bearer_auth(key);
     }
     match request.send().await {
+        Ok(response) if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
+            TestConnectionResponse {
+                status: "billing_error".into(),
+                hint: Some(BILLING_ERROR_HINT.into()),
+                ..Default::default()
+            }
+        }
         Ok(response) if response.status().is_success() => {
             match response.json::<serde_json::Value>().await {
                 Ok(body) if model_ids_from_body(&body).is_some() => {

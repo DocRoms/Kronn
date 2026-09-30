@@ -3156,6 +3156,7 @@ const en: TranslationDict = {
   'config.extApi.noConnections': 'No external API connections yet.',
   'config.extApi.deleteConfirm': 'Delete connection "{0}"?',
   'config.extApi.testConnection': 'Test connection',
+  'config.extApi.billingError': 'The provider requires payment or additional credits (HTTP 402). Check your API account balance and billing, then test again.',
   'config.extApi.testRequired': 'Test this connection to load available models.',
   'config.extApi.modelsLocked': 'Available after a successful connection test.',
   'config.extApi.mediaTitle': 'Media generation',

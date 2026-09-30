@@ -3123,6 +3123,7 @@ const zh: TranslationDict = {
   "config.extApi.noConnections": "暂无外部 API 连接。",
   "config.extApi.deleteConfirm": "删除连接“{0}”？",
   "config.extApi.testConnection": "测试连接",
+  "config.extApi.billingError": "服务商要求付款或充值（HTTP 402）。请检查 API 账户余额和账单，然后重新测试。",
   "config.extApi.testRequired": "测试此连接以加载可用模型。",
   "config.extApi.modelsLocked": "连接测试成功后可用。",
   "config.extApi.mediaTitle": "媒体生成",

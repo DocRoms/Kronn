@@ -12279,6 +12279,116 @@ async fn external_api_test_route_probes_a_chat_model_not_the_first_one_listed() 
 }
 
 #[tokio::test]
+async fn external_api_billing_error_stops_model_probes_without_leaking_upstream_details() {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for (preset, models) in [
+        ("other", serde_json::json!([])),
+        ("other", serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"])),
+        ("nvidia", serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"])),
+        (
+            "open_router",
+            serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"]),
+        ),
+    ] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/key"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "mimo-v2.5"}, {"id": "mimo-v2.5-tts"}]
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer sk-or-v1-billing-test-secret"))
+            .and(body_partial_json(serde_json::json!({"model": "mimo-v2.5"})))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "402",
+                    "type": "insufficient_balance",
+                    "message": "Insufficient account balance — private account 私密 sk-or-v1-billing-test-secret"
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "mimo-v2.5-tts"}),
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_string("TTS needs an assistant role"))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+
+        let (status, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": format!("{}/v1", upstream.uri()),
+                "api_key": "sk-or-v1-billing-test-secret",
+                "origin_preset": preset,
+                "models": models
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["ok"], false, "{preset}: {response}");
+        assert_eq!(
+            response["data"]["status"], "billing_error",
+            "{preset}: {response}"
+        );
+        let hint = response["data"]["hint"].as_str().unwrap();
+        assert!(hint.contains("402") && hint.contains("balance"), "{hint}");
+        assert_eq!(response["data"]["models"], serde_json::json!([]));
+        assert!(!response.to_string().contains("billing-test-secret"));
+        assert!(!response.to_string().contains("private account"));
+        assert!(!response.to_string().contains("TTS"));
+        upstream.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn external_api_billing_error_is_reported_during_catalogue_and_key_checks() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for (preset, endpoint) in [("other", "/v1/models"), ("open_router", "/v1/key")] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(402).set_body_string("private billing details"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let (_, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": upstream.uri(),
+                "api_key": "sk-or-v1-billing-test-secret",
+                "origin_preset": preset
+            }),
+        )
+        .await;
+        assert_eq!(response["data"]["ok"], false);
+        assert_eq!(response["data"]["status"], "billing_error", "{response}");
+        assert!(!response.to_string().contains("private billing details"));
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
