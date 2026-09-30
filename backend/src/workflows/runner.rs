@@ -1084,6 +1084,13 @@ async fn execute_run_with_notify_policy(
                 .filter(|d| (d.installed || d.runtime_available) && d.enabled)
                 .map(|d| d.agent_type.clone())
                 .collect();
+            // A test ACP route stands in for the agent binary; without this the
+            // preflight would depend on what the host happens to have installed.
+            #[cfg(test)]
+            let routed = crate::agents::runner::resolve_agent_work_dir(Some(&work_dir), &work_dir)
+                .is_ok_and(|dir| crate::agents::runner::test_acp_routes::is_routed(&dir));
+            #[cfg(not(test))]
+            let routed = false;
             let mut missing: Vec<(String, String)> = Vec::new();
             for step in workflow
                 .steps
@@ -1098,7 +1105,8 @@ async fn execute_run_with_notify_policy(
                         .base_url
                         .as_deref()
                         .is_some_and(|url| !url.trim().is_empty());
-                let ok = declared_proxy
+                let ok = routed
+                    || declared_proxy
                     || usable
                         .iter()
                         .any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));

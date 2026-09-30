@@ -4218,6 +4218,10 @@ pub(crate) mod test_acp_routes {
         RouteGuard(work_dir.to_path_buf())
     }
 
+    pub(crate) fn is_routed(work_dir: &Path) -> bool {
+        ROUTES.lock().unwrap().contains_key(work_dir)
+    }
+
     pub(super) fn transport_for(
         config: &AgentStartConfig<'_>,
         work_dir: &Path,
