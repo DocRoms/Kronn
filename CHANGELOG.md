@@ -186,6 +186,21 @@ Release notes for 0.9.3 and earlier are available in the
   tokens on the first call and on every re-read. A native discussion turn is off
   by default too; start the backend with `KRONN_CLAUDE_AUTO_MEMORY=1` to keep it
   there. See [Claude auto-memory](docs/operations/claude-auto-memory.md).
+- The repository resources of a project are masked ahead of the first listing
+  instead of on it. A background task renders the workflows, Quick Prompts,
+  Quick APIs, Quick Execs and Artifacts of every project a couple of seconds
+  after the backend starts, and again once they have stopped being edited
+  (from the API, an agent tool, an import or a workflow run alike, with a
+  debounce), filling the memory Kronn already keeps for that (capped at
+  48 MiB, and the task stops when it is nearly full). It never delays the
+  startup or a request — it reads the database in short slices, masks off its
+  lock, breathes between two resources and stops with the backend — so the
+  first listing after a restart reads from memory like the following ones.
+  Reads copy less: a rendering shares its document and files with that memory,
+  the workflow references, the approval fingerprint and the field diff no longer
+  copy the JSON they read, each resource and each repository file is read once
+  per listing, and only the project's own rows are read. Nothing changes in the
+  answers, byte for byte, nor in what is masked (KT-915).
 
 ### Fixed
 

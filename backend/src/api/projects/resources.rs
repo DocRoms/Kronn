@@ -58,11 +58,196 @@ struct RepositorySkillSeed {
     repository_paths: Vec<String>,
 }
 
-struct ResourceSeed {
-    id: String,
-    name: String,
-    slug: Option<String>,
+/// A Kronn-side resource as it was read from the database, typed once and
+/// ready to be rendered. Reading and rendering are kept apart on purpose:
+/// rendering masks every string of the resource and needs no connection, so a
+/// caller can read under the database lock and render outside it.
+pub(super) enum LoadedResource {
+    Skill(Skill),
+    Workflow(Workflow),
+    QuickPrompt(QuickPrompt),
+    QuickApi(QuickApi),
+    QuickExec(QuickExec),
+    /// The page as a bundle carries it, with the date of the page itself.
+    Artifact {
+        page: ArtifactBundlePage,
+        updated_at: DateTime<Utc>,
+    },
+}
+
+impl LoadedResource {
+    /// The resource as Kronn would write it under `slug`. A skill carries no
+    /// date of its own: `skill_updated_at` stands in for one.
+    pub(super) fn render(
+        &self,
+        slug: &str,
+        skill_updated_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<crate::core::repository_resources::RenderedRepositoryResource> {
+        use crate::core::repository_resources as render;
+        match self {
+            Self::Skill(skill) => {
+                render::render_skill(skill, skill_updated_at.unwrap_or_else(Utc::now), slug)
+            }
+            Self::Workflow(workflow) => render::render_workflow(workflow, slug),
+            Self::QuickPrompt(prompt) => render::render_quick_prompt(prompt, slug),
+            Self::QuickApi(api) => render::render_quick_api(api, slug),
+            Self::QuickExec(exec) => render::render_quick_exec(exec, slug),
+            Self::Artifact { page, updated_at } => render::render_artifact(page, *updated_at, slug),
+        }
+        .map_err(anyhow::Error::msg)
+    }
+}
+
+/// A resource of a project, as the listing and the warm-up see it before it is
+/// placed against the repository.
+pub(super) struct ResourceSeed {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) slug: Option<String>,
+    pub(super) kind: ProjectRepositoryResourceKind,
+    /// What the seed was read as: rendering it reads nothing again.
+    pub(super) loaded: LoadedResource,
+}
+
+impl ResourceSeed {
+    fn workflow(item: Workflow) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::Workflow,
+            loaded: LoadedResource::Workflow(item),
+        }
+    }
+
+    fn quick_prompt(item: QuickPrompt) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::QuickPrompt,
+            loaded: LoadedResource::QuickPrompt(item),
+        }
+    }
+
+    fn quick_api(item: QuickApi) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::QuickApi,
+            loaded: LoadedResource::QuickApi(item),
+        }
+    }
+
+    fn quick_exec(item: QuickExec) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::QuickExec,
+            loaded: LoadedResource::QuickExec(item),
+        }
+    }
+
+    /// The seed of a page: its bundle is read here, the heaviest read of the
+    /// five kinds (the revision and every dataset with its points).
+    pub(super) fn artifact(conn: &rusqlite::Connection, page: LivePage) -> anyhow::Result<Self> {
+        let bundle = crate::api::artifact_portability::export_page(conn, &page.id)?;
+        Ok(Self {
+            id: page.id,
+            name: page.title,
+            slug: Some(page.slug),
+            kind: ProjectRepositoryResourceKind::Artifact,
+            loaded: LoadedResource::Artifact {
+                page: bundle,
+                updated_at: page.updated_at,
+            },
+        })
+    }
+}
+
+/// The workflows, Quick Prompts, Quick APIs and Quick Execs of a project, each
+/// read once and in that order. Only the rows of this project are read.
+pub(super) fn typed_seeds(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> anyhow::Result<Vec<ResourceSeed>> {
+    let mut seeds = Vec::new();
+    seeds.extend(
+        crate::db::workflows::list_workflows_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::workflow),
+    );
+    seeds.extend(
+        crate::db::quick_prompts::list_quick_prompts_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::quick_prompt),
+    );
+    seeds.extend(
+        crate::db::quick_apis::list_quick_apis_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::quick_api),
+    );
+    seeds.extend(
+        crate::db::quick_execs::list_quick_execs_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::quick_exec),
+    );
+    Ok(seeds)
+}
+
+/// Every Kronn-side resource of a project, read once: the typed ones, then the
+/// Artifacts.
+fn project_seeds(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> anyhow::Result<Vec<ResourceSeed>> {
+    let mut seeds = typed_seeds(conn, project_id)?;
+    for page in crate::db::live_pages::list_live_pages_for_project(conn, project_id)? {
+        seeds.push(ResourceSeed::artifact(conn, page)?);
+    }
+    Ok(seeds)
+}
+
+/// Reads a resource by kind and id.
+pub(super) fn load_database_resource(
+    conn: &rusqlite::Connection,
     kind: ProjectRepositoryResourceKind,
+    id: &str,
+) -> anyhow::Result<LoadedResource> {
+    Ok(match kind {
+        ProjectRepositoryResourceKind::Skill => LoadedResource::Skill(
+            crate::core::skills::get_skill(id)
+                .ok_or_else(|| anyhow::anyhow!("Skill not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::Workflow => LoadedResource::Workflow(
+            crate::db::workflows::get_workflow(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Workflow not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::QuickPrompt => LoadedResource::QuickPrompt(
+            crate::db::quick_prompts::get_quick_prompt(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::QuickApi => LoadedResource::QuickApi(
+            crate::db::quick_apis::get_quick_api(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick API not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::QuickExec => LoadedResource::QuickExec(
+            crate::db::quick_execs::get_quick_exec(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick Exec not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::Artifact => {
+            // Only the page's own date is needed from the row: the bundle
+            // read below carries the revision and the datasets.
+            let page = crate::db::live_pages::get_live_page_summary(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Artifact not found: {id}"))?;
+            LoadedResource::Artifact {
+                page: crate::api::artifact_portability::export_page(conn, id)?,
+                updated_at: page.updated_at,
+            }
+        }
+    })
 }
 
 pub(super) fn render_database_resource(
@@ -72,49 +257,7 @@ pub(super) fn render_database_resource(
     slug: &str,
     skill_updated_at: Option<DateTime<Utc>>,
 ) -> anyhow::Result<crate::core::repository_resources::RenderedRepositoryResource> {
-    let rendered = match kind {
-        ProjectRepositoryResourceKind::Skill => {
-            let skill = crate::core::skills::get_skill(id)
-                .ok_or_else(|| anyhow::anyhow!("Skill not found: {id}"))?;
-            crate::core::repository_resources::render_skill(
-                &skill,
-                skill_updated_at.unwrap_or_else(Utc::now),
-                slug,
-            )
-        }
-        ProjectRepositoryResourceKind::Workflow => {
-            let workflow = crate::db::workflows::get_workflow(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Workflow not found: {id}"))?;
-            crate::core::repository_resources::render_workflow(&workflow, slug)
-        }
-        ProjectRepositoryResourceKind::QuickPrompt => {
-            let prompt = crate::db::quick_prompts::get_quick_prompt(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found: {id}"))?;
-            crate::core::repository_resources::render_quick_prompt(&prompt, slug)
-        }
-        ProjectRepositoryResourceKind::QuickApi => {
-            let api = crate::db::quick_apis::get_quick_api(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Quick API not found: {id}"))?;
-            crate::core::repository_resources::render_quick_api(&api, slug)
-        }
-        ProjectRepositoryResourceKind::QuickExec => {
-            let exec = crate::db::quick_execs::get_quick_exec(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Quick Exec not found: {id}"))?;
-            crate::core::repository_resources::render_quick_exec(&exec, slug)
-        }
-        ProjectRepositoryResourceKind::Artifact => {
-            let detail = crate::db::live_pages::get_live_page(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Artifact not found: {id}"))?;
-            let artifact = crate::api::artifact_portability::export_page(conn, id)?;
-            crate::core::repository_resources::render_artifact(
-                &artifact,
-                detail.page.updated_at,
-                slug,
-            )
-        }
-    }
-    .map_err(anyhow::Error::msg)?;
-    Ok(rendered)
+    load_database_resource(conn, kind, id)?.render(slug, skill_updated_at)
 }
 
 fn lock_entry(
@@ -232,6 +375,13 @@ struct AlignmentView {
     required_secret_names: Vec<String>,
     repository_fingerprint: Option<String>,
     kronn_fingerprint: Option<String>,
+}
+
+/// What one read of a resource's files in the repository leaves for the rest of
+/// the listing: the hash of the files and the level their definition declares.
+struct RepositoryRead {
+    hash: String,
+    adr_level: ResourceAdrLevel,
 }
 
 /// Kinds Kronn can execute: the only ones an imported definition must be
@@ -492,7 +642,25 @@ fn alignment_status(
     alignment: Option<&crate::db::repository_resources::ResourceAlignment>,
 ) -> anyhow::Result<AlignmentView> {
     let repository = crate::core::repository_resources::read_resource(root, entry).ok();
-    let repository_hash = repository.as_ref().map(|(_, hash)| hash.as_str());
+    alignment_view(
+        conn,
+        entry,
+        rendered,
+        alignment,
+        repository.as_ref().map(|(_, hash)| hash.as_str()),
+    )
+}
+
+/// `alignment_status` for a caller that has read the repository's side already:
+/// `repository_hash` is the hash of the resource's files there, `None` when
+/// they are missing or unreadable.
+fn alignment_view(
+    conn: &rusqlite::Connection,
+    entry: &crate::core::repository_resources::RepositoryLockResource,
+    rendered: &crate::core::repository_resources::RenderedRepositoryResource,
+    alignment: Option<&crate::db::repository_resources::ResourceAlignment>,
+    repository_hash: Option<&str>,
+) -> anyhow::Result<AlignmentView> {
     let sync_status = match alignment {
         // Never aligned yet both sides exist: with no baseline neither can
         // be called newer, so equal content is in sync and anything else is
@@ -993,12 +1161,13 @@ struct ResolvedResource {
     entry: crate::core::repository_resources::RepositoryLockResource,
 }
 
-fn resolve_resource(
+/// The slug a resource is written under: the one its identity holds, else the
+/// one its seed brings, else one made from its name.
+pub(super) fn resource_slug(
     conn: &rusqlite::Connection,
     project_key: &str,
-    lock: Option<&crate::core::repository_resources::RepositoryLock>,
     seed: &ResourceSeed,
-) -> anyhow::Result<ResolvedResource> {
+) -> anyhow::Result<String> {
     let identity = crate::db::resource_identities::find_by_target(
         conn,
         project_key,
@@ -1014,13 +1183,22 @@ fn resolve_resource(
             slug
         }
     };
-    let slug = identity
+    Ok(identity
         .as_ref()
         .map(|item| item.slug.clone())
         .or_else(|| seed.slug.clone())
-        .unwrap_or_else(generated_slug);
+        .unwrap_or_else(generated_slug))
+}
+
+fn resolve_resource(
+    conn: &rusqlite::Connection,
+    project_key: &str,
+    lock: Option<&crate::core::repository_resources::RepositoryLock>,
+    seed: &ResourceSeed,
+) -> anyhow::Result<ResolvedResource> {
+    let slug = resource_slug(conn, project_key, seed)?;
     let repository_paths = seed.kind.paths(&slug);
-    let rendered = render_database_resource(conn, seed.kind, &seed.id, &slug, None)?;
+    let rendered = seed.loaded.render(&slug, None)?;
     let alignment = crate::db::repository_resources::find_alignment(
         conn,
         project_key,
@@ -1048,61 +1226,9 @@ pub async fn repository_resources(
                 return Ok(None);
             };
             let project_key = crate::db::resource_identities::project_key(conn, Some(&project_id))?;
-            let mut seeds = Vec::new();
-            seeds.extend(
-                crate::db::workflows::list_workflows(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::Workflow,
-                    }),
-            );
-            seeds.extend(
-                crate::db::quick_prompts::list_quick_prompts(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::QuickPrompt,
-                    }),
-            );
-            seeds.extend(
-                crate::db::quick_apis::list_quick_apis(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::QuickApi,
-                    }),
-            );
-            seeds.extend(
-                crate::db::quick_execs::list_quick_execs(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::QuickExec,
-                    }),
-            );
-            seeds.extend(
-                crate::db::live_pages::list_live_pages_for_project(conn, &project_id)?
-                    .into_iter()
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.title,
-                        slug: Some(item.slug),
-                        kind: ProjectRepositoryResourceKind::Artifact,
-                    }),
-            );
+            // Each resource is read once, here, and rendered from what was
+            // read: the rows of the other projects are not touched at all.
+            let seeds = project_seeds(conn, &project_id)?;
 
             let root = PathBuf::from(&project.path);
             let side_effects = crate::core::repository_resources::publish_side_effect_paths(&root);
@@ -1177,17 +1303,26 @@ pub async fn repository_resources(
                 skill.kronn_fingerprint = view.kronn_fingerprint;
             }
             // The repository side of every non-skill entry, read once: the id
-            // its file was written under and what its definition points at.
+            // its file was written under and what its definition points at. What
+            // the rest of the listing needs of the same files (their hash, the
+            // level the definition declares) is kept from this read, in the
+            // order of the lock's entries, instead of reading them again.
             let mut repository_side: HashMap<ResourceKey, ResourceReferences> = HashMap::new();
+            let mut repository_reads: Vec<Option<RepositoryRead>> = Vec::new();
             for entry in lock.iter().flat_map(|lock| lock.resources.iter()) {
-                if entry.kind == ProjectRepositoryResourceKind::Skill {
-                    continue;
-                }
-                let Ok((document, _)) =
-                    crate::core::repository_resources::read_resource(&root, entry)
-                else {
+                let read = if entry.kind == ProjectRepositoryResourceKind::Skill {
+                    None
+                } else {
+                    crate::core::repository_resources::read_resource(&root, entry).ok()
+                };
+                let Some((document, hash)) = read else {
+                    repository_reads.push(None);
                     continue;
                 };
+                repository_reads.push(Some(RepositoryRead {
+                    hash,
+                    adr_level: crate::core::repository_resources::resource_adr_level(&document),
+                }));
                 repository_side.insert(
                     (entry.kind.identity_kind(), entry.slug.clone()),
                     ResourceReferences {
@@ -1225,7 +1360,26 @@ pub async fn repository_resources(
                     link_source.aliases.push(slug.clone());
                 }
                 link_sources.insert((seed.kind.identity_kind(), seed.id.clone()), link_source);
-                let view = alignment_status(conn, &root, &entry, &rendered, alignment.as_ref())?;
+                // An entry the lock lists was read above; one it does not list
+                // is the conventional path of a resource never published, which
+                // may still hold a file.
+                let listed_at = lock.as_ref().and_then(|lock| {
+                    lock.resources
+                        .iter()
+                        .position(|item| item.kind == seed.kind && item.slug == slug)
+                });
+                let view = match listed_at {
+                    Some(index) => alignment_view(
+                        conn,
+                        &entry,
+                        &rendered,
+                        alignment.as_ref(),
+                        repository_reads[index]
+                            .as_ref()
+                            .map(|read| read.hash.as_str()),
+                    )?,
+                    None => alignment_status(conn, &root, &entry, &rendered, alignment.as_ref())?,
+                };
                 let (repository_updated_at, repository_updated_by) = primary_diff_path(&entry)
                     .map(|path| dates.updated_at(path))
                     .unwrap_or((None, None));
@@ -1263,7 +1417,7 @@ pub async fn repository_resources(
                     .iter()
                     .map(|resource| (resource.kind.identity_kind(), resource.slug.clone()))
                     .collect();
-                for entry in &lock.resources {
+                for (index, entry) in lock.resources.iter().enumerate() {
                     if entry.kind == ProjectRepositoryResourceKind::Skill
                         || listed.contains(&(entry.kind.identity_kind(), entry.slug.clone()))
                     {
@@ -1272,12 +1426,9 @@ pub async fn repository_resources(
                     let (repository_updated_at, repository_updated_by) = primary_diff_path(entry)
                         .map(|path| dates.updated_at(path))
                         .unwrap_or((None, None));
-                    let repository_file =
-                        crate::core::repository_resources::read_resource(&root, entry);
+                    let repository_file = repository_reads[index].as_ref();
                     let repository_fingerprint = repository_file
-                        .as_ref()
-                        .ok()
-                        .map(|(_, hash)| crate::core::repository_resources::fingerprint(hash));
+                        .map(|read| crate::core::repository_resources::fingerprint(&read.hash));
                     let id = format!("repository:{}:{}", entry.kind.identity_kind(), entry.slug);
                     link_sources.insert(
                         (entry.kind.identity_kind(), id.clone()),
@@ -1293,10 +1444,8 @@ pub async fn repository_resources(
                         kind: entry.kind,
                         level: entry.kind.level(),
                         adr_level: repository_file
-                            .map(|(document, _)| {
-                                crate::core::repository_resources::resource_adr_level(&document)
-                            })
-                            .unwrap_or_else(|_| parse_adr_level(&entry.level)),
+                            .map(|read| read.adr_level)
+                            .unwrap_or_else(|| parse_adr_level(&entry.level)),
                         status: ProjectRepositoryResourceStatus::RepositoryOnly,
                         approval_required: false,
                         approved: false,
@@ -1374,49 +1523,28 @@ fn seed_of(
         ProjectRepositoryResourceKind::Skill => None,
         ProjectRepositoryResourceKind::Workflow => crate::db::workflows::get_workflow(conn, id)?
             .filter(|item| ours(item.project_id.as_deref()))
-            .map(|item| ResourceSeed {
-                id: item.id,
-                name: item.name,
-                slug: None,
-                kind,
-            }),
+            .map(ResourceSeed::workflow),
         ProjectRepositoryResourceKind::QuickPrompt => {
             crate::db::quick_prompts::get_quick_prompt(conn, id)?
                 .filter(|item| ours(item.project_id.as_deref()))
-                .map(|item| ResourceSeed {
-                    id: item.id,
-                    name: item.name,
-                    slug: None,
-                    kind,
-                })
+                .map(ResourceSeed::quick_prompt)
         }
         ProjectRepositoryResourceKind::QuickApi => crate::db::quick_apis::get_quick_api(conn, id)?
             .filter(|item| ours(item.project_id.as_deref()))
-            .map(|item| ResourceSeed {
-                id: item.id,
-                name: item.name,
-                slug: None,
-                kind,
-            }),
+            .map(ResourceSeed::quick_api),
         ProjectRepositoryResourceKind::QuickExec => {
             crate::db::quick_execs::get_quick_exec(conn, id)?
                 .filter(|item| ours(item.project_id.as_deref()))
-                .map(|item| ResourceSeed {
-                    id: item.id,
-                    name: item.name,
-                    slug: None,
-                    kind,
-                })
+                .map(ResourceSeed::quick_exec)
         }
-        ProjectRepositoryResourceKind::Artifact => crate::db::live_pages::get_live_page(conn, id)?
-            .map(|detail| detail.page)
-            .filter(|page| ours(page.project_id.as_deref()))
-            .map(|page| ResourceSeed {
-                id: page.id,
-                name: page.title,
-                slug: Some(page.slug),
-                kind,
-            }),
+        ProjectRepositoryResourceKind::Artifact => {
+            match crate::db::live_pages::get_live_page_summary(conn, id)?
+                .filter(|page| ours(page.project_id.as_deref()))
+            {
+                Some(page) => Some(ResourceSeed::artifact(conn, page)?),
+                None => None,
+            }
+        }
     })
 }
 
@@ -1625,7 +1753,7 @@ fn imported_artifact(
     project_id: &str,
     existing_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let exported: ArtifactBundlePage = serde_json::from_value(document.resource.clone())?;
+    let exported: ArtifactBundlePage = serde::Deserialize::deserialize(&document.resource)?;
     let page_id = existing_id
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1759,7 +1887,7 @@ fn import_document(
     let now = document.updated_at;
     let target_id = match document.kind {
         ProjectRepositoryResourceKind::Skill => {
-            let skill: Skill = serde_json::from_value(document.resource.clone())?;
+            let skill: Skill = serde::Deserialize::deserialize(&document.resource)?;
             let target_id = match existing_id.as_deref() {
                 Some(id) if id.starts_with("custom-") => crate::core::skills::update_custom_skill(
                     id,
@@ -1793,7 +1921,7 @@ fn import_document(
             target_id
         }
         ProjectRepositoryResourceKind::Workflow => {
-            let mut resource: Workflow = serde_json::from_value(document.resource.clone())?;
+            let mut resource: Workflow = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1827,7 +1955,7 @@ fn import_document(
             resource.id
         }
         ProjectRepositoryResourceKind::QuickPrompt => {
-            let mut resource: QuickPrompt = serde_json::from_value(document.resource.clone())?;
+            let mut resource: QuickPrompt = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1842,7 +1970,7 @@ fn import_document(
             resource.id
         }
         ProjectRepositoryResourceKind::QuickApi => {
-            let mut resource: QuickApi = serde_json::from_value(document.resource.clone())?;
+            let mut resource: QuickApi = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1858,7 +1986,7 @@ fn import_document(
             resource.id
         }
         ProjectRepositoryResourceKind::QuickExec => {
-            let mut resource: QuickExec = serde_json::from_value(document.resource.clone())?;
+            let mut resource: QuickExec = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -2772,7 +2900,7 @@ mod tests {
         };
         let mut rendered =
             crate::core::repository_resources::render_quick_exec(&exec, "health").unwrap();
-        rendered.files = BTreeMap::from([
+        rendered.files = std::sync::Arc::new(BTreeMap::from([
             (
                 "kronn/artifacts/health/artifact.yaml".to_string(),
                 b"same\n".to_vec(),
@@ -2781,7 +2909,7 @@ mod tests {
                 "kronn/artifacts/health/index.html".to_string(),
                 b"<p>new</p>\n".to_vec(),
             ),
-        ]);
+        ]));
         let entry = crate::core::repository_resources::RepositoryLockResource {
             kind: ProjectRepositoryResourceKind::Artifact,
             slug: "health".into(),
@@ -3836,6 +3964,589 @@ mod tests {
         }
     }
 
+    /// A project holding one resource of each kind Kronn holds, all with fixed
+    /// content and dates, so its listing reads the same on every run.
+    async fn seed_one_of_each_kind(state: &crate::AppState, project_id: &str) {
+        seed_one_of_each_kind_tagged(state, project_id, "").await;
+    }
+
+    /// [`seed_one_of_each_kind`] with `tag` added to the text of each resource,
+    /// for a test that needs content no other test renders (the render memo is
+    /// shared by the whole process). An empty tag changes nothing.
+    async fn seed_one_of_each_kind_tagged(state: &crate::AppState, project_id: &str, tag: &str) {
+        let project_id = project_id.to_string();
+        let tag = tag.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+                let mut prompt = sample_prompt(
+                    &project_id,
+                    "qp-1",
+                    &format!("Review {{{{diff}}}} password=hunter2-golden{tag}"),
+                );
+                prompt.name = "Review prompt".into();
+                crate::db::quick_prompts::insert_quick_prompt(conn, &prompt)?;
+
+                let mut exec = sample_exec(&project_id);
+                exec.args = vec![
+                    "check".into(),
+                    format!("--token=golden-exec-token-123456{tag}"),
+                ];
+                crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+
+                let api: QuickApi = serde_json::from_value(serde_json::json!({
+                    "id": "qa-1", "name": "Traffic", "icon": "api", "description": "",
+                    "project_id": project_id, "api_plugin_slug": "api-traffic",
+                    "api_config_id": "config-1", "api_endpoint_path": format!("/live{tag}"),
+                    "api_method": "GET",
+                    "api_headers": {"Authorization": "Bearer sk-live-1234567890abcdefghij", "Accept": "application/json"},
+                    "api_query": {"page": "2", "api_key": "golden-api-key-123456"},
+                    "variables": [], "profile_ids": [], "directive_ids": [], "pinned": false,
+                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:10Z"
+                }))
+                .unwrap();
+                crate::db::quick_apis::insert_quick_api(conn, &api)?;
+
+                let workflow = sample_workflow_json(
+                    "wf-1",
+                    "Nightly",
+                    &project_id,
+                    serde_json::json!([
+                        {
+                            "id": "00000000-0000-4000-8000-000000000001",
+                            "name": "ask", "step_type": {"type": "Agent"},
+                            "quick_prompt_id": "qp-1",
+                            "prompt_template": format!("Summarize password=hunter2-golden{tag}")
+                        },
+                        {
+                            "id": "00000000-0000-4000-8000-000000000002",
+                            "name": "fetch", "step_type": {"type": "ApiCall"},
+                            "quick_api_id": "qa-1",
+                            "api_headers": {"Authorization": "Bearer sk-live-1234567890abcdefghij"}
+                        },
+                        {
+                            "id": "00000000-0000-4000-8000-000000000003",
+                            "name": "collect", "step_type": {"type": "CollectApiData"},
+                            "collect_api_data": {"sources": [{"alias": "lint", "quick_exec_id": "qe-1"}]}
+                        },
+                        {
+                            "id": "00000000-0000-4000-8000-000000000004",
+                            "name": "again", "step_type": {"type": "SubWorkflow"},
+                            "sub_workflow_id": "wf-1"
+                        }
+                    ]),
+                );
+                crate::db::workflows::insert_workflow(conn, &workflow)?;
+
+                let page = LivePage {
+                    id: "page-1".into(),
+                    project_id: Some(project_id.clone()),
+                    title: "Dashboard".into(),
+                    slug: "dashboard".into(),
+                    current_revision_id: "rev-1".into(),
+                    data_revision: 0,
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                    last_published_at: None,
+                    pinned: false,
+                    archived: false,
+                };
+                let revision = LivePageRevision {
+                    id: "rev-1".into(),
+                    page_id: "page-1".into(),
+                    revision: 1,
+                    html: format!("<h1>Dashboard</h1><p>password=hunter2-golden</p>{tag}"),
+                    created_by_agent: Some("agent".into()),
+                    created_at: timestamp,
+                };
+                crate::db::live_pages::create_live_page(conn, &page, &revision, &[], None)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .expect("seed one of each kind");
+    }
+
+    /// The listing of a project with one resource of each kind, byte for byte
+    /// (KT-915: the listing stopped copying the JSON values it renders). Read
+    /// twice — the second time from the memo — it must not change either, and
+    /// must hold no secret value.
+    #[tokio::test]
+    async fn the_listing_of_one_resource_of_each_kind_is_byte_for_byte_what_it_was() {
+        // Captured from the code before KT-915, on the same content.
+        const GOLDEN: &str = "62b08785722790d9a69aaabe1a0c4455e0f9b163a43ea4b8bd3a8e3102dad2b5";
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_one_of_each_kind(&state, "project-1").await;
+
+        let first = list_resources(&state, "project-1").await;
+        let second = list_resources(&state, "project-1").await;
+        let workflow = first
+            .resources
+            .iter()
+            .find(|item| item.kind == ProjectRepositoryResourceKind::Workflow)
+            .expect("the workflow is listed");
+        assert_eq!(
+            workflow.uses.len(),
+            3,
+            "the workflow's references are part of what is compared: {:?}",
+            workflow.uses
+        );
+        let first = serde_json::to_string(&first.resources).unwrap();
+        let second = serde_json::to_string(&second.resources).unwrap();
+        assert_eq!(first, second, "served from memory it reads the same");
+        for secret in [
+            "hunter2-golden",
+            "golden-exec-token-123456",
+            "golden-api-key-123456",
+            "sk-live-1234567890abcdefghij",
+        ] {
+            assert!(!first.contains(secret), "{secret} leaked into the listing");
+        }
+        let digest = crate::core::repository_resources::sha256(first.as_bytes());
+        assert_eq!(
+            digest, GOLDEN,
+            "the listing no longer reads the same bytes: {first}"
+        );
+    }
+
+    // ── KT-915: the render memo is warmed in the background ─────────────────
+
+    use super::super::resource_prewarm::{self, Progress, Timings};
+    use tokio_util::sync::CancellationToken;
+
+    /// Whether the render memo already holds this resource under `slug`.
+    fn is_memoized(loaded: &LoadedResource, slug: &str) -> bool {
+        use crate::core::repository_resources::render_is_memoized as memoized;
+        fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+            serde_json::to_value(value).unwrap()
+        }
+        match loaded {
+            LoadedResource::Workflow(workflow) => {
+                // Rendered as a definition, never as an activation state.
+                let mut source = json(workflow);
+                source["enabled"] = serde_json::Value::Bool(false);
+                memoized(
+                    ProjectRepositoryResourceKind::Workflow,
+                    slug,
+                    workflow.updated_at,
+                    &source,
+                )
+            }
+            LoadedResource::QuickPrompt(prompt) => memoized(
+                ProjectRepositoryResourceKind::QuickPrompt,
+                slug,
+                prompt.updated_at,
+                &json(prompt),
+            ),
+            LoadedResource::QuickApi(api) => memoized(
+                ProjectRepositoryResourceKind::QuickApi,
+                slug,
+                api.updated_at,
+                &json(api),
+            ),
+            LoadedResource::QuickExec(exec) => memoized(
+                ProjectRepositoryResourceKind::QuickExec,
+                slug,
+                exec.updated_at,
+                &json(exec),
+            ),
+            LoadedResource::Artifact { page, updated_at } => memoized(
+                ProjectRepositoryResourceKind::Artifact,
+                slug,
+                *updated_at,
+                &json(page),
+            ),
+            LoadedResource::Skill(_) => unreachable!("skills are not warmed"),
+        }
+    }
+
+    /// What the warm-up plans for a project, with the slugs the listing uses.
+    async fn planned_resources(
+        state: &crate::AppState,
+        project_id: &str,
+    ) -> Vec<(LoadedResource, String)> {
+        let project_id = project_id.to_string();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                let project_key =
+                    crate::db::resource_identities::project_key(conn, Some(&project_id))?;
+                let mut planned = Vec::new();
+                for seed in project_seeds(conn, &project_id)? {
+                    let slug = resource_slug(conn, &project_key, &seed)?;
+                    planned.push((seed.loaded, slug));
+                }
+                Ok(planned)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// `count` Quick Prompts of about 24 KB with a credential assignment on
+    /// most lines, so masking them is slow enough to observe. `nonce` keeps
+    /// their text to this test.
+    async fn seed_heavy_prompts(state: &crate::AppState, count: usize, nonce: &str) {
+        let nonce = nonce.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                for index in 0..count {
+                    let mut body = format!("# heavy prompt {index} {nonce}\n");
+                    while body.len() < 24 * 1024 {
+                        body.push_str(&format!(
+                            "Send Authorization: Bearer ${{TOKEN_{index}}} and keep password=${{DB_{index}}} out of the log ({nonce})\n"
+                        ));
+                    }
+                    crate::db::quick_prompts::insert_quick_prompt(
+                        conn,
+                        &sample_prompt("project-1", &format!("heavy-{index}"), &body),
+                    )?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("gave up waiting for {what}");
+    }
+
+    fn fast_timings() -> Timings {
+        Timings {
+            startup: std::time::Duration::ZERO,
+            // Wide enough that a busy machine stalling between two edits of
+            // a burst does not split it.
+            debounce: std::time::Duration::from_millis(500),
+            max_debounce: std::time::Duration::from_secs(5),
+            breath: std::time::Duration::ZERO,
+        }
+    }
+
+    async fn edit_prompt(state: &crate::AppState, template: String) {
+        state
+            .db
+            .with_conn(move |conn| {
+                let mut prompt = crate::db::quick_prompts::get_quick_prompt(conn, "watched")?
+                    .expect("the watched prompt exists");
+                prompt.prompt_template = template;
+                crate::db::quick_prompts::update_quick_prompt(conn, &prompt)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn state_with_watched_prompt(nonce: &str) -> (crate::AppState, tempfile::TempDir) {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let template = format!("Watched prompt, first version ({nonce})");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt("project-1", "watched", &template),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        (state, root)
+    }
+
+    /// The warm-up renders what the listing will ask for, under the same slugs
+    /// and from the same content: afterwards, the render memo holds all of it.
+    #[tokio::test]
+    async fn warming_a_project_renders_what_its_listing_will_ask_for() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let tag = format!(" warm-probe-{}", Uuid::new_v4());
+        seed_one_of_each_kind_tagged(&state, "project-1", &tag).await;
+
+        let planned = planned_resources(&state, "project-1").await;
+        assert_eq!(planned.len(), 5, "one of each kind the listing renders");
+        for (loaded, slug) in &planned {
+            assert!(!is_memoized(loaded, slug), "{slug} is not rendered yet");
+        }
+
+        let progress = Progress::default();
+        let warmed = resource_prewarm::warm_project(
+            &state.db,
+            "project-1",
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &progress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(warmed, 5);
+        for (loaded, slug) in &planned {
+            assert!(
+                is_memoized(loaded, slug),
+                "{slug} is rendered ahead of time"
+            );
+        }
+
+        // The listing is then served from memory, and shows no secret value.
+        let hits = crate::core::repository_resources::render_memo_stats().hits;
+        let listing = list_resources(&state, "project-1").await;
+        assert!(
+            crate::core::repository_resources::render_memo_stats().hits >= hits + 5,
+            "every resource of the listing came from the warmed memo"
+        );
+        let listed = serde_json::to_string(&listing.resources).unwrap();
+        for secret in [
+            "hunter2-golden",
+            "golden-exec-token-123456",
+            "golden-api-key-123456",
+        ] {
+            assert!(!listed.contains(secret), "{secret} leaked into the listing");
+        }
+    }
+
+    /// Rendering is done off the database: while the warm-up masks its
+    /// resources, a request finds the read connection free.
+    #[tokio::test]
+    async fn warming_leaves_the_database_free_for_a_request_while_it_renders() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_heavy_prompts(&state, 150, &Uuid::new_v4().to_string()).await;
+
+        let progress = std::sync::Arc::new(Progress::default());
+        let warm = tokio::spawn({
+            let (db, progress) = (state.db.clone(), progress.clone());
+            async move {
+                resource_prewarm::warm_project(
+                    &db,
+                    "project-1",
+                    &CancellationToken::new(),
+                    std::time::Duration::from_millis(1),
+                    &progress,
+                )
+                .await
+            }
+        });
+        wait_until("the warm-up to be rendering", || {
+            progress.rendered.load(std::sync::atomic::Ordering::Acquire) >= 3
+        })
+        .await;
+        assert!(!warm.is_finished(), "the run is still going");
+
+        // A request now: it is served, and the warm-up is not done yet.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.db.with_read_conn(|_| Ok(())),
+        )
+        .await
+        .expect("a request is not made to wait for the warm-up")
+        .unwrap();
+        assert!(
+            !warm.is_finished(),
+            "the request was served while the warm-up was still rendering"
+        );
+        assert_eq!(warm.await.unwrap().unwrap(), 150);
+    }
+
+    #[tokio::test]
+    async fn the_warm_up_never_delays_the_start_and_stops_at_shutdown() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_heavy_prompts(&state, 150, &Uuid::new_v4().to_string()).await;
+
+        // Started, it returns at once whatever it waits for; stopped before
+        // its first run, it renders nothing.
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let started = std::time::Instant::now();
+        let waiting = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            Timings {
+                startup: std::time::Duration::from_secs(3600),
+                ..fast_timings()
+            },
+            progress.clone(),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+        assert_eq!(
+            progress.rendered.load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+
+        // Stopped in the middle of a run, it leaves the rest alone.
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let running = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            Timings {
+                breath: std::time::Duration::from_millis(1),
+                ..fast_timings()
+            },
+            progress.clone(),
+        );
+        wait_until("the run to start", || {
+            progress.rendered.load(std::sync::atomic::Ordering::Acquire) >= 3
+        })
+        .await;
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), running)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+        assert!(progress.rendered.load(std::sync::atomic::Ordering::Acquire) < 150);
+    }
+
+    /// The memo is bounded (48 MiB): the warm-up stops rather than push out
+    /// what it has computed.
+    #[tokio::test]
+    async fn the_warm_up_stops_when_the_render_memo_is_full() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_one_of_each_kind_tagged(&state, "project-1", &format!(" full-{}", Uuid::new_v4()))
+            .await;
+
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let room_for_two = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+        let warmed = resource_prewarm::warm_project_while(
+            &state.db,
+            "project-1",
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &Progress::default(),
+            &room_for_two,
+        )
+        .await
+        .unwrap();
+        assert_eq!(warmed, 2, "no more once the memo says it is full");
+
+        let nothing = resource_prewarm::warm_project_while(
+            &state.db,
+            "project-1",
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &Progress::default(),
+            &|| false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(nothing, 0);
+    }
+
+    /// After the start and after an edit, the memo holds the current content;
+    /// a burst of edits is one run, not one per edit.
+    #[tokio::test]
+    async fn the_warm_up_runs_after_the_start_and_after_an_edit_once_per_burst() {
+        let (state, _root) = state_with_watched_prompt(&Uuid::new_v4().to_string()).await;
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let passes = || progress.passes.load(std::sync::atomic::Ordering::Acquire);
+        let warm_up = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            fast_timings(),
+            progress.clone(),
+        );
+
+        // After the start: what the database held is rendered.
+        wait_until("the first run", || passes() >= 1).await;
+        let planned = planned_resources(&state, "project-1").await;
+        assert!(is_memoized(&planned[0].0, &planned[0].1));
+
+        // After an edit: the new content is, once the writes have stopped.
+        let nonce = Uuid::new_v4();
+        for version in 0..5 {
+            edit_prompt(&state, format!("Watched prompt, edit {version} ({nonce})")).await;
+        }
+        wait_until("the run after the edits", || passes() >= 2).await;
+        let planned = planned_resources(&state, "project-1").await;
+        assert!(
+            matches!(&planned[0].0, LoadedResource::QuickPrompt(prompt) if prompt.prompt_template.contains("edit 4")),
+            "the database holds the last edit"
+        );
+        assert!(
+            is_memoized(&planned[0].0, &planned[0].1),
+            "and the memo holds it too"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert_eq!(passes(), 2, "five edits in a burst made one run");
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), warm_up)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+    }
+
+    /// A workflow writing all day cannot keep the resources cold: the run
+    /// waits for the writes to stop, but not for ever.
+    #[tokio::test]
+    async fn a_steady_stream_of_edits_cannot_postpone_the_warm_up_for_ever() {
+        let (state, _root) = state_with_watched_prompt(&Uuid::new_v4().to_string()).await;
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let warm_up = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            Timings {
+                debounce: std::time::Duration::from_millis(400),
+                max_debounce: std::time::Duration::from_secs(1),
+                ..fast_timings()
+            },
+            progress.clone(),
+        );
+        wait_until("the first run", || {
+            progress.passes.load(std::sync::atomic::Ordering::Acquire) >= 1
+        })
+        .await;
+
+        // An edit every 60 ms, never quiet for the 400 ms the debounce wants.
+        let started = std::time::Instant::now();
+        let mut ran_during_the_stream = false;
+        while started.elapsed() < std::time::Duration::from_millis(2500) {
+            edit_prompt(
+                &state,
+                format!("Watched prompt, stream {:?}", started.elapsed()),
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            if progress.passes.load(std::sync::atomic::Ordering::Acquire) >= 2 {
+                ran_during_the_stream = true;
+                break;
+            }
+        }
+        assert!(
+            ran_during_the_stream,
+            "a run happened while the edits kept coming"
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), warm_up)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+    }
+
     async fn compare(
         state: &crate::AppState,
         project_id: &str,
@@ -4389,14 +5100,34 @@ mod tests {
         assert!(cut && text.len() <= MAX_CONTENT_BYTES && text.chars().all(|c| c == 'é'));
     }
 
+    /// Renders the resources of `project_id` ahead of its first listing, as the
+    /// backend does after it starts, and says how long that took.
+    async fn time_the_warm_up(state: &crate::AppState, project_id: &str) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        resource_prewarm::warm_project(
+            &state.db,
+            project_id,
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &Progress::default(),
+        )
+        .await
+        .unwrap();
+        started.elapsed()
+    }
+
     /// 60 prompts of about 8 KB and 20 Quick Execs, all Kronn-side (nothing
     /// published, so no diff to build): the listing of the first read, then of
-    /// the reads that follow.
+    /// the reads that follow. With `warm_up`, the resources are rendered ahead
+    /// of that first read, the way the backend does after it starts; the two
+    /// runs hold different text, so neither is served by the other's memo.
     async fn time_listing_of_large_automations(
         label: &'static str,
         sentences: &'static [&'static str],
+        warm_up: bool,
     ) {
         isolate_config_dir();
+        let run = if warm_up { "warmed" } else { "cold" };
         let state = test_state();
         let root = tempfile::tempdir().unwrap();
         let project_id = "project-1".to_string();
@@ -4405,7 +5136,7 @@ mod tests {
             .db
             .with_conn(move |conn| {
                 for index in 0..60 {
-                    let mut template = format!("# {label} automation {index}\n\n");
+                    let mut template = format!("# {label} {run} automation {index}\n\n");
                     let mut turn = index;
                     while template.len() < 8 * 1024 {
                         template.push_str(sentences[turn % sentences.len()]);
@@ -4420,7 +5151,7 @@ mod tests {
                 for index in 0..20 {
                     let mut exec = sample_exec("project-1");
                     exec.id = format!("qe-{index}");
-                    exec.name = format!("Automation exec {index}");
+                    exec.name = format!("Automation exec {index} {run}");
                     crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
                 }
                 Ok::<_, anyhow::Error>(())
@@ -4428,6 +5159,11 @@ mod tests {
             .await
             .unwrap();
 
+        let warmed_in = if warm_up {
+            Some(time_the_warm_up(&state, &project_id).await)
+        } else {
+            None
+        };
         let mut runs = Vec::new();
         for _ in 0..3 {
             let started = std::time::Instant::now();
@@ -4435,7 +5171,12 @@ mod tests {
             runs.push(started.elapsed());
             assert_eq!(listing.resources.len(), 80);
         }
-        eprintln!("LISTING_SPEED {label}, first (cold) then repeated: {runs:?}");
+        match warmed_in {
+            None => eprintln!("LISTING_SPEED {label}, first (cold) then repeated: {runs:?}"),
+            Some(took) => eprintln!(
+                "LISTING_SPEED {label}, first after the warm-up (which took {took:?}) then repeated: {runs:?}"
+            ),
+        }
     }
 
     /// `cargo test --lib listing_speed_with_many_large -- --ignored --nocapture`:
@@ -4446,30 +5187,26 @@ mod tests {
     #[tokio::test]
     #[ignore = "timing measurement, run on demand"]
     async fn listing_speed_with_many_large_automations() {
-        time_listing_of_large_automations(
-            "prose",
-            &[
-                "Review the mapping between the shipping token budget and the pin of each dependency.",
-                "Keep the answer short: list the files touched, then the tests run, then what is left.",
-                "The password policy lives in the security page; use a connection, never paste credentials.",
-                "Open https://example.com/docs/guide and compare it with the notes: key: value, one per line.",
-                "Explain the trade-off first, then propose the smallest change; wait for approval before writing.",
-                "Return JSON with the fields status, summary and next_steps; no prose outside the object.",
-            ],
-        )
-        .await;
-        time_listing_of_large_automations(
-            "credentials",
-            &[
-                "Export API_KEY=${SERVICE_KEY} before the run; the token: ${DEPLOY_TOKEN} comes from the vault.",
-                "Send Authorization: Bearer ${GITHUB_TOKEN} in the header and never log password=${DB_PASSWORD}.",
-                "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com/v1/items and keep the reply short.",
-                "Connect with postgres://app:${DB_PASSWORD}@db.internal/app, then list the tables that changed.",
-                "Explain the trade-off first, then propose the smallest change; wait for approval before writing.",
-                "Return JSON with the fields status, summary and next_steps; no prose outside the object.",
-            ],
-        )
-        .await;
+        const PROSE: &[&str] = &[
+            "Review the mapping between the shipping token budget and the pin of each dependency.",
+            "Keep the answer short: list the files touched, then the tests run, then what is left.",
+            "The password policy lives in the security page; use a connection, never paste credentials.",
+            "Open https://example.com/docs/guide and compare it with the notes: key: value, one per line.",
+            "Explain the trade-off first, then propose the smallest change; wait for approval before writing.",
+            "Return JSON with the fields status, summary and next_steps; no prose outside the object.",
+        ];
+        const CREDENTIALS: &[&str] = &[
+            "Export API_KEY=${SERVICE_KEY} before the run; the token: ${DEPLOY_TOKEN} comes from the vault.",
+            "Send Authorization: Bearer ${GITHUB_TOKEN} in the header and never log password=${DB_PASSWORD}.",
+            "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com/v1/items and keep the reply short.",
+            "Connect with postgres://app:${DB_PASSWORD}@db.internal/app, then list the tables that changed.",
+            "Explain the trade-off first, then propose the smallest change; wait for approval before writing.",
+            "Return JSON with the fields status, summary and next_steps; no prose outside the object.",
+        ];
+        for warm_up in [false, true] {
+            time_listing_of_large_automations("prose", PROSE, warm_up).await;
+            time_listing_of_large_automations("credentials", CREDENTIALS, warm_up).await;
+        }
     }
 
     /// `cargo test --lib listing_speed_with_many_short_leaves -- --ignored --nocapture`:
@@ -4480,40 +5217,55 @@ mod tests {
     #[ignore = "timing measurement, run on demand"]
     async fn listing_speed_with_many_short_leaves() {
         isolate_config_dir();
-        let state = test_state();
-        let root = tempfile::tempdir().unwrap();
-        let project_id = "project-1".to_string();
-        seed_project(&state, mk_project(&project_id, root.path())).await;
-        state
-            .db
-            .with_conn(|conn| {
-                for index in 0..100 {
-                    let mut exec = sample_exec("project-1");
-                    exec.id = format!("qe-{index}");
-                    exec.name = format!("Automation exec {index}");
-                    exec.args = (0..500)
-                        .map(|leaf| match leaf % 4 {
-                            0 => format!("--option-{index}-{leaf}"),
-                            1 => format!("value {index}/{leaf}"),
-                            2 => format!("--label=step-{leaf}"),
-                            _ => format!("https://example.com/{index}/{leaf}?page=2"),
-                        })
-                        .collect();
-                    crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .await
-            .unwrap();
+        // Cold, then with the resources rendered ahead of the first read: the
+        // two runs hold different text, so neither is served by the other's memo.
+        for warm_up in [false, true] {
+            let run = if warm_up { "warmed" } else { "cold" };
+            let state = test_state();
+            let root = tempfile::tempdir().unwrap();
+            let project_id = "project-1".to_string();
+            seed_project(&state, mk_project(&project_id, root.path())).await;
+            state
+                .db
+                .with_conn(move |conn| {
+                    for index in 0..100 {
+                        let mut exec = sample_exec("project-1");
+                        exec.id = format!("qe-{index}");
+                        exec.name = format!("Automation exec {index} {run}");
+                        exec.args = (0..500)
+                            .map(|leaf| match leaf % 4 {
+                                0 => format!("--option-{index}-{leaf}"),
+                                1 => format!("value {index}/{leaf}"),
+                                2 => format!("--label=step-{leaf}"),
+                                _ => format!("https://example.com/{index}/{leaf}?page=2"),
+                            })
+                            .collect();
+                        crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .unwrap();
 
-        let mut runs = Vec::new();
-        for _ in 0..3 {
-            let started = std::time::Instant::now();
-            let listing = list_resources(&state, &project_id).await;
-            runs.push(started.elapsed());
-            assert_eq!(listing.resources.len(), 100);
+            let warmed_in = if warm_up {
+                Some(time_the_warm_up(&state, &project_id).await)
+            } else {
+                None
+            };
+            let mut runs = Vec::new();
+            for _ in 0..3 {
+                let started = std::time::Instant::now();
+                let listing = list_resources(&state, &project_id).await;
+                runs.push(started.elapsed());
+                assert_eq!(listing.resources.len(), 100);
+            }
+            match warmed_in {
+                None => eprintln!("LISTING_SPEED short leaves, first (cold) then repeated: {runs:?}"),
+                Some(took) => eprintln!(
+                    "LISTING_SPEED short leaves, first after the warm-up (which took {took:?}) then repeated: {runs:?}"
+                ),
+            }
         }
-        eprintln!("LISTING_SPEED short leaves, first (cold) then repeated: {runs:?}");
     }
 
     /// `cargo test --lib listing_speed_with_workflows_linking -- --ignored --nocapture`:

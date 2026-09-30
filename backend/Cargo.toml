@@ -27,7 +27,7 @@ toml = "1"
 csv = "1"
 
 # Database (embedded)
-rusqlite = { version = "0.39", features = ["bundled", "backup", "trace"] }
+rusqlite = { version = "0.39", features = ["bundled", "backup", "trace", "hooks"] }
 
 # Scheduling
 cron = "0.16"

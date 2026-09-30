@@ -81,6 +81,21 @@ impl<T> ContentMemo<T> {
         }
     }
 
+    /// The summed weight of what the memo holds, out of [`Self::budget`].
+    pub fn used(&self) -> usize {
+        self.lock().used
+    }
+
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// Whether `key` is held, without counting a hit or a miss.
+    #[cfg(test)]
+    pub fn contains(&self, key: &str) -> bool {
+        self.lock().entries.contains_key(key)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State<T>> {
         // A panic while holding the lock cannot leave the maps half-updated in
         // a way that matters: the worst case is a missing entry, recomputed.
@@ -201,6 +216,27 @@ mod tests {
             assert_eq!(*value, "too large");
         }
         assert_eq!(runs, 2);
+    }
+
+    #[test]
+    fn the_memo_reports_how_much_of_its_budget_is_taken() {
+        let memo = ContentMemo::new(10);
+        assert_eq!((memo.used(), memo.budget()), (0, 10));
+        memo.get_or_try_insert::<()>("a", text_weight, || Ok("xxxx".to_string()))
+            .unwrap();
+        memo.get_or_try_insert::<()>("b", text_weight, || Ok("xxxx".to_string()))
+            .unwrap();
+        assert_eq!(memo.used(), 8);
+        // The third does not fit: the oldest leaves, the weight stays within budget.
+        memo.get_or_try_insert::<()>("c", text_weight, || Ok("xxxx".to_string()))
+            .unwrap();
+        assert_eq!(memo.used(), 8);
+        assert!(!memo.contains("a") && memo.contains("b") && memo.contains("c"));
+        assert_eq!(
+            memo.stats().hits,
+            0,
+            "asking whether a key is held is no lookup"
+        );
     }
 
     #[test]

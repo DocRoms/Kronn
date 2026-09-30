@@ -472,8 +472,10 @@ pub fn update_live_page_html(
     Ok(revision)
 }
 
-pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePageDetail>> {
-    let page = conn
+/// The page row alone, by id or slug: `get_live_page` without the revision,
+/// the datasets and their points, for a caller that needs the page's own facts.
+pub fn get_live_page_summary(conn: &Connection, page_id: &str) -> Result<Option<LivePage>> {
+    Ok(conn
         .query_row(
             "SELECT id, project_id, title, slug, current_revision_id, data_revision,
                     created_at, updated_at, last_published_at, pinned, archived
@@ -481,7 +483,11 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
             [page_id],
             map_page,
         )
-        .optional()?;
+        .optional()?)
+}
+
+pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePageDetail>> {
+    let page = get_live_page_summary(conn, page_id)?;
     let Some(page) = page else {
         return Ok(None);
     };

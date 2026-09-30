@@ -834,6 +834,13 @@ async fn main() -> anyhow::Result<()> {
     let media_state = state.clone();
     tokio::spawn(async move { kronn::agents::media_runner::run_loop(media_state).await });
 
+    // KT-915 — render the resources of every project ahead of its first
+    // listing, and again after they are edited. Its own task, low priority: it
+    // never delays the boot nor a request, and stops with the server. Mirrored
+    // in desktop/src-tauri/src/main.rs (feature in the lib, spawn per-binary).
+    let prewarm = kronn::api::projects::resource_prewarm::Prewarm::start(state.db.clone());
+    let stop_prewarm = prewarm.shutdown_token();
+
     // Build router
     let deferred_resume_state = state.clone();
     let app = build_router(state);
@@ -877,12 +884,19 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Graceful shutdown: wait for SIGTERM/SIGINT, then let in-flight requests finish
-    axum::serve(
+    let served = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        stop_prewarm.cancel();
+    })
+    .await;
+    // The warm-up leaves between two resources: wait for it to, whether the
+    // server stopped or failed, rather than cut a rendering short.
+    prewarm.stop().await;
+    served?;
 
     tracing::info!("Kronn — Shutdown complete.");
     Ok(())

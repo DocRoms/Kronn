@@ -139,16 +139,19 @@ pub fn reconcile_stale_runs(
 /// user-facing workflow list.
 pub const BATCH_WORKFLOW_PREFIX: &str = "qp:";
 
+/// The columns `row_to_workflow` reads, in its order.
+const WORKFLOW_COLUMNS: &str = "id, name, project_id, trigger_json, steps_json, actions_json,
+                safety_json, workspace_config_json, concurrency_limit, enabled,
+                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
+                pinned, concurrency_key";
+
 pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     // Filter out batch placeholders (prefix "qp:") — they shouldn't show
     // up in the Workflows page, they're a plumbing detail for the FK.
-    let mut stmt = conn.prepare(
-        "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
-                safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key
-         FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS}
+         FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC"
+    ))?;
 
     let workflows = stmt
         .query_map([], |row| Ok(row_to_workflow(row)))?
@@ -158,14 +161,25 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     Ok(workflows)
 }
 
+/// `list_workflows` for one project, in the same order: the rows of the other
+/// projects are neither read nor parsed.
+pub fn list_workflows_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Workflow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS}
+         FROM workflows WHERE id NOT LIKE 'qp:%' AND project_id = ?1 ORDER BY updated_at DESC"
+    ))?;
+    let workflows = stmt
+        .query_map(params![project_id], |row| Ok(row_to_workflow(row)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(workflows)
+}
+
 pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
-                safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key
-         FROM workflows WHERE id = ?1",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS}
+         FROM workflows WHERE id = ?1"
+    ))?;
 
     let wf = stmt
         .query_row(params![id], |row| Ok(row_to_workflow(row)))

@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::models::{
@@ -42,8 +43,10 @@ fn extend(
 
 fn workflow_references(resource: &Value) -> Vec<Reference> {
     // A definition that no longer parses as a workflow has no readable edges;
-    // the alignment status already reports the file.
-    let Ok(workflow) = serde_json::from_value::<Workflow>(resource.clone()) else {
+    // the alignment status already reports the file. Read in place: the
+    // resource is the memoized rendering's, and the listing asks for the
+    // references of every workflow on each read.
+    let Ok(workflow) = Workflow::deserialize(resource) else {
         return Vec::new();
     };
     let dependencies = crate::api::workflows::workflow_dependency_ids([&workflow]);

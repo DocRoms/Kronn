@@ -16,6 +16,7 @@ pub mod docker;
 pub mod git;
 pub mod migrate;
 pub mod resource_links;
+pub mod resource_prewarm;
 pub mod resources;
 pub mod skill_migration;
 pub mod template;
