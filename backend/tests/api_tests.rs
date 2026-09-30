@@ -4147,7 +4147,9 @@ async fn a_native_skill_used_in_kronn_is_listed_with_its_folder_and_its_skill_md
     .unwrap();
     std::fs::create_dir_all(project_directory.path().join(".agents/skills/unused")).unwrap();
     std::fs::write(
-        project_directory.path().join(".agents/skills/unused/SKILL.md"),
+        project_directory
+            .path()
+            .join(".agents/skills/unused/SKILL.md"),
         "---\nname: Unused\ndescription: Nobody uses it\n---\n\nNot referenced.\n",
     )
     .unwrap();
