@@ -86,12 +86,19 @@ page, sidebar included. The pure rules stay in `lib/automationFilters.ts`.
 
 | Filter | Rule |
 | --- | --- |
-| Type | A full-width `<select>`: All / Workflows / Quick APIs / Quick Prompts / Quick Execs, each option with its count. Choosing a type also opens its list; "All" lifts the filter. It carries the tour anchor `automation-filter-type`, which the four type steps of the tour target (they open the panel and pick their type). [src: file: frontend/src/components/tour/tourSteps.ts:258] |
+| Type | A full-width `<select>`: All / Workflows / Quick APIs / Quick Prompts / Quick Execs / Skills, each option with its count. Choosing a type also opens its list; "All" lifts the filter. It carries the tour anchor `automation-filter-type`, which the four automation type steps of the tour target (they open the panel and pick their type). [src: file: frontend/src/components/tour/tourSteps.ts:258] |
 | State | A `<select>`: All / Favorites / Active / Inactive, with counts. Only a disabled workflow is inactive: a Quick Prompt, API or Exec has no off switch, so it always counts as active. [src: file: frontend/src/lib/automationFilters.ts:44-51] |
-| Project | A `<select>`: all, no project, or one project. |
+| Project | A `<select>`: all, no project, or one project. A skill is attached to every project that lists it in `default_skill_ids`, so it matches each of them (and "no project" when none does). [src: file: frontend/src/lib/automationFilters.ts:56-67] |
 | Counts | Every option counts what choosing it would show given the other filters and the search. [src: file: frontend/src/lib/automationFilters.ts:82-109] |
 | Clear | "Clear filters" resets type, state and project (not the search, which has its own ✕). It shows in the panel and in the empty list while a filter is set. The Filter icon stays lit for as long as one is. [src: file: frontend/src/pages/WorkflowsPage.tsx:1949] |
 | Sort | Name / Last modified / Type, plus a reverse toggle. Favorites stay first whatever the criterion; the direction only flips each side of that line. [src: file: frontend/src/lib/automationSort.ts:68] |
+
+Skills (KT-914) are read from the catalog, not created here: the row opens a
+read-only sheet (`SkillSheet`) whose `SKILL.md` reuses the safe Markdown of the
+repository resources, and editing stays in Config › Skills. A skill has no
+server-side pin or modification date, so its favorites are kept in the browser
+and it ranks after every dated automation in Recent.
+[src: file: frontend/src/lib/automationSkills.ts:1] [src: file: frontend/src/components/SkillSheet.tsx:1]
 
 The panels stack one select per row in a single shrinkable column, so nothing
 scrolls sideways at 400 px, where the sidebar is the usual drawer. There is no

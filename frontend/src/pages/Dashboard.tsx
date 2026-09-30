@@ -1427,6 +1427,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
               onNavigatePage={(pageId) => { setOpenPageId(pageId); setPage('pages'); }}
               onNavigateMcp={() => setPage('mcps')}
+              onNavigateSettings={() => setPage('settings')}
               onBatchLaunched={(discIds, batchRunId, mode = 'batch') => {
                 // Mark every batch-child disc as sending so the sidebar
                 // spinner lights up for all of them in parallel, not just

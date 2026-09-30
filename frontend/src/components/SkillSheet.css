@@ -1,0 +1,71 @@
+/* Sheet of a skill on the Automation page (KT-914). The header reuses the
+ * compact command bar of the other types (`.qp-card[data-detail]`); the body
+ * below is the skill itself, and its Markdown is styled by `.rr-markdown`
+ * (RepositoryResourceSheets.css), the same rendering as a repository resource. */
+.skill-sheet { display: flex; flex-direction: column; gap: var(--kr-sp-4); min-width: 0; }
+.skill-sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-5);
+  padding: var(--kr-sp-5);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-card);
+}
+.skill-sheet-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--kr-sp-3); }
+.skill-sheet-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-pill);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+.skill-sheet-badge[data-origin='external'] { border-color: var(--kr-accent-border); color: var(--kr-accent); }
+.skill-sheet-link { display: inline-flex; align-items: center; gap: 4px; color: var(--kr-accent); font-size: var(--kr-fs-xs); text-decoration: none; }
+.skill-sheet-link:hover, .skill-sheet-link:focus-visible { text-decoration: underline; }
+.skill-sheet-description { margin: 0; max-width: 920px; color: var(--kr-text-secondary); font-size: var(--kr-fs-sm); line-height: 1.5; }
+.skill-sheet-muted { margin: 0; color: var(--kr-text-muted); font-size: var(--kr-fs-sm); }
+.skill-sheet-section h3 { margin: 0 0 var(--kr-sp-2); font-size: var(--kr-fs-sm); }
+.skill-sheet-section h3 code { font-family: var(--kr-font-mono); }
+.skill-sheet-section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--kr-sp-2); margin-bottom: var(--kr-sp-2); }
+.skill-sheet-section-head h3 { margin: 0; }
+.skill-sheet-projects { display: flex; flex-wrap: wrap; gap: var(--kr-sp-2); margin: 0; padding: 0; list-style: none; }
+.skill-sheet-projects li {
+  padding: 3px 10px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-bg-raised);
+  font-size: var(--kr-fs-sm);
+}
+.skill-sheet-view { display: flex; gap: 4px; }
+.skill-sheet-chip,
+.skill-sheet-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-pill);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+}
+.skill-sheet-chip[aria-pressed='true'] { border-color: var(--kr-accent-border); background: var(--kr-accent-bg); color: var(--kr-text-primary); }
+.skill-sheet-action:hover, .skill-sheet-chip:hover { color: var(--kr-text-primary); }
+.skill-sheet-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--kr-sp-3); padding-top: var(--kr-sp-4); border-top: 1px solid var(--kr-border-subtle); }
+.skill-sheet-buttons { display: flex; align-items: center; gap: var(--kr-sp-3); }
+.skill-card-open { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.skill-card-open:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 3px; }
+
+@media (max-width: 640px) {
+  .skill-sheet-body { padding: var(--kr-sp-4); }
+  .skill-sheet-chip, .skill-sheet-action { min-height: 44px; }
+  .skill-sheet-view { width: 100%; }
+  .skill-sheet-view .skill-sheet-chip { flex: 1; justify-content: center; }
+}

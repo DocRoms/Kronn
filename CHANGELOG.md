@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The Automation page lists the skills. "Skills" is a fifth type in the
+  sidebar Filter, with its count, next to Workflows, Quick APIs, Quick Prompts
+  and Quick Execs, and covers the built-in skills as well as the ones you
+  wrote. A skill sits under every project that lists it among its default
+  skills, and under "No project" when none does; the flat lists (Favorites,
+  Recent) show it once. Opening one shows its sheet in the main column: name,
+  description, category, the projects that use it, and its `SKILL.md` — rendered
+  as Markdown without raw HTML (the same rendering as a repository resource) or
+  as Source. Name and description are searchable, like the other types. The
+  sheet is for reading: no variable, no launch. A skill is still edited in
+  Config › Skills, which the sheet links to; a skill you wrote can be deleted
+  from its row or its sheet, a built-in one cannot. A skill has no pin on the
+  server, so its favorites are kept in this browser. Merging skills with Quick
+  Prompts stays KT-906 (KT-914).
+
 - Skills are real Agent Skills, written where agents look for them. Writing a
   skill into the repository now produces `.agents/skills/<slug>/SKILL.md` in the
   standard format (valid `name` and `description`, Kronn's own fields under

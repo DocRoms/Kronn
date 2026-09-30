@@ -17,7 +17,7 @@ import {
 const toolbarCss = readFileSync(join(import.meta.dirname, '..', 'AutomationToolbar.css'), 'utf-8');
 
 const counts = {
-  kinds: { all: 9, workflows: 4, quickPrompts: 3, quickApis: 1, quickExecs: 1 },
+  kinds: { all: 11, workflows: 4, quickPrompts: 3, quickApis: 1, quickExecs: 1, skills: 2 },
   states: { all: 9, favorites: 2, active: 8, inactive: 1 },
 };
 
@@ -86,7 +86,7 @@ describe('AutomationToolbar', () => {
     const type = within(panels).getByRole('combobox', { name: 'Filtre par type d’automatisation' });
     expect(type).toHaveAttribute('data-tour-id', 'automation-filter-type');
     expect(within(type).getAllByRole('option').map(option => option.textContent)).toEqual([
-      'Tous (9)', 'Workflows (4)', 'Quick APIs (1)', 'Quick Prompts (3)', 'Quick Execs (CLI) (1)',
+      'Tous (11)', 'Workflows (4)', 'Quick APIs (1)', 'Quick Prompts (3)', 'Quick Execs (CLI) (1)', 'Skills (2)',
     ]);
     const state = within(panels).getByRole('combobox', { name: 'Filtre par état d’automatisation' });
     expect(within(state).getAllByRole('option').map(option => option.textContent)).toEqual([

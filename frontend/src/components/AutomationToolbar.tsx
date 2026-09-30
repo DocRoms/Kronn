@@ -22,6 +22,7 @@ const KIND_LABEL = {
   quickApis: 'wf.tabQuickApis',
   quickPrompts: 'wf.tabQuickPrompts',
   quickExecs: 'wf.tabQuickExecs',
+  skills: 'wf.tabSkills',
 } as const satisfies Record<AutomationKind, string>;
 
 export interface AutomationToolbarState {

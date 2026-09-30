@@ -30,7 +30,10 @@ const MARKDOWN_COMPONENTS: Components = {
   img: ({ alt }) => <span>{alt}</span>,
 };
 
-function FileText({ text, markdown }: { text: string; markdown: boolean }) {
+/** One file's text: Markdown rendered without raw HTML (react-markdown, no
+ *  `rehype-raw`), or the source as it is. Shared with the skill sheet of the
+ *  Automation page, so a SKILL.md reads the same wherever it is opened. */
+export function FileText({ text, markdown }: { text: string; markdown: boolean }) {
   if (!markdown) return <pre className="rr-content-text" data-testid="content-source">{text}</pre>;
   const { header, body } = splitFrontMatter(text);
   return (

@@ -443,7 +443,7 @@ describe('WorkflowsPage', () => {
     it('counts each type in the Type select, and narrows the tree to the chosen one', async () => {
       const { sidebar, type } = await showLibrary();
       expect(optionTexts(type)).toEqual([
-        'Tous (5)', 'Workflows (2)', 'Quick APIs (0)', 'Quick Prompts (2)', 'Quick Execs (CLI) (1)',
+        'Tous (5)', 'Workflows (2)', 'Quick APIs (0)', 'Quick Prompts (2)', 'Quick Execs (CLI) (1)', 'Skills (0)',
       ]);
       expect(type).toHaveValue('all');
 
@@ -465,7 +465,7 @@ describe('WorkflowsPage', () => {
       expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Alpha flow', 'Ouvrir Gamma prompt']));
       // The type counts now read within the favorites only.
       expect(optionTexts(type)).toEqual([
-        'Tous (2)', 'Workflows (1)', 'Quick APIs (0)', 'Quick Prompts (1)', 'Quick Execs (CLI) (0)',
+        'Tous (2)', 'Workflows (1)', 'Quick APIs (0)', 'Quick Prompts (1)', 'Quick Execs (CLI) (0)', 'Skills (0)',
       ]);
 
       // + type: only the favorite workflow is left.

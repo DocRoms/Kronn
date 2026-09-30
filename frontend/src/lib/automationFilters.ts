@@ -2,14 +2,14 @@
 // search. Pure and in-memory, so the sidebar tree, the counters of the filter
 // bar and the tests all read one definition of "matches".
 
-export type AutomationKind = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs';
+export type AutomationKind = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
 export type AutomationKindFilter = AutomationKind | 'all';
 /** `active` / `inactive` only ever exclude a disabled workflow: a Quick
- *  Prompt, API or Exec has no off switch, so it is always usable. */
+ *  Prompt, API, Exec or Skill has no off switch, so it is always usable. */
 export type AutomationStateFilter = 'all' | 'favorites' | 'active' | 'inactive';
 
 /** Order of the type chips: same as the tour and the creation dialog. */
-export const AUTOMATION_KIND_FILTERS: AutomationKind[] = ['workflows', 'quickApis', 'quickPrompts', 'quickExecs'];
+export const AUTOMATION_KIND_FILTERS: AutomationKind[] = ['workflows', 'quickApis', 'quickPrompts', 'quickExecs', 'skills'];
 export const AUTOMATION_STATE_FILTERS: AutomationStateFilter[] = ['all', 'favorites', 'active', 'inactive'];
 /** Value of the project filter that keeps the automations without a project. */
 export const AUTOMATION_NO_PROJECT = '__global__';
@@ -17,6 +17,9 @@ export const AUTOMATION_NO_PROJECT = '__global__';
 export interface FilterableAutomation {
   kind: AutomationKind;
   projectId: string | null;
+  /** A skill can be attached to several projects at once; every other kind
+   *  belongs to one (`projectId`). Both are read by the project filter. */
+  projectIds?: readonly string[];
   pinned: boolean;
   searchText: string;
   workflow?: { enabled: boolean };
@@ -50,9 +53,17 @@ export function matchesAutomationState(resource: FilterableAutomation, state: Au
   }
 }
 
+/** Every project an automation is listed under; empty means "no project". */
+export function automationProjectIds(resource: Pick<FilterableAutomation, 'projectId' | 'projectIds'>): string[] {
+  const ids = new Set(resource.projectIds ?? []);
+  if (resource.projectId) ids.add(resource.projectId);
+  return [...ids];
+}
+
 export function matchesAutomationProject(resource: FilterableAutomation, projectId: string): boolean {
   if (projectId === 'all') return true;
-  return projectId === AUTOMATION_NO_PROJECT ? !resource.projectId : resource.projectId === projectId;
+  const ids = automationProjectIds(resource);
+  return projectId === AUTOMATION_NO_PROJECT ? ids.length === 0 : ids.includes(projectId);
 }
 
 /** The shell's own search rule, kept here to count what a search leaves. */
@@ -84,7 +95,7 @@ export function countAutomationKinds(
   filters: AutomationFilters,
 ): Record<AutomationKindFilter, number> {
   const counts: Record<AutomationKindFilter, number> = {
-    all: 0, workflows: 0, quickPrompts: 0, quickApis: 0, quickExecs: 0,
+    all: 0, workflows: 0, quickPrompts: 0, quickApis: 0, quickExecs: 0, skills: 0,
   };
   for (const resource of resources) {
     if (!matchesAutomationFilters(resource, filters, ['kind'])) continue;

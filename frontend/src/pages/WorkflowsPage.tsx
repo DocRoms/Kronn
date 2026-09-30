@@ -13,7 +13,7 @@ import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
   AgentType, AgentsConfig, ModelTier, StepResult, QuickPrompt, CreateQuickPromptRequest,
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
-  JsonValue,
+  JsonValue, Skill,
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
@@ -30,6 +30,7 @@ import { agentSettingsForSelection } from '../lib/agentSelection';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
+import { SkillCard, SkillSheet } from '../components/SkillSheet';
 import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
 import { PromptVariableInput } from '../components/workflows/PromptVariableInput';
 import { promptVariableEffectiveValue } from '../lib/promptVariableControl';
@@ -62,7 +63,14 @@ import {
   type AutomationToolbarState,
 } from '../components/AutomationToolbar';
 import {
+  SKILL_UPDATED_AT,
+  projectsUsingSkill,
+  readSkillFavorites,
+  writeSkillFavorites,
+} from '../lib/automationSkills';
+import {
   activeAutomationFilterCount,
+  automationProjectIds,
   countAutomationKinds,
   countAutomationStates,
   matchesAutomationFilters,
@@ -81,7 +89,7 @@ import {
 import './DiscussionsPage.css';
 import './WorkflowsPage.css';
 
-type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs';
+type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
 type CompareTarget = {
   agent: AgentType;
   tier: ModelTier;
@@ -113,6 +121,8 @@ type AutomationResource = {
   kind: AutomationTab;
   name: string;
   projectId: string | null;
+  /** Skills only: every project that lists the skill (empty: "No project"). */
+  projectIds?: string[];
   pinned: boolean;
   searchText: string;
   meta: string;
@@ -122,9 +132,10 @@ type AutomationResource = {
   quickApi?: QuickApi;
   quickPrompt?: QuickPrompt;
   quickExec?: QuickExec;
+  skill?: Skill;
 };
 
-const AUTOMATION_TABS: AutomationTab[] = ['workflows', 'quickPrompts', 'quickApis', 'quickExecs'];
+const AUTOMATION_TABS: AutomationTab[] = ['workflows', 'quickPrompts', 'quickApis', 'quickExecs', 'skills'];
 const AUTOMATION_NAVIGATION_STORAGE_KEY = 'kronn:automationNavigation';
 const AUTOMATION_COLLAPSED_STORAGE_KEY = 'kronn:automationCollapsedSections';
 
@@ -297,6 +308,8 @@ interface WorkflowsPageProps {
   /** Switches Dashboard to the Plugins page — used by the "no API plugin
    *  wired" prerequisite warning on the Quick API tab. */
   onNavigateMcp?: () => void;
+  /** Switches Dashboard to Settings, where a skill is edited (KT-914). */
+  onNavigateSettings?: () => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -317,7 +330,7 @@ function readPostImprovedQuickPromptId(): string | null {
   }
 }
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, initialSelectedWorkflowRunId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage, onNavigateMcp }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, initialSelectedWorkflowRunId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
@@ -364,7 +377,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // 0.8.5 — catalogs for the QP form binding pickers (skills + profiles +
   // directives). Empty-array fallback keeps the form rendering during the
   // first paint before the API resolves.
-  const { data: skillsCatalog } = useApi(() => skillsApi.list(), []);
+  const { data: skillsCatalog, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
   const { data: profilesCatalog } = useApi(() => profilesApi.list(), []);
   const { data: directivesCatalog } = useApi(() => directivesApi.list(), []);
   const externalAgentTargets = useMemo<AgentSwitchTarget[]>(() =>
@@ -409,6 +422,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       ? initialAutomationNavigation.resourceId
       : null,
   );
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(
+    initialAutomationNavigation.tab === 'skills'
+      ? initialAutomationNavigation.resourceId
+      : null,
+  );
+  const [skillFavorites, setSkillFavorites] = useState<ReadonlySet<string>>(readSkillFavorites);
+  const toggleSkillFavorite = useCallback((skillId: string) => {
+    setSkillFavorites(current => {
+      const next = new Set(current);
+      if (next.has(skillId)) next.delete(skillId);
+      else next.add(skillId);
+      return next;
+    });
+  }, []);
+  useEffect(() => { writeSkillFavorites(skillFavorites); }, [skillFavorites]);
   const invalidWorkflowSelection = Boolean(
     workflowList && selectedId && !workflowList.some(item => item.id === selectedId),
   );
@@ -424,6 +452,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     quickExecList && selectedQuickExecId
       && !quickExecList.some(item => item.id === selectedQuickExecId),
   );
+  const invalidSkillSelection = Boolean(
+    skillsCatalog && selectedSkillId
+      && !skillsCatalog.some(item => item.id === selectedSkillId),
+  );
   useEffect(() => {
     const resourceId = tab === 'workflows'
       ? (invalidWorkflowSelection ? null : selectedId)
@@ -431,7 +463,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         ? (invalidQuickPromptSelection ? null : selectedQuickPromptId)
         : tab === 'quickApis'
           ? (invalidQuickApiSelection ? null : selectedQuickApiId)
-          : (invalidQuickExecSelection ? null : selectedQuickExecId);
+          : tab === 'skills'
+            ? (invalidSkillSelection ? null : selectedSkillId)
+            : (invalidQuickExecSelection ? null : selectedQuickExecId);
     try {
       localStorage.setItem(
         AUTOMATION_NAVIGATION_STORAGE_KEY,
@@ -444,11 +478,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     invalidQuickApiSelection,
     invalidQuickExecSelection,
     invalidQuickPromptSelection,
+    invalidSkillSelection,
     invalidWorkflowSelection,
     selectedId,
     selectedQuickApiId,
     selectedQuickExecId,
     selectedQuickPromptId,
+    selectedSkillId,
     tab,
   ]);
   useEffect(() => {
@@ -761,7 +797,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       pinned: quickExec.pinned, searchText: `${quickExec.name} ${quickExec.description ?? ''} ${quickExec.command} ${quickExec.output_format}`,
       meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`, icon: quickExec.icon, updatedAt: quickExec.updated_at, quickExec,
     })),
-  ], automationSort, automationSortReversed), [automationSort, automationSortReversed, quickApiList, quickExecList, quickPromptList, workflows]);
+    ...(skillsCatalog ?? []).map(skill => {
+      // A project that no longer exists (or is hidden from this page) cannot
+      // hold the skill: it then reads as attached to none.
+      const projectIds = projectsUsingSkill(skill.id, projects).map(project => project.id);
+      return {
+        id: `skills:${skill.id}`, resourceId: skill.id, kind: 'skills' as const, name: skill.name, projectId: null, projectIds,
+        pinned: skillFavorites.has(skill.id), searchText: `${skill.name} ${skill.description}`,
+        meta: `${t(`skills.${skill.category.toLowerCase()}`)} · ${t(skill.is_builtin ? 'skills.builtin' : 'skills.custom')}`,
+        icon: skill.icon || '✨', updatedAt: SKILL_UPDATED_AT, skill,
+      };
+    }),
+  ], automationSort, automationSortReversed), [automationSort, automationSortReversed, projects, quickApiList, quickExecList, quickPromptList, skillFavorites, skillsCatalog, t, workflows]);
   const visibleQuickPrompts = selectedQuickPromptId
     ? (quickPromptList ?? []).filter(item => item.id === selectedQuickPromptId)
     : sortedQuickPrompts;
@@ -771,9 +818,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const visibleQuickExecs = selectedQuickExecId
     ? (quickExecList ?? []).filter(item => item.id === selectedQuickExecId)
     : (quickExecList ?? []);
+  const selectedSkill = selectedSkillId
+    ? (skillsCatalog ?? []).find(item => item.id === selectedSkillId) ?? null
+    : null;
+  const sortedSkills = useMemo(
+    () => [...(skillsCatalog ?? [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true })),
+    [skillsCatalog],
+  );
   useEffect(() => {
     if (!invalidWorkflowSelection && !invalidQuickPromptSelection
-      && !invalidQuickApiSelection && !invalidQuickExecSelection) return;
+      && !invalidQuickApiSelection && !invalidQuickExecSelection && !invalidSkillSelection) return;
     const timeoutId = window.setTimeout(() => {
       if (invalidWorkflowSelection) {
         setSelectedId(null);
@@ -782,12 +836,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       if (invalidQuickPromptSelection) setSelectedQuickPromptId(null);
       if (invalidQuickApiSelection) setSelectedQuickApiId(null);
       if (invalidQuickExecSelection) setSelectedQuickExecId(null);
+      if (invalidSkillSelection) setSelectedSkillId(null);
     }, 0);
     return () => window.clearTimeout(timeoutId);
   }, [
     invalidQuickApiSelection,
     invalidQuickExecSelection,
     invalidQuickPromptSelection,
+    invalidSkillSelection,
     invalidWorkflowSelection,
   ]);
 
@@ -1234,8 +1290,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       case 'quickPrompts': await quickPromptsApi.delete(resource.resourceId); break;
       case 'quickApis': await quickApisApi.delete(resource.resourceId); break;
       case 'quickExecs': await quickExecsApi.delete(resource.resourceId); break;
+      // Only a skill the user wrote is offered for deletion (see `deletable`).
+      case 'skills': await skillsApi.delete(resource.resourceId); break;
     }
   }, []);
+  /** A built-in skill cannot be deleted: it gets no delete entry and no
+   *  selection box, so a bulk delete never picks it up. */
+  const deletable = (resource: AutomationResource) => !resource.skill?.is_builtin;
 
   const handleDelete = async (id: string) => {
     // The red trash button once fired straight away — one mis-click destroyed
@@ -1784,7 +1845,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  const aiCreation = tab === 'workflows'
+  // A skill cannot be created from here: on its tab the dialog offers what the
+  // first entry of the list offers, a workflow.
+  const aiCreation = tab === 'workflows' || tab === 'skills'
     ? {
         title: t('wf.aiArchitectTitle'),
         prompt: t('wf.aiArchitectPrompt'),
@@ -1849,7 +1912,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setEditingQE(null);
   };
 
-  const openAutomationCreation = (kind: AutomationTab) => {
+  const openAutomationCreation = (kind: Exclude<AutomationTab, 'skills'>) => {
     clearAutomationEditors();
     setShowAutomationActions(false);
     setSelectedId(null);
@@ -1857,6 +1920,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setSelectedQuickPromptId(null);
     setSelectedQuickApiId(null);
     setSelectedQuickExecId(null);
+    setSelectedSkillId(null);
     setTab(kind);
     if (kind === 'workflows') setShowCreate(true);
     else if (kind === 'quickPrompts') setShowCreateQP(true);
@@ -1876,6 +1940,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setSelectedQuickApiId(null);
     } else if (kind === 'quickPrompts') {
       setSelectedQuickPromptId(null);
+    } else if (kind === 'skills') {
+      setSelectedSkillId(null);
     } else {
       setSelectedQuickExecId(null);
     }
@@ -1911,6 +1977,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setTab('quickExecs');
     setSelectedQuickExecId(quickExec.id);
   };
+  const openSkill = (skill: Skill) => {
+    clearAutomationEditors();
+    setTab('skills');
+    setSelectedSkillId(skill.id);
+  };
   const openAutomationResource = (resource: AutomationResource) => {
     if (resource.workflow) {
       clearAutomationEditors();
@@ -1922,15 +1993,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       openQuickPrompt(resource.quickPrompt);
     } else if (resource.quickExec) {
       openQuickExec(resource.quickExec);
+    } else if (resource.skill) {
+      openSkill(resource.skill);
     }
   };
 
   const totalAutomationResources = workflows.length
     + (quickApiList?.length ?? 0)
     + (quickPromptList?.length ?? 0)
-    + (quickExecList?.length ?? 0);
+    + (quickExecList?.length ?? 0)
+    + (skillsCatalog?.length ?? 0);
   const automationHasSelection = Boolean(
-    selectedId || selectedQuickApiId || selectedQuickPromptId || selectedQuickExecId
+    selectedId || selectedQuickApiId || selectedQuickPromptId || selectedQuickExecId || selectedSkillId
       || showCreate || editingWorkflow || showCreateQA || editingQA
       || showCreateQP || editingQP || showCreateQE || editingQE,
   );
@@ -2012,6 +2086,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             refetchQP();
             refetchQA();
             refetchQE();
+            refetchSkills();
             if (failures.length) {
               toastProp?.(t('automation.bulkDeleteFailed', failures.length, failures[0]), 'error');
               // Thrown so the shell keeps the selection: the operator can see
@@ -2024,7 +2099,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         selectedId={tab === 'workflows' && selectedId ? `workflows:${selectedId}`
           : tab === 'quickApis' && selectedQuickApiId ? `quickApis:${selectedQuickApiId}`
             : tab === 'quickPrompts' && selectedQuickPromptId ? `quickPrompts:${selectedQuickPromptId}`
-              : tab === 'quickExecs' && selectedQuickExecId ? `quickExecs:${selectedQuickExecId}` : null}
+              : tab === 'quickExecs' && selectedQuickExecId ? `quickExecs:${selectedQuickExecId}`
+                : tab === 'skills' && selectedSkillId ? `skills:${selectedSkillId}` : null}
         onSelect={id => {
           const resource = automationResources.find(item => item.id === id);
           if (resource) openAutomationResource(resource);
@@ -2079,6 +2155,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);
             const sidebarQuickPrompts = visibleItems.flatMap(resource => resource.quickPrompt ? [resource.quickPrompt] : []);
             const sidebarQuickExecs = visibleItems.flatMap(resource => resource.quickExec ? [resource.quickExec] : []);
+            const sidebarSkills = visibleItems.flatMap(resource => resource.skill ? [resource.skill] : []);
             // Selection mode renders each item only in the canonical project
             // tree, avoiding duplicate checkboxes in Favorites and Recents.
             const sidebarFavoriteCount = canMultiSelect ? 0 : visibleItems.filter(resource => resource.pinned).length;
@@ -2102,11 +2179,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               refetchQP();
               refetchQA();
               refetchQE();
+              refetchSkills();
             };
             const selectionFor = (kind: AutomationTab, resourceId: string) => {
               if (!canMultiSelect) return undefined;
               const resource = visibleItems.find(item => item.kind === kind && item.resourceId === resourceId);
-              if (!resource) return undefined;
+              if (!resource || !deletable(resource)) return undefined;
               return {
                 checked: isMultiSelected(resource),
                 onToggle: () => toggleMultiSelection(resource.id),
@@ -2117,12 +2195,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               resource.kind === 'workflows' ? tab === 'workflows' && selectedId === resource.resourceId
                 : resource.kind === 'quickApis' ? tab === 'quickApis' && selectedQuickApiId === resource.resourceId
                   : resource.kind === 'quickPrompts' ? tab === 'quickPrompts' && selectedQuickPromptId === resource.resourceId
-                    : tab === 'quickExecs' && selectedQuickExecId === resource.resourceId
+                    : resource.kind === 'skills' ? tab === 'skills' && selectedSkillId === resource.resourceId
+                      : tab === 'quickExecs' && selectedQuickExecId === resource.resourceId
             );
             const kindName = (kind: AutomationTab) => t(
               kind === 'workflows' ? 'wf.tabWorkflows'
                 : kind === 'quickApis' ? 'wf.tabQuickApis'
-                  : kind === 'quickPrompts' ? 'wf.tabQuickPrompts' : 'wf.tabQuickExecs',
+                  : kind === 'quickPrompts' ? 'wf.tabQuickPrompts'
+                    : kind === 'skills' ? 'wf.tabSkills' : 'wf.tabQuickExecs',
             );
             const renderResource = (resource: AutomationResource, prefix: string) => {
               const open = () => {
@@ -2130,12 +2210,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 else if (resource.quickApi) openQuickApi(resource.quickApi);
                 else if (resource.quickPrompt) openQuickPrompt(resource.quickPrompt);
                 else if (resource.quickExec) openQuickExec(resource.quickExec);
+                else if (resource.skill) openSkill(resource.skill);
               };
               const togglePinned = () => {
                 if (resource.workflow) void handleTogglePin(resource.workflow);
                 else if (resource.quickApi) void toggleQuickFavorite('quickApis', resource.quickApi.id, resource.quickApi.pinned, quickApisApi.setPinned, refetchQA);
                 else if (resource.quickPrompt) void toggleQuickFavorite('quickPrompts', resource.quickPrompt.id, resource.quickPrompt.pinned, quickPromptsApi.setPinned, refetchQP);
                 else if (resource.quickExec) void toggleQuickFavorite('quickExecs', resource.quickExec.id, resource.quickExec.pinned, quickExecsApi.setPinned, refetchQE);
+                else if (resource.skill) toggleSkillFavorite(resource.skill.id);
               };
               return <AutomationResourceRow
                 key={`${prefix}-${resource.id}`}
@@ -2156,7 +2238,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onTogglePinned={togglePinned}
                 rowProps={getRowProps(resource)}
                 selection={selectionFor(resource.kind, resource.resourceId)}
-                onDelete={deleteFor(resource.kind, resource.resourceId)}
+                onDelete={deletable(resource) ? deleteFor(resource.kind, resource.resourceId) : undefined}
               />;
             };
             const recentResources = canMultiSelect ? [] : [...visibleItems]
@@ -2253,6 +2335,25 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   onDelete={deleteFor('quickExecs', quickExec.id)}
                 />
               ))}
+              {!isAutomationSectionCollapsed('favorites') && sidebarSkills.filter(item => skillFavorites.has(item.id)).map(skill => (
+                <AutomationResourceRow
+                  key={`favorite-skill-${skill.id}`}
+                  resourceId={skill.id}
+                  name={skill.name}
+                  meta={`${t('wf.tabSkills')} · ${t(`skills.${skill.category.toLowerCase()}`)}`}
+                  icon={skill.icon || '✨'}
+                  active={tab === 'skills' && selectedSkillId === skill.id}
+                  pinned
+                  openLabel={t('automation.openResource', skill.name)}
+                  pinLabel={t('wf.pin')}
+                  unpinLabel={t('wf.unpin')}
+                  onOpen={() => openSkill(skill)}
+                  onTogglePinned={() => toggleSkillFavorite(skill.id)}
+                  rowProps={rowProps('skills', skill.id)}
+                  selection={selectionFor('skills', skill.id)}
+                  onDelete={skill.is_builtin ? undefined : deleteFor('skills', skill.id)}
+                />
+              ))}
             </div>
           )}
 
@@ -2276,6 +2377,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 projects={projects}
                 items={visibleItems}
                 getProjectId={resource => resource.projectId}
+                // A skill listed by several projects appears under each of them
+                // (and under "No project" when none); the flat lists above and
+                // the counters still see it once.
+                getProjectIds={resource => automationProjectIds(resource)}
                 isItemActive={activeResource}
                 collapsedGroups={canMultiSelect || automationQuery.trim() ? new Set() : collapsedAutomationSections}
                 onToggleGroup={toggleAutomationSection}
@@ -2286,7 +2391,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             )}
           </div>
 
-          {sidebarWorkflows.length + sidebarQuickApis.length + sidebarQuickPrompts.length + sidebarQuickExecs.length === 0 && (
+          {sidebarWorkflows.length + sidebarQuickApis.length + sidebarQuickPrompts.length + sidebarQuickExecs.length + sidebarSkills.length === 0 && (
             <div className="disc-empty">
               {t('automation.noSearchResults')}
               {activeAutomationFilterCount(automationFilters) > 0 && (
@@ -4006,6 +4111,48 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 })}
               </div>
             )
+          )}
+        </div>
+      )}
+
+      {/* ═══ SKILLS TAB (KT-914) ═══
+          Read-only: a skill is opened, never launched. Editing stays in
+          Settings, the one screen that has an editor for it. */}
+      {tab === 'skills' && (
+        <div>
+          {selectedSkill ? (
+            <SkillSheet
+              key={selectedSkill.id}
+              skill={selectedSkill}
+              projects={projects}
+              pinned={skillFavorites.has(selectedSkill.id)}
+              onTogglePinned={() => toggleSkillFavorite(selectedSkill.id)}
+              onOpenSettings={onNavigateSettings}
+              onError={message => toastProp?.(message, 'error')}
+              onDelete={selectedSkill.is_builtin ? undefined : async () => {
+                await skillsApi.delete(selectedSkill.id);
+                setSelectedSkillId(null);
+                refetchSkills();
+              }}
+            />
+          ) : sortedSkills.length === 0 ? (
+            <div className="wf-empty">
+              <p className="wf-empty-title">{t('automation.skill.empty')}</p>
+              <p className="wf-empty-hint">{t('automation.skill.emptyHint')}</p>
+            </div>
+          ) : (
+            <div className="qp-list">
+              {sortedSkills.map(skill => (
+                <SkillCard
+                  key={skill.id}
+                  skill={skill}
+                  pinned={skillFavorites.has(skill.id)}
+                  onTogglePinned={() => toggleSkillFavorite(skill.id)}
+                  projectCount={projectsUsingSkill(skill.id, projects).length}
+                  onOpen={() => openSkill(skill)}
+                />
+              ))}
+            </div>
           )}
         </div>
       )}

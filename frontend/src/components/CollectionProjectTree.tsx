@@ -12,6 +12,11 @@ export interface CollectionProjectTreeProps<TItem> {
   items: TItem[];
   /** `null` groups an item under the "no project" bucket, rendered first. */
   getProjectId: (item: TItem) => string | null;
+  /** For an item that belongs under several projects at once: every project
+   *  folder it is listed in (an empty list means the "no project" bucket).
+   *  Takes precedence over `getProjectId`. The item is still ONE item — only
+   *  the tree repeats it; a flat list built from `items` does not. */
+  getProjectIds?: (item: TItem) => readonly string[];
   /** Marks the item whose containing project folder must stay open
    *  regardless of the persisted collapse state — e.g. the active row. */
   isItemActive: (item: TItem) => boolean;
@@ -57,20 +62,28 @@ const DEFAULT_NO_PROJECT_KEY = '__global__';
  * skeleton.
  */
 export function CollectionProjectTree<TItem>({
-  projects, items, getProjectId, isItemActive, collapsedGroups, onToggleGroup,
+  projects, items, getProjectId, getProjectIds, isItemActive, collapsedGroups, onToggleGroup,
   unseenByGroup, renderGroupStatus, renderGroup, labels, noProjectIcon, noProjectGroupKey = DEFAULT_NO_PROJECT_KEY,
   showEmptyProjects = false, showEmptyNoProject = false, selectedProjectId, onSelectProject,
 }: CollectionProjectTreeProps<TItem>) {
   const itemsByProjectId = useMemo(() => {
     const map = new Map<string | null, TItem[]>();
-    for (const item of items) {
-      const key = getProjectId(item);
+    const file = (key: string | null, item: TItem) => {
       const list = map.get(key);
       if (list) list.push(item);
       else map.set(key, [item]);
+    };
+    for (const item of items) {
+      if (!getProjectIds) {
+        file(getProjectId(item), item);
+        continue;
+      }
+      const ids = getProjectIds(item);
+      if (ids.length === 0) file(null, item);
+      else for (const id of ids) file(id, item);
     }
     return map;
-  }, [items, getProjectId]);
+  }, [items, getProjectId, getProjectIds]);
 
   const noProjectItems = itemsByProjectId.get(null) ?? [];
   const visibleProjects = useMemo(
