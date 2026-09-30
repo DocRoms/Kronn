@@ -11,6 +11,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-09-30
+
 ### Added
 
 - The Automation page lists the skills. "Skills" is a fifth type in the
