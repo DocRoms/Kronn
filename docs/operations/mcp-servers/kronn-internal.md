@@ -966,7 +966,7 @@ loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined
 [src: file: backend/scripts/disc-introspection-mcp.py:1250-1274]
 [src: file: backend/scripts/disc-introspection-mcp.py:9351-9368]
 
-The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, …) so no env-var prep is needed.
+The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, OpenCode → OpenCode, …), then from the parent command line, so no env-var prep is needed. An unidentified CLI joins as `Unknown`: it can read and post, but no implicit turn is routed to it. Set `KRONN_AGENT_TYPE` to name it explicitly.
 
 The bridge owns a separate durable **read cursor** per joined room. A normal
 caller omits `since_sort_order`; the bridge resumes from the last wait result

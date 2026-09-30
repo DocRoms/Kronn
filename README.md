@@ -49,6 +49,12 @@
   output at the rate of the model that served the reply, Claude Code sessions
   launched by Kronn no longer load your workstation's auto-memory, and an HTTP
   connection test reports a billing error as such.
+- **Audits on a local model:** an audit can run on Ollama or LiteLLM. The model
+  reads and writes only inside the project, through file tools Kronn executes
+  for it, with no shell, web or commit, and a step that writes nothing fails.
+- **Rooms that always open:** a CLI the bridge cannot identify no longer makes
+  its room unreadable, OpenCode is recognised when it joins, and a discussion
+  that fails to load says why, with a retry.
 
 Earlier releases are described in the [CHANGELOG](CHANGELOG.md).
 

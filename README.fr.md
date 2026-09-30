@@ -51,6 +51,14 @@
   sessions Claude Code lancées par Kronn ne chargent plus la mémoire automatique
   du poste, et un test de connexion HTTP signale une erreur de facturation comme
   telle.
+- **Des audits sur modèle local :** un audit peut tourner sur Ollama ou
+  LiteLLM. Le modèle ne lit et n'écrit que dans le projet, par des outils
+  fichiers que Kronn exécute pour lui, sans shell, sans web ni commit, et une
+  étape qui n'écrit rien échoue.
+- **Des rooms qui s'ouvrent toujours :** un CLI que le bridge ne sait pas
+  identifier ne rend plus sa room illisible, OpenCode est reconnu quand il la
+  rejoint, et une discussion qui ne se charge pas dit pourquoi, avec un bouton
+  Réessayer.
 
 Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 

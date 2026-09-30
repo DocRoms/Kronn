@@ -412,3 +412,75 @@ async fn cancel_audit_trips_the_token_of_a_running_http_step() {
         "the token is taken, not left for the next run"
     );
 }
+
+/// Drive the partial-audit handler on a fresh project and return its SSE body.
+async fn partial_audit_stream(state: &AppState, project: &Path, agent: AgentType) -> String {
+    use axum::response::IntoResponse;
+    let path = project.to_string_lossy().into_owned();
+    let row: crate::models::Project = serde_json::from_value(json!({
+        "id": "proj-partial", "name": "partial", "path": path,
+        "repo_url": null, "token_override": null, "ai_config": {"detected": false, "configs": []},
+        "created_at": chrono::Utc::now().to_rfc3339(), "updated_at": chrono::Utc::now().to_rfc3339()
+    }))
+    .unwrap();
+    state
+        .db
+        .with_conn(move |conn| crate::db::projects::insert_project(conn, &row))
+        .await
+        .unwrap();
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let step = chain
+        .iter()
+        .position(crate::api::audit::partial_selectable)
+        .expect("a refreshable section")
+        + 1;
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-partial".to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent,
+            tier: None,
+            steps: vec![step],
+        }),
+    )
+    .await
+    .into_response();
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        axum::body::to_bytes(response.into_body(), 1 << 20),
+    )
+    .await
+    .expect("the partial stream ends")
+    .unwrap();
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+#[tokio::test]
+async fn the_partial_audit_applies_the_same_gate_and_launcher() {
+    // NVIDIA stays refused, with the one message the Full launch uses.
+    let state = litellm_state("http://127.0.0.1:1").await;
+    let project = tempfile::tempdir().unwrap();
+    let refused = partial_audit_stream(&state, project.path(), AgentType::Nvidia).await;
+    assert!(refused.contains("cannot run audits"), "{refused}");
+    assert!(
+        refused.contains("Ollama") && refused.contains("LiteLLM"),
+        "{refused}"
+    );
+
+    // LiteLLM passes the gate and reaches the HTTP launcher: with no tier model
+    // configured it fails on the launcher's own remedy, never on the gate.
+    let mut config = crate::core::config::default_config();
+    config.agents.lite_llm.base_url = Some("http://127.0.0.1:1".into());
+    let state = AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(config)),
+        Arc::new(crate::db::Database::open_in_memory().unwrap()),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let project = tempfile::tempdir().unwrap();
+    let admitted = partial_audit_stream(&state, project.path(), AgentType::LiteLlm).await;
+    assert!(!admitted.contains("cannot run audits"), "{admitted}");
+    assert!(
+        admitted.contains("No LiteLLM model configured"),
+        "{admitted}"
+    );
+}
