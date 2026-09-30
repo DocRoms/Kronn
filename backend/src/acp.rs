@@ -331,23 +331,9 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
                 .or_else(|| option.get("options"))
                 .and_then(Value::as_array)
                 .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| {
-                            let vid = value
-                                .get("id")
-                                .or_else(|| value.get("value"))
-                                .and_then(Value::as_str)
-                                .filter(|id| !id.trim().is_empty())?
-                                .to_owned();
-                            let name = value
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or(&vid)
-                                .to_owned();
-                            Some(AcpConfigValue { id: vid, name })
-                        })
-                        .collect()
+                    let mut flat = Vec::new();
+                    collect_config_values(values, &mut flat);
+                    flat
                 })
                 .unwrap_or_default();
             Some(AcpConfigOption {
@@ -357,6 +343,46 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
             })
         })
         .collect()
+}
+
+/// Read the values of one select option. ACP lets `options` be either a flat
+/// list of `{value, name}` or a list of groups `{group, name, options: [...]}`
+/// (the ACP SDK bundled with OpenCode 1.18.33 declares the option list as a
+/// union of both shapes). A group is not a selectable value, so it is
+/// flattened: reading only the flat shape made every grouped value look absent.
+/// A value offered twice is kept once.
+fn collect_config_values(values: &[Value], out: &mut Vec<AcpConfigValue>) {
+    for value in values {
+        let id = value
+            .get("id")
+            .or_else(|| value.get("value"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty());
+        match id {
+            Some(id) => {
+                if out.iter().any(|known| known.id == id) {
+                    continue;
+                }
+                let name = value.get("name").and_then(Value::as_str).unwrap_or(id);
+                out.push(AcpConfigValue {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                });
+            }
+            None => {
+                if let Some(members) = value.get("options").and_then(Value::as_array) {
+                    collect_config_values(members, out);
+                }
+            }
+        }
+    }
+}
+
+/// ACP does not standardize which option carries the model catalogue, so a
+/// runtime's option is the catalogue when its id names a model. Shared by
+/// discovery (what to list) and launch (what a chosen model must be found in).
+pub(crate) fn is_model_option_id(id: &str) -> bool {
+    id.to_lowercase().contains("model")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1304,19 +1330,36 @@ impl AcpHost {
         self.transport.config_options().await
     }
 
+    /// Whether the current session lists models at all. A chosen model that is
+    /// absent from such a list will not be the one the agent runs; against a
+    /// session that lists none, `select_model` keeps its deliberate no-op.
+    pub async fn offers_model_catalogue(&self) -> bool {
+        self.transport
+            .config_options()
+            .await
+            .iter()
+            .any(|option| is_model_option_id(&option.id) && !option.available.is_empty())
+    }
+
     /// Apply a tier/model choice to an existing session by matching it against
     /// the options the session actually returned, then calling
-    /// `session/set_config_option`. Returns `true` when a matching option value
-    /// was found and applied; `false` is a deliberate no-op (no catalogue or no
-    /// match) so a catalogue-less agent keeps its own default rather than
-    /// receiving a spurious selection.
+    /// `session/set_config_option`. The model catalogue is searched before any
+    /// other option, so an effort or mode value never stands in for a model.
+    /// Returns `true` when a matching option value was found and applied;
+    /// `false` is a deliberate no-op (no catalogue or no match) so a
+    /// catalogue-less agent keeps its own default rather than receiving a
+    /// spurious selection. A caller that must run exactly the chosen model
+    /// checks `offers_model_catalogue` before accepting `false`.
     pub async fn select_model(
         &self,
         target: &AcpSessionTarget,
         model: &str,
     ) -> Result<bool, AcpError> {
         let options = self.transport.config_options().await;
-        for option in &options {
+        let (catalogue, others): (Vec<_>, Vec<_>) = options
+            .iter()
+            .partition(|option| is_model_option_id(&option.id));
+        for option in catalogue.into_iter().chain(others) {
             if let Some(value) = option
                 .available
                 .iter()
@@ -1620,6 +1663,172 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    /// OpenCode builds the `model` option as one flat `provider/model` value per
+    /// model of every provider it loaded for the session directory, then an
+    /// `effort` and a `mode` option (read from the 1.18.33 bundle). A local
+    /// provider such as Ollama is a provider like another: its models must come
+    /// out one for one, the `:` of a tag included, and nothing else may be added.
+    #[test]
+    fn a_local_provider_model_is_read_like_any_other_opencode_model() {
+        let options = parse_config_options(&json!({
+            "sessionId": "ses_local",
+            "configOptions": [
+                {
+                    "id": "model", "name": "Model", "category": "model", "type": "select",
+                    "currentValue": "ollama/qwen3.8:27b",
+                    "options": [
+                        {"value": "ollama/llama3.3:70b", "name": "Ollama/Llama 3.3 70B"},
+                        {"value": "ollama/qwen3.8:27b", "name": "Ollama/Qwen3.8 27B"},
+                        {"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"}
+                    ]
+                },
+                {
+                    "id": "mode", "name": "Session Mode", "category": "mode", "type": "select",
+                    "currentValue": "build",
+                    "options": [{"value": "build", "name": "build"}, {"value": "plan", "name": "plan"}]
+                }
+            ]
+        }));
+        let model = options
+            .iter()
+            .find(|option| is_model_option_id(&option.id))
+            .expect("model option");
+        assert_eq!(model.current.as_deref(), Some("ollama/qwen3.8:27b"));
+        assert_eq!(
+            model
+                .available
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "ollama/llama3.3:70b",
+                "ollama/qwen3.8:27b",
+                "opencode/big-pickle"
+            ]
+        );
+        assert!(
+            options
+                .iter()
+                .filter(|option| is_model_option_id(&option.id))
+                .count()
+                == 1,
+            "a session mode is not a model catalogue"
+        );
+    }
+
+    /// ACP also allows a select option to group its values. A group is not a
+    /// value: it has no `value` of its own, and reading only the flat shape
+    /// dropped every model of a grouped catalogue.
+    #[test]
+    fn grouped_select_options_are_flattened_into_their_values() {
+        let options = parse_config_options(&json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "model",
+                "currentValue": "ollama/qwen3.8:27b",
+                "options": [
+                    {"group": "ollama", "name": "Ollama", "options": [
+                        {"value": "ollama/qwen3.8:27b", "name": "Qwen3.8 27B"},
+                        {"value": "ollama/llama3.3:70b", "name": "Llama 3.3 70B"}
+                    ]},
+                    {"group": "opencode", "name": "OpenCode Zen", "options": [
+                        {"value": "opencode/big-pickle", "name": "Big Pickle"},
+                        {"value": "ollama/qwen3.8:27b", "name": "duplicate of a value above"}
+                    ]},
+                    {"value": "loose/model", "name": "Loose"}
+                ]
+            }]
+        }));
+        let ids: Vec<&str> = options[0]
+            .available
+            .iter()
+            .map(|value| value.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "ollama/qwen3.8:27b",
+                "ollama/llama3.3:70b",
+                "opencode/big-pickle",
+                "loose/model"
+            ]
+        );
+        assert_eq!(options[0].available[0].name, "Qwen3.8 27B");
+    }
+
+    /// A value of another option (an effort level, a session mode) must never
+    /// be taken for a model, even when it carries the model's name.
+    #[tokio::test]
+    async fn a_chosen_model_is_matched_in_the_model_catalogue_before_any_other_option() {
+        let recorded = Arc::new(Mutex::new(None));
+        let mut host = AcpHost::new(
+            1,
+            Arc::new(ModelTransport {
+                options: vec![
+                    AcpConfigOption {
+                        id: "effort".into(),
+                        current: Some("default".into()),
+                        available: vec![AcpConfigValue {
+                            id: "default".into(),
+                            name: "Default".into(),
+                        }],
+                    },
+                    AcpConfigOption {
+                        id: "model".into(),
+                        current: Some("opencode/big-pickle".into()),
+                        available: vec![
+                            AcpConfigValue {
+                                id: "opencode/big-pickle".into(),
+                                name: "Big Pickle".into(),
+                            },
+                            AcpConfigValue {
+                                id: "default".into(),
+                                name: "A model that is literally named default".into(),
+                            },
+                        ],
+                    },
+                ],
+                recorded: recorded.clone(),
+            }),
+        );
+        host.negotiate(request()).await.unwrap();
+        let target = host.create_session().await.unwrap();
+
+        assert!(host.offers_model_catalogue().await);
+        assert!(host.select_model(&target, "default").await.unwrap());
+        assert_eq!(
+            recorded
+                .lock()
+                .await
+                .as_ref()
+                .map(|(c, v)| (c.as_str(), v.as_str())),
+            Some(("model", "default")),
+            "the model option, not the effort option, receives the choice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_model_list_does_not_claim_a_model_catalogue() {
+        let mut host = AcpHost::new(
+            1,
+            Arc::new(ModelTransport {
+                options: vec![AcpConfigOption {
+                    id: "mode".into(),
+                    current: Some("build".into()),
+                    available: vec![AcpConfigValue {
+                        id: "build".into(),
+                        name: "build".into(),
+                    }],
+                }],
+                recorded: Arc::new(Mutex::new(None)),
+            }),
+        );
+        host.negotiate(request()).await.unwrap();
+        host.create_session().await.unwrap();
+
+        assert!(!host.offers_model_catalogue().await);
     }
 
     #[tokio::test]

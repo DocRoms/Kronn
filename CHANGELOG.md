@@ -241,6 +241,24 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The model list of Config shows the models OpenCode declares in a project
+  too, and a launch runs the model you chose (KT-928). OpenCode builds its
+  model list per working directory — its user-level config plus the
+  `opencode.json` of that directory — while Kronn read it from a neutral one,
+  so a provider only a project declares, a local Ollama for instance, was in
+  every run of that project and in no selector. Kronn now also asks OpenCode
+  from each registered project that has its own `opencode.json(c)` (or
+  `.opencode/opencode.json(c)`; the files are only checked for, never read),
+  and adds what comes back: a model only a project offers says so in its
+  description, nothing is listed that OpenCode did not report, and a project
+  that fails to answer is left out without failing the refresh. The reader also
+  accepts a model list grouped by provider, which it used to drop whole. On
+  the launch side, a model that the session does not list was silently
+  replaced by OpenCode's own default while the discussion kept showing the one
+  you picked; that launch is now refused with a message naming the model, and
+  nothing is sent to the agent. A value of another session option (an effort
+  level, a mode) can no longer be taken for a model.
+
 - A room that a CLI peer joined without being identified opens again
   (KT-925). The bridge joins such a peer as `Unknown`; the discussion detail,
   its default targets, native replies and room imports then failed with

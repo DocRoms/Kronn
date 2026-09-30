@@ -4361,9 +4361,14 @@ async fn run_acp_session(
     }
     // Apply the resolved tier/model against the options the session actually
     // returned (ACP session-config-options). The host applies it via
-    // `session/set_config_option` only when a matching option value exists;
-    // otherwise the choice is a deliberate no-op so a catalogue-less agent keeps
-    // its own default instead of receiving a bad flag.
+    // `session/set_config_option` only when a matching option value exists.
+    // A session that lists no models at all is a catalogue-less agent: the
+    // choice is a deliberate no-op and it keeps its own default instead of
+    // receiving a bad flag. A session that lists models without the chosen one
+    // is different: keeping its default would run another model than the one
+    // the user picked, while every screen says otherwise — OpenCode lists the
+    // models of the directory it runs in, so a model seen from elsewhere can be
+    // absent here. That launch is refused, before any prompt is sent.
     if let Some(model) = model_flag {
         match host.select_model(&session, model).await {
             Ok(true) => {
@@ -4372,10 +4377,22 @@ async fn run_acp_session(
             }
             Ok(false) => {
                 provenance::resolve_model(provenance.as_ref(), Some(model), Some(false));
+                if host.offers_model_catalogue().await {
+                    return Err(acp_start_failure(
+                        &host,
+                        format!(
+                            "{agent_type:?} does not offer the model '{model}' for this \
+                             working directory, so it would run another one. Pick a model \
+                             it lists here, or declare '{model}' in a config {agent_type:?} \
+                             reads from this directory."
+                        ),
+                    )
+                    .await);
+                }
                 tracing::debug!(
-                agent = ?agent_type,
-                model,
-                "ACP session exposes no matching model option; keeping its default"
+                    agent = ?agent_type,
+                    model,
+                    "ACP session exposes no model catalogue; keeping its default"
                 );
             }
             Err(error) => {
@@ -12508,6 +12525,228 @@ mod acp_resume_tests {
         assert!(diagnostics
             .iter()
             .all(|line| !line.contains("fixture-value")));
+    }
+
+    /// A session that lists models the way OpenCode does and records what the
+    /// runner asks it to run. The model reaches the agent only through
+    /// `session/set_config_option`, so that call is "the model that runs".
+    struct ModelSessionTransport {
+        options: Vec<AcpConfigOption>,
+        selections: Mutex<Vec<(String, String)>>,
+        prompts: AtomicUsize,
+        shutdowns: AtomicUsize,
+    }
+
+    impl ModelSessionTransport {
+        fn offering(models: &[&str]) -> Arc<Self> {
+            let options = if models.is_empty() {
+                Vec::new()
+            } else {
+                vec![AcpConfigOption {
+                    id: "model".into(),
+                    current: models.first().map(|model| (*model).to_owned()),
+                    available: models
+                        .iter()
+                        .map(|model| crate::acp::AcpConfigValue {
+                            id: (*model).to_owned(),
+                            name: (*model).to_owned(),
+                        })
+                        .collect(),
+                }]
+            };
+            Arc::new(Self {
+                options,
+                selections: Mutex::new(Vec::new()),
+                prompts: AtomicUsize::new(0),
+                shutdowns: AtomicUsize::new(0),
+            })
+        }
+
+        fn selections(&self) -> Vec<(String, String)> {
+            self.selections.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AcpTransport for ModelSessionTransport {
+        async fn initialize(
+            &self,
+            _: AcpInitialize,
+        ) -> Result<AcpNegotiatedCapabilities, AcpError> {
+            Ok(AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: BTreeSet::from([
+                    AcpCapability::Sessions,
+                    AcpCapability::Resume,
+                    AcpCapability::Streaming,
+                    AcpCapability::Cancellation,
+                    AcpCapability::McpInjection,
+                ]),
+            })
+        }
+        async fn create_session(&self) -> Result<AcpSessionTarget, AcpError> {
+            AcpSessionTarget::new(AcpAgent::OpenCode, "model-session")
+        }
+        async fn config_options(&self) -> Vec<AcpConfigOption> {
+            self.options.clone()
+        }
+        async fn set_config_option(
+            &self,
+            _: &AcpSessionTarget,
+            config_id: &str,
+            value_id: &str,
+        ) -> Result<(), AcpError> {
+            self.selections
+                .lock()
+                .unwrap()
+                .push((config_id.to_owned(), value_id.to_owned()));
+            Ok(())
+        }
+        async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn prompt(
+            &self,
+            _: &AcpSessionTarget,
+            _: &str,
+            events: tokio::sync::mpsc::Sender<AcpSessionEvent>,
+        ) -> Result<(), AcpError> {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            events.send(AcpSessionEvent::Completed).await.unwrap();
+            Ok(())
+        }
+        async fn cancel(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), AcpError> {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn model_request<'a>(
+        agent_type: &'a AgentType,
+        model_flag: Option<&'a str>,
+    ) -> AcpSessionRequest<'a> {
+        AcpSessionRequest {
+            agent_type,
+            work_dir: Path::new("."),
+            prompt: "fixture prompt",
+            system_context: "",
+            project_path: "",
+            model_flag,
+            reasoning_effort: None,
+            parent_cancel: None,
+            discussion_id: None,
+            resume_id: None,
+            session_store: None,
+            fallback_prompt: None,
+            provenance: None,
+            activity: None,
+        }
+    }
+
+    /// The model Kronn shows and stores is the model OpenCode is told to run:
+    /// the tier a user configured, or an explicit pin on the step, travels
+    /// unchanged — colon and all — into `session/set_config_option`.
+    #[tokio::test]
+    async fn the_model_chosen_in_kronn_is_the_model_set_on_the_opencode_session() {
+        let listed = ["opencode/big-pickle", "ollama/qwen3.8:27b"];
+        let tiers = crate::models::ModelTiersConfig {
+            open_code: crate::models::ModelTierConfig {
+                default: Some("ollama/qwen3.8:27b".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let by_tier = ModelSessionTransport::offering(&listed);
+        let flag =
+            effective_model_flag(None, &AgentType::OpenCode, ModelTier::Default, Some(&tiers));
+        let mut process = run_acp_session(
+            model_request(&AgentType::OpenCode, flag.as_deref()),
+            by_tier.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("launch on the configured tier: {error}"));
+        collect_output(&mut process).await;
+        assert_eq!(
+            by_tier.selections(),
+            vec![("model".to_owned(), "ollama/qwen3.8:27b".to_owned())]
+        );
+        assert_eq!(by_tier.prompts.load(Ordering::SeqCst), 1);
+
+        let by_pin = ModelSessionTransport::offering(&listed);
+        let flag = effective_model_flag(
+            Some("opencode/big-pickle"),
+            &AgentType::OpenCode,
+            ModelTier::Default,
+            Some(&tiers),
+        );
+        let mut process = run_acp_session(
+            model_request(&AgentType::OpenCode, flag.as_deref()),
+            by_pin.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("launch on the pinned model: {error}"));
+        collect_output(&mut process).await;
+        assert_eq!(
+            by_pin.selections(),
+            vec![("model".to_owned(), "opencode/big-pickle".to_owned())],
+            "an explicit pin outranks the tier, and is what runs"
+        );
+    }
+
+    /// OpenCode lists the models of the directory it runs in. A model the user
+    /// chose that this session does not list used to be dropped in silence —
+    /// OpenCode answered with its own default while Kronn reported the chosen
+    /// one. It is refused now, and nothing is sent to the agent.
+    #[tokio::test]
+    async fn a_model_the_opencode_session_does_not_list_is_refused_not_replaced() {
+        let transport = ModelSessionTransport::offering(&["opencode/big-pickle"]);
+
+        let outcome = run_acp_session(
+            model_request(&AgentType::OpenCode, Some("ollama/qwen3.8:27b")),
+            transport.clone(),
+        )
+        .await;
+
+        let message = match outcome {
+            Ok(_) => panic!("a model the session does not list must not start a run"),
+            Err(message) => message,
+        };
+        assert!(
+            message.contains("ollama/qwen3.8:27b") && message.contains("does not offer"),
+            "the refusal must name the model: {message}"
+        );
+        assert!(
+            transport.selections().is_empty(),
+            "no other model may be selected in its place"
+        );
+        assert_eq!(transport.prompts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            transport.shutdowns.load(Ordering::SeqCst),
+            1,
+            "the refused session must not leak its process"
+        );
+    }
+
+    /// An agent whose session lists no models at all keeps the deliberate
+    /// no-op: there is nothing to match against, and it runs its own default.
+    #[tokio::test]
+    async fn a_session_that_lists_no_models_keeps_the_agents_own_default() {
+        let transport = ModelSessionTransport::offering(&[]);
+
+        let mut process = run_acp_session(
+            model_request(&AgentType::OpenCode, Some("ollama/qwen3.8:27b")),
+            transport.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a catalogue-less session must launch: {error}"));
+        collect_output(&mut process).await;
+
+        assert!(transport.selections().is_empty());
+        assert_eq!(transport.prompts.load(Ordering::SeqCst), 1);
     }
 
     #[test]
