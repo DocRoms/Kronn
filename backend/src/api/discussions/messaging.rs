@@ -218,16 +218,15 @@ pub(crate) async fn canonical_targets(
     // Naming the joined sessions is what `no_agent` already promises: "joined
     // peers remain participants and continue receiving turns".
     if !target_all && requested.is_empty() && no_agent && !sessions.is_empty() {
-        return sessions
+        let targets: Vec<MessageTarget> = sessions
             .iter()
-            .map(|session| {
-                Ok(MessageTarget::cli(
-                    crate::db::discussions::parse_agent_type(&session.agent_type)?,
-                    session.id,
-                ))
+            .filter_map(|session| {
+                crate::db::discussions::session_cli_target(&session.agent_type, session.id)
             })
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| error.to_string());
+            .collect();
+        if !targets.is_empty() {
+            return Ok(targets);
+        }
     }
 
     let mut candidates = if target_all {
@@ -245,18 +244,9 @@ pub(crate) async fn canonical_targets(
                 .cloned()
                 .map(|agent| MessageTarget::agent(agent).with_tier(ModelTier::Default)),
         );
-        all.extend(
-            sessions
-                .iter()
-                .map(|session| {
-                    Ok(MessageTarget::cli(
-                        crate::db::discussions::parse_agent_type(&session.agent_type)?,
-                        session.id,
-                    ))
-                })
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|error| error.to_string())?,
-        );
+        all.extend(sessions.iter().filter_map(|session| {
+            crate::db::discussions::session_cli_target(&session.agent_type, session.id)
+        }));
         all
     } else {
         Vec::new()
@@ -1826,6 +1816,46 @@ mod tests {
         }
         // CancelGuard removed its entry on drop — nothing dangling in the registry.
         assert!(!state.cancel_registry.lock().unwrap().contains_key("j-gate"));
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_peer_is_skipped_as_a_target_instead_of_failing_the_turn() {
+        // The bridge joins a CLI it cannot identify as `Unknown`; that peer
+        // cannot be addressed by type, but it must not break every turn.
+        let disc = "d-unknown-peer";
+        let state = make_state_with_disc(disc).await;
+        let codex = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::set_disc_no_agent(conn, disc, true)?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "Unknown",
+                    Some("sess-unknown"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "Codex",
+                    Some("sess-codex"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        for target_all in [false, true] {
+            let targets = canonical_targets(&state, disc, Vec::new(), target_all)
+                .await
+                .unwrap();
+            assert_eq!(
+                targets,
+                vec![MessageTarget::cli(AgentType::Codex, codex)],
+                "target_all={target_all}"
+            );
+        }
     }
 
     #[tokio::test]

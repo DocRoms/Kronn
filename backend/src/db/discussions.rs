@@ -1861,9 +1861,12 @@ pub fn insert_native_agent_message_with_checkpoint(
                         .iter()
                         .find(|view| view.id == pk)
                         .ok_or(rusqlite::Error::InvalidQuery)?;
-                    parse_agent_type(&view.agent_type).map(|agent| MessageTarget::cli(agent, pk))
+                    Ok(session_cli_target(&view.agent_type, pk))
                 })
                 .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect()
         } else {
             Vec::new()
         };
@@ -2905,14 +2908,10 @@ pub fn message_cli_author_target(
          WHERE mca.message_id = ?1
            AND m.discussion_id = ?2",
         params![message_id, discussion_id],
-        |row| {
-            Ok(MessageTarget::cli(
-                parse_agent_type(&row.get::<_, String>(0)?)?,
-                row.get(1)?,
-            ))
-        },
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
     )
     .optional()
+    .map(|author| author.and_then(|(agent, pk)| session_cli_target(&agent, pk)))
     .map_err(anyhow::Error::from)
 }
 
@@ -3784,6 +3783,23 @@ pub fn update_message_tokens(
         params![tokens_used as i64, auth_mode, message_id],
     )?;
     Ok(())
+}
+
+/// A joined session as a typed CLI target, or `None` when the bridge could not
+/// identify its provider (it joins as `Unknown`): such a peer cannot be addressed
+/// by type, and it must not make the whole room unreadable.
+pub(crate) fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<MessageTarget> {
+    match parse_agent_type(agent_type) {
+        Ok(agent) => Some(MessageTarget::cli(agent, session_pk)),
+        Err(_) => {
+            tracing::warn!(
+                session_pk,
+                agent_type,
+                "joined session has an unrecognised agent type; it is not addressable as a CLI target"
+            );
+            None
+        }
+    }
 }
 
 pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {

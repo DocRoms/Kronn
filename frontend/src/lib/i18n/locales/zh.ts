@@ -1,6 +1,8 @@
 import type { TranslationDict } from '../../i18n';
 
 const zh: TranslationDict = {
+  "disc.loadFailed": "无法打开此讨论：{0}",
+  "disc.loadRetry": "重试",
   "disc.mosaic.open": "以拼贴方式打开",
   "disc.mosaic.selection": "选择 2 到 {0} 个讨论",
   "disc.mosaic.title": "讨论拼贴",

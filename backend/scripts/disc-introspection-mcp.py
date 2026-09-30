@@ -2864,6 +2864,8 @@ def _infer_agent_type_from_client_name(name):
         return "ClaudeCode"
     if "codex" in lower:
         return "Codex"
+    if "opencode" in lower:
+        return "OpenCode"
     if "gemini" in lower:
         return "GeminiCli"
     if "kiro" in lower:
@@ -2982,7 +2984,7 @@ def _cmdline_of(pid):
 # Substrings that mark an ancestor as the launching CLI. Same family as
 # `_infer_agent_type_from_client_name`; kept lax on purpose (a node-wrapped
 # `claude` or `codex` still matches on the combined cmdline).
-_CLI_CMDLINE_HINTS = ("claude", "codex", "gemini", "kiro", "copilot", "vibe", "cursor", "cline")
+_CLI_CMDLINE_HINTS = ("claude", "codex", "opencode", "gemini", "kiro", "copilot", "vibe", "cursor", "cline")
 
 
 def _cli_ancestor_identity():

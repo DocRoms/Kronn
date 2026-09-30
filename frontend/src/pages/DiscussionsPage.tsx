@@ -977,6 +977,8 @@ export function DiscussionsPage({
   // refresh so the server can omit an unchanged transcript.
   const detailRevisionsRef = useRef<Record<string, string>>({});
   const detailReloadsRef = useRef<Record<string, { again: boolean; done: Promise<void> }>>({});
+  // A discussion whose first load failed has no state to keep: show why.
+  const [detailLoadErrors, setDetailLoadErrors] = useState<Record<string, string>>({});
   const reloadDiscussion = useCallback((discId: string): Promise<void> => {
     // A burst of events for one discussion collapses into the poll in flight
     // plus at most one more, started after the latest request.
@@ -994,13 +996,24 @@ export function DiscussionsPage({
           const result = await discussionsApi.poll(discId, detailRevisionsRef.current[discId] ?? null);
           if (!result) continue;
           detailRevisionsRef.current[discId] = result.revision;
+          setDetailLoadErrors(prev => {
+            if (!(discId in prev)) return prev;
+            const next = { ...prev };
+            delete next[discId];
+            return next;
+          });
           /*
            * A stream interrupted by a backend reload keeps its local text until
            * this detail fetch proves either a newer durable checkpoint or a
            * settled Agent message. Network failure deliberately changes nothing.
            */
           if (result.detail) reconcileLoadedDiscussion(result.detail);
-        } catch { /* keep the current state */ }
+        } catch (error) {
+          // A refresh failure keeps the current state; a first load has none.
+          if (!detailRevisionsRef.current[discId]) {
+            setDetailLoadErrors(prev => ({ ...prev, [discId]: userError(error) }));
+          }
+        }
       } while (reload.again);
       delete detailReloadsRef.current[discId];
     };
@@ -4539,6 +4552,21 @@ export function DiscussionsPage({
               ref={messagesContainerRef}
               onScroll={handleMessagesScroll}
             >
+              {!loadedDiscussions[activeDiscussion.id] && detailLoadErrors[activeDiscussion.id] && (
+                <div className="disc-worktree-error" role="alert">
+                  <AlertTriangle size={14} className="text-error flex-shrink-0" />
+                  <span className="flex-1">
+                    {t('disc.loadFailed', detailLoadErrors[activeDiscussion.id])}
+                  </span>
+                  <button
+                    type="button"
+                    className="disc-worktree-retry-btn"
+                    onClick={() => { void reloadDiscussion(activeDiscussion.id); }}
+                  >
+                    {t('disc.loadRetry')}
+                  </button>
+                </div>
+              )}
               {transcriptElements}
 
               {(activeDiscussion.active_workflow_steps ?? []).map(step => (

@@ -241,6 +241,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A room that a CLI peer joined without being identified opens again
+  (KT-925). The bridge joins such a peer as `Unknown`; the discussion detail,
+  its default targets, native replies and room imports then failed with
+  "unknown persisted agent type", and the room never rendered. That peer is
+  now skipped as a typed target and logged. The bridge also recognises
+  OpenCode, which was joining as `Unknown`, and a discussion whose first load
+  fails says why, with a retry, instead of loading forever.
+
 - Frontend dependencies: `brace-expansion` is pinned to 5.0.12, which fixes
   GHSA-qhr7-859c-m2p7 and two related advisories (denial of service by
   recursion, quadratic expansion). It is only used by the lint tooling.

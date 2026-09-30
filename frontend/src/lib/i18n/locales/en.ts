@@ -1,6 +1,8 @@
 import type { TranslationDict } from '../../i18n';
 
 const en: TranslationDict = {
+  "disc.loadFailed": "This discussion could not be opened: {0}",
+  "disc.loadRetry": "Retry",
   "disc.mosaic.open": "Open in a mosaic",
   "disc.mosaic.selection": "Select 2 to {0} discussions",
   "disc.mosaic.title": "Discussion mosaic",
