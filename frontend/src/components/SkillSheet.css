@@ -69,3 +69,5 @@
   .skill-sheet-view { width: 100%; }
   .skill-sheet-view .skill-sheet-chip { flex: 1; justify-content: center; }
 }
+
+.skill-card-projects { color: var(--kr-text-muted); font-size: var(--kr-fs-sm); }

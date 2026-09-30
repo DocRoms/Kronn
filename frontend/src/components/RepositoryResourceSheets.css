@@ -78,7 +78,7 @@
 .rr-content-newer { margin: 0 0 var(--kr-sp-2); color: var(--kr-info); }
 .rr-content-view { display: flex; justify-content: flex-end; gap: 4px; margin: var(--kr-sp-2) 0; }
 .rr-content-text { max-height: 480px; margin: 0; padding: 8px; overflow: auto; border-radius: var(--kr-radius-sm); background: var(--kr-bg-input); font: 11px/1.5 var(--kr-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.rr-markdown { max-height: 480px; padding: var(--kr-sp-2) var(--kr-sp-3); overflow: auto; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-radius-sm); background: var(--kr-bg-raised); overflow-wrap: anywhere; }
+.rr-markdown { max-height: 480px; font-size: var(--kr-fs-base); line-height: 1.55; padding: var(--kr-sp-2) var(--kr-sp-3); overflow: auto; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-radius-sm); background: var(--kr-bg-raised); overflow-wrap: anywhere; }
 .rr-markdown > :first-child { margin-top: 0; }
 .rr-markdown > :last-child { margin-bottom: 0; }
 .rr-markdown h1,
@@ -92,7 +92,7 @@
 .rr-markdown table { margin: 0 0 var(--kr-sp-2); }
 .rr-markdown ul,
 .rr-markdown ol { padding-left: 20px; }
-.rr-markdown code { padding: 0 4px; border-radius: var(--kr-radius-sm); background: var(--kr-bg-input); }
+.rr-markdown code { padding: 0 4px; font-size: var(--kr-fs-sm); border-radius: var(--kr-radius-sm); background: var(--kr-bg-input); }
 .rr-markdown pre { margin: 0 0 var(--kr-sp-2); padding: 8px; overflow: auto; border-radius: var(--kr-radius-sm); background: var(--kr-bg-input); }
 .rr-markdown pre code { padding: 0; background: none; }
 .rr-markdown table { border-collapse: collapse; }

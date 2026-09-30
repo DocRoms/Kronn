@@ -82,7 +82,7 @@ export function SkillCard({ skill, pinned, onTogglePinned, projectCount, onOpen 
       {skill.description && <p className="qp-card-desc">{skill.description}</p>}
       <div className="qp-card-meta">
         <SkillBadges skill={skill} />
-        <span>{t('automation.skill.projectCount', projectCount)}</span>
+        <span className="skill-card-projects">{t('automation.skill.projectCount', projectCount)}</span>
       </div>
     </div>
   );
