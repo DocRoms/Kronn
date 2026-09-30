@@ -250,6 +250,33 @@ Release notes for 0.9.3 and earlier are available in the
   three groupings. A search still finds them and lays the section open; the
   type and project counters and the library total count what the list shows.
 
+- The skills of a discussion are grouped, searchable, and include the ones a
+  repository holds (KT-923). The skill picker of "New discussion" and of a
+  discussion's settings listed the whole catalog flat, without the native
+  skills of the project's repository (`block-migration` in `.agents/skills/`
+  could not be picked). Both now share one picker with the Automation page's
+  logic: "Utilisés par ce projet" first (attached, referenced from the
+  repository or published, with "Dépôt · .agents/skills" for a repository
+  skill), then the skills already ticked, then the rest of the catalog by
+  category behind "Voir les skills disponibles (N)". A search on the name or
+  the description lays out what matches; a discussion with no project shows the
+  catalog by category. Nothing is fixed in the front: the lists are read from
+  `GET /api/skills` and `GET /api/projects/used-skills` each time the picker
+  opens, the section follows the project chosen in the form at once, and a skill
+  used, published or attached since — or gone from the repository — shows or
+  disappears on the next opening, without reloading the page. A ticked skill
+  that no longer exists stays visible, flagged, so it can be removed. A
+  repository skill is stored as `repository:<project>:<slug>` in the
+  discussion's `skill_ids`, and the agent really receives it: at each send the
+  backend reads its `SKILL.md` from the project's repository, for a path the
+  project uses only, never through a symbolic link or out of the repository,
+  masked like any repository text and cut at 64 KiB, then injects it in a
+  "Repository Skills" block of the prompt (compact for the agents that take
+  compact skills). A skill it cannot load — another project's, no longer used,
+  file gone — is said at the head of the reply, never dropped silently. A
+  `SKILL.md` edited between two messages is read again by the second. Only the
+  `SKILL.md` is injected; skills with extra files stay KT-919.
+
 - The AI & automation tab of a project with many automations no longer takes
   seconds to load (about 5.2 s in front_euronews, the same on every read).
   Each read rendered every automation and masked its secrets again, and built

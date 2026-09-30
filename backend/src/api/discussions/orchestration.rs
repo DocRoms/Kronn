@@ -302,6 +302,17 @@ pub async fn orchestrate(
     } else {
         req_skill_ids
     };
+    // KT-923 — the skills only the project's repository holds, read from it now
+    // (see `make_agent_stream`); what cannot be loaded is said in the debate's
+    // opening system message.
+    let orch_repository_skills =
+        crate::api::projects::used_skills::repository_skills_for_discussion(
+            &state.db,
+            disc.project_id.as_deref(),
+            &orch_skill_ids,
+        )
+        .await;
+    let orch_repository_skills_notice = orch_repository_skills.notice();
     let orch_directive_ids = if req_directive_ids.is_empty() {
         disc.directive_ids.clone()
     } else {
@@ -590,11 +601,14 @@ pub async fn orchestrate(
         }
 
         let agent_names: Vec<String> = agents.iter().map(agent_display_name).collect();
-        let sys_text = format!(
+        let mut sys_text = format!(
             "Mode orchestration active avec {}. Les agents vont debattre sur {} rounds maximum.",
             agent_names.join(", "),
             max_rounds
         );
+        if let Some(notice) = orch_repository_skills_notice.as_ref() {
+            sys_text = format!("{sys_text}\n\n{notice}");
+        }
         emit!(AgentStreamEvent::System {
             data: serde_json::json!({ "text": sys_text, "agents": agent_names })
         });
@@ -829,6 +843,7 @@ pub async fn orchestrate(
                     work_dir: orch_workspace_path.as_deref(),
                     full_access: fa,
                     skill_ids: &orch_skill_ids,
+                    repository_skills: &orch_repository_skills.resolved,
                     directive_ids: &orch_directive_ids,
                     profile_ids: &orch_profile_ids,
                     mcp_context_override: global_mcp_context.as_deref(),
@@ -1042,6 +1057,7 @@ pub async fn orchestrate(
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: synth_fa,
                 skill_ids: &orch_skill_ids,
+                repository_skills: &orch_repository_skills.resolved,
                 directive_ids: &orch_directive_ids,
                 profile_ids: &orch_profile_ids,
                 mcp_context_override: global_mcp_context.as_deref(),

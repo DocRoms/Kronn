@@ -1,0 +1,119 @@
+/* Discussion skill picker (KT-923): shared by the new-discussion form and the
+   discussion settings. The chips keep the class of the surface they sit in
+   (`.disc-chip`, `.disc-toggle-pill`); this file lays out what surrounds them. */
+.skill-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 6px 16px;
+  min-width: 0;
+}
+
+.skill-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-tertiary);
+}
+
+.skill-picker-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+}
+
+.skill-picker-search:focus-within {
+  border-color: var(--kr-accent-ink);
+}
+
+.skill-picker-section,
+.skill-picker-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.skill-picker-heading,
+.skill-picker-category {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.skill-picker-category {
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
+}
+
+.skill-picker-heading span,
+.skill-picker-category span {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+}
+
+.skill-picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.skill-picker-chips > button {
+  max-width: 100%;
+}
+
+/* Where a repository skill lives, on the chip itself. */
+.skill-picker-origin {
+  margin-left: 3px;
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 400;
+}
+
+/* A ticked id nothing answers to: kept visible so it can be unticked. */
+.skill-picker-chips > button[data-missing="true"] {
+  border-style: dashed;
+  color: var(--kr-warning);
+}
+
+.skill-picker-fold {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+  text-align: left;
+}
+
+.skill-picker-fold:hover {
+  color: var(--kr-text-primary);
+}
+
+.skill-picker-empty {
+  margin: 0;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-xs);
+}

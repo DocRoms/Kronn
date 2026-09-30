@@ -19,6 +19,7 @@ use super::resources::{read_repository_file, side_text};
 use crate::db::project_skill_references::SkillReference;
 use crate::models::{
     ApiErrorCode, ApiResponse, ProjectRepositoryResourceKind, ProjectSkillFile, ProjectUsedSkill,
+    Skill, SkillCategory,
 };
 use crate::AppState;
 
@@ -202,6 +203,253 @@ pub async fn used_skill_file(
             ApiErrorCode::Internal,
             format!("Unable to read the skill: {error}"),
         )),
+    }
+}
+
+// ─── Discussions (KT-923) ────────────────────────────────────────────────────
+//
+// A skill only a repository holds can be selected for a discussion under the
+// id the Automation page gives it, `repository:<project>:<slug>`. The catalog
+// knows nothing of it, so the discussion resolves it itself, from the
+// repository, every time a message is sent — a `SKILL.md` edited between two
+// sends is read again, and one that disappeared is reported.
+
+/// How an id starts when the skill is one only a project's repository holds.
+const REPOSITORY_SKILL_PREFIX: &str = "repository:";
+
+/// What Kronn injects of one repository skill at most. The content route serves
+/// up to 512 KiB for a human to read; an agent's prompt is paid for on every
+/// turn, so a skill that long is cut and said to be.
+pub const MAX_INJECTED_SKILL_BYTES: usize = 64 * 1024;
+
+/// `(project id, slug)` out of `repository:<project>:<slug>`, `None` for any
+/// other id (a catalog skill).
+pub fn parse_repository_skill_id(id: &str) -> Option<(&str, &str)> {
+    let (project_id, slug) = id.strip_prefix(REPOSITORY_SKILL_PREFIX)?.rsplit_once(':')?;
+    (!project_id.is_empty() && !slug.is_empty()).then_some((project_id, slug))
+}
+
+/// Why a repository skill selected for a discussion is not loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositorySkillProblem {
+    /// It belongs to another project than the discussion's, or the discussion
+    /// has none: reading it would take a file from a repository the agent is
+    /// not working in.
+    OtherProject,
+    /// Its project no longer exists.
+    ProjectGone,
+    /// The project no longer uses it: not referenced, not published.
+    NotUsed,
+    /// The project uses it but its `SKILL.md` cannot be read (gone from the
+    /// repository, behind a symbolic link, unreadable).
+    Unreadable,
+}
+
+impl RepositorySkillProblem {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::OtherProject => "it belongs to another project than this discussion's",
+            Self::ProjectGone => "its project no longer exists",
+            Self::NotUsed => "the project no longer uses it",
+            Self::Unreadable => "its SKILL.md cannot be read from the repository",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedRepositorySkill {
+    pub id: String,
+    pub problem: RepositorySkillProblem,
+}
+
+/// The repository skills a discussion selected, as they stand right now.
+#[derive(Debug, Default)]
+pub struct RepositorySkills {
+    /// Ready to inject: the `SKILL.md` body, masked and bounded.
+    pub resolved: Vec<Skill>,
+    /// Ids the agent will not receive, and why.
+    pub unresolved: Vec<UnresolvedRepositorySkill>,
+    /// Names of the resolved skills that were longer than the bound and cut.
+    pub truncated: Vec<String>,
+}
+
+impl RepositorySkills {
+    /// What the discussion tells the user when a selected skill is not, or only
+    /// partly, loaded. `None` when everything selected was loaded whole.
+    pub fn notice(&self) -> Option<String> {
+        if self.unresolved.is_empty() && self.truncated.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        for skill in &self.unresolved {
+            let name = parse_repository_skill_id(&skill.id).map_or(skill.id.as_str(), |(_, s)| s);
+            lines.push(format!(
+                "`{name}` was not loaded: {}.",
+                skill.problem.reason()
+            ));
+        }
+        for name in &self.truncated {
+            lines.push(format!(
+                "`{name}` was cut at {} KiB.",
+                MAX_INJECTED_SKILL_BYTES / 1024
+            ));
+        }
+        Some(format!("⚠️ **Repository skills** — {}", lines.join(" ")))
+    }
+}
+
+/// `text` cut at `max` bytes on a character boundary, and whether it was cut.
+fn cut_at(text: &str, max: usize) -> (&str, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+/// The skill an agent receives out of a repository `SKILL.md` that has already
+/// been read, masked and cut by the route's own pass: its body, without the
+/// header a catalog skill does not carry either. A file with no header is taken
+/// whole.
+fn repository_skill(id: &str, used: &ProjectUsedSkill, text: &str) -> (Skill, bool) {
+    let file = crate::core::agent_skill::parse(text).ok();
+    let (body, description) = file.as_ref().map_or((text, String::new()), |file| {
+        (file.body.as_str(), file.description.clone())
+    });
+    let (content, truncated) = cut_at(body, MAX_INJECTED_SKILL_BYTES);
+    let name = if used.name.is_empty() {
+        used.slug.clone()
+    } else {
+        used.name.clone()
+    };
+    let skill = Skill {
+        id: id.to_string(),
+        name,
+        description,
+        icon: "📂".into(),
+        category: SkillCategory::Domain,
+        content: content.to_string(),
+        is_builtin: false,
+        token_estimate: u32::try_from(content.len() / 4).unwrap_or(u32::MAX),
+        license: file.as_ref().and_then(|file| file.license.clone()),
+        allowed_tools: file.as_ref().and_then(|file| file.allowed_tools.clone()),
+        auto_triggers: None,
+        external: false,
+        source_url: None,
+    };
+    (skill, truncated)
+}
+
+/// Reads the `SKILL.md` of one repository skill a project uses, with the
+/// guarantees of the content route: only a path the project uses, never a
+/// symbolic link or a path out of the repository, masked before anything else
+/// is done with the text.
+fn read_used_skill(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    slug: &str,
+    catalog: &BTreeMap<String, String>,
+) -> anyhow::Result<Result<(ProjectUsedSkill, String), RepositorySkillProblem>> {
+    let Some(project) = crate::db::projects::get_project(conn, project_id)? else {
+        return Ok(Err(RepositorySkillProblem::ProjectGone));
+    };
+    let root = Path::new(&project.path);
+    let references = crate::db::project_skill_references::list_for_project(conn, project_id)?;
+    let Some(used) = project_used_skills(project_id, root, &references, catalog)
+        .into_iter()
+        .find(|skill| skill.skill_id.is_none() && skill.slug == slug)
+    else {
+        return Ok(Err(RepositorySkillProblem::NotUsed));
+    };
+    let Some(bytes) = read_repository_file(root, &used.relative_path) else {
+        return Ok(Err(RepositorySkillProblem::Unreadable));
+    };
+    let (text, _) = side_text(&bytes);
+    Ok(Ok((used, text)))
+}
+
+/// The repository skills among `skill_ids` (catalog ids are left to the
+/// catalog), resolved from their project's repository as it is now. A skill is
+/// loaded only when the discussion's project is the one it belongs to and that
+/// project still uses it; anything else is listed in `unresolved`, never
+/// dropped without a word.
+pub fn resolve_repository_skills(
+    conn: &rusqlite::Connection,
+    discussion_project_id: Option<&str>,
+    skill_ids: &[String],
+) -> anyhow::Result<RepositorySkills> {
+    let mut seen = std::collections::BTreeSet::new();
+    let wanted: Vec<(&String, &str, &str)> = skill_ids
+        .iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .filter_map(|id| parse_repository_skill_id(id).map(|(project, slug)| (id, project, slug)))
+        .collect();
+    let mut result = RepositorySkills::default();
+    if wanted.is_empty() {
+        return Ok(result);
+    }
+    let catalog = catalog_ids_by_slug();
+    for (id, project_id, slug) in wanted {
+        let outcome = if discussion_project_id == Some(project_id) {
+            read_used_skill(conn, project_id, slug, &catalog)?
+        } else {
+            Err(RepositorySkillProblem::OtherProject)
+        };
+        match outcome {
+            Ok((used, text)) => {
+                let (skill, truncated) = repository_skill(id, &used, &text);
+                if truncated {
+                    result.truncated.push(skill.name.clone());
+                }
+                result.resolved.push(skill);
+            }
+            Err(problem) => result.unresolved.push(UnresolvedRepositorySkill {
+                id: id.clone(),
+                problem,
+            }),
+        }
+    }
+    Ok(result)
+}
+
+/// [`resolve_repository_skills`] for a message that is about to be sent. When
+/// the database cannot be read, every repository skill selected is reported as
+/// unreadable rather than silently left out.
+pub async fn repository_skills_for_discussion(
+    db: &crate::db::Database,
+    discussion_project_id: Option<&str>,
+    skill_ids: &[String],
+) -> RepositorySkills {
+    if !skill_ids
+        .iter()
+        .any(|id| parse_repository_skill_id(id).is_some())
+    {
+        return RepositorySkills::default();
+    }
+    let project_id = discussion_project_id.map(str::to_string);
+    let ids = skill_ids.to_vec();
+    match db
+        .with_read_conn(move |conn| resolve_repository_skills(conn, project_id.as_deref(), &ids))
+        .await
+    {
+        Ok(skills) => skills,
+        Err(error) => {
+            tracing::warn!("repository skills: cannot resolve the selection: {error}");
+            RepositorySkills {
+                unresolved: skill_ids
+                    .iter()
+                    .filter(|id| parse_repository_skill_id(id).is_some())
+                    .map(|id| UnresolvedRepositorySkill {
+                        id: id.clone(),
+                        problem: RepositorySkillProblem::Unreadable,
+                    })
+                    .collect(),
+                ..RepositorySkills::default()
+            }
+        }
     }
 }
 
@@ -535,5 +783,318 @@ mod tests {
         .expect("the file is served");
         assert!(!file.content.contains(TYPED_KEY));
         assert!(file.content.contains("***REDACTED***"));
+    }
+
+    // ─── Discussions (KT-923) ────────────────────────────────────────────────
+
+    const BLOCK_MIGRATION: &str = ".agents/skills/block-migration/SKILL.md";
+
+    async fn reference_block_migration(state: &AppState) {
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::project_skill_references::upsert(
+                    conn,
+                    "p1",
+                    "block-migration",
+                    BLOCK_MIGRATION,
+                    "Block migration",
+                    "2026-09-30T00:00:00Z",
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    #[test]
+    fn a_repository_skill_id_names_its_project_and_slug() {
+        assert_eq!(
+            parse_repository_skill_id("repository:p1:block-migration"),
+            Some(("p1", "block-migration"))
+        );
+        // A catalog skill is not one, nor is what the id does not complete.
+        for other in [
+            "review",
+            "custom-review",
+            "repository:",
+            "repository:p1",
+            "repository::x",
+            "repository:p1:",
+        ] {
+            assert_eq!(parse_repository_skill_id(other), None, "{other}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skill_the_project_uses_is_resolved_masked_and_without_its_header() {
+        const TYPED_KEY: &str = "sk-zyxwvutsrqponmlkjihgfedcba9876543210";
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".agents/skills/block-migration");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: block-migration\ndescription: Moves a block.\n---\nMove the block.\nkey {TYPED_KEY}\n"
+            ),
+        )
+        .unwrap();
+        let state = state_with_project(root.path()).await;
+        reference_block_migration(&state).await;
+
+        let skills = repository_skills_for_discussion(
+            &state.db,
+            Some("p1"),
+            &ids(&["review", "repository:p1:block-migration"]),
+        )
+        .await;
+
+        assert!(skills.unresolved.is_empty() && skills.truncated.is_empty());
+        assert_eq!(skills.notice(), None);
+        assert_eq!(
+            skills.resolved.len(),
+            1,
+            "the catalog id is not its business"
+        );
+        let skill = &skills.resolved[0];
+        assert_eq!(skill.id, "repository:p1:block-migration");
+        assert_eq!(skill.name, "Block migration");
+        assert_eq!(skill.description, "Moves a block.");
+        assert!(skill.content.contains("Move the block."));
+        assert!(
+            !skill.content.contains("description:"),
+            "the header is not injected"
+        );
+        assert!(!skill.content.contains(TYPED_KEY), "the text is masked");
+        assert!(skill.content.contains("***REDACTED***"));
+    }
+
+    #[tokio::test]
+    async fn a_skill_the_project_does_not_use_is_refused_whatever_its_id_says() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".agents/skills/unused");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: unused\ndescription: d\n---\nNot referenced.\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("secret.txt"), "top secret").unwrap();
+        let state = state_with_project(root.path()).await;
+
+        let skills = repository_skills_for_discussion(
+            &state.db,
+            Some("p1"),
+            &ids(&[
+                "repository:p1:unused",
+                "repository:p1:../secret.txt",
+                "repository:p1:secret.txt",
+            ]),
+        )
+        .await;
+
+        assert!(skills.resolved.is_empty());
+        assert_eq!(skills.unresolved.len(), 3);
+        assert!(skills
+            .unresolved
+            .iter()
+            .all(|skill| skill.problem == RepositorySkillProblem::NotUsed));
+        // Said, not dropped.
+        let notice = skills.notice().expect("the user is told");
+        assert!(notice.contains("`unused`") && notice.contains("no longer uses it"));
+    }
+
+    #[tokio::test]
+    async fn a_reference_pointing_out_of_the_repository_is_not_read() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("SKILL.md"),
+            "---\nname: x\ndescription: d\n---\nLeak.\n",
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = state_with_project(root.path()).await;
+        let escaping = format!(
+            "../{}/SKILL.md",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::project_skill_references::upsert(
+                    conn,
+                    "p1",
+                    "escape",
+                    &escaping,
+                    "Escape",
+                    "2026-09-30T00:00:00Z",
+                )
+            })
+            .await
+            .unwrap();
+
+        let skills = repository_skills_for_discussion(
+            &state.db,
+            Some("p1"),
+            &ids(&["repository:p1:escape"]),
+        )
+        .await;
+
+        assert!(skills.resolved.is_empty());
+        assert_eq!(
+            skills.unresolved[0].problem,
+            RepositorySkillProblem::Unreadable
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_skill_md_behind_a_symbolic_link_is_not_read() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("real.md"),
+            "---\nname: linked\ndescription: d\n---\nLeak.\n",
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".agents/skills/linked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("real.md"), dir.join("SKILL.md")).unwrap();
+        let state = state_with_project(root.path()).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::project_skill_references::upsert(
+                    conn,
+                    "p1",
+                    "linked",
+                    ".agents/skills/linked/SKILL.md",
+                    "Linked",
+                    "2026-09-30T00:00:00Z",
+                )
+            })
+            .await
+            .unwrap();
+
+        let skills = repository_skills_for_discussion(
+            &state.db,
+            Some("p1"),
+            &ids(&["repository:p1:linked"]),
+        )
+        .await;
+
+        assert!(skills.resolved.is_empty());
+        assert_eq!(
+            skills.unresolved[0].problem,
+            RepositorySkillProblem::Unreadable
+        );
+    }
+
+    #[tokio::test]
+    async fn another_projects_skill_is_reported_and_never_read() {
+        let root = tempfile::tempdir().unwrap();
+        write_skill(
+            root.path(),
+            ".agents/skills",
+            "block-migration",
+            "Block migration",
+            "Steps.",
+        );
+        let state = state_with_project(root.path()).await;
+        reference_block_migration(&state).await;
+
+        for project in [Some("elsewhere"), None] {
+            let skills = repository_skills_for_discussion(
+                &state.db,
+                project,
+                &ids(&["repository:p1:block-migration"]),
+            )
+            .await;
+            assert!(skills.resolved.is_empty(), "{project:?}");
+            assert_eq!(
+                skills.unresolved[0].problem,
+                RepositorySkillProblem::OtherProject
+            );
+            assert!(skills.notice().unwrap().contains("another project"));
+        }
+
+        let gone = repository_skills_for_discussion(
+            &state.db,
+            Some("gone"),
+            &ids(&["repository:gone:block-migration"]),
+        )
+        .await;
+        assert_eq!(
+            gone.unresolved[0].problem,
+            RepositorySkillProblem::ProjectGone
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_edited_between_two_sends_is_read_again_and_a_removed_one_is_reported() {
+        let root = tempfile::tempdir().unwrap();
+        write_skill(
+            root.path(),
+            ".agents/skills",
+            "block-migration",
+            "Block migration",
+            "First version.",
+        );
+        let state = state_with_project(root.path()).await;
+        reference_block_migration(&state).await;
+        let selected = ids(&["repository:p1:block-migration"]);
+
+        let first = repository_skills_for_discussion(&state.db, Some("p1"), &selected).await;
+        assert!(first.resolved[0].content.contains("First version."));
+
+        write_skill(
+            root.path(),
+            ".agents/skills",
+            "block-migration",
+            "Block migration",
+            "Second version.",
+        );
+        let second = repository_skills_for_discussion(&state.db, Some("p1"), &selected).await;
+        assert!(second.resolved[0].content.contains("Second version."));
+        assert!(!second.resolved[0].content.contains("First version."));
+
+        std::fs::remove_file(root.path().join(BLOCK_MIGRATION)).unwrap();
+        let third = repository_skills_for_discussion(&state.db, Some("p1"), &selected).await;
+        assert!(third.resolved.is_empty());
+        assert_eq!(
+            third.unresolved[0].problem,
+            RepositorySkillProblem::Unreadable
+        );
+        assert!(third.notice().unwrap().contains("cannot be read"));
+    }
+
+    #[tokio::test]
+    async fn a_skill_longer_than_the_bound_is_cut_and_the_notice_says_so() {
+        let root = tempfile::tempdir().unwrap();
+        let body = "é".repeat(MAX_INJECTED_SKILL_BYTES);
+        write_skill(
+            root.path(),
+            ".agents/skills",
+            "block-migration",
+            "Block migration",
+            &body,
+        );
+        let state = state_with_project(root.path()).await;
+        reference_block_migration(&state).await;
+
+        let skills = repository_skills_for_discussion(
+            &state.db,
+            Some("p1"),
+            &ids(&["repository:p1:block-migration"]),
+        )
+        .await;
+
+        assert_eq!(skills.resolved.len(), 1);
+        assert!(skills.resolved[0].content.len() <= MAX_INJECTED_SKILL_BYTES);
+        assert_eq!(skills.truncated, vec!["Block migration".to_string()]);
+        assert!(skills.notice().unwrap().contains("cut at 64 KiB"));
     }
 }

@@ -1881,6 +1881,17 @@ async fn make_agent_stream_inner(
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
+    // KT-923 — a skill only the project's repository holds is read from that
+    // repository now, at send time: a SKILL.md edited since the last message
+    // is read again, and one that cannot be is said so in the reply rather than
+    // left out without a word.
+    let repository_skills = crate::api::projects::used_skills::repository_skills_for_discussion(
+        &state.db,
+        disc.project_id.as_deref(),
+        &skill_ids,
+    )
+    .await;
+    let repository_skills_notice = repository_skills.notice();
     let tool_free_judge = {
         let did = discussion_id.clone();
         state
@@ -2645,7 +2656,13 @@ async fn make_agent_stream_inner(
         &project_path,
         global_mcp_context.as_deref(),
         &agent_type,
-    ) + context_files_prompt.len();
+    ) + context_files_prompt.len()
+        + crate::core::skills::append_repository_skills_prompt(
+            String::new(),
+            &repository_skills.resolved,
+            crate::api::disc_helpers::is_compact_agent(&agent_type),
+        )
+        .len();
     let mut prompt_disc =
         discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
     // QP values are never persisted in messages. Hydrate only this temporary
@@ -2855,12 +2872,20 @@ async fn make_agent_stream_inner(
     };
     let disc_model = preflight.effective_model;
     let attempted_model = disc_model.clone();
-    let catalog_warning_notice = preflight.warning.map(|warning| {
-        format!(
-            "⚠️ **Model catalogue fallback** — requested `{}`; using `{}` because the requested model disappeared.",
-            warning.requested_model, warning.effective_model
-        )
-    });
+    // Both notices open the reply the same way: sent as a chunk first, and kept
+    // at the head of what is stored.
+    let catalog_warning_notice = [
+        preflight.warning.map(|warning| {
+            format!(
+                "⚠️ **Model catalogue fallback** — requested `{}`; using `{}` because the requested model disappeared.",
+                warning.requested_model, warning.effective_model
+            )
+        }),
+        repository_skills_notice,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|notices, notice| format!("{notices}\n\n{notice}"));
 
     let disc_id = discussion_id.clone();
     let disc_project_id = disc.project_id.clone();
@@ -3036,6 +3061,7 @@ async fn make_agent_stream_inner(
             work_dir: workspace_path.as_deref(),
             full_access,
             skill_ids: &skill_ids,
+            repository_skills: &repository_skills.resolved,
             directive_ids: &directive_ids,
             profile_ids: &profile_ids,
             mcp_context_override: global_mcp_context.as_deref(),

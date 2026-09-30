@@ -502,16 +502,20 @@ pub fn release_skills_snapshot(run_id: &str) {
     SKILL_SNAPSHOTS.release(run_id);
 }
 
-fn render_skills_prompt(skills: &[Skill]) -> String {
+fn render_skills_block(header: &str, skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    let mut prompt = String::from("=== Active Skills ===\n\n");
+    let mut prompt = format!("=== {header} ===\n\n");
     for skill in skills {
         prompt.push_str(&format!("--- {} ---\n{}\n\n", skill.name, skill.content));
     }
     prompt
+}
+
+fn render_skills_prompt(skills: &[Skill]) -> String {
+    render_skills_block("Active Skills", skills)
 }
 
 /// Build the combined skill prompt text for injection.
@@ -525,12 +529,12 @@ pub fn build_skills_prompt_for_run(run_id: &str, skill_ids: &[String]) -> String
     render_skills_prompt(&get_skills_snapshot(run_id, skill_ids))
 }
 
-fn render_skills_prompt_compact(skills: &[Skill]) -> String {
+fn render_skills_block_compact(header: &str, skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    let mut prompt = String::from("=== Skills ===\n");
+    let mut prompt = format!("=== {header} ===\n");
     for skill in skills {
         // Take first 2-3 meaningful lines (up to ~200 chars) for better context
         let mut summary = String::new();
@@ -553,6 +557,32 @@ fn render_skills_prompt_compact(skills: &[Skill]) -> String {
         prompt.push_str(&format!("[{}: {}]\n", skill.name, summary));
     }
     prompt
+}
+
+fn render_skills_prompt_compact(skills: &[Skill]) -> String {
+    render_skills_block_compact("Skills", skills)
+}
+
+/// `prompt` (the catalog skills' text, possibly empty or a native-files hint)
+/// followed by the skills a project's repository holds (KT-923), laid out like
+/// the catalog's — full for an agent that takes them, compact for one with a
+/// small context window. They get a block of their own: the native-files hint
+/// says nothing about a `SKILL.md` Kronn did not write, so this text is what
+/// makes sure the agent reads it.
+pub fn append_repository_skills_prompt(prompt: String, skills: &[Skill], compact: bool) -> String {
+    if skills.is_empty() {
+        return prompt;
+    }
+    let block = if compact {
+        render_skills_block_compact("Repository Skills", skills)
+    } else {
+        render_skills_block("Repository Skills", skills)
+    };
+    if prompt.is_empty() {
+        block
+    } else {
+        format!("{prompt}\n{block}")
+    }
 }
 
 /// Build a compact skills prompt for agents with small context windows.
@@ -1162,6 +1192,76 @@ mod tests {
         let prompt = build_skills_prompt(&["rust".into()]);
         assert!(prompt.contains("rust"));
         assert!(prompt.contains("=== Active Skills ==="));
+    }
+
+    fn repository_skill(name: &str, content: &str) -> Skill {
+        Skill {
+            id: format!("repository:p1:{name}"),
+            name: name.into(),
+            description: String::new(),
+            icon: "📂".into(),
+            category: SkillCategory::Domain,
+            content: content.into(),
+            is_builtin: false,
+            token_estimate: 0,
+            license: None,
+            allowed_tools: None,
+            auto_triggers: None,
+            external: false,
+            source_url: None,
+        }
+    }
+
+    #[test]
+    fn repository_skills_leave_the_catalog_prompt_alone_when_there_are_none() {
+        assert_eq!(
+            append_repository_skills_prompt("catalog".into(), &[], false),
+            "catalog"
+        );
+        assert_eq!(
+            append_repository_skills_prompt(String::new(), &[], true),
+            ""
+        );
+    }
+
+    #[test]
+    fn repository_skills_follow_the_catalog_ones_in_a_block_of_their_own() {
+        let skills = [repository_skill("block-migration", "Move the block.")];
+        let alone = append_repository_skills_prompt(String::new(), &skills, false);
+        assert_eq!(
+            alone,
+            "=== Repository Skills ===\n\n--- block-migration ---\nMove the block.\n\n"
+        );
+
+        let catalog = build_skills_prompt(&["rust".into()]);
+        let both = append_repository_skills_prompt(catalog.clone(), &skills, false);
+        assert!(both.starts_with(&catalog));
+        assert!(
+            both.contains("=== Active Skills ===") && both.contains("=== Repository Skills ===")
+        );
+        assert!(both.ends_with(&alone));
+
+        // Even when the catalog's part is only the native-files hint: a
+        // SKILL.md Kronn did not write is not what that hint points at.
+        let hinted = append_repository_skills_prompt(
+            "For this task, prioritize your rust skills.".into(),
+            &skills,
+            false,
+        );
+        assert!(hinted.contains("Move the block."));
+    }
+
+    #[test]
+    fn repository_skills_are_summarised_for_a_small_context_agent() {
+        let skills = [repository_skill(
+            "block-migration",
+            "Move the block.\nThen check it.",
+        )];
+        let prompt = append_repository_skills_prompt(String::new(), &skills, true);
+        assert_eq!(
+            prompt,
+            "=== Repository Skills ===\n[block-migration: Move the block. Then check it.]\n"
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use super::provenance::{self, AgentProvenanceCapture};
 use crate::core::cmd::{async_cmd, sync_cmd};
-use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
+use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
 // Repository search is not an API probe. A real KT-404 worker needed thirteen
@@ -2575,6 +2575,11 @@ pub struct AgentStartConfig<'a> {
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
     pub skill_ids: &'a [String],
+    /// Skills only a project's repository holds (KT-923), already resolved and
+    /// masked by the caller at send time from `repository:<project>:<slug>` ids
+    /// in `skill_ids`. Injected in a block of their own, whatever the agent
+    /// discovers natively.
+    pub repository_skills: &'a [Skill],
     pub directive_ids: &'a [String],
     pub profile_ids: &'a [String],
     /// Override MCP context instead of reading from project filesystem.
@@ -2722,6 +2727,7 @@ impl<'a> AgentStartConfig<'a> {
             work_dir: None,
             full_access: false,
             skill_ids: &[],
+            repository_skills: &[],
             directive_ids: &[],
             profile_ids: &[],
             mcp_context_override: None,
@@ -3279,6 +3285,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             None => crate::core::skills::build_skills_prompt(config.skill_ids),
         }
     };
+    let skills_prompt = crate::core::skills::append_repository_skills_prompt(
+        skills_prompt,
+        config.repository_skills,
+        compact,
+    );
 
     // 0.8.8 PR-B — enforce mode auto-attaches the `kronn-doc-author` cheat-sheet
     // when the agent's project carries a `docs/AGENTS.md`, so an agent that
