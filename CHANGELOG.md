@@ -224,6 +224,10 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Frontend dependencies: `brace-expansion` is pinned to 5.0.12, which fixes
+  GHSA-qhr7-859c-m2p7 and two related advisories (denial of service by
+  recursion, quadratic expansion). It is only used by the lint tooling.
+
 - The Automation sidebar folds every group, the first one included (KT-921).
   The group that held the open automation was forced open, and the first group
   (Workflows) almost always does: clicking its header did nothing. A group now
