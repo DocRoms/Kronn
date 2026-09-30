@@ -12,6 +12,7 @@ use axum::{
 };
 use chrono::Utc;
 
+use crate::agents::runner;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -400,8 +401,36 @@ pub async fn partial_audit(
         // refresh — the section stays stale too (matrix v2).
         let mut succeeded_steps: Vec<usize> = Vec::new();
         let mut unchanged_steps: Vec<usize> = Vec::new();
+        // KT-927 — unknown until an agent reports usage, never 0.
+        let mut run_tokens = super::agent_launch::RunTokens::default();
 
         for (progress_idx, &step) in requested_steps.iter().enumerate() {
+            // KT-927 — a Stop between two steps. The partial pipeline had no
+            // cancellation at all: `cancel-audit` set a flag nobody read and the
+            // refresh ran to its end.
+            if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id_for_progress)).unwrap_or(false) {
+                // Persist the terminal status BEFORE acknowledging (same
+                // contract as the Full pipeline): on failure the guard stays
+                // armed and stamps Interrupted.
+                let run_id = audit_run_id.clone();
+                let persisted = state.db.with_conn(move |conn| {
+                    crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                }).await;
+                match persisted {
+                    Ok(()) => drop_guard.disarm(),
+                    Err(e) => tracing::error!(
+                        "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
+                    ),
+                }
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.clear_progress(&project_id_for_progress);
+                    t.cancelled.remove(&project_id_for_progress);
+                }
+                yield Event::default().event("cancelled").data(
+                    serde_json::json!({ "status": "cancelled" }).to_string()
+                );
+                return;
+            }
             let analysis_step = &chain[step - 1];
             let file_label = if analysis_step.target_file == "REVIEW" { "Final review" } else { analysis_step.target_file };
 
@@ -487,6 +516,24 @@ pub async fn partial_audit(
                     }
                 };
 
+            // KT-927 — the same per-step metrics the Full pipeline records, so
+            // the recap and the run total of a partial refresh are not blank,
+            // and an agent that reports no usage reads as unknown, not 0. The
+            // row is opened only now: the two early exits above leave none.
+            let step_started_at = std::time::Instant::now();
+            {
+                let run_id = audit_run_id.clone();
+                let label = file_label.to_string();
+                let started = Utc::now();
+                if let Err(e) = state.db.with_conn(move |conn| {
+                    crate::db::audit_runs::insert_audit_step_start(
+                        conn, &run_id, step as u32, &label, started,
+                    )
+                }).await {
+                    tracing::error!("Failed to persist partial audit step start for run {audit_run_id}: {e}");
+                }
+            }
+
             let max_attempts = if enforce_mode {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
@@ -496,10 +543,21 @@ pub async fn partial_audit(
             let mut citation_feedback: Option<String> = None;
             'attempts: loop {
             attempt += 1;
+            let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
             let attempt_prompt = match &citation_feedback {
                 Some(fb) => format!("{full_prompt}\n\n{fb}"),
                 None => full_prompt.clone(),
             };
+            // Stop reaches an HTTP or ACP agent through this token and a direct
+            // CLI agent through its PID — the same registration as the Full
+            // pipeline, made BEFORE the start so a Stop during the handshake
+            // or a cold model's first response still finds it.
+            let attempt_cancel = agent_launcher.stops_with_token().then(tokio_util::sync::CancellationToken::new);
+            if let Some(cancel) = &attempt_cancel {
+                if let Ok(mut tracker) = audit_tracker.lock() {
+                    tracker.agent_cancels.insert(project_id_for_progress.clone(), cancel.clone());
+                }
+            }
             match agent_launcher.start(
                 &agent_type,
                 audit_tier,
@@ -507,16 +565,59 @@ pub async fn partial_audit(
                 &project_path_str,
                 &attempt_prompt,
                 &tokens,
-                None,
+                attempt_cancel.clone(),
             ).await {
                 Ok(mut process) => {
+                    // Only a direct CLI agent has a PID worth killing: the
+                    // child of an HTTP or ACP run is a lifeline.
+                    if attempt_cancel.is_none() {
+                        if let Some(pid) = process.child.id() {
+                            if let Ok(mut tracker) = audit_tracker.lock() {
+                                tracker.running_pids.insert(project_id_for_progress.clone(), pid);
+                            }
+                        }
+                    }
+                    let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
                     while let Some(line) = process.next_line().await {
+                        if is_stream_json {
+                            if let runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. } =
+                                runner::parse_claude_stream_line(&line)
+                            {
+                                // Claude reports cumulative usage per call:
+                                // the largest reading is the step's.
+                                if input_tokens + output_tokens > 0
+                                    && step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen)
+                                {
+                                    step_usage = crate::db::audit_runs::StepTokens {
+                                        input: Some(input_tokens),
+                                        output: Some(output_tokens),
+                                        cache_read: prompt_cache.cached_prompt_tokens,
+                                        cache_write: prompt_cache.cache_write_prompt_tokens,
+                                    };
+                                }
+                            }
+                        }
                         let chunk = serde_json::json!({ "text": line, "step": step });
                         yield Event::default().event("chunk").data(chunk.to_string());
+                    }
+                    // An agent that streams text (ACP, HTTP) reports its usage on
+                    // the process, often with the end of the turn: read it now.
+                    if !is_stream_json {
+                        let reading = crate::db::audit_runs::StepTokens::from_reported(
+                            process.reported_usage_counters(),
+                        );
+                        if reading.total().is_some() {
+                            step_usage = reading;
+                        }
                     }
 
                     let status = process.child.wait().await;
                     process.fix_ownership();
+                    if let Ok(mut tracker) = audit_tracker.lock() {
+                        tracker.running_pids.remove(&project_id_for_progress);
+                        tracker.agent_cancels.remove(&project_id_for_progress);
+                    }
+                    run_tokens.add(step_usage.total());
                     tracing::debug!("Partial audit step {}: fix_ownership applied for {}", step, file_label);
 
                     // PER-ATTEMPT boundary: sanitize before validation can
@@ -574,6 +675,33 @@ pub async fn partial_audit(
                             Some(reason)
                         }
                     };
+
+                    // KT-927 — a Stop during the step. Checked AFTER the
+                    // sweeps above, like the Full pipeline, so the attempt's
+                    // rewrite is already redacted and the human-owned sections
+                    // restored; BEFORE any gate or retry, so a stopped step
+                    // neither counts as a failure nor spawns another agent.
+                    if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id_for_progress)).unwrap_or(false) {
+                        let run_id = audit_run_id.clone();
+                        let persisted = state.db.with_conn(move |conn| {
+                            crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                        }).await;
+                        match persisted {
+                            Ok(()) => drop_guard.disarm(),
+                            Err(e) => tracing::error!(
+                                "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
+                            ),
+                        }
+                        if let Ok(mut t) = audit_tracker.lock() {
+                            t.clear_progress(&project_id_for_progress);
+                            t.cancelled.remove(&project_id_for_progress);
+                        }
+                        yield Event::default().event("cancelled").data(
+                            serde_json::json!({ "status": "cancelled" }).to_string()
+                        );
+                        return;
+                    }
+
                     let cli_success = status.map(|s| s.success()).unwrap_or(false);
                     // Gate order = Full parity (matrix v2): CLI → semantic
                     // validator → step-8 disposition → enforce lint → the
@@ -716,16 +844,49 @@ pub async fn partial_audit(
                         "failed"
                     };
 
+                    let step_succeeded = success && outcome == "succeeded";
+                    let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                    if let (Some(step_tokens), Ok(mut t)) = (step_usage.total(), audit_tracker.lock()) {
+                        t.update_chips(&project_id_for_progress, Some(step_tokens), run_tokens.total(), None);
+                    }
                     let step_done = serde_json::json!({
                         "step": step,
-                        "success": success && outcome == "succeeded",
+                        "success": step_succeeded,
                         "outcome": outcome,
-                        "file": file_label
+                        "file": file_label,
+                        // `null` — not 0 — when the agent reported no usage.
+                        "tokens": step_usage.total(),
+                        "duration_ms": duration_ms,
+                        "total_tokens": run_tokens.total(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
+                    {
+                        let run_id = audit_run_id.clone();
+                        let recorded_usage = step_usage;
+                        let recorded_total = run_tokens.total();
+                        if let Err(e) = state.db.with_conn(move |conn| {
+                            crate::db::audit_runs::finalize_audit_step(
+                                conn,
+                                &run_id,
+                                step as u32,
+                                Utc::now(),
+                                duration_ms,
+                                &recorded_usage,
+                                recorded_total,
+                                step_succeeded,
+                                None,
+                                false,
+                            )
+                        }).await {
+                            tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Partial audit step {} failed to start: {}", step, e);
+                    if let Ok(mut tracker) = audit_tracker.lock() {
+                        tracker.agent_cancels.remove(&project_id_for_progress);
+                    }
                     let err = serde_json::json!({
                         "error": format!("Step {} ({}): {}", step, file_label, e),
                         "step": step
@@ -738,6 +899,27 @@ pub async fn partial_audit(
                             "outcome": "failed", "file": file_label,
                         }).to_string()
                     );
+                    {
+                        let run_id = audit_run_id.clone();
+                        let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                        let recorded_total = run_tokens.total();
+                        if let Err(e) = state.db.with_conn(move |conn| {
+                            crate::db::audit_runs::finalize_audit_step(
+                                conn,
+                                &run_id,
+                                step as u32,
+                                Utc::now(),
+                                duration_ms,
+                                &crate::db::audit_runs::StepTokens::UNKNOWN,
+                                recorded_total,
+                                false,
+                                None,
+                                false,
+                            )
+                        }).await {
+                            tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
+                        }
+                    }
                 }
             }
             break 'attempts;

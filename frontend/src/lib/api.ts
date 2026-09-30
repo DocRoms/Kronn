@@ -600,9 +600,10 @@ interface AuditSseEvent {
   // total_tokens is the running sum across steps. started_at is an
   // ISO-8601 timestamp surfaced once on the `start` event so the
   // frontend can compute live elapsed without local-clock drift.
-  tokens?: number;
+  // `null` (KT-927): the agent reported no usage — unknown, never 0.
+  tokens?: number | null;
   duration_ms?: number;
-  total_tokens?: number;
+  total_tokens?: number | null;
   started_at?: string;
   // 0.8.3 (#281) — live step progress + tool-call events fired
   // mid-step (Claude stream-json only). step_tokens = current
@@ -1337,9 +1338,9 @@ export const projects = {
       onStepDone: (
         step: number,
         success: boolean,
-        tokens?: number,
+        tokens?: number | null,
         durationMs?: number,
-        totalTokens?: number,
+        totalTokens?: number | null,
       ) => void;
       /**
        * 0.8.3 (#281) — live token counter during a step. Fires every

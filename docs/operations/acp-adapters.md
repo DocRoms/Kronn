@@ -153,7 +153,16 @@ project path never reuses that identifier.
   A scoped live request must also match the bound ACP protocol session and
   identify either an authorized MCP server/tool or at least one path wholly
   contained by the canonical project root. Missing/malformed locations and
-  symlink escapes are denied, including under `full_access`.
+  symlink escapes are denied, including under `full_access`. A read-like call
+  that names a real secret file (`.env`, `.env.local`, a key) is denied under
+  `full_access` too, while a versioned template (`.env.dist`, `.env.example`,
+  `.env.sample`, `.env.template`) is readable. A refusal is returned as the
+  agent's own reject option, an answer to the tool call. OpenCode asks about a
+  `read` without the path, so Kronn starts it with an inline configuration
+  (`OPENCODE_CONFIG_CONTENT`) that denies the real environment files, allows the
+  templates and keeps a refusal from ending the turn. See
+  [auditing with an ACP agent](../architecture/audit-acp-agents.md).
+  [src: file: backend/src/acp/secret_files.rs]
 - **Filesystem / terminal:** Kronn has not bound a scoped executor for
   `fs/*`/`terminal/*` yet. Every such request — from any agent — gets a
   spec-correct JSON-RPC error (`-32001` "capability not granted"), never a

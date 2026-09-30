@@ -326,12 +326,40 @@ async fn a_cli_agent_keeps_the_spawn_it_always_had() {
         AgentType::CopilotCli,
     ] {
         let launcher = AuditAgentLauncher::new(&state, &agent).await;
-        assert!(!launcher.is_http(), "{agent:?} has a filesystem of its own");
+        assert!(
+            launcher.http.is_none(),
+            "{agent:?} has a filesystem of its own"
+        );
+        // ...but it runs in Kronn's ACP host, so what `start` returns is a
+        // lifeline and a Stop goes through the session (KT-927).
+        assert!(
+            launcher.stops_with_token(),
+            "{agent:?} is stopped through its ACP session, not through a PID"
+        );
     }
     for agent in [AgentType::Ollama, AgentType::LiteLlm] {
         let launcher = AuditAgentLauncher::new(&state, &agent).await;
-        assert!(launcher.is_http(), "{agent:?} runs in Kronn's tool loop");
+        assert!(
+            launcher.http.is_some(),
+            "{agent:?} runs in Kronn's tool loop"
+        );
+        assert!(launcher.stops_with_token());
     }
+}
+
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn an_agent_forced_onto_its_direct_cli_is_still_stopped_by_its_pid() {
+    // The explicit compatibility override: the process IS the agent again.
+    std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
+    let state = litellm_state("http://127.0.0.1:1").await;
+    let launcher = AuditAgentLauncher::new(&state, &AgentType::ClaudeCode).await;
+    std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+    assert!(launcher.http.is_none());
+    assert!(
+        !launcher.stops_with_token(),
+        "a direct CLI is killed by its PID, which is the agent's own"
+    );
 }
 
 #[tokio::test]
@@ -380,7 +408,7 @@ async fn cancel_audit_trips_the_token_of_a_running_http_step() {
     let token = CancellationToken::new();
     {
         let mut tracker = state.audit_tracker.lock().unwrap();
-        tracker.http_cancels.insert("p-stop".into(), token.clone());
+        tracker.agent_cancels.insert("p-stop".into(), token.clone());
     }
     // The audit worker acknowledges a cancel once its step has stopped; here the
     // step stops when — and only when — the token is tripped.
@@ -407,7 +435,7 @@ async fn cancel_audit_trips_the_token_of_a_running_http_step() {
             .audit_tracker
             .lock()
             .unwrap()
-            .http_cancels
+            .agent_cancels
             .contains_key("p-stop"),
         "the token is taken, not left for the next run"
     );

@@ -52,10 +52,43 @@ impl HttpSettings {
     }
 }
 
+/// The tokens of an audit run so far: its finished steps added up. Unknown — not
+/// zero — until a step's agent has reported something, so a runtime that reports
+/// nothing never makes a run look free (KT-927).
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct RunTokens {
+    total: u64,
+    known: bool,
+}
+
+impl RunTokens {
+    /// Count a finished step. A step of unknown cost leaves the tally as it was.
+    pub(super) fn add(&mut self, step: Option<u64>) {
+        if let Some(step) = step {
+            self.total = self.total.saturating_add(step);
+            self.known = true;
+        }
+    }
+
+    /// The run's total, `None` while no step has reported.
+    pub(super) fn total(&self) -> Option<u64> {
+        self.known.then_some(self.total)
+    }
+
+    /// The running total with the step in progress at its latest reading.
+    pub(super) fn with(&self, step: u64) -> u64 {
+        self.total.saturating_add(step)
+    }
+}
+
 pub(super) struct AuditAgentLauncher {
     state: AppState,
     /// `None` for a CLI agent: its spawn is left exactly as it always was.
     http: Option<HttpSettings>,
+    /// The agent runs inside Kronn's ACP host: OpenCode and the other native ACP
+    /// agents, and Claude and Codex through their adapters. What `start` hands
+    /// back is then a lifeline process, not the agent (KT-927).
+    acp: bool,
 }
 
 impl AuditAgentLauncher {
@@ -65,22 +98,32 @@ impl AuditAgentLauncher {
         } else {
             None
         };
+        let acp = matches!(
+            crate::acp::resolve_acp_route(agent),
+            crate::acp::AcpProductionRoute::NativeAcp | crate::acp::AcpProductionRoute::AdaptedAcp
+        );
         Self {
             state: state.clone(),
             http,
+            acp,
         }
     }
 
-    /// Whether the agent runs in Kronn's own tool loop, so that stopping it means
-    /// cancelling a task rather than killing a process.
-    pub(super) fn is_http(&self) -> bool {
-        self.http.is_some()
+    /// Whether stopping the agent means tripping a token rather than killing a
+    /// process: an HTTP agent lives in Kronn's own tool loop, an ACP agent in a
+    /// session Kronn cancels and whose process it shuts down. The PID of such a
+    /// run belongs to a lifeline that does no work, so `cancel_audit` must not
+    /// go looking for the agent there: killing it only made the pipeline believe
+    /// the step was over while the agent kept working (KT-927, about 8 minutes).
+    pub(super) fn stops_with_token(&self) -> bool {
+        self.http.is_some() || self.acp
     }
 
     /// Spawn the agent of one step. `project_path` is the directory the pipeline
     /// resolved and validates; an HTTP agent's file tools are scoped to it and
-    /// cannot leave it. `cancel` is only honoured by an HTTP agent (see
-    /// `is_http`), whose provider and tool loop no process kill can reach.
+    /// cannot leave it. `cancel` is honoured by an HTTP or ACP agent (see
+    /// `stops_with_token`), whose provider, tool loop or session no process kill
+    /// can reach.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn start(
         &self,
@@ -99,6 +142,8 @@ impl AuditAgentLauncher {
                 // A CLI agent reaches the project through its own filesystem;
                 // native tools stay absent rather than inherited by omission.
                 tools: None,
+                // A direct CLI is stopped by its PID and ignores the token.
+                cancel_token: if self.acp { cancel } else { None },
                 ..AgentStartConfig::new(agent_type, project_path_str, prompt, tokens)
             })
             .await;
@@ -127,3 +172,7 @@ impl AuditAgentLauncher {
 #[cfg(test)]
 #[path = "agent_launch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_launch_acp_tests.rs"]
+mod acp_tests;

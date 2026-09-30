@@ -258,6 +258,38 @@ Release notes for 0.9.3 and earlier are available in the
   you picked; that launch is now refused with a message naming the model, and
   nothing is sent to the agent. A value of another session option (an effort
   level, a mode) can no longer be taken for a model.
+- An audit on OpenCode reads a versioned environment template and no longer
+  aborts when a read is refused (KT-927). OpenCode guards `*.env.*` by pattern
+  and asks Kronn about a read without saying which file, so `.env.dist`, like
+  `.env.example`, `.env.sample` and `.env.template`, was refused together with
+  the real `.env` — and OpenCode ends its whole turn when a question is
+  refused, so one template read aborted the step. Kronn now starts OpenCode
+  with a read policy: the templates are readable, `.env`, `.env.local` and the
+  other real environment files stay refused, and a refusal reaches the agent as
+  the tool's answer instead of ending the turn. For the other ACP agents the
+  broker refuses a read of a real secret file, or of a link to one, even with
+  full access, and allows the templates. A project that already passes its own
+  `OPENCODE_CONFIG_CONTENT` keeps it. See
+  [auditing with an ACP agent](docs/architecture/audit-acp-agents.md).
+
+- "Cancel" stops an audit on an ACP agent in seconds, and the partial audit can
+  be cancelled at all (KT-927). `cancel-audit` killed the process it had on
+  record, which for OpenCode — and for Claude and Codex through their adapters —
+  is a lifeline that does no work: the audit believed the step over while the
+  agent kept reading and writing, for about eight minutes on an OpenCode run. The
+  stop now cancels the agent's ACP session and shuts its process down, with
+  what it started. The partial audit had no cancellation whatsoever, for any
+  agent: Cancel set a flag nothing read and the refresh ran to its end; it now
+  stops between steps and during one, ends as Cancelled, and leaves the baseline
+  alone.
+
+- The steps of an audit on an ACP agent record the tokens they consumed
+  (KT-927). Only Claude's own stream was read, so every step of OpenCode — or of
+  any ACP agent, Claude and Codex included — counted 0 tokens, per step and per
+  run. The recap now keeps input, output and cache read/written apart, as the
+  runtime reports them (migration 205), for the Full and the partial audit. A
+  runtime that reports nothing gives an unknown figure (`—`), never 0; the run
+  total is unknown until a step has reported.
 
 - A room that a CLI peer joined without being identified opens again
   (KT-925). The bridge joins such a peer as `Unknown`; the discussion detail,

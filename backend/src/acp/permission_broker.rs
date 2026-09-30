@@ -14,6 +14,7 @@
 //! trail shape, so "one broker" is true of the decision logic even though the
 //! wire mechanism differs.
 
+use super::secret_files::is_secret_file;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -336,10 +337,18 @@ impl AcpPermissionBroker {
         } else {
             kind == Some("think")
         };
+        // A real secret file (`.env`, a key) is never read, `full_access` or
+        // not. A versioned template (`.env.dist`) is not one. Only reads are
+        // concerned: what an agent may write is the `full_access` gate's call.
+        let secret_target = safe_kind
+            && parsed_locations
+                .as_deref()
+                .is_some_and(|locations| locations.iter().any(|path| location_is_secret(path)));
         // Scope trumps `full_access`: it broadens operations inside the bound
         // project/server only. A missing location and missing server/tool
         // identity is unverifiable and therefore denied.
-        let allow = session_matches && resource_scoped && (self.full_access || safe_kind);
+        let allow =
+            session_matches && resource_scoped && !secret_target && (self.full_access || safe_kind);
         let options = params
             .get("options")
             .and_then(Value::as_array)
@@ -359,11 +368,12 @@ impl AcpPermissionBroker {
                 AcpPermissionVerdict::Deny
             },
             format!(
-                "tool_call kind={} full_access={} session_matches={} resource_scoped={} -> {}",
+                "tool_call kind={} full_access={} session_matches={} resource_scoped={} secret_file={} -> {}",
                 kind.unwrap_or("unspecified"),
                 self.full_access,
                 session_matches,
                 resource_scoped,
+                secret_target,
                 if allow { "allow" } else { "deny" }
             ),
             server,
@@ -470,6 +480,16 @@ impl AcpPermissionBroker {
         );
         policy
     }
+}
+
+/// A location names a secret file by its own name or, when it exists, through the
+/// file it resolves to: a link called `notes.txt` that points at `.env` is one.
+fn location_is_secret(path: &str) -> bool {
+    let path = Path::new(path);
+    is_secret_file(path)
+        || std::fs::canonicalize(path)
+            .ok()
+            .is_some_and(|resolved| is_secret_file(&resolved))
 }
 
 /// Filesystem-aware containment check. The project root and the candidate's
@@ -951,6 +971,114 @@ mod tests {
         assert_eq!(
             broker.decide_tool_call_permission("session/request_permission", &request),
             json!({"outcome": {"outcome": "selected", "optionId": "reject-once"}})
+        );
+    }
+
+    /// What the broker answers to a read of `relative` inside a scoped project.
+    fn read_outcome(full_access: bool, relative: &str) -> (Value, AcpAuditEntry) {
+        let project = tempfile::tempdir().unwrap();
+        let broker = AcpPermissionBroker::scoped(
+            full_access,
+            AcpSessionScope::new(Some(project.path().to_path_buf()), "disc-env"),
+        );
+        broker.bind_protocol_session("s1").unwrap();
+        let mut request = permission_request(Some("read"));
+        request["toolCall"]["locations"] =
+            json!([{"path": project.path().join(relative).to_string_lossy()}]);
+        let outcome = broker.decide_tool_call_permission("session/request_permission", &request);
+        let entry = broker.audit_log().pop().unwrap();
+        (outcome, entry)
+    }
+
+    fn selected(option: &str) -> Value {
+        json!({"outcome": {"outcome": "selected", "optionId": option}})
+    }
+
+    #[test]
+    fn a_versioned_environment_template_is_readable_by_an_agent() {
+        for template in [".env.dist", ".env.example", ".env.sample", ".env.template"] {
+            for full_access in [false, true] {
+                let (outcome, entry) = read_outcome(full_access, template);
+                assert_eq!(outcome, selected("allow-once"), "{template}");
+                assert_eq!(entry.verdict, AcpPermissionVerdict::Allow, "{template}");
+                assert!(
+                    entry.reason.contains("secret_file=false"),
+                    "{}",
+                    entry.reason
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_real_secret_file_stays_refused_and_the_refusal_is_an_answer_not_a_failure() {
+        for secret in [
+            ".env",
+            ".env.local",
+            "config/.env.production",
+            "tls/server.key",
+        ] {
+            // `full_access` widens what an agent may do, never what it may read
+            // of a secret.
+            for full_access in [false, true] {
+                let (outcome, entry) = read_outcome(full_access, secret);
+                assert_eq!(
+                    outcome,
+                    selected("reject-once"),
+                    "{secret}: a refusal is a selected reject option the agent reads as \
+                     the tool's answer, not a cancelled turn"
+                );
+                assert_eq!(entry.verdict, AcpPermissionVerdict::Deny, "{secret}");
+                assert!(
+                    entry.reason.contains("secret_file=true"),
+                    "{}",
+                    entry.reason
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_real_secret_file_is_refused_under_its_innocent_name() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(".env"), "TOKEN=x\n").unwrap();
+        std::os::unix::fs::symlink(
+            project.path().join(".env"),
+            project.path().join("notes.txt"),
+        )
+        .unwrap();
+        let broker = AcpPermissionBroker::scoped(
+            false,
+            AcpSessionScope::new(Some(project.path().to_path_buf()), "disc-link"),
+        );
+        broker.bind_protocol_session("s1").unwrap();
+        let mut request = permission_request(Some("read"));
+        request["toolCall"]["locations"] =
+            json!([{"path": project.path().join("notes.txt").to_string_lossy()}]);
+        assert_eq!(
+            broker.decide_tool_call_permission("session/request_permission", &request),
+            selected("reject-once")
+        );
+    }
+
+    #[test]
+    fn a_read_that_names_no_path_is_refused_with_an_answer_never_left_unanswered() {
+        // OpenCode asks about a `read` of an environment file with empty
+        // `locations`: the broker cannot tell `.env` from `.env.dist`, so it
+        // fails closed. The refusal must still come back as a selected reject
+        // option, which is what lets the agent carry on.
+        let project = tempfile::tempdir().unwrap();
+        let broker = AcpPermissionBroker::scoped(
+            false,
+            AcpSessionScope::new(Some(project.path().to_path_buf()), "disc-blind"),
+        );
+        broker.bind_protocol_session("s1").unwrap();
+        let mut request = permission_request(Some("read"));
+        request["toolCall"]["locations"] = json!([]);
+        assert_eq!(
+            broker.decide_tool_call_permission("session/request_permission", &request),
+            selected("reject-once")
         );
     }
 }

@@ -328,8 +328,9 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs]. The partial audit has no cancel path
-today, for any agent.
+[src: file: backend/src/api/audit/full.rs]. Since KT-927 the partial audit does
+the same, and so does an ACP agent, whose PID is a lifeline too: see
+[auditing with an ACP agent](audit-acp-agents.md).
 
 **What this does not change.** The per-tool call ceilings of a run still apply
 (twelve `write_file` calls, for instance, before the tool is withdrawn), and an

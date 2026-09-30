@@ -9,6 +9,10 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 
 ## Current release: 0.14.2
 
+- An audit on OpenCode or another ACP agent reads the versioned environment
+  templates (`.env.dist`, `.env.example`), is stopped by "Cancel" in seconds,
+  and records the tokens its steps consumed — in the Full audit and in the
+  partial one. See [auditing with an ACP agent](architecture/audit-acp-agents.md).
 - Workflows chain and scale: a `TriggerWorkflow` step launches another workflow
   with mapped variables, `concurrency_key` counts the limit per rendered key, and
   `workspace_config.base_ref` starts an isolated run from a fetched commit. See

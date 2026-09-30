@@ -4243,6 +4243,10 @@ pub(crate) mod test_acp_routes {
 /// is text; this is the third channel both other transports already use.
 pub const ACP_TOOL_MARKER: &str = "[acp-tool] ";
 
+/// How long a stop waits for `session/cancel` to be written before the agent's
+/// process is shut down regardless.
+const ACP_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn run_acp_session(
     request: AcpSessionRequest<'_>,
     transport: Arc<dyn crate::acp::AcpTransport>,
@@ -4527,7 +4531,17 @@ async fn run_acp_session(
         // On cancellation the prompt future is dropped, which drops its event
         // sender and lets the forwarder finish draining before we report.
         let (result, cancelled) = tokio::select! {
-            _ = task_cancel.cancelled() => (host.cancel(&session).await, true),
+            _ = task_cancel.cancelled() => {
+                // The cancel is a write to the agent's stdin: a wedged agent must
+                // not hold the stop hostage, and the shutdown below kills it
+                // whether or not it heard.
+                let sent = tokio::time::timeout(ACP_CANCEL_GRACE, host.cancel(&session))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(crate::acp::AcpError::Timeout("session/cancel".to_owned()))
+                    });
+                (sent, true)
+            }
             result = host.prompt(&session, &full_prompt, event_tx) => (result, false),
         };
         let _ = forwarder.await;

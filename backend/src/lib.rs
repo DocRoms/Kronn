@@ -69,12 +69,17 @@ pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
 /// and removed on completion/cancel/error.
 #[derive(Default)]
 pub struct AuditTracker {
-    /// Currently running child PID per project (if any)
+    /// Currently running child PID per project (if any). Only a direct CLI agent
+    /// is registered here: the PID of an HTTP or ACP agent is a lifeline, not
+    /// the agent.
     pub running_pids: HashMap<String, u32>,
-    /// Cancellation of the step's agent per project, for an HTTP agent: its
-    /// provider and tool loop run in a task, so killing the lifeline process in
-    /// `running_pids` alone would leave it reading and writing files (KT-924).
-    pub http_cancels: HashMap<String, tokio_util::sync::CancellationToken>,
+    /// Cancellation of the step's agent per project, for an agent that does not
+    /// run as the process in `running_pids`: an HTTP agent lives in a task
+    /// (KT-924), an ACP agent — OpenCode and the others, Claude and Codex
+    /// through their adapters — in a session Kronn cancels and whose process it
+    /// then shuts down (KT-927). Killing the lifeline alone would leave either
+    /// reading and writing files.
+    pub agent_cancels: HashMap<String, tokio_util::sync::CancellationToken>,
     /// Projects whose audit should be cancelled
     pub cancelled: HashSet<String>,
     /// Live progress snapshot per project — empty when no audit runs.

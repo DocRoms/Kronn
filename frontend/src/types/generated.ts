@@ -791,6 +791,13 @@ recommendations_json?: string | null, };
  */
 export type AuditRunStep = { audit_run_id: string, step_index: number, file_label: string, started_at: string, ended_at?: string | null, duration_ms?: number | null, step_tokens?: number | null, cumulative_tokens?: number | null,
 /**
+ * What the step's agent reported, parts apart (KT-927). Each is absent when
+ * the runtime did not report it — which is not zero. `step_tokens` is
+ * absent too when neither input nor output was reported: the step's cost is
+ * unknown, never 0.
+ */
+input_tokens?: number | null, output_tokens?: number | null, cache_read_tokens?: number | null, cache_write_tokens?: number | null,
+/**
  * `false` when the CLI exited non-zero OR `step_warning` fired.
  */
 cli_success: boolean, step_warning?: string | null,
