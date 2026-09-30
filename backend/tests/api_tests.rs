@@ -3991,6 +3991,99 @@ async fn project_repository_resources_classifies_repository_and_kronn_skills() {
 }
 
 #[tokio::test]
+async fn skill_migration_routes_show_the_recap_then_move_without_overwriting() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    for (relative, body) in [
+        (".claude/skills/review/SKILL.md", "Claude version."),
+        (".agents/skills/review/SKILL.md", "Agents version."),
+        (".gemini/skills/lint/SKILL.md", "Lint."),
+    ] {
+        let path = project_directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!("---\nname: skill\ndescription: Test skill\n---\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["migrating-project", "Migrating", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, plan) = get_json(
+        app.clone(),
+        "/api/projects/migrating-project/repository-resources/skills/migration",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(plan["success"], true, "{plan}");
+    assert_eq!(plan["data"]["target_root"], ".agents/skills");
+    assert_eq!(plan["data"]["moves"][0]["source"], ".gemini/skills/lint");
+    assert_eq!(plan["data"]["moves"][0]["target"], ".agents/skills/lint");
+    assert_eq!(plan["data"]["conflicts"][0]["slug"], "review");
+    assert_eq!(
+        plan["data"]["conflicts"][0]["versions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        project_directory
+            .path()
+            .join(".gemini/skills/lint")
+            .is_dir(),
+        "the recap moves nothing"
+    );
+
+    let (_, migrated) = post_json(
+        app,
+        "/api/projects/migrating-project/repository-resources/skills/migrate",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(migrated["success"], true, "{migrated}");
+    assert_eq!(migrated["data"]["moved"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        migrated["data"]["unresolved"],
+        serde_json::json!(["review"])
+    );
+    assert!(project_directory
+        .path()
+        .join(".agents/skills/lint/SKILL.md")
+        .is_file());
+    assert!(!project_directory
+        .path()
+        .join(".gemini/skills/lint")
+        .exists());
+    assert!(std::fs::read_to_string(
+        project_directory
+            .path()
+            .join(".agents/skills/review/SKILL.md")
+    )
+    .unwrap()
+    .contains("Agents version."));
+    assert!(project_directory
+        .path()
+        .join(".claude/skills/review/SKILL.md")
+        .is_file());
+}
+
+#[tokio::test]
 async fn live_page_create_publish_and_read_round_trip() {
     let app = test_app();
     let (_, capability_before) = get_json(app.clone(), "/api/pages/capability").await;

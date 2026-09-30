@@ -13,6 +13,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Skills are real Agent Skills, written where agents look for them. Writing a
+  skill into the repository now produces `.agents/skills/<slug>/SKILL.md` in the
+  standard format (valid `name` and `description`, Kronn's own fields under
+  `metadata`), never `kronn/skills/`, which keeps only what has no native home.
+  A repository that already has `kronn/skills/<slug>` is offered the move, with
+  its lock entry, identity and approvals following the skill and no duplicate
+  left behind. The Skills tab gets "Migrate everything to .agents/skills" when
+  skills sit in `.claude/skills`, `.gemini/skills`, `.codex/skills`,
+  `.github/skills`, `.opencode/skill(s)`, `.cursor/skills` or `kronn/skills`:
+  a recap lists every move (source → target) and every conflict (same slug,
+  different contents — you pick the version, nothing is overwritten
+  silently) before anything is written, and nothing is committed
+  (KT-903).
+
 - Each Agent step attempt exposes the CLI session it ran in and what it cost:
   `agent_provenance.attempts[].session_id` is the id Claude Code reports on its
   `init` line, the name of its transcript, and `cost_usd` is priced like a

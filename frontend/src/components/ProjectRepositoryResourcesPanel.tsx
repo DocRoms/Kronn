@@ -38,6 +38,7 @@ import {
   type RepositoryRows,
   type ResourceRow,
 } from '../lib/repositoryResourceRows';
+import { migratableSkillCount, SKILLS_TARGET_ROOT } from '../lib/skillMigration';
 import { userError } from '../lib/userError';
 import type {
   ProjectRepositoryResourceKind,
@@ -50,6 +51,7 @@ import { RepositoryResourceApprove } from './RepositoryResourceApprove';
 import { RepositoryResourceCompare } from './RepositoryResourceCompare';
 import { RepositoryResourceRow, type RowMenuAction } from './RepositoryResourceRow';
 import { RepositoryResourceTransfer, type TransferChoice } from './RepositoryResourceTransfer';
+import { RepositorySkillMigration } from './RepositorySkillMigration';
 import './ProjectRepositoryResourcesPanel.css';
 
 interface Props {
@@ -121,6 +123,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const [transfer, setTransfer] = useState<TransferPlan | null>(null);
   const [sheet, setSheet] = useState<Sheet | null>(null);
   const [alignOpen, setAlignOpen] = useState(false);
+  const [migrationOpen, setMigrationOpen] = useState(false);
   const [linkNote, setLinkNote] = useState<LinkNote | null>(null);
   // Folded by default, and remembered per project once someone opens it.
   const [catalogOpenByProject, setCatalogOpenByProject] = useState<Record<string, boolean>>({});
@@ -364,6 +367,7 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   };
 
   const nativeSkillRoots = data.skill_roots ?? [];
+  const migratableSkills = migratableSkillCount(nativeSkillRoots);
   const uncommitted = data.uncommitted_managed_paths ?? [];
   const repositoryScaffoldIncluded = Boolean(data.kronn_exists || selected.size > 0);
   const attention = attentionAll.filter(item => item.row.group === activeTab);
@@ -552,6 +556,21 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
                     </li>
                   ))}
                 </ul>
+              )}
+              {migratableSkills > 0 && (
+                <div className="rr-migrate-offer" data-testid="skill-migration-offer">
+                  <span>{t('projects.repositoryResources.skillMigration.offer', SKILLS_TARGET_ROOT)}</span>
+                  <button
+                    type="button"
+                    className="rr-button"
+                    disabled={busyKey !== null || !canWrite}
+                    title={canWrite ? undefined : t('projects.repositoryResources.banner.writeDisabled.title')}
+                    onClick={() => setMigrationOpen(true)}
+                  >
+                    <ArrowRightLeft size={14} aria-hidden="true" />
+                    {t('projects.repositoryResources.skillMigration.button', migratableSkills)}
+                  </button>
+                </div>
               )}
             </div>
           )}
@@ -786,6 +805,17 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
           onReject={() => { void reject(sheetRow); }}
           onAddKey={onAddKey}
           onClose={() => setSheet(null)}
+        />
+      )}
+      {migrationOpen && (
+        <RepositorySkillMigration
+          projectId={projectId}
+          canWrite={canWrite}
+          onOpenGit={onOpenGit}
+          onClose={migrated => {
+            setMigrationOpen(false);
+            if (migrated) void refresh(projectId);
+          }}
         />
       )}
       {alignOpen && (

@@ -98,3 +98,10 @@
   .rr-modal-header .rr-icon-button { width: 44px; height: 44px; }
   .rr-diff-row { grid-template-columns: 1fr; }
 }
+.rr-migration-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.rr-migration-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--kr-sp-2); padding: 6px 0; border-bottom: 1px solid var(--kr-border-subtle); }
+.rr-migration-list code, .rr-migration-conflict code { overflow-wrap: anywhere; }
+.rr-migration-list small, .rr-migration-conflict small { color: var(--kr-text-faint); font-size: var(--kr-fs-sm); }
+.rr-migration-conflict { display: flex; flex-direction: column; gap: 2px; margin: 0 0 var(--kr-sp-3); padding: var(--kr-sp-2) var(--kr-sp-3); border: 1px solid var(--kr-border); border-radius: var(--kr-radius-md); }
+.rr-migration-conflict label { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: var(--kr-sp-2); padding: 4px 0; cursor: pointer; }
+.rr-migration-conflict label > span { display: flex; flex-direction: column; gap: 2px; }

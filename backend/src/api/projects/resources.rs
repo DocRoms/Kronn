@@ -23,6 +23,8 @@ use crate::models::{
 };
 use crate::AppState;
 
+/// Where skills are looked for. `kronn/skills` is where Kronn used to write
+/// them: it is still read (and offered for migration), never written.
 const PROJECT_SKILL_ROOTS: &[&str] = &[
     "kronn/skills",
     ".claude/skills",
@@ -63,7 +65,7 @@ struct ResourceSeed {
     kind: ProjectRepositoryResourceKind,
 }
 
-fn render_database_resource(
+pub(super) fn render_database_resource(
     conn: &rusqlite::Connection,
     kind: ProjectRepositoryResourceKind,
     id: &str,
@@ -166,7 +168,7 @@ impl ProjectRepositoryResourceKind {
 
     fn paths(self, slug: &str) -> Vec<String> {
         match self {
-            Self::Skill => vec![format!("kronn/skills/{slug}/SKILL.md")],
+            Self::Skill => vec![crate::core::repository_resources::skill_path(slug)],
             Self::Workflow => vec![format!("kronn/workflows/{slug}.yaml")],
             Self::QuickPrompt => vec![format!("kronn/prompts/{slug}.md")],
             Self::QuickApi => vec![format!("kronn/quick-apis/{slug}.yaml")],
@@ -179,7 +181,7 @@ impl ProjectRepositoryResourceKind {
     }
 }
 
-fn parse_identity_time(value: &str) -> Option<DateTime<Utc>> {
+pub(super) fn parse_identity_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .ok()
@@ -341,6 +343,45 @@ fn resource_comparison(
         diff,
         file_diffs,
         field_diff,
+    }
+}
+
+/// The comparison of a skill whose repository copy is still under
+/// `kronn/skills`: that copy as the standard file a migration would write
+/// against the Kronn rendering, so the diff shows real differences and not the
+/// change of file format.
+fn legacy_skill_comparison(
+    root: &Path,
+    slug: &str,
+    legacy_path: &str,
+    rendered: &crate::core::repository_resources::RenderedRepositoryResource,
+    sync_status: ProjectRepositoryResourceStatus,
+) -> RepositoryResourceComparison {
+    if !matches!(
+        sync_status,
+        ProjectRepositoryResourceStatus::RepositoryNewer
+            | ProjectRepositoryResourceStatus::KronnNewer
+            | ProjectRepositoryResourceStatus::Conflict
+    ) {
+        return RepositoryResourceComparison::default();
+    }
+    let path = crate::core::repository_resources::skill_path(slug);
+    let repository =
+        crate::core::repository_resources::legacy_skill_as_standard(root, slug, legacy_path)
+            .unwrap_or_default();
+    let kronn = rendered
+        .files
+        .get(&path)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let diff = crate::core::repository_resources::unified_diff(&repository, kronn);
+    if diff.is_empty() {
+        return RepositoryResourceComparison::default();
+    }
+    RepositoryResourceComparison {
+        diff: Some(diff.clone()),
+        file_diffs: vec![RepositoryResourceFileDiff { path, diff }],
+        field_diff: Vec::new(),
     }
 }
 
@@ -619,9 +660,8 @@ fn project_skills(
         );
         let is_linked = linked.contains(skill.id.as_str());
         handled.insert(skill.id.clone());
-        let publication_path = format!(
-            "kronn/skills/{}/SKILL.md",
-            crate::core::native_files::slug(&skill.id)
+        let publication_path = crate::core::repository_resources::skill_path(
+            &crate::core::native_files::slug(&skill.id),
         );
         let repository_paths = repository
             .as_ref()
@@ -678,7 +718,7 @@ fn project_skills(
             skill_id,
             copy_origins.get(skill_id).map(String::as_str),
         );
-        let publication_path = format!("kronn/skills/{slug}/SKILL.md");
+        let publication_path = crate::core::repository_resources::skill_path(&slug);
         let is_native = repository.is_some();
         let name = repository
             .as_ref()
@@ -730,7 +770,7 @@ fn project_skills(
             ProjectRepositorySkillProvenance::Repository,
             ProjectRepositoryResourceStatus::NativeSkill,
             seed.repository_paths,
-            format!("kronn/skills/{slug}/SKILL.md"),
+            crate::core::repository_resources::skill_path(&slug),
         ));
     }
 
@@ -810,8 +850,19 @@ fn align_skill(
     slug: &str,
     entry: &crate::core::repository_resources::RepositoryLockResource,
 ) -> anyhow::Result<AlignedSkill> {
-    let alignment =
-        crate::db::repository_resources::find_alignment(conn, project_key, "skill", slug)?;
+    // A skill still under `kronn/skills` was aligned in the former file format,
+    // so its baseline says nothing about today's rendering: it reads as never
+    // aligned, its repository side compared as the standard file a migration to
+    // `.agents/skills` would write.
+    let alignment = if entry
+        .paths
+        .iter()
+        .any(|path| crate::core::repository_resources::is_legacy_skill_path(path))
+    {
+        None
+    } else {
+        crate::db::repository_resources::find_alignment(conn, project_key, "skill", slug)?
+    };
     // A skill carries no date of its own: pin the rendering to the baseline's,
     // or to the repository file's when never aligned, so identical content
     // hashes identically.
@@ -1172,12 +1223,11 @@ pub async fn repository_resources(
             link_resources(&mut resources, &link_sources);
             let (can_write_repository, can_write_repository_reason) =
                 crate::core::repository_resources::can_write_repository(&root);
-            let uncommitted_managed_paths = lock
-                .as_ref()
-                .map(|lock| {
-                    crate::core::repository_resources::uncommitted_managed_paths(&root, lock)
-                })
-                .unwrap_or_default();
+            let uncommitted_managed_paths =
+                crate::core::repository_resources::uncommitted_managed_paths(
+                    &root,
+                    &lock.clone().unwrap_or_default(),
+                );
             Ok(Some(ProjectRepositoryResources {
                 kronn_exists: root.join("kronn").is_dir(),
                 skill_roots: discover_skill_roots(&root),
@@ -1307,6 +1357,19 @@ pub async fn repository_resource_comparison(
                 };
                 let AlignedSkill { rendered, view } =
                     align_skill(conn, &root, &project_key, &query.id, &slug, entry)?;
+                if let Some(legacy) = entry
+                    .paths
+                    .iter()
+                    .find(|path| crate::core::repository_resources::is_legacy_skill_path(path))
+                {
+                    return Ok(Some(legacy_skill_comparison(
+                        &root,
+                        &slug,
+                        legacy,
+                        &rendered,
+                        view.sync_status,
+                    )));
+                }
                 return Ok(Some(resource_comparison(
                     &root,
                     entry,
@@ -1905,8 +1968,9 @@ fn native_copy_origins(
 }
 
 /// Whether `relative_path` is `<skill root>/<slug>/SKILL.md` for one of the
-/// project's native skill roots — not `kronn/skills`, which Kronn manages, and
-/// not the router skill Kronn itself writes under `.agents/skills/kronn`.
+/// project's native skill roots — not `kronn/skills`, the former Kronn location
+/// that is migrated rather than referenced, and not the router skill Kronn
+/// itself writes under `.agents/skills/kronn`.
 fn native_skill_relative_path_ok(relative_path: &str) -> bool {
     PROJECT_SKILL_ROOTS
         .iter()
@@ -1992,7 +2056,7 @@ pub async fn use_native_skill(
 ///
 /// "Copy into Kronn": a managed copy. Creates a catalog skill from the native
 /// file and attaches it to the project — a Kronn-side write only. The
-/// repository is untouched: publishing the copy into `kronn/skills/` stays a
+/// repository is untouched: publishing the copy into `.agents/skills/` stays a
 /// separate, previewed action. Copying again replaces an edited Kronn copy
 /// only when the request says so.
 pub async fn copy_native_skill(
@@ -2086,6 +2150,7 @@ pub async fn copy_native_skill(
 
 #[cfg(test)]
 mod tests {
+    use super::super::skill_migration::{migrate_skills, skill_migration_plan};
     use super::*;
 
     #[test]
@@ -4058,5 +4123,723 @@ mod tests {
             Some(ProjectRepositoryResourceStatus::UpToDate),
         )
         .await;
+    }
+
+    // ── KT-903: skills are real Agent Skills in `.agents/skills` ────────────
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn commit_count(root: &Path) -> usize {
+        let output = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    async fn attach_skills(state: &crate::AppState, project_id: &str, ids: &[&str]) {
+        let project_id = project_id.to_string();
+        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::update_project_default_skills(conn, &project_id, &ids)
+            })
+            .await
+            .unwrap();
+    }
+
+    fn publish_request(id: &str) -> Json<PublishProjectRepositoryResourceRequest> {
+        Json(PublishProjectRepositoryResourceRequest {
+            kind: ProjectRepositoryResourceKind::Skill,
+            id: id.into(),
+            overwrite_repository_changes: false,
+        })
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn writing_a_skill_in_the_repository_makes_a_real_agent_skill_under_agents_skills() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        // A skill written by hand in Kronn, without a description, and a
+        // builtin one carrying a category, an icon and a license.
+        let custom_id = crate::core::skills::save_custom_skill(
+            "Reviewer Pro Kt903",
+            "",
+            "🔍",
+            &crate::models::SkillCategory::Business,
+            "Review carefully.\n\nSecond paragraph.",
+            Some("MIT"),
+            Some("Bash Read"),
+        )
+        .unwrap();
+        attach_skills(&state, &project_id, &["rust", &custom_id]).await;
+
+        for id in ["rust", custom_id.as_str()] {
+            let response = publish_repository_resource(
+                State(state.clone()),
+                AxumPath(project_id.clone()),
+                publish_request(id),
+            )
+            .await;
+            let mutation = response.0.data.expect("publish succeeds");
+            let path = root
+                .path()
+                .join(format!(".agents/skills/{}/SKILL.md", mutation.slug));
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                panic!("{id} must be written to .agents/skills/{}/", mutation.slug)
+            });
+            let file = crate::core::agent_skill::parse(&text).unwrap();
+            crate::core::agent_skill::validate(&file, &mutation.slug)
+                .unwrap_or_else(|error| panic!("{id} is not a valid Agent Skill: {error}\n{text}"));
+            assert!(text.starts_with("---\nname: "), "{text}");
+            assert!(
+                !text.contains("kronn:resource"),
+                "no Kronn blob in a real skill"
+            );
+            assert!(!file.body.is_empty());
+        }
+        assert!(
+            !root.path().join("kronn/skills").exists(),
+            "a skill is never written to kronn/skills"
+        );
+
+        let custom = std::fs::read_to_string(
+            root.path()
+                .join(".agents/skills/custom-reviewer-pro-kt903/SKILL.md"),
+        )
+        .unwrap();
+        let file = crate::core::agent_skill::parse(&custom).unwrap();
+        assert_eq!(
+            file.description, "Reviewer Pro Kt903",
+            "an empty description falls back to the name so the header stays valid"
+        );
+        assert_eq!(file.license.as_deref(), Some("MIT"));
+        assert_eq!(file.allowed_tools.as_deref(), Some("Bash Read"));
+        assert_eq!(file.metadata["kronn-name"], "Reviewer Pro Kt903");
+        assert_eq!(file.metadata["kronn-icon"], "🔍");
+        assert_eq!(file.metadata["kronn-category"], "business");
+        assert!(file.body.contains("Second paragraph."));
+        assert!(
+            !custom.contains("\nicon:") && !custom.contains("\ncategory:"),
+            "what is Kronn's own goes under metadata"
+        );
+
+        let lock = crate::core::repository_resources::load_lock(root.path())
+            .unwrap()
+            .unwrap();
+        for entry in lock
+            .resources
+            .iter()
+            .filter(|entry| entry.kind == ProjectRepositoryResourceKind::Skill)
+        {
+            assert_eq!(
+                entry.paths,
+                vec![format!(".agents/skills/{}/SKILL.md", entry.slug)]
+            );
+            assert!(lock.files.contains_key(&entry.paths[0]));
+        }
+        assert!(
+            lock.files
+                .keys()
+                .all(|path| !path.starts_with("kronn/skills")),
+            "{:?}",
+            lock.files.keys().collect::<Vec<_>>()
+        );
+
+        let listing = list_resources(&state, &project_id).await;
+        for slug in ["rust", "custom-reviewer-pro-kt903"] {
+            let skill = listing
+                .skills_present
+                .iter()
+                .find(|skill| skill.slug == slug)
+                .unwrap();
+            assert_eq!(
+                skill.publication_path,
+                format!(".agents/skills/{slug}/SKILL.md")
+            );
+            assert_eq!(skill.status, ProjectRepositoryResourceStatus::UpToDate);
+            assert_eq!(
+                skill.repository_paths,
+                vec![format!(".agents/skills/{slug}/SKILL.md")]
+            );
+        }
+
+        // Read back from the repository, the skill is what Kronn holds.
+        let entry = lock
+            .resources
+            .iter()
+            .find(|entry| entry.slug == "custom-reviewer-pro-kt903")
+            .unwrap();
+        let (document, _) =
+            crate::core::repository_resources::read_resource(root.path(), entry).unwrap();
+        let read: Skill = serde_json::from_value(document.resource).unwrap();
+        assert_eq!(read.name, "Reviewer Pro Kt903");
+        assert_eq!(read.icon, "🔍");
+        assert_eq!(read.content, "Review carefully.\n\nSecond paragraph.");
+        assert_eq!(read.license.as_deref(), Some("MIT"));
+    }
+
+    fn write_legacy_skill(root: &Path, skill: &Skill, slug: &str) -> (String, Vec<u8>) {
+        let document = crate::core::repository_resources::RepositoryDocument {
+            schema_version: crate::core::repository_resources::SCHEMA_VERSION,
+            kind: ProjectRepositoryResourceKind::Skill,
+            slug: slug.to_string(),
+            updated_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            requires: Vec::new(),
+            resource: serde_json::to_value(skill).unwrap(),
+            redacted_fields: Vec::new(),
+        };
+        let text = format!(
+            "---\nname: {slug}\ndescription: {}\n---\n\n<!-- kronn:resource\n{}\n-->\n\n{}\n",
+            serde_json::to_string(&skill.description).unwrap(),
+            serde_json::to_string_pretty(&document).unwrap(),
+            skill.content
+        );
+        let relative = format!("kronn/skills/{slug}/SKILL.md");
+        let path = root.join(&relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &text).unwrap();
+        (relative, text.into_bytes())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skills_under_kronn_skills_migrate_with_lock_identity_and_approval_kept() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        let skill = crate::core::skills::get_skill("rust").unwrap();
+        let (legacy_path, legacy_bytes) = write_legacy_skill(root.path(), &skill, "rust");
+        let lock = crate::core::repository_resources::RepositoryLock {
+            version: crate::core::repository_resources::SCHEMA_VERSION,
+            updated_at: Utc::now(),
+            resources: vec![crate::core::repository_resources::RepositoryLockResource {
+                kind: ProjectRepositoryResourceKind::Skill,
+                slug: "rust".into(),
+                name: skill.name.clone(),
+                level: "N1".into(),
+                paths: vec![legacy_path.clone()],
+                sha256: "legacy".into(),
+                required_secrets: Vec::new(),
+            }],
+            files: BTreeMap::from([(
+                legacy_path.clone(),
+                crate::core::repository_resources::sha256(&legacy_bytes),
+            )]),
+        };
+        std::fs::write(
+            root.path()
+                .join(crate::core::repository_resources::LOCK_PATH),
+            serde_json::to_vec_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-q", "-m", "legacy skills"]);
+        let commits = commit_count(root.path());
+
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        attach_skills(&state, &project_id, &["rust"]).await;
+        let approval_hash = crate::core::repository_resources::approval_hash(
+            &crate::core::repository_resources::render_skill(
+                &skill,
+                Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                "rust",
+            )
+            .unwrap()
+            .document,
+        );
+        let project_key = state
+            .db
+            .with_conn({
+                let project_id = project_id.clone();
+                let approval_hash = approval_hash.clone();
+                move |conn| {
+                    let key = crate::db::resource_identities::project_key(conn, Some(&project_id))?;
+                    crate::db::resource_identities::upsert(conn, &key, "skill", "rust", "rust")?;
+                    crate::db::repository_resources::upsert_alignment(
+                        conn,
+                        &key,
+                        "skill",
+                        "rust",
+                        "rust",
+                        "hash-in-the-former-format",
+                        "hash-in-the-former-format",
+                        "2026-09-01T00:00:00+00:00",
+                        false,
+                    )?;
+                    crate::db::repository_resources::approve(
+                        conn,
+                        &key,
+                        "skill",
+                        "rust",
+                        &approval_hash,
+                    )?;
+                    Ok::<_, anyhow::Error>(key)
+                }
+            })
+            .await
+            .unwrap();
+
+        // Before: still readable where it is, proposed for the move, and never
+        // presented as different only because its file format is older.
+        let listing = list_resources(&state, &project_id).await;
+        let before = listing
+            .skills_present
+            .iter()
+            .find(|entry| entry.slug == "rust")
+            .unwrap();
+        assert_eq!(before.status, ProjectRepositoryResourceStatus::UpToDate);
+        assert_eq!(before.repository_paths, vec![legacy_path.clone()]);
+        assert_eq!(before.publication_path, ".agents/skills/rust/SKILL.md");
+        let plan = skill_migration_plan(State(state.clone()), AxumPath(project_id.clone()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.moves[0].source, "kronn/skills/rust");
+        assert_eq!(plan.moves[0].target, ".agents/skills/rust");
+        assert!(plan.moves[0].converted && plan.moves[0].kronn_managed);
+        assert!(
+            root.path().join(&legacy_path).is_file(),
+            "the recap writes nothing"
+        );
+
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest::default()),
+        )
+        .await;
+        let result = response.0.data.expect("migration succeeds");
+        assert_eq!(result.moved.len(), 1);
+        assert!(result.unresolved.is_empty() && result.kept.is_empty());
+
+        // No duplicate: the folder left `kronn/skills`, the standard skill is
+        // in `.agents/skills`.
+        assert!(!root.path().join("kronn/skills").exists());
+        let text =
+            std::fs::read_to_string(root.path().join(".agents/skills/rust/SKILL.md")).unwrap();
+        let file = crate::core::agent_skill::parse(&text).unwrap();
+        crate::core::agent_skill::validate(&file, "rust").unwrap();
+        assert!(!text.contains("kronn:resource"));
+
+        // The lock follows the skill.
+        let lock = crate::core::repository_resources::load_lock(root.path())
+            .unwrap()
+            .unwrap();
+        let entry = lock
+            .resources
+            .iter()
+            .find(|entry| entry.slug == "rust")
+            .unwrap();
+        assert_eq!(
+            entry.paths,
+            vec![".agents/skills/rust/SKILL.md".to_string()]
+        );
+        assert_eq!(lock.resources.len(), 1);
+        assert!(!lock.files.contains_key(&legacy_path));
+        assert_eq!(
+            lock.files[".agents/skills/rust/SKILL.md"],
+            crate::core::repository_resources::sha256(text.as_bytes())
+        );
+
+        // The identity, the alignment and the approval follow it too.
+        let (identity, alignment, approved) = state
+            .db
+            .with_read_conn({
+                let project_key = project_key.clone();
+                let approval_hash = approval_hash.clone();
+                move |conn| {
+                    Ok((
+                        crate::db::resource_identities::lookup(
+                            conn,
+                            &project_key,
+                            "skill",
+                            "rust",
+                        )?,
+                        crate::db::repository_resources::find_alignment(
+                            conn,
+                            &project_key,
+                            "skill",
+                            "rust",
+                        )?,
+                        crate::db::repository_resources::is_approved(
+                            conn,
+                            &project_key,
+                            "skill",
+                            "rust",
+                            &approval_hash,
+                        )?,
+                    ))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(identity.as_deref(), Some("rust"));
+        assert!(approved, "the approval by fingerprint does not change");
+        let alignment = alignment.expect("the baseline is set against the new file");
+        let (_, new_hash) =
+            crate::core::repository_resources::read_resource(root.path(), entry).unwrap();
+        assert_eq!(alignment.repository_hash, new_hash);
+        assert_eq!(alignment.aligned_at, "2026-09-01T00:00:00+00:00");
+
+        let listing = list_resources(&state, &project_id).await;
+        let rows: Vec<_> = listing
+            .skills_present
+            .iter()
+            .filter(|entry| entry.slug == "rust")
+            .collect();
+        assert_eq!(rows.len(), 1, "no duplicate row");
+        assert_eq!(rows[0].status, ProjectRepositoryResourceStatus::UpToDate);
+        assert_eq!(
+            rows[0].repository_paths,
+            vec![".agents/skills/rust/SKILL.md".to_string()]
+        );
+
+        // Nothing was committed; the banner counts the move.
+        assert_eq!(commit_count(root.path()), commits);
+        assert!(listing
+            .uncommitted_managed_paths
+            .contains(&".agents/skills/rust/SKILL.md".to_string()));
+        assert!(
+            listing.uncommitted_managed_paths.contains(&legacy_path),
+            "{:?}",
+            listing.uncommitted_managed_paths
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn publishing_a_skill_still_under_kronn_skills_moves_it_instead_of_duplicating_it() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let skill = crate::core::skills::get_skill("rust").unwrap();
+        let (legacy_path, legacy_bytes) = write_legacy_skill(root.path(), &skill, "rust");
+        let lock = crate::core::repository_resources::RepositoryLock {
+            version: crate::core::repository_resources::SCHEMA_VERSION,
+            updated_at: Utc::now(),
+            resources: vec![crate::core::repository_resources::RepositoryLockResource {
+                kind: ProjectRepositoryResourceKind::Skill,
+                slug: "rust".into(),
+                name: skill.name.clone(),
+                level: "N1".into(),
+                paths: vec![legacy_path.clone()],
+                sha256: "legacy".into(),
+                required_secrets: Vec::new(),
+            }],
+            files: BTreeMap::from([(
+                legacy_path.clone(),
+                crate::core::repository_resources::sha256(&legacy_bytes),
+            )]),
+        };
+        std::fs::write(
+            root.path()
+                .join(crate::core::repository_resources::LOCK_PATH),
+            serde_json::to_vec_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        attach_skills(&state, &project_id, &["rust"]).await;
+
+        let response = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            publish_request("rust"),
+        )
+        .await;
+        assert!(response.0.data.is_some(), "{:?}", response.0.error);
+        assert!(root.path().join(".agents/skills/rust/SKILL.md").is_file());
+        assert!(
+            !root.path().join("kronn/skills").exists(),
+            "the former copy is removed, not left beside the new one"
+        );
+        let lock = crate::core::repository_resources::load_lock(root.path())
+            .unwrap()
+            .unwrap();
+        assert!(lock
+            .files
+            .keys()
+            .all(|path| !path.starts_with("kronn/skills")));
+
+        // A former copy someone edited is never deleted without saying so.
+        let root = tempfile::tempdir().unwrap();
+        let (legacy_path, legacy_bytes) = write_legacy_skill(root.path(), &skill, "rust");
+        let lock = crate::core::repository_resources::RepositoryLock {
+            version: crate::core::repository_resources::SCHEMA_VERSION,
+            updated_at: Utc::now(),
+            resources: vec![crate::core::repository_resources::RepositoryLockResource {
+                kind: ProjectRepositoryResourceKind::Skill,
+                slug: "rust".into(),
+                name: skill.name.clone(),
+                level: "N1".into(),
+                paths: vec![legacy_path.clone()],
+                sha256: "legacy".into(),
+                required_secrets: Vec::new(),
+            }],
+            files: BTreeMap::from([(
+                legacy_path.clone(),
+                crate::core::repository_resources::sha256(&legacy_bytes),
+            )]),
+        };
+        std::fs::write(
+            root.path()
+                .join(crate::core::repository_resources::LOCK_PATH),
+            serde_json::to_vec_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.path().join(&legacy_path), "edited by a human").unwrap();
+        state
+            .db
+            .with_conn({
+                let path = root.path().display().to_string();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE projects SET path = ?1 WHERE id = 'project-1'",
+                        [path],
+                    )?;
+                    Ok::<_, anyhow::Error>(())
+                }
+            })
+            .await
+            .unwrap();
+        let refused = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            publish_request("rust"),
+        )
+        .await;
+        assert!(
+            refused
+                .0
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("changed since the last alignment")),
+            "{:?}",
+            refused.0.error
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(&legacy_path)).unwrap(),
+            "edited by a human"
+        );
+        assert!(!root.path().join(".agents/skills/rust/SKILL.md").exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn migrate_all_lists_moves_and_conflicts_first_and_overwrites_nothing_without_a_choice() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        write_native_skill(root.path(), ".claude/skills", "review", "Review", "Claude.");
+        write_native_skill(root.path(), ".agents/skills", "review", "Review", "Agents.");
+        write_native_skill(root.path(), ".gemini/skills", "lint", "Lint", "Lint body.");
+        write_native_skill(
+            root.path(),
+            ".github/skills",
+            "triage",
+            "Triage",
+            "Triage body.",
+        );
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-q", "-m", "skills everywhere"]);
+        let commits = commit_count(root.path());
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        // "Use in Kronn" pointed at the folder that is about to move.
+        let used = use_native_skill(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            native_request(".gemini/skills/lint/SKILL.md", false),
+        )
+        .await;
+        assert!(used.0.data.is_some());
+
+        let plan = skill_migration_plan(State(state.clone()), AxumPath(project_id.clone()))
+            .await
+            .0
+            .data
+            .unwrap();
+        let moves: Vec<_> = plan
+            .moves
+            .iter()
+            .map(|entry| (entry.source.as_str(), entry.target.as_str()))
+            .collect();
+        assert_eq!(
+            moves,
+            vec![
+                (".gemini/skills/lint", ".agents/skills/lint"),
+                (".github/skills/triage", ".agents/skills/triage"),
+            ]
+        );
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].slug, "review");
+        assert_eq!(plan.conflicts[0].versions.len(), 2);
+        assert!(
+            root.path().join(".gemini/skills/lint/SKILL.md").is_file(),
+            "the recap writes nothing"
+        );
+
+        // Without a choice, the conflict is skipped and nothing is overwritten.
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest::default()),
+        )
+        .await;
+        let result = response.0.data.expect("migration succeeds");
+        assert_eq!(result.unresolved, vec!["review"]);
+        assert_eq!(result.moved.len(), 2);
+        assert!(
+            std::fs::read_to_string(root.path().join(".agents/skills/review/SKILL.md"))
+                .unwrap()
+                .contains("Agents.")
+        );
+        assert!(root.path().join(".claude/skills/review/SKILL.md").is_file());
+        assert!(root.path().join(".agents/skills/lint/SKILL.md").is_file());
+        assert!(!root.path().join(".gemini/skills/lint").exists());
+
+        // The read-only reference follows the skill.
+        let reference = state
+            .db
+            .with_read_conn({
+                let project_id = project_id.clone();
+                move |conn| crate::db::project_skill_references::find(conn, &project_id, "lint")
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.relative_path, ".agents/skills/lint/SKILL.md");
+
+        // The user chooses the Claude version for the conflict.
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest {
+                resolutions: vec![crate::models::SkillMigrationResolution {
+                    slug: "review".into(),
+                    keep: ".claude/skills/review".into(),
+                }],
+            }),
+        )
+        .await;
+        let result = response.0.data.expect("second migration succeeds");
+        assert_eq!(result.moved.len(), 1);
+        assert!(result.unresolved.is_empty());
+        assert!(
+            std::fs::read_to_string(root.path().join(".agents/skills/review/SKILL.md"))
+                .unwrap()
+                .contains("Claude.")
+        );
+        assert!(!root.path().join(".claude/skills/review").exists());
+
+        // Nothing was committed; the banner shows the work waiting.
+        assert_eq!(commit_count(root.path()), commits);
+        let listing = list_resources(&state, &project_id).await;
+        for path in [
+            ".agents/skills/lint/SKILL.md",
+            ".agents/skills/triage/SKILL.md",
+            ".agents/skills/review/SKILL.md",
+            ".gemini/skills/lint/SKILL.md",
+            ".claude/skills/review/SKILL.md",
+        ] {
+            assert!(
+                listing
+                    .uncommitted_managed_paths
+                    .contains(&path.to_string()),
+                "{path} missing from {:?}",
+                listing.uncommitted_managed_paths
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn migrate_all_refuses_symbolic_links_and_paths_outside_the_repository() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "outside").unwrap();
+        write_native_skill(root.path(), ".claude/skills", "linked", "Linked", "Body.");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            root.path().join(".claude/skills/linked/notes.md"),
+        )
+        .unwrap();
+        write_native_skill(root.path(), ".claude/skills", "review", "Review", "Claude.");
+        write_native_skill(root.path(), ".agents/skills", "review", "Review", "Agents.");
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+
+        let plan = skill_migration_plan(State(state.clone()), AxumPath(project_id.clone()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert_eq!(plan.blocked.len(), 1);
+        assert_eq!(plan.blocked[0].path, ".claude/skills/linked");
+        assert!(plan.moves.is_empty());
+
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest {
+                resolutions: vec![crate::models::SkillMigrationResolution {
+                    slug: "review".into(),
+                    keep: "../../etc".into(),
+                }],
+            }),
+        )
+        .await;
+        let result = response.0.data.unwrap();
+        assert_eq!(result.unresolved, vec!["review"]);
+        assert!(root.path().join(".claude/skills/linked/SKILL.md").is_file());
+        assert!(!root.path().join(".agents/skills/linked").exists());
+        assert!(
+            std::fs::read_to_string(root.path().join(".agents/skills/review/SKILL.md"))
+                .unwrap()
+                .contains("Agents.")
+        );
+        assert!(outside.path().join("secret.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn migrating_needs_a_known_project() {
+        let state = test_state();
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath("missing".into()),
+            Json(crate::models::SkillMigrationRequest::default()),
+        )
+        .await;
+        assert!(response.0.data.is_none());
+        let plan = skill_migration_plan(State(state), AxumPath("missing".into())).await;
+        assert!(plan.0.data.is_none());
     }
 }

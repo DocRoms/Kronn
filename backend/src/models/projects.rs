@@ -394,6 +394,129 @@ pub struct RepositoryNativeSkillRequest {
     pub overwrite_kronn_changes: bool,
 }
 
+/// What "Migrate everything to `.agents/skills`" would do, computed without
+/// touching the repository: one line per skill folder that moves (source →
+/// target) and one per slug whose copies differ and need the user's choice.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationPlan {
+    /// Always `.agents/skills`.
+    pub target_root: String,
+    pub moves: Vec<SkillMigrationMove>,
+    /// Same slug, different contents: nothing is written for these until a
+    /// version is chosen, and nothing is overwritten unless it is chosen.
+    pub conflicts: Vec<SkillMigrationConflict>,
+    /// Skill folders that cannot be moved safely (a symbolic link, an
+    /// unreadable file…), left exactly where they are.
+    pub blocked: Vec<SkillMigrationBlocked>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationMove {
+    pub slug: String,
+    /// The skill folder as it is now, e.g. `.claude/skills/review`.
+    pub source: String,
+    /// Where it goes, e.g. `.agents/skills/review`.
+    pub target: String,
+    pub action: SkillMigrationAction,
+    /// The skill was written by Kronn in its former format and is rewritten
+    /// as a standard Agent Skill on the way.
+    pub converted: bool,
+    /// Kronn tracks this skill in `kronn.lock`: the lock and the alignment
+    /// follow it to the new location.
+    pub kronn_managed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SkillMigrationAction {
+    /// The folder moves to the target.
+    Move,
+    /// The target already holds the same content: the folder is only removed,
+    /// nothing is lost.
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationConflict {
+    pub slug: String,
+    pub target: String,
+    /// The distinct contents found for this slug, each with the folders that
+    /// hold it.
+    pub versions: Vec<SkillMigrationVersion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationVersion {
+    /// First 8 characters of the content hash.
+    pub fingerprint: String,
+    /// The skill folders holding this content, the target included.
+    pub paths: Vec<String>,
+    /// The target already holds this version: choosing it changes nothing
+    /// there.
+    pub at_target: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationBlocked {
+    pub path: String,
+    pub reason: SkillMigrationBlockReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SkillMigrationBlockReason {
+    /// The folder, or something in it, is a symbolic link.
+    Symlink,
+    /// A file could not be read, or is not a regular file.
+    Unreadable,
+    /// `.agents/skills/kronn` is Kronn's own router skill.
+    ReservedSlug,
+    /// The target folder exists but holds no `SKILL.md`.
+    TargetOccupied,
+    /// Too many files or too much data to move as one skill.
+    TooLarge,
+}
+
+/// The choices the user made in the recap.
+#[derive(Debug, Clone, Default, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationRequest {
+    /// One per conflict the user resolved. A conflict without one is skipped:
+    /// Kronn never picks a version.
+    #[serde(default)]
+    pub resolutions: Vec<SkillMigrationResolution>,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationResolution {
+    pub slug: String,
+    /// One of the folders listed in the conflict's versions: its content is
+    /// the one written to the target.
+    pub keep: String,
+}
+
+/// What a migration did. Nothing is committed: the files sit in the working
+/// tree, and the uncommitted-changes banner counts them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationResult {
+    pub moved: Vec<SkillMigrationMove>,
+    /// Slugs whose conflict had no choice: untouched.
+    pub unresolved: Vec<String>,
+    /// Folders left where they were because their content is not what the
+    /// target now holds.
+    pub kept: Vec<String>,
+    pub blocked: Vec<SkillMigrationBlocked>,
+}
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct ProjectRepositoryResourceMutation {

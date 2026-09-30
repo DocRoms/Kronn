@@ -26,6 +26,12 @@ const CONFIG_PATH: &str = "kronn/kronn.toml";
 const ROUTER_PATH: &str = ".agents/skills/kronn/SKILL.md";
 const AGENTS_PATH: &str = "docs/AGENTS.md";
 const AGENTS_LINE: &str = "Kronn resources → `kronn/INDEX.md`";
+/// Where every agent looks for skills, and so where Kronn writes them: `kronn/`
+/// only holds what has no native home (prompts, automations, artifacts).
+pub const SKILLS_ROOT: &str = ".agents/skills";
+/// Where Kronn wrote skills before they moved to [`SKILLS_ROOT`]; still read,
+/// never written.
+pub const LEGACY_SKILLS_ROOT: &str = "kronn/skills";
 const DOCUMENT_START: &str = "<!-- kronn:resource\n";
 const DOCUMENT_END: &str = "\n-->";
 
@@ -558,18 +564,86 @@ pub fn render_skill(
                 source.clone(),
                 Vec::new(),
             );
-            let content = document
-                .resource
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let files = BTreeMap::from([(
-                format!("kronn/skills/{slug}/SKILL.md"),
-                markdown_file(&document, &skill.name, &skill.description, content)?,
-            )]);
+            let files = BTreeMap::from([(skill_path(slug), standard_skill_file(&document, slug)?)]);
             Ok(rendered(document, skill.name.clone(), files, secrets))
         },
     )
+}
+
+/// The repository path of a skill's `SKILL.md`.
+pub fn skill_path(slug: &str) -> String {
+    format!("{SKILLS_ROOT}/{slug}/SKILL.md")
+}
+
+/// Whether `path` is a skill file at the location Kronn used before skills
+/// moved to [`SKILLS_ROOT`].
+pub fn is_legacy_skill_path(path: &str) -> bool {
+    path.strip_prefix(LEGACY_SKILLS_ROOT)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn resource_text<'a>(resource: &'a Value, key: &str) -> &'a str {
+    resource
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// A skill as a real Agent Skills file: `name` is the folder slug, the header
+/// stays valid whatever the skill holds (an empty description falls back to the
+/// display name, an oversized one is cut), and what is Kronn's own — display
+/// name, category, icon, attribution — goes under `metadata`.
+fn standard_skill_file(document: &RepositoryDocument, slug: &str) -> Result<Vec<u8>, String> {
+    use crate::core::skills::{
+        category_str, KRONN_CATEGORY_KEY, KRONN_EXTERNAL_KEY, KRONN_ICON_KEY, KRONN_NAME_KEY,
+        KRONN_SOURCE_URL_KEY,
+    };
+    let resource = &document.resource;
+    let display_name = resource_text(resource, "name").trim();
+    let mut description = resource_text(resource, "description").trim();
+    if description.is_empty() {
+        description = if display_name.is_empty() {
+            slug
+        } else {
+            display_name
+        };
+    }
+    let mut metadata = BTreeMap::new();
+    let mut keep = |key: &str, value: &str| {
+        if !value.is_empty() {
+            metadata.insert(key.to_string(), value.to_string());
+        }
+    };
+    keep(KRONN_NAME_KEY, display_name);
+    keep(KRONN_ICON_KEY, resource_text(resource, "icon"));
+    let category = match resource_text(resource, "category") {
+        "Language" => Some(crate::models::SkillCategory::Language),
+        "Business" => Some(crate::models::SkillCategory::Business),
+        "Domain" => Some(crate::models::SkillCategory::Domain),
+        _ => None,
+    };
+    keep(
+        KRONN_CATEGORY_KEY,
+        category.as_ref().map_or("", category_str),
+    );
+    if resource.get("external").and_then(Value::as_bool) == Some(true) {
+        keep(KRONN_EXTERNAL_KEY, "true");
+    }
+    keep(KRONN_SOURCE_URL_KEY, resource_text(resource, "source_url"));
+    let file = crate::core::agent_skill::AgentSkillFile {
+        name: slug.to_string(),
+        description: description
+            .chars()
+            .take(crate::core::agent_skill::DESCRIPTION_MAX)
+            .collect(),
+        license: Some(resource_text(resource, "license").to_string()),
+        compatibility: None,
+        allowed_tools: Some(resource_text(resource, "allowed_tools").to_string()),
+        metadata,
+        body: resource_text(resource, "content").to_string(),
+    };
+    crate::core::agent_skill::validate(&file, slug)?;
+    Ok(crate::core::agent_skill::render(&file).into_bytes())
 }
 
 /// Refuses a `kronn` path that exists but is not a directory (e.g. a launcher
@@ -634,6 +708,32 @@ pub fn validate_relative(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A skill file in the Agent Skills format as a resource document. It carries
+/// no date of its own, so the file's modification time stands in for one.
+fn standard_skill_document(
+    root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    slug: &str,
+) -> Result<RepositoryDocument, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("resource {slug} is not UTF-8"))?;
+    let skill = crate::core::skills::parse_skill_markdown(slug, text, false)
+        .ok_or_else(|| format!("resource {slug} has no valid Skill frontmatter"))?;
+    let updated_at = std::fs::metadata(root.join(relative))
+        .and_then(|metadata| metadata.modified())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(|_| Utc::now());
+    Ok(RepositoryDocument {
+        schema_version: SCHEMA_VERSION,
+        kind: ProjectRepositoryResourceKind::Skill,
+        slug: slug.to_string(),
+        updated_at,
+        requires: Vec::new(),
+        resource: serde_json::to_value(skill).map_err(|error| error.to_string())?,
+        redacted_fields: Vec::new(),
+    })
+}
+
 pub fn read_resource(
     root: &Path,
     entry: &RepositoryLockResource,
@@ -652,6 +752,13 @@ pub fn read_resource(
         .first()
         .and_then(|path| files.get(path))
         .ok_or_else(|| format!("resource {} has no definition file", entry.slug))?;
+    let legacy_skill = entry.kind == ProjectRepositoryResourceKind::Skill
+        && std::str::from_utf8(first).is_ok_and(|text| text.contains(DOCUMENT_START));
+    if entry.kind == ProjectRepositoryResourceKind::Skill && !legacy_skill {
+        let path = entry.paths.first().map(String::as_str).unwrap_or_default();
+        let document = standard_skill_document(root, path, first, &entry.slug)?;
+        return Ok((document, resource_hash(&files)));
+    }
     let document: RepositoryDocument = if matches!(
         entry.kind,
         ProjectRepositoryResourceKind::QuickPrompt | ProjectRepositoryResourceKind::Skill
@@ -690,6 +797,14 @@ pub fn read_resource(
     {
         return Err(format!("resource metadata does not match {}", entry.slug));
     }
+    if legacy_skill {
+        // Compared as what a move to `.agents/skills` would write, so a skill
+        // still under `kronn/skills` reads as in sync with its Kronn copy when
+        // only the file format differs.
+        let standard = standard_skill_file(&document, &entry.slug)?;
+        let files = BTreeMap::from([(skill_path(&entry.slug), standard)]);
+        return Ok((document, resource_hash(&files)));
+    }
     if entry.kind == ProjectRepositoryResourceKind::Artifact {
         let html_path = entry
             .paths
@@ -705,6 +820,91 @@ pub fn read_resource(
         return Ok((document, resource_hash(&files)));
     }
     Ok((document, resource_hash(&files)))
+}
+
+/// A skill Kronn wrote in its former format (`kronn/skills/<slug>/SKILL.md`,
+/// with the definition in a metadata comment) as the standard Agent Skills file
+/// a move to `.agents/skills` writes.
+pub fn legacy_skill_as_standard(
+    root: &Path,
+    slug: &str,
+    legacy_path: &str,
+) -> Result<Vec<u8>, String> {
+    let entry = RepositoryLockResource {
+        kind: ProjectRepositoryResourceKind::Skill,
+        slug: slug.to_string(),
+        name: String::new(),
+        level: String::new(),
+        paths: vec![legacy_path.to_string()],
+        sha256: String::new(),
+        required_secrets: Vec::new(),
+    };
+    let (document, _) = read_resource(root, &entry)?;
+    standard_skill_file(&document, slug)
+}
+
+/// Points the lock at the new place of skills that moved from `kronn/skills/`
+/// to `.agents/skills/`: each entry's path, the ownership record of the file
+/// and its content hash follow the skill, while its slug — the identity the
+/// alignment and the approvals are keyed by — does not change. The router
+/// skill is refreshed when Kronn wrote it and nobody edited it since. Returns
+/// the entries as they now stand.
+pub fn relocate_skill_entries(
+    root: &Path,
+    slugs: &[String],
+) -> Result<Vec<RepositoryLockResource>, String> {
+    let Some(mut lock) = load_lock(root)? else {
+        return Ok(Vec::new());
+    };
+    let mut relocated = Vec::new();
+    for slug in slugs {
+        let new_path = skill_path(slug);
+        let Some(entry) = lock.resources.iter_mut().find(|entry| {
+            entry.kind == ProjectRepositoryResourceKind::Skill && entry.slug == *slug
+        }) else {
+            continue;
+        };
+        let former: Vec<String> = entry
+            .paths
+            .iter()
+            .filter(|path| is_legacy_skill_path(path))
+            .cloned()
+            .collect();
+        if former.is_empty() {
+            continue;
+        }
+        validate_relative(&new_path)?;
+        let path = root.join(&new_path);
+        crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        entry.paths = vec![new_path.clone()];
+        entry.sha256 = resource_hash(&BTreeMap::from([(new_path.clone(), bytes.clone())]));
+        relocated.push(entry.clone());
+        for path in former {
+            lock.files.remove(&path);
+        }
+        lock.files.insert(new_path, sha256(&bytes));
+    }
+    if relocated.is_empty() {
+        return Ok(relocated);
+    }
+    lock.updated_at = Utc::now();
+    let current_router = std::fs::read(root.join(ROUTER_PATH)).ok();
+    let router = router_skill();
+    if let (Some(expected), Some(current)) = (lock.files.get(ROUTER_PATH), current_router) {
+        if sha256(&current) == *expected
+            && current != router
+            && write_atomic(root, ROUTER_PATH, &router).is_ok()
+        {
+            lock.files.insert(ROUTER_PATH.to_string(), sha256(&router));
+        }
+    }
+    let mut lock_bytes = serde_json::to_vec_pretty(&lock)
+        .map_err(|error| format!("cannot serialize kronn.lock: {error}"))?;
+    lock_bytes.push(b'\n');
+    write_atomic(root, LOCK_PATH, &lock_bytes)?;
+    Ok(relocated)
 }
 
 fn is_tracked(root: &Path, relative: &str) -> bool {
@@ -751,6 +951,69 @@ fn may_replace(
         return Err(format!("{relative} changed since the last alignment"));
     }
     Ok(())
+}
+
+/// Whether a file Kronn wrote earlier may be deleted: it is gone already, or it
+/// is a plain file the lock lists and that still holds what Kronn wrote (unless
+/// the caller accepts losing edits). A file the lock does not list is not
+/// Kronn's to delete and is left alone.
+fn may_remove(
+    root: &Path,
+    relative: &str,
+    previous: &RepositoryLock,
+    allow_changed_owned: bool,
+) -> Result<(), String> {
+    validate_relative(relative)?;
+    let path = root.join(relative);
+    crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+    };
+    if !metadata.is_file() {
+        return Err(format!("refusing to remove non-file {}", path.display()));
+    }
+    let Some(expected) = previous.files.get(relative) else {
+        return Ok(());
+    };
+    let current =
+        std::fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if !allow_changed_owned && sha256(&current) != *expected {
+        return Err(format!("{relative} changed since the last alignment"));
+    }
+    Ok(())
+}
+
+/// Deletes what [`may_remove`] allowed, then the folders that emptied.
+fn remove_owned_file(root: &Path, relative: &str, previous: &RepositoryLock) -> Result<(), String> {
+    if !previous.files.contains_key(relative) {
+        return Ok(());
+    }
+    let path = root.join(relative);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot remove {}: {error}", path.display())),
+    }
+    remove_empty_parents(root, &path);
+    Ok(())
+}
+
+/// Removes `path`'s parent folders while they are empty, never `root` itself
+/// nor the top-level folder under it (`kronn/`, `.agents/`).
+pub(crate) fn remove_empty_parents(root: &Path, path: &Path) {
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        let depth = directory
+            .strip_prefix(root)
+            .map(|relative| relative.components().count())
+            .unwrap_or(0);
+        if depth < 2 || std::fs::remove_dir(directory).is_err() {
+            return;
+        }
+        current = directory.parent();
+    }
 }
 
 fn write_atomic(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
@@ -810,7 +1073,7 @@ fn config_toml(project_key: &str, lock: &RepositoryLock) -> Result<Vec<u8>, Stri
 /// changes so a repository can tell which model wrote its copy; publication
 /// regenerates the file every time, and refuses to replace a copy a human
 /// edited (`may_replace`) like any other managed file.
-const ROUTER_SKILL_VERSION: u32 = 1;
+const ROUTER_SKILL_VERSION: u32 = 2;
 
 /// Where a human reads about Kronn and installs it. Both are taken from the
 /// project README (a test keeps them there), never invented here.
@@ -821,7 +1084,7 @@ const ROUTER_SKILL_DESCRIPTION: &str = "Explains the shared AI resources in this
 
 const ROUTER_SKILL_BODY: &str = "# Kronn resources
 
-`kronn/` holds the AI resources this team shares through Git: skills, prompts, automations and artifacts. Kronn is a desktop/web app that orchestrates coding agents and writes these files; most of them are plain files any agent can use without it.
+`kronn/` holds the AI resources this team shares through Git that have no native home: prompts, automations and artifacts. Skills are real Agent Skills in `.agents/skills/`, where every agent looks for them. Kronn is a desktop/web app that orchestrates coding agents and writes these files; most of them are plain files any agent can use without it.
 
 Read `kronn/INDEX.md` first (one line per resource, with its level), then open only what the task needs. `kronn/kronn.lock` records what Kronn wrote: never edit it.
 
@@ -831,7 +1094,7 @@ Levels: **N0** readable by anyone, **N1** runnable with the CLIs on this machine
 
 - **Quick Prompt** (`kronn/prompts/*.md`): a prompt template. Ask the human for each `{{variable}}` it declares, fill them in, then carry out the prompt yourself.
 - **Quick Exec** (`kronn/quick-execs/*.yaml`, JSON content): one deterministic command (`resource.command` + `resource.args`). Run it as written from the repository root, filling `{{variable}}` from the human. Each `secret://NAME` is a secret: pass it by name through the environment variable `NAME` (`\"$NAME\"` in the command). If it is unset, ask the human to set it. Never write a secret value in a file, a command you print or your answer.
-- **Skills** (`kronn/skills/*/SKILL.md`): read them like any SKILL.md.
+- **Skills** (`.agents/skills/*/SKILL.md`): plain Agent Skills, read them like any SKILL.md.
 
 ## Needs Kronn
 
@@ -917,18 +1180,25 @@ pub fn can_write_repository(root: &Path) -> (bool, Option<crate::models::Reposit
     }
 }
 
-/// Repository-relative paths Kronn wrote (per `kronn.lock`) that `git status`
-/// reports as modified or untracked. Best-effort: any git failure (no repo,
-/// no binary) reports no uncommitted paths rather than failing the caller.
+/// Repository-relative paths Kronn manages that `git status` reports as
+/// modified, deleted or untracked: the files `kronn.lock` lists, everything in
+/// the skills folder Kronn writes and migrates into, and the skills a migration
+/// took out of the other native skill folders (only their deletion is
+/// reported: what else sits there is the repository's own). Best-effort: any
+/// git failure (no repo, no binary) reports no uncommitted paths rather than
+/// failing the caller.
 pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<String> {
-    if lock.files.is_empty() {
+    if lock.files.is_empty() && !root.join(SKILLS_ROOT).is_dir() {
         return Vec::new();
     }
+    let mut pathspecs: Vec<&str> = lock.files.keys().map(String::as_str).collect();
+    pathspecs.push(SKILLS_ROOT);
+    pathspecs.extend(crate::core::skill_migration::SOURCE_ROOTS.iter().copied());
     let output = crate::core::cmd::sync_cmd("git")
         .arg("-C")
         .arg(root)
         .args(["status", "--porcelain", "-uall", "--"])
-        .args(lock.files.keys())
+        .args(&pathspecs)
         .output();
     let Ok(output) = output else {
         return Vec::new();
@@ -938,8 +1208,17 @@ pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<Stri
     }
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.get(3..))
-        .map(str::to_string)
+        .filter_map(|line| Some((line.get(..2)?, line.get(3..)?)))
+        .filter(|(status, path)| {
+            let moved_out = crate::core::skill_migration::SOURCE_ROOTS
+                .iter()
+                .any(|source| {
+                    path.strip_prefix(source)
+                        .is_some_and(|rest| rest.starts_with('/'))
+                });
+            !moved_out || lock.files.contains_key(*path) || status.contains('D')
+        })
+        .map(|(_, path)| path.to_string())
         .collect()
 }
 
@@ -1189,16 +1468,34 @@ pub fn publish(
     writes.insert(CONFIG_PATH.into(), config);
     writes.insert(ROUTER_PATH.into(), router);
 
+    // Files this resource was published under before and no longer is (a skill
+    // that moved from `kronn/skills/` to `.agents/skills/`): removed once the
+    // new ones are in place, so publishing never leaves the resource twice.
+    let stale: Vec<String> = previous
+        .resources
+        .iter()
+        .filter(|item| item.kind == entry.kind && item.slug == entry.slug)
+        .flat_map(|item| item.paths.iter().cloned())
+        .filter(|path| !writes.contains_key(path))
+        .collect();
+
     for relative in writes.keys() {
         may_replace(root, relative, &previous, allow_changed_owned)?;
     }
     may_replace(root, LOCK_PATH, &previous, allow_changed_owned)?;
+    for relative in &stale {
+        may_remove(root, relative, &previous, allow_changed_owned)?;
+    }
 
     ensure_agents_line(root)?;
     for (relative, bytes) in &writes {
         write_atomic(root, relative, bytes)?;
     }
     next.files = previous.files.clone();
+    for relative in &stale {
+        remove_owned_file(root, relative, &previous)?;
+        next.files.remove(relative);
+    }
     for (path, bytes) in &writes {
         next.files.insert(path.clone(), sha256(bytes));
     }
@@ -1774,6 +2071,51 @@ mod tests {
         assert_eq!(fresh.hash, cached.hash);
     }
 
+    fn skill_with(name: &str, description: &str, body: &str) -> Skill {
+        let raw = format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n");
+        crate::core::skills::parse_skill_markdown("review", &raw, false).unwrap()
+    }
+
+    #[test]
+    fn a_rendered_skill_is_a_valid_agent_skill_whatever_it_holds() {
+        let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let long = "x".repeat(2_000);
+        for description in ["", "One line.", long.as_str()] {
+            let skill = skill_with("Review Diffs", description, "Read the diff.");
+            let rendered = render_skill(&skill, timestamp, "review").unwrap();
+            assert_eq!(
+                rendered.files.keys().collect::<Vec<_>>(),
+                vec![".agents/skills/review/SKILL.md"]
+            );
+            let text = String::from_utf8(rendered.files[".agents/skills/review/SKILL.md"].clone())
+                .unwrap();
+            let file = crate::core::agent_skill::parse(&text).unwrap();
+            crate::core::agent_skill::validate(&file, "review")
+                .unwrap_or_else(|error| panic!("{error}\n{text}"));
+            assert_eq!(file.body, "Read the diff.");
+            assert_eq!(file.metadata["kronn-name"], "Review Diffs");
+        }
+        assert!(
+            render_skill(&skill_with("A", "b", "c"), timestamp, "Not A Slug").is_err(),
+            "a folder name the specification rejects is never written"
+        );
+    }
+
+    #[test]
+    fn a_skill_read_back_from_the_repository_keeps_what_kronn_wrote() {
+        let root = tempfile::TempDir::new().unwrap();
+        let skill = skill_with("Review Diffs", "Review \"carefully\".", "Read the diff.");
+        let rendered = render_skill(&skill, Utc::now(), "review").unwrap();
+        let entry = publish(root.path(), "repo", rendered.clone(), false).unwrap();
+        assert_eq!(entry.paths, vec![".agents/skills/review/SKILL.md"]);
+        assert!(!root.path().join("kronn/skills").exists());
+        let (document, hash) = read_resource(root.path(), &entry).unwrap();
+        assert_eq!(hash, rendered.hash);
+        assert_eq!(document.resource["name"], "Review Diffs");
+        assert_eq!(document.resource["description"], "Review \"carefully\".");
+        assert_eq!(document.resource["content"], "Read the diff.");
+    }
+
     #[test]
     fn rendering_preserves_and_declares_existing_secret_references() {
         let (_, secrets) = document(
@@ -1874,7 +2216,7 @@ mod tests {
             "`secret://NAME`",
             "environment variable `NAME`",
             "Never write a secret value",
-            "`kronn/skills/*/SKILL.md`",
+            "`.agents/skills/*/SKILL.md`",
             // What needs Kronn, and what to do about it.
             "Workflows",
             "Quick APIs",

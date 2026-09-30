@@ -186,6 +186,33 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
 
+/// `metadata` keys a skill written by Kronn carries for Kronn's own use: the
+/// Agent Skills format keeps `name` for the folder slug, so the display name,
+/// icon, category and attribution live here.
+pub(crate) const KRONN_NAME_KEY: &str = "kronn-name";
+pub(crate) const KRONN_ICON_KEY: &str = "kronn-icon";
+pub(crate) const KRONN_CATEGORY_KEY: &str = "kronn-category";
+pub(crate) const KRONN_EXTERNAL_KEY: &str = "kronn-external";
+pub(crate) const KRONN_SOURCE_URL_KEY: &str = "kronn-source-url";
+
+/// The lowercase word a category is written as in a skill file.
+pub(crate) fn category_str(category: &SkillCategory) -> &'static str {
+    match category {
+        SkillCategory::Language => "language",
+        SkillCategory::Domain => "domain",
+        SkillCategory::Business => "business",
+    }
+}
+
+fn category_from_str(value: &str) -> Option<SkillCategory> {
+    match value.trim().to_lowercase().as_str() {
+        "language" => Some(SkillCategory::Language),
+        "domain" => Some(SkillCategory::Domain),
+        "business" => Some(SkillCategory::Business),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
     let trimmed = raw.trim_start();
     if !trimmed.starts_with("---") {
@@ -217,7 +244,7 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
         }
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
-            name = val.trim().to_string();
+            name = crate::core::agent_skill::decode_scalar(val);
         } else if let Some(val) = line.strip_prefix("description:") {
             description = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("icon:") {
@@ -246,6 +273,36 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
             if !v.is_empty() {
                 source_url = Some(v);
             }
+        }
+    }
+
+    // A skill in the Agent Skills format keeps what is Kronn's own under
+    // `metadata` and may quote or fold its values: read those, they win over
+    // the bare line reading above.
+    if let Ok(standard) = crate::core::agent_skill::parse(raw) {
+        let kronn = |key: &str| standard.metadata.get(key).filter(|value| !value.is_empty());
+        if let Some(value) = kronn(KRONN_NAME_KEY) {
+            name = value.clone();
+        }
+        if !standard.description.is_empty() {
+            description = standard.description.clone();
+        }
+        if let Some(value) = kronn(KRONN_ICON_KEY) {
+            icon = value.clone();
+        }
+        if let Some(value) = kronn(KRONN_CATEGORY_KEY) {
+            category = category_from_str(value).unwrap_or(category);
+        }
+        if let Some(value) = kronn(KRONN_EXTERNAL_KEY) {
+            external = matches!(value.as_str(), "true" | "yes" | "1");
+        }
+        if let Some(value) = kronn(KRONN_SOURCE_URL_KEY) {
+            source_url = Some(value.clone());
+        }
+        license = standard.license.or(license);
+        allowed_tools = standard.allowed_tools.or(allowed_tools);
+        if name.is_empty() {
+            name = standard.name;
         }
     }
 
@@ -1109,6 +1166,32 @@ mod tests {
             assert!(skill.is_some(), "Domain skill '{}' must exist", id);
             assert_eq!(skill.unwrap().category, SkillCategory::Domain);
         }
+    }
+
+    #[test]
+    fn a_standard_agent_skill_keeps_kronns_fields_under_metadata() {
+        let raw = "---\nname: review\ndescription: \"Review \\\"carefully\\\".\"\nlicense: \"MIT\"\nallowed-tools: \"Bash Read\"\nmetadata:\n  kronn-name: \"Review Diffs\"\n  kronn-icon: \"🔍\"\n  kronn-category: \"language\"\n  kronn-external: \"true\"\n  kronn-source-url: \"https://example.test/skill\"\n---\n\nRead the diff.\n";
+        let skill = parse_skill_markdown("review", raw, false).unwrap();
+        assert_eq!(skill.name, "Review Diffs");
+        assert_eq!(skill.description, "Review \"carefully\".");
+        assert_eq!(skill.icon, "🔍");
+        assert_eq!(skill.category, SkillCategory::Language);
+        assert_eq!(skill.license.as_deref(), Some("MIT"));
+        assert_eq!(skill.allowed_tools.as_deref(), Some("Bash Read"));
+        assert!(skill.external);
+        assert_eq!(
+            skill.source_url.as_deref(),
+            Some("https://example.test/skill")
+        );
+        assert_eq!(skill.content, "Read the diff.");
+    }
+
+    #[test]
+    fn a_plain_standard_skill_is_named_after_its_header() {
+        let raw = "---\nname: \"3d-models\"\ndescription: >\n  Model in\n  three dimensions.\n---\nBody.\n";
+        let skill = parse_skill_markdown("3d-models", raw, false).unwrap();
+        assert_eq!(skill.name, "3d-models");
+        assert_eq!(skill.description, "Model in three dimensions.");
     }
 
     #[test]

@@ -82,6 +82,23 @@ pub fn find_alignment(
     .map_err(Into::into)
 }
 
+/// Forgets the baseline of one resource: it then reads as never aligned, so a
+/// difference between its two sides is a conflict for a human to settle rather
+/// than a guess at which one changed.
+pub fn delete_alignment(
+    conn: &Connection,
+    project_key: &str,
+    kind: &str,
+    slug: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM repository_resource_alignments
+          WHERE project_key = ?1 AND kind = ?2 AND slug = ?3",
+        rusqlite::params![project_key, kind, slug],
+    )?;
+    Ok(())
+}
+
 pub fn find_alignment_by_target(
     conn: &Connection,
     kind: &str,

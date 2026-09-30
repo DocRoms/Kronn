@@ -6711,6 +6711,107 @@ source_url?: string | null, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
 
+export type SkillMigrationAction = "move" | "duplicate";
+
+export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
+
+export type SkillMigrationBlockReason = "symlink" | "unreadable" | "reserved_slug" | "target_occupied" | "too_large";
+
+export type SkillMigrationConflict = { slug: string, target: string,
+/**
+ * The distinct contents found for this slug, each with the folders that
+ * hold it.
+ */
+versions: Array<SkillMigrationVersion>, };
+
+export type SkillMigrationMove = { slug: string,
+/**
+ * The skill folder as it is now, e.g. `.claude/skills/review`.
+ */
+source: string,
+/**
+ * Where it goes, e.g. `.agents/skills/review`.
+ */
+target: string, action: SkillMigrationAction,
+/**
+ * The skill was written by Kronn in its former format and is rewritten
+ * as a standard Agent Skill on the way.
+ */
+converted: boolean,
+/**
+ * Kronn tracks this skill in `kronn.lock`: the lock and the alignment
+ * follow it to the new location.
+ */
+kronn_managed: boolean, };
+
+/**
+ * What "Migrate everything to `.agents/skills`" would do, computed without
+ * touching the repository: one line per skill folder that moves (source →
+ * target) and one per slug whose copies differ and need the user's choice.
+ */
+export type SkillMigrationPlan = {
+/**
+ * Always `.agents/skills`.
+ */
+target_root: string, moves: Array<SkillMigrationMove>,
+/**
+ * Same slug, different contents: nothing is written for these until a
+ * version is chosen, and nothing is overwritten unless it is chosen.
+ */
+conflicts: Array<SkillMigrationConflict>,
+/**
+ * Skill folders that cannot be moved safely (a symbolic link, an
+ * unreadable file…), left exactly where they are.
+ */
+blocked: Array<SkillMigrationBlocked>, };
+
+/**
+ * The choices the user made in the recap.
+ */
+export type SkillMigrationRequest = {
+/**
+ * One per conflict the user resolved. A conflict without one is skipped:
+ * Kronn never picks a version.
+ */
+resolutions?: Array<SkillMigrationResolution>, };
+
+export type SkillMigrationResolution = { slug: string,
+/**
+ * One of the folders listed in the conflict's versions: its content is
+ * the one written to the target.
+ */
+keep: string, };
+
+/**
+ * What a migration did. Nothing is committed: the files sit in the working
+ * tree, and the uncommitted-changes banner counts them.
+ */
+export type SkillMigrationResult = { moved: Array<SkillMigrationMove>,
+/**
+ * Slugs whose conflict had no choice: untouched.
+ */
+unresolved: Array<string>,
+/**
+ * Folders left where they were because their content is not what the
+ * target now holds.
+ */
+kept: Array<string>, blocked: Array<SkillMigrationBlocked>, };
+
+export type SkillMigrationVersion = {
+/**
+ * First 8 characters of the content hash.
+ */
+fingerprint: string,
+/**
+ * The skill folders holding this content, the target included.
+ */
+paths: Array<string>,
+/**
+ * The target already holds this version: choosing it changes nothing
+ * there.
+ */
+at_target: boolean, };
+
 /**
  * One extracted `[src: …]` marker plus its mechanical verdict.
  */

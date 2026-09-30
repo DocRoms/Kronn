@@ -18,6 +18,9 @@ import type {
   ProjectRepositoryResources,
   PublishProjectRepositoryResourceRequest,
   RepositoryNativeSkillRequest,
+  SkillMigrationPlan,
+  SkillMigrationRequest,
+  SkillMigrationResult,
   RepositoryResourceComparison,
   ProjectDockerAction,
   ProjectDockerLogs,
@@ -920,6 +923,13 @@ export const projects = {
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/use`, request),
   copyNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/copy`, request),
+  /** "Migrate everything to .agents/skills": the recap first (read-only)… */
+  skillMigrationPlan: (id: string) =>
+    api<SkillMigrationPlan>('GET', `/projects/${encodeURIComponent(id)}/repository-resources/skills/migration`),
+  /** …then the move, with the version the user chose for each conflict. It
+   *  writes to the working tree and never commits. */
+  migrateSkills: (id: string, request: SkillMigrationRequest) =>
+    api<SkillMigrationResult>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/migrate`, request),
   dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
   dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
   dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>

@@ -41,7 +41,7 @@ export const skill = (overrides: Partial<ProjectRepositorySkill> & Pick<ProjectR
   approved: false,
   repository_paths: [],
   repository_paths_diverge: false,
-  publication_path: `kronn/skills/${overrides.id}/SKILL.md`,
+  publication_path: `.agents/skills/${overrides.id}/SKILL.md`,
   write_preview: [],
   referenced: false,
   required_secrets: [],

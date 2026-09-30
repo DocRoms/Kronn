@@ -1,3 +1,4 @@
+pub mod agent_skill;
 pub mod anti_halluc;
 pub mod audit_detectors;
 pub mod audit_mcp_filter;
@@ -61,6 +62,7 @@ pub mod run_eta;
 pub mod run_notify;
 pub mod scanner;
 pub mod session_budget;
+pub mod skill_migration;
 pub mod skills;
 pub mod sse_limits;
 pub mod static_context;
