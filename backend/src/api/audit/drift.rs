@@ -99,17 +99,12 @@ pub async fn partial_audit(
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-926 — the only other repos this prompt names are the ones the user
+    // explicitly linked to the project. Never the list of the machine's Kronn
+    // projects: the prompt goes to the model provider, and a companion list
+    // would be copied into a versioned `docs/AGENTS.md`.
     let linked_repos_block =
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
-    let pid_for_universe = project.id.clone();
-    let kronn_projects_universe_block =
-        match state.db.with_conn(crate::db::projects::list_projects).await {
-            Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(
-                &all,
-                &pid_for_universe,
-            ),
-            Err(_) => None,
-        };
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9
@@ -464,9 +459,6 @@ pub async fn partial_audit(
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
             }
             if let Some(ref block) = linked_repos_block {
-                full_prompt.push_str(&format!("\n\n{}\n", block));
-            }
-            if let Some(ref block) = kronn_projects_universe_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
             }
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {

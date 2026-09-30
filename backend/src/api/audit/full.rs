@@ -240,27 +240,12 @@ pub async fn full_audit(
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-926 — the only other repos this prompt names are the ones the user
+    // explicitly linked to the project. Never the list of the machine's Kronn
+    // projects: the prompt goes to the model provider, and a companion list
+    // would be copied into a versioned `docs/AGENTS.md`.
     let linked_repos_block =
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
-    // 0.8.3 — candidate pool for companion-repo detection. The agent
-    // only suggests links from this finite list (typically 5-20),
-    // not "every repo I see on disk" — keeps suggestions scalable
-    // for users with hundreds of repos.
-    let pid_for_universe = project_id.clone();
-    let kronn_projects_universe_block =
-        match state.db.with_conn(crate::db::projects::list_projects).await {
-            Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(
-                &all,
-                &pid_for_universe,
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to load Kronn projects for companion-detection block: {}",
-                    e
-                );
-                None
-            }
-        };
     let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
@@ -1013,9 +998,6 @@ pub async fn full_audit(
                 full_prompt.push_str("\n\n## Legacy docs (PRIMARY SOURCE for this audit)\nThis project had a hand-curated `docs/` folder BEFORE Kronn was bootstrapped. We moved that content under `docs/legacy/` so the freshly-installed Kronn templates don't collide with it. **READ every `*.md` under `docs/legacy/` BEFORE filling the Kronn templates.** That content is the human-curated knowledge — the README and source code alone would lose 6 months of accumulated context.\n\nWhen filling each Kronn template, cite the legacy source inline (`see docs/legacy/installation.md`, `cf docs/legacy/architecture/overview.md`) so the user can verify the mapping and decide what to keep / discard after the audit. After the audit, the user reviews `docs/legacy/` and either deletes it or migrates remaining pieces into the Kronn structure manually.\n\n**Navigation requirement for `docs/AGENTS.md` ONLY (Step 1):** when filling `docs/AGENTS.md`, add ONE line in the appropriate section (or a small dedicated `## Legacy docs (pre-Kronn snapshot)` section if none fits) that points future agents to `docs/legacy/` — wording like `> Hand-curated docs from before Kronn — see [docs/legacy/README.md](legacy/README.md) for context preserved from the previous structure.` Without this pointer the folder is invisible to anyone re-reading `AGENTS.md` next week. Do NOT add this line to other Kronn templates (`glossary.md`, `repo-map.md`, etc.) — the entry point is enough.\n");
             }
             if let Some(ref block) = linked_repos_block {
-                full_prompt.push_str(&format!("\n\n{}\n", block));
-            }
-            if let Some(ref block) = kronn_projects_universe_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
             }
 

@@ -162,6 +162,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The prompt of a Full or partial audit no longer lists your other Kronn
+  projects (KT-926). Every step used to carry the name and absolute path of
+  every other project registered in Kronn, and asked the agent to read their
+  `docs/AGENTS.md` and to write a `## Suggested companion repos` section into
+  the audited repository's own `docs/AGENTS.md`. That prompt goes to the model
+  provider, which may be a remote service with no relation to those projects,
+  and the section landed in a versioned file; for an HTTP agent, whose file
+  tools cannot leave the project since KT-924, the instruction to read another
+  repository contradicted the tools. The only other repositories an audit names
+  are the ones you linked to the project yourself ("Linked repos" on the
+  project), which stay in every step. Nothing else about the audit changes:
+  it still describes the repository from what the repository says. A
+  `## Suggested companion repos` section an earlier audit left in a
+  `docs/AGENTS.md` is not removed by this change, and discussions and workflow
+  Agent steps still receive the list of your Kronn projects.
 - The Plugins sidebar no longer carries a per-project tree, so each plugin is
   listed once (a global plugin used to appear once per project, and again
   under "No project"). It is a flat list: Favorites and "Recently tested"

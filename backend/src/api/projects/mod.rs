@@ -36,10 +36,15 @@ pub use template::*;
 pub use used_skills::{used_skill_file, used_skills};
 
 /// 0.8.3 — Format the list of OTHER Kronn-registered projects as a
-/// candidate pool for the audit agent to look for companion-repo
-/// evidence in. Scales to users with 200+ repos on disk because we
-/// only consider projects already known to Kronn (typically 5-20),
-/// not the whole filesystem.
+/// candidate pool of companion repos.
+///
+/// KT-926 — NEVER for an audit. The audit prompt goes to the model provider,
+/// which may be a remote service with no relation to those projects, and its
+/// companion-repo section ended up in a versioned `docs/AGENTS.md`. The audit
+/// pipelines therefore carry only what the user explicitly linked
+/// (`format_linked_repos_for_prompt`); `compute_companion_context_for_audit`
+/// leaves this block out, and the audit tests pin it. Only the discussion and
+/// workflow surfaces (`compute_companion_context`) still use it.
 ///
 /// Returns `None` when there are no other projects (the current one
 /// is the only project in Kronn — nothing to suggest).
@@ -210,8 +215,9 @@ pub(crate) fn format_linked_repos_for_prompt(repos: &[LinkedRepo]) -> Option<Str
 /// `linked_repos` now; the disc/WF surfaces call the regular version
 /// which drops `linked_repos` since `docs/linked-repos.md` is on disk
 /// and the agent reads it on-demand (saves 500-2000 tokens/message).
-/// The Kronn-projects-universe block stays everywhere — it's small
-/// + lists Kronn-managed companions which is qualitatively different.
+/// The Kronn-projects-universe block stays on disc/WF — it's small
+/// and lists Kronn-managed companions, which is qualitatively different.
+/// It is NOT part of the audit variant (KT-926).
 pub(crate) async fn compute_companion_context(
     state: &AppState,
     project_id: Option<&str>,
@@ -223,6 +229,9 @@ pub(crate) async fn compute_companion_context(
 /// `linked_repos` block (cross-repo findings depend on it — proven
 /// -39% tokens on big-ticket migrations). Disc/WF use the regular fn
 /// which skips linked_repos to keep per-message prompts lean.
+///
+/// KT-926 — and it never carries the Kronn-projects-universe block: an
+/// audit names only the repos the user explicitly linked to the project.
 ///
 /// Today the audit pipeline composes its own block via
 /// `format_linked_repos_for_prompt` for finer-grained control over
@@ -239,7 +248,7 @@ pub(crate) async fn compute_companion_context_for_audit(
 async fn compute_companion_context_inner(
     state: &AppState,
     project_id: Option<&str>,
-    include_linked_repos: bool,
+    for_audit: bool,
 ) -> String {
     let Some(pid) = project_id else {
         return String::new();
@@ -254,23 +263,28 @@ async fn compute_companion_context_inner(
     let Some(project) = project_opt else {
         return String::new();
     };
-    // 0.8.4 (#295) — gate the linked_repos injection on the
-    // `include_linked_repos` flag. False = disc/WF (push→pull
-    // migration), True = audit (cross-repo findings need it inline).
-    let linked_block = if include_linked_repos {
+    // 0.8.4 (#295) — gate the linked_repos injection on the audit flag.
+    // False = disc/WF (push→pull migration), True = audit (cross-repo
+    // findings need it inline).
+    let linked_block = if for_audit {
         format_linked_repos_for_prompt(&project.linked_repos)
     } else {
         None
     };
-    let pid_for_universe = pid.to_string();
-    let universe_block = match state.db.with_conn(crate::db::projects::list_projects).await {
-        Ok(all) => format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
-        Err(e) => {
-            tracing::warn!(
-                "Failed to load Kronn projects for companion-context block: {}",
-                e
-            );
-            None
+    // KT-926 — the audit never lists the user's other Kronn projects.
+    let universe_block = if for_audit {
+        None
+    } else {
+        let pid_for_universe = pid.to_string();
+        match state.db.with_conn(crate::db::projects::list_projects).await {
+            Ok(all) => format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load Kronn projects for companion-context block: {}",
+                    e
+                );
+                None
+            }
         }
     };
     let mut extra = String::new();
@@ -837,6 +851,50 @@ mod tests {
         assert!(
             ctx.starts_with("\n\n"),
             "context must be pre-padded with \\n\\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_companion_context_for_audit_never_lists_other_kronn_projects() {
+        // KT-926 — the audit variant names the repos the user LINKED to the
+        // project and nothing else: the other projects registered in Kronn
+        // (name and absolute path) stay out of a prompt that goes to the
+        // model provider. The same two projects are in the context of the
+        // disc/WF variant, which keeps its candidate pool.
+        let state = test_state();
+        let current = Project {
+            linked_repos: vec![lr("linked-api", "api", "/r/linked-api", "")],
+            ..mk_project("p_current", "current", "/r/current")
+        };
+        let other = mk_project("p_other", "unrelated-billing", "/r/unrelated-billing");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &current)?;
+                crate::db::projects::insert_project(conn, &other)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .expect("insert projects");
+
+        let audit = compute_companion_context_for_audit(&state, Some("p_current")).await;
+        assert!(
+            audit.contains("**linked-api** (api)"),
+            "the explicitly linked repo stays, got: {audit:?}"
+        );
+        assert!(
+            !audit.contains("unrelated-billing") && !audit.contains("/r/unrelated-billing"),
+            "an unlinked Kronn project must not reach an audit prompt, got: {audit:?}"
+        );
+        assert!(
+            !audit.contains("Other Kronn projects") && !audit.contains("Suggested companion repos"),
+            "no candidate-pool section in an audit prompt, got: {audit:?}"
+        );
+
+        let discussion = compute_companion_context(&state, Some("p_current")).await;
+        assert!(
+            discussion.contains("unrelated-billing"),
+            "the disc/WF variant is unchanged, got: {discussion:?}"
         );
     }
 

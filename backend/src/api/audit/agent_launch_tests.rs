@@ -512,3 +512,290 @@ async fn the_partial_audit_applies_the_same_gate_and_launcher() {
         "{admitted}"
     );
 }
+
+// ── KT-926 — what an audit prompt says about OTHER repos ─────────────────────
+//
+// The prompt goes to the model provider, so the only repo it may name besides the
+// audited one is a repo the user explicitly linked to the project. These tests run
+// the two real pipelines (`full_audit`, `partial_audit`) on a scripted `claude`
+// routed to the audited project, and read what that agent was handed on stdin —
+// the prompt as the model receives it, not a string the test assembled. No socket.
+
+#[cfg(unix)]
+/// Three other projects registered in Kronn, none of them linked to the audited one.
+const OTHER_PROJECTS: [(&str, &str); 3] = [
+    ("orchid-billing-api", "/srv/zz-clients/orchid-billing-api"),
+    ("zephyr-mobile-app", "/srv/zz-clients/zephyr-mobile-app"),
+    ("quartz-infra", "/srv/zz-clients/quartz-infra"),
+];
+#[cfg(unix)]
+const LINKED_NAME: &str = "linked-design-system";
+#[cfg(unix)]
+const LINKED_LOCATION: &str = "/srv/zz-clients/linked-design-system";
+#[cfg(unix)]
+/// In the audited project's briefing, which every step prompt carries: a turn that
+/// holds it is a step prompt, not a retry note or a validation turn.
+const BRIEFING_MARKER: &str = "BRIEFING-MARKER-KT926";
+#[cfg(unix)]
+const TURN_SEPARATOR: &str = "=====KT926-TURN=====";
+
+#[cfg(unix)]
+async fn register_project(state: &AppState, id: &str, name: &str, path: &str, extra: Value) {
+    let mut row = json!({
+        "id": id, "name": name, "path": path,
+        "repo_url": null, "token_override": null, "ai_config": {"detected": false, "configs": []},
+        "created_at": chrono::Utc::now().to_rfc3339(), "updated_at": chrono::Utc::now().to_rfc3339()
+    });
+    row.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().cloned().unwrap_or_default());
+    let row: crate::models::Project = serde_json::from_value(row).unwrap();
+    state
+        .db
+        .with_conn(move |conn| crate::db::projects::insert_project(conn, &row))
+        .await
+        .unwrap();
+}
+
+#[cfg(unix)]
+/// The audited project (with a linked repo when asked) next to the three unlinked ones.
+async fn audited_project_among_others(state: &AppState, dir: &Path, linked: bool) {
+    let linked_repos = if linked {
+        json!([{
+            "id": "lr-1", "name": LINKED_NAME, "kind": "design",
+            "location": LINKED_LOCATION, "description": "the design system"
+        }])
+    } else {
+        json!([])
+    };
+    register_project(
+        state,
+        "proj-audited",
+        "audited",
+        &dir.to_string_lossy(),
+        json!({"briefing_notes": BRIEFING_MARKER, "linked_repos": linked_repos}),
+    )
+    .await;
+    for (index, (name, path)) in OTHER_PROJECTS.iter().enumerate() {
+        register_project(state, &format!("proj-other-{index}"), name, path, json!({})).await;
+    }
+}
+
+#[cfg(unix)]
+async fn sse_body(response: axum::response::Response) -> String {
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        axum::body::to_bytes(response.into_body(), 1 << 22),
+    )
+    .await
+    .expect("the audit stream ends")
+    .unwrap();
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+#[cfg(unix)]
+/// Every section a partial audit may refresh, as 1-based step numbers.
+fn refreshable_steps() -> Vec<usize> {
+    crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| crate::api::audit::partial_selectable(step))
+        .map(|(index, _)| index + 1)
+        .collect()
+}
+
+#[cfg(unix)]
+/// How many steps the pipeline runs: the foundation steps plus the chained
+/// sub-audits for a Full audit, every refreshable section for a partial one.
+fn expected_step_count(pipeline: &str) -> usize {
+    if pipeline == "full" {
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len()
+    } else {
+        refreshable_steps().len()
+    }
+}
+
+/// Run one audit pipeline to its end and return the prompt of every step, as the
+/// agent was handed it. The scripted `claude` records its stdin and its arguments,
+/// then ends a turn that wrote nothing: the steps fail their gates, which is of no
+/// interest here — only what each one was told is.
+#[cfg(unix)]
+async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
+    use axum::response::IntoResponse;
+    let tools = tempfile::tempdir().unwrap();
+    let log = tools.path().join("turns.log");
+    let script = format!(
+        "{{ cat; printf '%s\\n' \"$*\"; printf '%s\\n' '{TURN_SEPARATOR}'; }} >> '{}'\n{}",
+        log.display(),
+        r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done."}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}'"#
+    );
+    let fixture = crate::acp::test_support::write_fixture_script(tools.path(), &script);
+
+    let state = AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        )),
+        Arc::new(crate::db::Database::open_in_memory().unwrap()),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let project = tempfile::tempdir().unwrap();
+    audited_project_among_others(&state, project.path(), linked).await;
+    let project_path = project.path().to_string_lossy().into_owned();
+    let work_dir =
+        crate::agents::runner::resolve_agent_work_dir(Some(&project_path), &project_path).unwrap();
+    let _route = crate::agents::runner::test_acp_routes::route(
+        &work_dir,
+        Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+            fixture.to_string_lossy(),
+            None,
+            false,
+        )),
+    );
+
+    let response = if pipeline == "full" {
+        crate::api::audit::full::full_audit(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("proj-audited".to_string()),
+            axum::Json(crate::models::LaunchAuditRequest {
+                agent: AgentType::ClaudeCode,
+                tier: None,
+                kind: None,
+                custom_prompt: None,
+                resume_run_id: None,
+            }),
+        )
+        .await
+        .into_response()
+    } else {
+        crate::api::audit::drift::partial_audit(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("proj-audited".to_string()),
+            axum::Json(crate::models::PartialAuditRequest {
+                agent: AgentType::ClaudeCode,
+                tier: None,
+                steps: refreshable_steps(),
+            }),
+        )
+        .await
+        .into_response()
+    };
+    let stream = sse_body(response).await;
+    assert!(
+        !stream.contains("event: error"),
+        "the {pipeline} audit must start: {stream}"
+    );
+    let turns = std::fs::read_to_string(&log).unwrap_or_default();
+    let prompts: Vec<String> = turns
+        .split(TURN_SEPARATOR)
+        .filter(|turn| turn.contains(BRIEFING_MARKER))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        !prompts.is_empty(),
+        "the {pipeline} audit handed its agent no step prompt: {stream}"
+    );
+    prompts
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn no_step_of_the_full_or_partial_audit_names_an_unlinked_kronn_project() {
+    for pipeline in ["full", "partial"] {
+        let prompts = step_prompts_of(pipeline, false).await;
+        assert!(
+            prompts.len() >= expected_step_count(pipeline),
+            "{pipeline}: {} step prompts for {} steps",
+            prompts.len(),
+            expected_step_count(pipeline)
+        );
+        for prompt in &prompts {
+            for (name, path) in OTHER_PROJECTS {
+                assert!(!prompt.contains(name), "{pipeline}: prompt names {name}");
+                assert!(!prompt.contains(path), "{pipeline}: prompt names {path}");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_explicitly_linked_repo_stays_in_every_step_prompt_and_the_others_stay_out() {
+    for pipeline in ["full", "partial"] {
+        let prompts = step_prompts_of(pipeline, true).await;
+        assert!(
+            prompts.len() >= expected_step_count(pipeline),
+            "{pipeline}: {} step prompts for {} steps",
+            prompts.len(),
+            expected_step_count(pipeline)
+        );
+        for prompt in &prompts {
+            assert!(
+                prompt.contains(LINKED_NAME) && prompt.contains(LINKED_LOCATION),
+                "{pipeline}: the linked repo is a voluntary declaration and stays"
+            );
+            for (name, path) in OTHER_PROJECTS {
+                assert!(!prompt.contains(name), "{pipeline}: prompt names {name}");
+                assert!(!prompt.contains(path), "{pipeline}: prompt names {path}");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machines_projects() {
+    for pipeline in ["full", "partial"] {
+        for prompt in step_prompts_of(pipeline, false).await {
+            for retired in [
+                "Suggested companion repos",
+                "Other Kronn projects",
+                "andidate pool",
+                "companion-repo candidate",
+                "registered in Kronn",
+                "AGENTS.md at the path above",
+            ] {
+                assert!(
+                    !prompt.contains(retired),
+                    "{pipeline}: prompt still says {retired:?}"
+                );
+            }
+            // Only a linked repo is read through its `docs/AGENTS.md`; with none
+            // linked, no step tells the agent to open another repo's docs.
+            assert!(
+                !prompt.contains("<repo-path>/docs/AGENTS.md"),
+                "{pipeline}: a prompt with no linked repo sends the agent to another repo's docs"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_static_audit_prompt_carries_the_retired_companion_pool() {
+    let mut prompts: Vec<String> = Vec::new();
+    for kind in [
+        crate::models::AuditKind::Full,
+        crate::models::AuditKind::Security,
+        crate::models::AuditKind::Docker,
+    ] {
+        prompts.extend(
+            crate::api::audit::assemble_chained_steps(kind)
+                .iter()
+                .map(|step| step.prompt.to_string()),
+        );
+    }
+    prompts.push(crate::api::audit::PROMPT_PREAMBLE.to_string());
+    for language in ["en", "fr", "es"] {
+        prompts.push(crate::api::audit::helpers::build_briefing_prompt(
+            language, None,
+        ));
+        prompts.push(crate::api::audit::helpers::build_briefing_prompt(
+            language,
+            Some("notes"),
+        ));
+    }
+    for prompt in prompts {
+        assert!(!prompt.contains("Suggested companion repos"));
+        assert!(!prompt.contains("Other Kronn projects"));
+    }
+}
