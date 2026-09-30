@@ -705,7 +705,9 @@ pub fn tool_catalogue() -> Vec<Value> {
                 "name": "api_call",
                 "description": "Call a Kronn-configured API. Credentials are injected by \
                                 Kronn server-side and never exposed. Use mcp_list first to \
-                                find the plugin slug and endpoint path.",
+                                find the plugin slug and endpoint path. A large response is \
+                                shortened to fit your context window and cannot be re-read \
+                                whole: pass `extract` to get only the part you need.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -714,6 +716,12 @@ pub fn tool_catalogue() -> Vec<Value> {
                         "endpoint_path": { "type": "string", "description": "path from api_endpoints, e.g. /v1/sites" },
                         "method": { "type": "string", "description": "GET (default), POST, …" },
                         "query": { "type": "object", "description": "query-string parameters" },
+                        "extract": {
+                            "type": "object",
+                            "description": "JSONPath applied to the API response; only what it selects comes back. E.g. {\"path\": \"$.data[*]['name','id']\"}.",
+                            "properties": { "path": { "type": "string" } },
+                            "required": ["path"],
+                        },
                     },
                     "required": ["api_plugin_slug", "endpoint_path"],
                 },
@@ -1852,15 +1860,11 @@ impl ToolExecutor for KronnToolExecutor {
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "api_call" => {
-                let (Some(slug), Some(path)) = (
-                    call.arguments["api_plugin_slug"].as_str(),
-                    call.arguments["endpoint_path"].as_str(),
-                ) else {
-                    return fail(
-                        call,
-                        "missing required fields `api_plugin_slug` and/or `endpoint_path`",
-                    );
+                let mut req = match api_call_request(&call.arguments) {
+                    Ok(req) => req,
+                    Err(message) => return fail(call, message),
                 };
+                let slug = req.api_plugin_slug.clone().unwrap_or_default();
                 // Making the model carry a UUID across turns is a reliability
                 // tax it fails to pay: a 4B model paired `api-speedcurve` with
                 // Resend's config id (2026-08-09). Kronn owns that mapping, so
@@ -1868,10 +1872,10 @@ impl ToolExecutor for KronnToolExecutor {
                 // disambiguation hint, not a requirement.
                 let config_id = match call.arguments["api_config_id"].as_str() {
                     Some(explicit) if !explicit.trim().is_empty() => self
-                        .config_id_in_scope(slug, explicit)
+                        .config_id_in_scope(&slug, explicit)
                         .await
                         .then(|| explicit.to_string()),
-                    _ => self.resolve_config_id(slug).await,
+                    _ => self.resolve_config_id(&slug).await,
                 };
                 if config_id.is_none() {
                     return fail(
@@ -1879,26 +1883,11 @@ impl ToolExecutor for KronnToolExecutor {
                         format!("no API configuration wired for plugin `{slug}` — call mcp_list to see what is available"),
                     );
                 }
-                let req = crate::api::agent_api::AgentApiCallRequest {
-                    disc_id: self.disc_id.clone(),
-                    project_id: self.project_id.clone(),
-                    api_plugin_slug: Some(slug.to_string()),
-                    api_config_id: config_id,
-                    quick_api_id: None,
-                    endpoint_path: path.to_string(),
-                    method: call.arguments["method"].as_str().map(str::to_string),
-                    path_params: None,
-                    query: call.arguments["query"].as_object().map(|o| {
-                        o.iter()
-                            .map(|(k, v)| (k.clone(), as_plain_string(v)))
-                            .collect()
-                    }),
-                    body: call.arguments.get("body").cloned(),
-                    headers: None,
-                    extract: None,
-                    workflow_run_id: self.workflow_run_id.clone(),
-                    agent: Some(self.actor_id.clone()),
-                };
+                req.api_config_id = config_id;
+                req.disc_id = self.disc_id.clone();
+                req.project_id = self.project_id.clone();
+                req.workflow_run_id = self.workflow_run_id.clone();
+                req.agent = Some(self.actor_id.clone());
                 let Json(res) =
                     crate::api::agent_api::agent_api_call(State(self.state.clone()), Json(req))
                         .await;
@@ -4137,6 +4126,66 @@ fn compact_quick_apis(items: &Value, project_id: Option<&str>) -> Value {
     json!({ "quick_apis": list })
 }
 
+/// The broker request an `api_call` stands for, from what the model wrote.
+/// Who is asking (discussion, project, configuration, run, actor) is Kronn's to
+/// fill in, never the model's, so those fields are left for the caller.
+fn api_call_request(
+    arguments: &Value,
+) -> Result<crate::api::agent_api::AgentApiCallRequest, String> {
+    let (Some(slug), Some(path)) = (
+        arguments["api_plugin_slug"].as_str(),
+        arguments["endpoint_path"].as_str(),
+    ) else {
+        return Err("missing required fields `api_plugin_slug` and/or `endpoint_path`".into());
+    };
+    Ok(crate::api::agent_api::AgentApiCallRequest {
+        disc_id: None,
+        project_id: None,
+        api_plugin_slug: Some(slug.to_string()),
+        api_config_id: None,
+        quick_api_id: None,
+        endpoint_path: path.to_string(),
+        method: arguments["method"].as_str().map(str::to_string),
+        path_params: None,
+        query: arguments["query"].as_object().map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), as_plain_string(v)))
+                .collect()
+        }),
+        body: arguments.get("body").cloned(),
+        headers: None,
+        extract: api_call_extract(arguments)?,
+        workflow_run_id: None,
+        agent: None,
+    })
+}
+
+/// The `extract` a model attached to an `api_call`, in the shape the broker
+/// already takes from workflows (`ExtractSpec`). A bare JSONPath string is
+/// accepted as its `path`: local models write that as often as the object, and
+/// refusing it costs a turn to teach a spelling.
+pub(crate) fn api_call_extract(
+    arguments: &Value,
+) -> Result<Option<crate::models::ExtractSpec>, String> {
+    let path_error =
+        "`extract` needs a JSONPath in `path`, e.g. {\"path\": \"$.data[*]['name','id']\"}";
+    let spec = match arguments.get("extract") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(path)) => crate::models::ExtractSpec {
+            path: path.clone(),
+            fallback: None,
+            fail_on_empty: true,
+        },
+        Some(object @ Value::Object(_)) => serde_json::from_value(object.clone())
+            .map_err(|error| format!("invalid `extract`: {error}. {path_error}"))?,
+        Some(_) => return Err(format!("invalid `extract`: {path_error}")),
+    };
+    if spec.path.trim().is_empty() {
+        return Err(format!("empty `extract`: {path_error}"));
+    }
+    Ok(Some(spec))
+}
+
 /// Collapse a handler's `ApiResponse` into the payload the model sees.
 fn unwrap_api<T: serde::Serialize>(
     call: &ToolCall,
@@ -5403,6 +5452,119 @@ mod tests {
             by_name("task_update_dod")["function"]["parameters"]["required"],
             serde_json::json!(["task_id", "dod_id", "completed"])
         );
+    }
+
+    /// A shortened result tells the model to ask for a part of it, which it can
+    /// only do if the tool takes a way to say which part. `extract` was accepted
+    /// by the broker and by the CLI bridge, and missing from this declaration.
+    #[test]
+    fn api_call_declares_extract_and_says_why_to_use_it() {
+        let items = tool_catalogue();
+        let api_call = items
+            .iter()
+            .find(|item| item["function"]["name"] == "api_call")
+            .expect("api_call is declared");
+        let extract = &api_call["function"]["parameters"]["properties"]["extract"];
+        assert_eq!(extract["type"], "object");
+        assert_eq!(extract["properties"]["path"]["type"], "string");
+        assert_eq!(extract["required"], serde_json::json!(["path"]));
+        assert!(
+            api_call["function"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("large response") && text.contains("`extract`")),
+            "the description must say when `extract` is for: a large response"
+        );
+        // Optional: a small response needs none, and the model is not asked for it.
+        assert_eq!(
+            api_call["function"]["parameters"]["required"],
+            serde_json::json!(["api_plugin_slug", "endpoint_path"])
+        );
+    }
+
+    #[test]
+    fn api_call_hands_its_extract_query_and_method_to_the_broker() {
+        let request = api_call_request(&json!({
+            "api_plugin_slug": "api-speedcurve",
+            "endpoint_path": "/v1/tests",
+            "method": "GET",
+            "query": { "site_id": 4, "per_page": "100" },
+            "extract": { "path": "$.data[*]['browser','largest_contentful_paint']" },
+        }))
+        .expect("a complete call");
+
+        let extract = request.extract.expect("the extract reaches the broker");
+        assert_eq!(
+            extract.path,
+            "$.data[*]['browser','largest_contentful_paint']"
+        );
+        assert!(
+            extract.fail_on_empty,
+            "a path that matches nothing is reported to the model, not passed off as data"
+        );
+        assert_eq!(request.endpoint_path, "/v1/tests");
+        assert_eq!(request.method.as_deref(), Some("GET"));
+        let query = request.query.expect("query");
+        assert_eq!(query.get("site_id").map(String::as_str), Some("4"));
+        assert_eq!(query.get("per_page").map(String::as_str), Some("100"));
+        // Who is asking is Kronn's to say.
+        assert!(request.disc_id.is_none() && request.agent.is_none());
+    }
+
+    #[test]
+    fn a_call_without_extract_asks_for_the_whole_response_as_before() {
+        for arguments in [
+            json!({ "api_plugin_slug": "p", "endpoint_path": "/x" }),
+            json!({ "api_plugin_slug": "p", "endpoint_path": "/x", "extract": null }),
+        ] {
+            assert!(api_call_request(&arguments).unwrap().extract.is_none());
+        }
+        let error = api_call_request(&json!({ "endpoint_path": "/x" })).unwrap_err();
+        assert!(error.contains("api_plugin_slug"), "{error}");
+    }
+
+    #[test]
+    fn api_call_accepts_the_extract_spellings_a_local_model_writes() {
+        // The object the broker documents, with its optional fields.
+        let object = api_call_extract(&json!({
+            "extract": { "path": "$.items", "fallback": [], "fail_on_empty": false }
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(object.path, "$.items");
+        assert_eq!(object.fallback, Some(json!([])));
+        assert!(!object.fail_on_empty);
+
+        // The bare JSONPath, which is what a small model reaches for.
+        let bare = api_call_extract(&json!({ "extract": "$.items[*].id" }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bare.path, "$.items[*].id");
+        assert!(bare.fail_on_empty);
+    }
+
+    #[test]
+    fn a_malformed_extract_is_refused_with_the_spelling_to_use() {
+        for arguments in [
+            json!({ "extract": {} }),
+            json!({ "extract": { "path": "" } }),
+            json!({ "extract": "   " }),
+            json!({ "extract": 12 }),
+            json!({ "extract": ["$.a"] }),
+        ] {
+            let error = api_call_extract(&arguments).expect_err(&arguments.to_string());
+            assert!(
+                error.contains("\"path\"") && error.contains("$.data"),
+                "the refusal must show a working extract: {error}"
+            );
+        }
+        // And it is refused before the call, so nothing is sent for it.
+        let error = api_call_request(&json!({
+            "api_plugin_slug": "p",
+            "endpoint_path": "/x",
+            "extract": 12,
+        }))
+        .unwrap_err();
+        assert!(error.contains("extract"), "{error}");
     }
 
     #[test]

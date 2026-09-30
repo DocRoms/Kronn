@@ -1991,6 +1991,595 @@ mod tests {
         );
     }
 
+    // ── KT-929: a result too big for the window says what it holds and how to ask
+    // for a part of it ──────────────────────────────────────────────────────────
+
+    /// One `/v1/tests` page the way SpeedCurve answers it: a run weighs about
+    /// 2 KB, its metrics are nested under `metrics`, the paging is under `meta`.
+    /// A hundred runs is the ~200 KB answer that used to end a turn half done.
+    fn speedcurve_tests_page(rows: usize) -> serde_json::Value {
+        let metrics = |run: usize| {
+            ["lcp", "fcp", "inp", "ttfb"]
+                .into_iter()
+                .map(str::to_string)
+                .chain((0..32).map(|n| format!("metric_{n:02}")))
+                .enumerate()
+                .map(|(n, name)| (name, serde_json::json!(1000 + (run * 7 + n) % 900)))
+                .collect::<serde_json::Map<_, _>>()
+        };
+        serde_json::json!({
+            "data": (0..rows).map(|run| serde_json::json!({
+                "test_id": format!("t-{run:04}"),
+                "site_id": 4,
+                "url": format!("https://www.euronews.com/2026/09/{:02}/story-{run}", 1 + run % 28),
+                "browser": if run % 2 == 0 { "Chrome" } else { "Firefox" },
+                "day": format!("2026-09-{:02}", 1 + run % 28),
+                "region": "eu-west-1",
+                "status": "completed",
+                "metrics": metrics(run),
+                "waterfall": "GET /static/app.js 200;".repeat(52),
+            })).collect::<Vec<_>>(),
+            "links": { "next": "https://api.speedcurve.com/v1/tests?page=2", "prev": null },
+            "meta": { "current_page": 1, "per_page": rows, "total": 1240, "last_page": 13 },
+        })
+    }
+
+    /// An `api_call` round as the loop records it: what the model asked, and
+    /// what the tool answered, in the envelope `api_call` really returns.
+    fn push_api_call_round(
+        body: &mut serde_json::Value,
+        id: &str,
+        arguments: serde_json::Value,
+        data: serde_json::Value,
+    ) {
+        use crate::agents::tools::{
+            assistant_tool_call_message, tool_result_message, ToolCall, ToolOutcome,
+        };
+        let call = ToolCall {
+            id: id.to_string(),
+            name: "api_call".to_string(),
+            arguments,
+        };
+        let envelope = crate::api::agent_api::AgentApiCallResponse {
+            success: true,
+            duration_ms: 812,
+            data: Some(data),
+            status: "OK".to_string(),
+            summary: "GET https://api.speedcurve.com/v1/tests".to_string(),
+            http_status: Some(200),
+            error: None,
+        };
+        let outcome = ToolOutcome {
+            call: call.clone(),
+            content: serde_json::to_value(&envelope).unwrap(),
+            ok: true,
+        };
+        let messages = body["messages"].as_array_mut().unwrap();
+        messages.push(assistant_tool_call_message(&[call], false));
+        messages.push(tool_result_message(&outcome));
+    }
+
+    /// What a discussion with an Ollama agent sends: its identity and notices,
+    /// the user's question, the full native catalogue, and the window Ollama
+    /// already fixed when it loaded the model.
+    fn discussion_body(window: u64) -> serde_json::Value {
+        let system = format!(
+            "{}\n\n{}",
+            http_agent_identity_context(&AgentType::Ollama, "qwen3.8:27b-mlx"),
+            http_agent_tools_notice(true)
+        );
+        let mut body = build_ollama_chat_body(
+            "qwen3.8:27b-mlx",
+            &system,
+            "Tu peux me vérifier les derniers CWV via SpeedCurve ?",
+            None,
+            window,
+            None,
+        );
+        body["tools"] =
+            serde_json::Value::Array(crate::api::agent_tools::full_discussion_catalogue());
+        body["options"]["num_ctx"] = serde_json::json!(window);
+        body
+    }
+
+    fn last_tool_content(body: &serde_json::Value) -> String {
+        body["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Every `{"path":"…"}` a note offers as an example.
+    fn example_paths(text: &str) -> Vec<String> {
+        text.split("{\"path\":\"")
+            .skip(1)
+            .filter_map(|rest| rest.split("\"}").next().map(str::to_string))
+            .collect()
+    }
+
+    fn selects_something(path: &str, response: &serde_json::Value) -> bool {
+        serde_json_path::JsonPath::parse(path)
+            .is_ok_and(|parsed| !parsed.query(response).all().is_empty())
+    }
+
+    #[test]
+    fn a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part() {
+        let response = speedcurve_tests_page(100);
+        assert!(
+            response.to_string().len() > 195_000,
+            "the fixture stands for a ~200 KB answer"
+        );
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({
+                "api_plugin_slug": "api-speedcurve",
+                "endpoint_path": "/v1/tests",
+                "query": { "site_id": "4", "per_page": "100" },
+            }),
+            response.clone(),
+        );
+
+        clamp_ollama_tool_results(&mut body, 32_768);
+
+        let shortened: serde_json::Value =
+            serde_json::from_str(&last_tool_content(&body)).expect("still valid JSON");
+        assert_eq!(shortened["kronn_shortened"], true);
+        let shape = &shortened["shape"];
+        // The keys of the response, with the paging shown as values: it is what
+        // the model needs to go on, and the first thing a fact budget loses.
+        assert_eq!(shape["keys"]["data"], "array[100]");
+        assert_eq!(shape["keys"]["meta"]["last_page"], 13);
+        assert_eq!(shape["keys"]["meta"]["total"], 1240);
+        // The collection: where it is, how long, what one element holds —
+        // nested metrics included, since that is where the answer is.
+        assert_eq!(shape["collection"]["path"], "$.data");
+        assert_eq!(shape["collection"]["length"], 100);
+        let item = &shape["collection"]["item_keys"];
+        assert_eq!(item["url"], "string");
+        for name in ["lcp", "fcp", "inp", "ttfb"] {
+            assert_eq!(item["metrics"][name], "number", "{name} must be visible");
+        }
+        // And a way to ask, with paths that work on this very response.
+        let note = shortened["note"].as_str().unwrap();
+        assert!(note.contains("`extract`"), "{note}");
+        let examples = example_paths(note);
+        assert!(
+            examples.len() >= 3,
+            "scalar fields, a nested object and one whole element: {examples:?}"
+        );
+        for path in &examples {
+            assert!(
+                selects_something(path, &response),
+                "an example that selects nothing teaches nothing: {path}"
+            );
+        }
+        assert!(examples.contains(&"$.data[0]".to_string()), "{examples:?}");
+        assert!(
+            examples.iter().any(|path| path.contains(".metrics[")),
+            "a nested example: {examples:?}"
+        );
+        assert!(
+            shortened.to_string().len() < 16_000,
+            "the shortened result must leave room: {} B",
+            shortened.to_string().len()
+        );
+    }
+
+    /// The case that started this: the 200 KB answer, a 32K window, and a model
+    /// that has to get LCP, FCP, INP and TTFB out of it. The whole answer cannot
+    /// be kept, so the first result is shortened; one targeted call then returns
+    /// exactly the four metrics of every run, unshortened, inside the window.
+    #[test]
+    fn a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window() {
+        const WINDOW: u64 = 32_768;
+        let response = speedcurve_tests_page(100);
+        let mut body = discussion_body(WINDOW);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({
+                "api_plugin_slug": "api-speedcurve",
+                "endpoint_path": "/v1/tests",
+                "query": { "site_id": "4", "per_page": "100" },
+            }),
+            response.clone(),
+        );
+        let unclamped = estimated_chat_history_tokens(&body);
+        let response_bytes = last_tool_content(&body).len();
+        assert!(
+            unclamped > WINDOW,
+            "unclamped, the answer does not fit the window"
+        );
+
+        clamp_ollama_tool_results(&mut body, WINDOW);
+
+        assert!(estimated_chat_history_tokens(&body) <= WINDOW);
+        let first: serde_json::Value = serde_json::from_str(&last_tool_content(&body)).unwrap();
+        let shortened_bytes = last_tool_content(&body).len();
+        assert!(
+            !first.to_string().contains("t-0099"),
+            "what was lost is what the model cannot answer from: the last runs are not in the first result"
+        );
+
+        // The model's next move, from what the shortened result tells it: the
+        // collection's path, and the member whose object holds the four metrics.
+        let shape = &first["shape"]["collection"];
+        let nested = shape["item_keys"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, value)| {
+                ["lcp", "fcp", "inp", "ttfb"]
+                    .iter()
+                    .all(|name| value.get(name).is_some())
+            })
+            .map(|(key, _)| key.clone())
+            .expect("the shape shows which field holds the metrics");
+        let path = format!(
+            "{}[*].{nested}['lcp','fcp','inp','ttfb']",
+            shape["path"].as_str().unwrap()
+        );
+        let extract = crate::api::agent_tools::api_call_extract(
+            &serde_json::json!({ "extract": { "path": path } }),
+        )
+        .expect("the tool accepts it")
+        .expect("and keeps it");
+        let part = crate::workflows::api_call_step::apply_extract(&extract, &response)
+            .expect("a valid path")
+            .value;
+        push_api_call_round(
+            &mut body,
+            "c2",
+            serde_json::json!({
+                "api_plugin_slug": "api-speedcurve",
+                "endpoint_path": "/v1/tests",
+                "query": { "site_id": "4", "per_page": "100" },
+                "extract": { "path": path },
+            }),
+            part,
+        );
+
+        clamp_ollama_tool_results(&mut body, WINDOW);
+
+        assert!(
+            estimated_chat_history_tokens(&body) <= WINDOW,
+            "the targeted answer fits beside the rest of the conversation"
+        );
+        let answer: serde_json::Value = serde_json::from_str(&last_tool_content(&body))
+            .expect("the targeted result is whole, valid JSON");
+        assert!(
+            answer.get("kronn_shortened").is_none(),
+            "a targeted answer is not shortened again"
+        );
+        let expected: Vec<serde_json::Value> = response["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|run| {
+                ["lcp", "fcp", "inp", "ttfb"]
+                    .iter()
+                    .map(|name| run["metrics"][name].clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(expected.len(), 400);
+        assert_eq!(
+            answer["data"],
+            serde_json::Value::Array(expected),
+            "LCP, FCP, INP and TTFB of every run, in one call"
+        );
+        println!(
+            "\nresponse {response_bytes} B ({unclamped} tokens estimated with the conversation) \
+             -> shortened {shortened_bytes} B, shape {} B -> targeted answer {} B, \
+             conversation {} tokens of {WINDOW} (catalogue {} B)",
+            first["shape"].to_string().len(),
+            last_tool_content(&body).len(),
+            estimated_chat_history_tokens(&body),
+            body["tools"].to_string().len(),
+        );
+    }
+
+    #[test]
+    fn a_wide_record_is_listed_up_to_a_bound_and_one_whole_element_stays_one_call_away() {
+        // The real /v1/tests row is flat with 80+ fields: listing them all would
+        // spend the room the shortening just made.
+        let rows: Vec<serde_json::Value> = (0..60)
+            .map(|run| {
+                let mut row = serde_json::Map::new();
+                for n in 0..84 {
+                    row.insert(format!("field_{n:02}"), serde_json::json!(run * 100 + n));
+                }
+                row.insert("notes".into(), serde_json::json!("x".repeat(3_000)));
+                serde_json::Value::Object(row)
+            })
+            .collect();
+        let response = serde_json::json!({ "data": rows, "meta": { "last_page": 3 } });
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({ "api_plugin_slug": "p", "endpoint_path": "/v1/tests" }),
+            response.clone(),
+        );
+
+        clamp_ollama_tool_results(&mut body, 32_768);
+
+        let shortened: serde_json::Value = serde_json::from_str(&last_tool_content(&body)).unwrap();
+        let item = shortened["shape"]["collection"]["item_keys"]
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            item.len(),
+            SHAPE_MAX_KEYS + 1,
+            "the bound, and the count left out"
+        );
+        assert_eq!(item["…"], "45 more keys");
+        assert!(
+            shortened["shape"].to_string().len() < 4_000,
+            "{} B",
+            shortened["shape"].to_string().len()
+        );
+        // What is not listed is one call away.
+        let examples = example_paths(shortened["note"].as_str().unwrap());
+        assert!(examples.contains(&"$.data[0]".to_string()), "{examples:?}");
+        assert!(examples
+            .iter()
+            .all(|path| selects_something(path, &response)));
+    }
+
+    #[test]
+    fn a_result_that_was_already_an_extract_is_told_to_select_less_not_given_paths_that_do_not_apply(
+    ) {
+        // Paths over an extract's output are not paths over the response the next
+        // `extract` runs on: offering them would send the model to empty results.
+        let response = speedcurve_tests_page(100);
+        let run = |extracted: serde_json::Value| {
+            let mut body = discussion_body(32_768);
+            push_api_call_round(
+                &mut body,
+                "c1",
+                serde_json::json!({
+                    "api_plugin_slug": "api-speedcurve",
+                    "endpoint_path": "/v1/tests",
+                    "extract": { "path": "$.data" },
+                }),
+                extracted,
+            );
+            clamp_ollama_tool_results(&mut body, 32_768);
+            last_tool_content(&body)
+        };
+
+        // An extract that came back as a list keeps its items and a note after them.
+        let as_list = run(response["data"].clone());
+        let (_, note) = as_list
+            .split_once("\n\n[compacted by Kronn:")
+            .expect("the list keeps its items");
+        assert!(
+            note.contains("already the result of your `extract`"),
+            "{note}"
+        );
+        assert!(example_paths(note).is_empty(), "{note}");
+
+        // One that came back as an object is shortened to an envelope.
+        let as_object = run(serde_json::json!({ "runs": response["data"].clone() }));
+        let shortened: serde_json::Value = serde_json::from_str(&as_object).unwrap();
+        assert_eq!(shortened["kronn_shortened"], true);
+        assert!(shortened.get("shape").is_none());
+        let note = shortened["note"].as_str().unwrap();
+        assert!(
+            note.contains("already the result of your `extract`"),
+            "{note}"
+        );
+        assert!(example_paths(note).is_empty(), "{note}");
+    }
+
+    #[test]
+    fn a_collection_note_offers_paths_that_work_when_the_tool_can_take_an_extract() {
+        let response = serde_json::Value::Array(
+            (0..43)
+                .map(|i| {
+                    serde_json::json!({
+                        "id": format!("svc-{i}"),
+                        "name": format!("service-{i}"),
+                        "versions": (0..400).collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+        );
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({ "api_plugin_slug": "api-fastly", "endpoint_path": "/service" }),
+            response.clone(),
+        );
+
+        clamp_ollama_tool_results(&mut body, 32_768);
+
+        let trimmed = last_tool_content(&body);
+        let (_, note) = trimmed
+            .split_once("\n\n[compacted by Kronn:")
+            .expect("the inventory keeps its items");
+        let examples = example_paths(note);
+        assert!(
+            examples.contains(&"$[*]['id','name']".to_string()),
+            "{examples:?}"
+        );
+        assert!(examples.contains(&"$[0]".to_string()), "{examples:?}");
+        assert!(examples
+            .iter()
+            .all(|path| selects_something(path, &response)));
+    }
+
+    #[test]
+    fn shortening_a_result_twice_keeps_its_note_and_shape_and_still_shrinks() {
+        let response = speedcurve_tests_page(100);
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({ "api_plugin_slug": "api-speedcurve", "endpoint_path": "/v1/tests" }),
+            response,
+        );
+        clamp_ollama_tool_results(&mut body, 32_768);
+        let once = last_tool_content(&body);
+
+        // Another result arrives and the same message has to give up more.
+        let again = compact_tool_result(&once, 600, None).expect("it can still give something up");
+        let twice: serde_json::Value = serde_json::from_str(&again).unwrap();
+
+        assert!(again.len() < once.len());
+        assert_eq!(
+            twice["original_bytes"],
+            serde_json::from_str::<serde_json::Value>(&once).unwrap()["original_bytes"],
+            "the size reported is the response's, not the envelope's"
+        );
+        assert_eq!(twice["shape"]["collection"]["path"], "$.data");
+        assert!(twice["note"].as_str().unwrap().contains("`extract`"));
+    }
+
+    #[test]
+    fn a_tool_without_an_extract_is_shortened_as_before() {
+        let mut body = discussion_body(32_768);
+        body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "role": "tool", "tool_call_id": "c1", "name": "read_file",
+                "content": serde_json::json!({
+                    "path": "src/main.rs", "content_sha256": "ab12", "content": "x".repeat(90_000),
+                }).to_string(),
+            }));
+        clamp_ollama_tool_results(&mut body, 32_768);
+        let kept = last_tool_content(&body);
+        assert!(
+            !kept.contains("extract") && !kept.contains("\"shape\""),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("ask for a part you have not seen yet"),
+            "{kept}"
+        );
+    }
+
+    /// A call that differs from an earlier one only by its `extract`, or by a
+    /// query parameter, is a new question with a new answer. Answering it as a
+    /// repeat told the model to stop, about the very call meant to get past a
+    /// shortened result.
+    #[test]
+    fn an_api_call_that_only_changes_its_extract_or_its_query_is_not_a_repeat() {
+        let base = serde_json::json!({
+            "api_plugin_slug": "api-speedcurve",
+            "endpoint_path": "/v1/tests",
+            "query": { "site_id": "4" },
+        });
+        let with_extract = |path: &str| {
+            let mut arguments = base.clone();
+            arguments["extract"] = serde_json::json!({ "path": path });
+            arguments
+        };
+        let signature =
+            |arguments: &serde_json::Value| tool_call_signature("api_call", arguments).1;
+
+        // The whole response, then two different parts of it.
+        assert_ne!(
+            signature(&base),
+            signature(&with_extract("$.data[*]['lcp']"))
+        );
+        assert_ne!(
+            signature(&with_extract("$.data[*]['lcp']")),
+            signature(&with_extract("$.data[*]['fcp']"))
+        );
+        // The same call for another page, or another period.
+        let mut next_page = base.clone();
+        next_page["query"]["page"] = serde_json::json!("2");
+        assert_ne!(signature(&base), signature(&next_page));
+        let mut other_period = base.clone();
+        other_period["query"]["start_timestamp"] = serde_json::json!("1790000000");
+        assert_ne!(signature(&base), signature(&other_period));
+        // A call that really is the same stays the same, however its keys are ordered.
+        let reordered = serde_json::json!({
+            "query": { "site_id": "4" },
+            "endpoint_path": "/v1/tests",
+            "api_plugin_slug": "api-speedcurve",
+        });
+        assert_eq!(signature(&base), signature(&reordered));
+        assert_eq!(
+            signature(&with_extract("$.data[*]['lcp']")),
+            signature(&with_extract("$.data[*]['lcp']"))
+        );
+    }
+
+    /// What `qwen3.8:27b-mlx` is given on a 64 GB Mac, by each rule that can
+    /// decide it, computed by the functions a run calls. A discussion is not a
+    /// worker: the 32K MLX ceiling exists for a worker's long exploration and
+    /// never applies to the principal the user talks to.
+    #[test]
+    fn the_window_qwen38_mlx_gets_on_a_64_gb_mac_depends_on_who_is_running_it() {
+        use crate::agents::tools::ToolRunMode;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MODEL: &str = "qwen3.8:27b-mlx";
+        const TRAINED: u64 = 262_144;
+
+        // Nothing is known of the weights or the cache yet: the memory band.
+        let ceiling = ram_ceiling_for_model(Some(64 * GIB), None, None);
+        assert_eq!(ceiling, 65_536);
+        let resolved = resolve_ctx_cap_within(None, Some(TRAINED), ceiling);
+        assert_eq!(resolved.value, 65_536);
+        assert_eq!(
+            resolved.origin,
+            CtxCapOrigin::MachineCeiling {
+                model_limit: TRAINED
+            }
+        );
+
+        let policy = worker_exploration_policy(MODEL, Some("safetensors"), false, true);
+        assert!(policy.mlx_mitigation, "the model is detected as native MLX");
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::General, policy),
+            65_536,
+            "a discussion runs at the memory band"
+        );
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::Worker, policy),
+            32_768,
+            "a worker is held at the MLX ceiling"
+        );
+
+        // A persistent per-model override replaces the band — lower or higher —
+        // and a worker stays under the MLX ceiling whatever it says.
+        for (override_tokens, discussion, worker) in [
+            (32_768, 32_768, 32_768),
+            (100_000, 100_000, 32_768),
+            (16_384, 16_384, 16_384),
+        ] {
+            let overrides = std::collections::HashMap::from([(MODEL.to_string(), override_tokens)]);
+            let cap = resolve_ctx_cap_for_model(None, MODEL, &overrides, Some(TRAINED), ceiling);
+            assert_eq!(cap.origin, CtxCapOrigin::ModelOverride);
+            assert_eq!(
+                worker_effective_ctx_cap(cap.value, ToolRunMode::General, policy),
+                discussion
+            );
+            assert_eq!(
+                worker_effective_ctx_cap(cap.value, ToolRunMode::Worker, policy),
+                worker
+            );
+        }
+        // The operator's break-glass variable beats the override.
+        let overrides = std::collections::HashMap::from([(MODEL.to_string(), 100_000)]);
+        let env = resolve_ctx_cap_for_model(
+            Some("24576".into()),
+            MODEL,
+            &overrides,
+            Some(TRAINED),
+            ceiling,
+        );
+        assert_eq!(env.value, 24_576);
+        assert_eq!(env.origin, CtxCapOrigin::OperatorOverride);
+    }
+
     #[test]
     fn clamp_trims_against_the_window_actually_granted() {
         // Regression: a one-line question sized the window near the floor, then

@@ -339,6 +339,64 @@ and is judged by the gates. Whether those ceilings suit a step that writes many
 files is a question for the bench this was built for, not something to tune here
 unmeasured — see the rule at the top of this file.
 
+## Asking for part of an API response (KT-929)
+
+An HTTP agent's context window is fixed when its model loads, and a 200 KB API
+answer does not fit a 32K one. Kronn shortens such a result before the next
+request, which is a protocol fact and stays. What was missing was the other half
+of the sentence the shortened result carried, "ask for a part you have not seen":
+`api_call` had no argument to say which part. The broker already took an
+`extract` (`AgentApiCallRequest.extract`, the workflows' `ExtractSpec`) and the
+CLI bridge already declared it; the native declaration had no such argument and
+its handler passed `extract: None`. The discussion that prompted KT-929 asked
+about the latest Core Web Vitals on SpeedCurve: six successful `/v1/tests` calls,
+each too big for the window, a model re-issuing the same or neighbouring calls
+because it could not select anything, refusals, a forced end of the tool loop, and
+an answer with LCP, FCP, INP and TTFB missing.
+
+This is a capability and an information, not a behavioural aid, so the rule at
+the top of this file does not ask for a measured benefit across models before
+shipping it. Three things changed:
+
+- **`api_call` takes `extract`.** An object `{"path": "<JSONPath>"}`, with the
+  optional `fallback` and `fail_on_empty` of `ExtractSpec`; a bare JSONPath string
+  is accepted as its `path`. An empty or malformed value is refused with a working
+  example before anything is sent. The declaration says why: a large response is
+  shortened and cannot be re-read whole
+  [src: file: backend/src/api/agent_tools.rs:719]
+  [src: file: backend/src/api/agent_tools.rs:4167].
+- **A shortened API result says what it holds.** Its `shape` lists the response's
+  keys (small flat objects such as `meta` and `links` by value, so the paging is
+  visible), the path and length of the main list, and the keys of one element down
+  to its nested objects, up to 40 names per level with the count of those left
+  out. The note gives `extract` examples built from that shape and checked against
+  the original response (each is parsed and run; one that selects nothing is not
+  offered), plus the path of one whole element to see every key. The shape is
+  derived from the original result before any cutting, so a result shortened again
+  on a later turn keeps it. A result that was already an extract gets no paths,
+  which would not apply to the response the next `extract` runs on, and is told to
+  select less. Other tools are shortened exactly as before
+  [src: file: backend/src/agents/runner.rs:5528]
+  [src: file: backend/src/agents/runner.rs:5829].
+- **A call that differs only by its `extract` or its query is not a repeat.** The
+  duplicate guard compares the tool name and every argument, sorted by key, so an
+  identical call is still replayed once and then refused, and a call with another
+  `extract`, page or period runs [src: file: backend/src/agents/runner.rs:854].
+
+Measured by the test that plays the whole exchange on a hundred runs of about 2 KB
+each, with their metrics nested, the full native catalogue (44,634 B) and a 32,768
+token window: the 198,119 B answer is shortened to 8,005 B, of which the shape is
+1,071 B; the model reads the shape, sends one call with
+`$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
+unshortened; the conversation then stands at 19,319 estimated tokens of 32,768
+[src: file: backend/src/agents/runner_test.rs:2175].
+
+What this does not show: how often a model writes the extract it is shown, or
+writes a good one unprompted. The "model" in that test reads the shape and follows
+it; it is not a model. The broker's HTTP path refuses loopback addresses, so the
+test stops at the extraction the broker applies (`apply_extract` on the parsed
+spec) and does not go through a live `agent_api_call`.
+
 ## Judging a future request
 
 ### Workflow authoring (KT-673)

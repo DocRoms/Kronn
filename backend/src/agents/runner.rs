@@ -843,6 +843,27 @@ fn annotate_worker_exploration(
     );
 }
 
+/// What the duplicate guard compares: the canonical arguments and the
+/// `name|arguments` signature built from them.
+///
+/// Canonical: serde_json preserves insertion order, so the same call re-emitted
+/// with its keys in another order would otherwise look new. Sorting the pairs
+/// makes the signature about content. Every argument counts, so an `api_call`
+/// that only adds an `extract` or changes a query parameter asks a different
+/// question and is run, not answered as a repeat of the call it follows.
+fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, String) {
+    let canonical_args = match arguments.as_object() {
+        Some(map) => {
+            let mut pairs: Vec<_> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            pairs.sort();
+            pairs.join(",")
+        }
+        None => arguments.to_string(),
+    };
+    let signature = format!("{name}|{canonical_args}");
+    (canonical_args, signature)
+}
+
 /// A successful tool call that teaches the model nothing is invisible to every
 /// other guard here: it is not an error, and varying one argument gives it a
 /// fresh signature. Both loops measured on real delegations had that shape —
@@ -5521,41 +5542,394 @@ pub(crate) fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
     num_predict_for(num_ctx, std::env::var("KRONN_OLLAMA_NUM_PREDICT").ok())
 }
 
+/// Most names a shape lists per level. A wider record is cut with a count, and
+/// the whole-element example shows the rest.
+const SHAPE_MAX_KEYS: usize = 40;
+/// Names kept per level in the smaller rendering, for a window with no room left.
+const SHAPE_BRIEF_KEYS: usize = 12;
+/// Longest string a shape shows as a value rather than as a type.
+const SHAPE_INLINE_CHARS: usize = 40;
+
+/// How to ask again for a part of an API response that was shortened to fit
+/// the window. Shortening a result and saying "ask for a part you have not
+/// seen" is an invitation the model cannot follow unless it knows what the
+/// response holds and has a way to select a piece of it: this carries both.
+/// Built from the ORIGINAL response, before any shortening, so it stays true
+/// however many times the message is cut.
+struct PartialReadHint {
+    /// The layout in full: the response's keys and the main collection's item
+    /// keys one level deep. `None` when the call was already an extract, whose
+    /// layout is not the response's and so cannot be addressed by a new one.
+    full: Option<serde_json::Value>,
+    /// The same, with fewer names per level, for a window with no room left.
+    brief: Option<serde_json::Value>,
+    /// Working JSONPaths over the response, checked against it.
+    examples: Vec<String>,
+    /// The path to one whole element of the main collection.
+    one_item: Option<String>,
+    already_extracted: bool,
+}
+
+impl PartialReadHint {
+    fn shape(&self, brief: bool) -> Option<&serde_json::Value> {
+        if brief {
+            self.brief.as_ref()
+        } else {
+            self.full.as_ref()
+        }
+    }
+
+    /// The instruction appended to a shortened result, with paths that work on
+    /// this very response.
+    fn how_to_ask(&self) -> String {
+        if self.already_extracted {
+            return "This is already the result of your `extract`: make its `path` select \
+                    less — fewer fields (`['a','b']`) or fewer elements (`[0:5]`) — or ask the \
+                    API for a smaller page or a filter in `query`."
+                .to_string();
+        }
+        let mut text = String::from(
+            "To read a part of the response, call `api_call` again with an `extract`, a \
+             JSONPath applied to the response itself, and only what it selects comes back.",
+        );
+        for (index, path) in self.examples.iter().enumerate() {
+            text.push_str(if index == 0 { " For example " } else { ", or " });
+            text.push_str(&serde_json::json!({ "path": path }).to_string());
+        }
+        if let Some(path) = &self.one_item {
+            text.push_str(&format!(
+                ". One whole element, to see all its keys: {}",
+                serde_json::json!({ "path": path })
+            ));
+        }
+        text.push('.');
+        text
+    }
+}
+
+/// A JSONPath member accessor for `key`: `.key` for a plain identifier,
+/// `['key']` otherwise. `None` for a name the quoted form cannot carry.
+fn path_member(key: &str) -> Option<String> {
+    let plain = key
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain {
+        return Some(format!(".{key}"));
+    }
+    path_name(key).map(|name| format!("[{name}]"))
+}
+
+/// `'key'`, the quoted name selector, or `None` when the name would need an
+/// escape a model is unlikely to copy faithfully.
+fn path_name(key: &str) -> Option<String> {
+    (!key
+        .chars()
+        .any(|c| c == '\'' || c == '\\' || c.is_control()))
+    .then(|| format!("'{key}'"))
+}
+
+fn shape_type(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    Value::String(match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(_) => "boolean".to_string(),
+        Value::Number(_) => "number".to_string(),
+        Value::String(_) => "string".to_string(),
+        Value::Array(items) => format!("array[{}]", items.len()),
+        Value::Object(map) => format!("object[{} keys]", map.len()),
+    })
+}
+
+/// What a response says about itself at its top level. Totals, page counters
+/// and links are small and are what lets a model carry on, so a flat object is
+/// shown by its values; the rest by its type.
+fn shape_top_level_entry(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    let shown_whole = match value {
+        Value::Object(map) => map.len() <= 8 && map.values().all(shape_is_short_scalar),
+        scalar => shape_is_short_scalar(scalar),
+    };
+    if shown_whole {
+        value.clone()
+    } else {
+        shape_type(value)
+    }
+}
+
+fn shape_is_short_scalar(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.chars().count() <= SHAPE_INLINE_CHARS,
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
+        _ => true,
+    }
+}
+
+fn shape_keys(
+    map: &serde_json::Map<String, serde_json::Value>,
+    max_keys: usize,
+    describe: impl Fn(&serde_json::Value) -> serde_json::Value,
+) -> serde_json::Value {
+    let mut keys = serde_json::Map::new();
+    for (key, value) in map.iter().take(max_keys) {
+        keys.insert(key.clone(), describe(value));
+    }
+    if map.len() > max_keys {
+        keys.insert(
+            "…".to_string(),
+            serde_json::json!(format!("{} more keys", map.len() - max_keys)),
+        );
+    }
+    serde_json::Value::Object(keys)
+}
+
+/// The array a response is mostly made of: the root itself, or the longest one
+/// reachable through objects alone. Its path is relative to the response.
+fn main_collection(root: &serde_json::Value) -> Option<(String, &Vec<serde_json::Value>)> {
+    fn walk<'a>(
+        value: &'a serde_json::Value,
+        path: String,
+        depth: usize,
+        best: &mut Option<(String, &'a Vec<serde_json::Value>)>,
+    ) {
+        match value {
+            serde_json::Value::Array(items) if !items.is_empty() => {
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, kept)| items.len() > kept.len())
+                {
+                    *best = Some((path, items));
+                }
+            }
+            serde_json::Value::Object(map) if depth < 3 => {
+                for (key, child) in map {
+                    if let Some(member) = path_member(key) {
+                        walk(child, format!("{path}{member}"), depth + 1, best);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = None;
+    walk(root, "$".to_string(), 0, &mut best);
+    best
+}
+
+fn shape_of(root: &serde_json::Value, max_keys: usize, nested: bool) -> serde_json::Value {
+    use serde_json::Value;
+    let mut shape = serde_json::Map::new();
+    match root {
+        Value::Object(map) => {
+            shape.insert(
+                "keys".into(),
+                shape_keys(map, max_keys, shape_top_level_entry),
+            );
+        }
+        other => {
+            shape.insert("root".into(), shape_type(other));
+        }
+    }
+    if let Some((path, items)) = main_collection(root) {
+        let mut collection = serde_json::Map::new();
+        collection.insert("path".into(), Value::String(path));
+        collection.insert("length".into(), serde_json::json!(items.len()));
+        if let Some(Value::Object(item)) = items.first() {
+            let described = shape_keys(item, max_keys, |value| match value {
+                Value::Object(inner) if nested => shape_keys(inner, max_keys, shape_type),
+                other => shape_type(other),
+            });
+            collection.insert("item_keys".into(), described);
+        }
+        shape.insert("collection".into(), Value::Object(collection));
+    }
+    Value::Object(shape)
+}
+
+/// JSONPaths that select something on `root`: the first scalar fields of a
+/// collection's element and, when the element nests an object, the first
+/// scalars inside it. Every path is parsed and run before it is offered, so the
+/// model is never handed a spelling that fails or matches nothing.
+fn working_extract_examples(root: &serde_json::Value) -> (Vec<String>, Option<String>) {
+    use serde_json::Value;
+    let collection = main_collection(root);
+    let (prefix, sample) = match &collection {
+        Some((path, items)) => (format!("{path}[*]"), items.first()),
+        None => ("$".to_string(), Some(root)),
+    };
+    let Some(Value::Object(sample)) = sample else {
+        return (Vec::new(), None);
+    };
+    let scalar_names = |map: &serde_json::Map<String, Value>| {
+        map.iter()
+            .filter(|(_, value)| !value.is_array() && !value.is_object())
+            .filter_map(|(key, _)| path_name(key))
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut examples = Vec::new();
+    let names = scalar_names(sample);
+    if !names.is_empty() {
+        examples.push(format!("{prefix}[{names}]"));
+    }
+    let nested = sample.iter().find_map(|(key, value)| {
+        let inner = value.as_object()?;
+        let names = scalar_names(inner);
+        let member = path_member(key)?;
+        (!names.is_empty()).then(|| format!("{prefix}{member}[{names}]"))
+    });
+    examples.extend(nested);
+    examples.retain(|path| {
+        serde_json_path::JsonPath::parse(path)
+            .is_ok_and(|parsed| !parsed.query(root).all().is_empty())
+    });
+    let one_item = collection.map(|(path, _)| format!("{path}[0]"));
+    (examples, one_item)
+}
+
+/// The arguments the model gave a tool call, found through the assistant
+/// message that carries its id. Some wires carry them as an object, others as
+/// a JSON string.
+fn tool_call_arguments(
+    messages: &[serde_json::Value],
+    tool_call_id: &str,
+) -> Option<serde_json::Value> {
+    messages.iter().rev().find_map(|message| {
+        let call = message["tool_calls"]
+            .as_array()?
+            .iter()
+            .find(|call| call["id"] == tool_call_id)?;
+        Some(match &call["function"]["arguments"] {
+            serde_json::Value::String(text) => {
+                serde_json::from_str(text).unwrap_or(serde_json::Value::Null)
+            }
+            other => other.clone(),
+        })
+    })
+}
+
+/// A way to ask for a part of the API response behind `messages[index]`.
+/// Only `api_call` takes an `extract`, so only its results get one, and only the
+/// success envelope (`success` + `data`), whose `data` is the response.
+fn partial_read_hint(messages: &[serde_json::Value], index: usize) -> Option<PartialReadHint> {
+    let message = &messages[index];
+    if message["name"] != "api_call" {
+        return None;
+    }
+    let content = serde_json::from_str::<serde_json::Value>(message["content"].as_str()?).ok()?;
+    content.get("success")?;
+    let response = content.get("data")?;
+    if response.is_null() {
+        return None;
+    }
+    let already_extracted = message["tool_call_id"]
+        .as_str()
+        .and_then(|id| tool_call_arguments(&messages[..index], id))
+        .is_some_and(|arguments| {
+            arguments
+                .get("extract")
+                .is_some_and(|extract| !extract.is_null())
+        });
+    if already_extracted {
+        return Some(PartialReadHint {
+            full: None,
+            brief: None,
+            examples: Vec::new(),
+            one_item: None,
+            already_extracted,
+        });
+    }
+    let (examples, one_item) = working_extract_examples(response);
+    Some(PartialReadHint {
+        full: Some(shape_of(response, SHAPE_MAX_KEYS, true)),
+        brief: Some(shape_of(response, SHAPE_BRIEF_KEYS, false)),
+        examples,
+        one_item,
+        already_extracted,
+    })
+}
+
 /// Shorten large JSON fields while preserving small scalars and valid structure.
 /// Return None for non-JSON input or when no space is saved.
-fn compact_tool_result(raw: &str, allowance: usize) -> Option<String> {
+///
+/// `hint`, when the result is an API response, says what the response holds and
+/// how to ask for a part of it: a model told to "ask for a part you have not
+/// seen" with no way to do so asks for the same thing again.
+fn compact_tool_result(
+    raw: &str,
+    allowance: usize,
+    hint: Option<&PartialReadHint>,
+) -> Option<String> {
     let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-    let mut facts = Vec::new();
-    let mut excerpts = Vec::new();
-    let mut visited = 0;
-    collect_checkpoint_json_facts(&parsed, "", &mut facts, &mut excerpts, &mut visited);
+    // Shortened on an earlier turn and still too big: give up more of what it
+    // kept. Collecting facts from the envelope would describe the envelope, and
+    // report its size as the original's. Its note and shape stay: the hint
+    // cannot be rebuilt from an envelope, only from the response itself.
+    let earlier = (parsed["kronn_shortened"] == true).then_some(&parsed);
+    let (original_bytes, mut facts, mut excerpts) = if let Some(earlier) = earlier {
+        let kept = |field: &str| earlier[field].as_array().cloned().unwrap_or_default();
+        let original = earlier["original_bytes"]
+            .as_u64()
+            .map_or(raw.len(), |bytes| bytes as usize);
+        (original, kept("kept"), kept("excerpts"))
+    } else {
+        let mut facts = Vec::new();
+        let mut excerpts = Vec::new();
+        let mut visited = 0;
+        collect_checkpoint_json_facts(&parsed, "", &mut facts, &mut excerpts, &mut visited);
+        (raw.len(), facts, excerpts)
+    };
     if facts.is_empty() && excerpts.is_empty() {
         return None;
     }
-    let render = |facts: &[serde_json::Value], excerpts: &[serde_json::Value]| {
-        serde_json::json!({
+    let render = |facts: &[serde_json::Value], excerpts: &[serde_json::Value], brief: bool| {
+        let mut result = serde_json::json!({
             "kronn_shortened": true,
-            "original_bytes": raw.len(),
+            "original_bytes": original_bytes,
             "kept": facts,
             "excerpts": excerpts,
-            // Never invite the same call again: it returns the same result and
-            // it is shortened the same way, so the turn is spent for nothing.
-            "note": "Shortened to fit the context window. Calling this again returns the same \
-                     result, shortened the same way. Work from what is here, or ask for a part \
-                     you have not seen yet.",
-        })
-        .to_string()
+        });
+        // Never invite the same call again: it returns the same result and
+        // it is shortened the same way, so the turn is spent for nothing.
+        result["note"] = match (hint, earlier) {
+            (Some(hint), _) => serde_json::Value::String(format!(
+                "Shortened to fit the context window. Calling this again with the same \
+                 arguments returns the same result, shortened the same way. {}",
+                hint.how_to_ask()
+            )),
+            (None, Some(earlier)) => earlier["note"].clone(),
+            (None, None) => serde_json::json!(
+                "Shortened to fit the context window. Calling this again returns the same \
+                 result, shortened the same way. Work from what is here, or ask for a part \
+                 you have not seen yet."
+            ),
+        };
+        let shape = match (hint, earlier) {
+            (Some(hint), _) => hint.shape(brief).cloned(),
+            (None, Some(earlier)) => Some(earlier["shape"].clone()).filter(|s| !s.is_null()),
+            (None, None) => None,
+        };
+        if let Some(shape) = shape {
+            result["shape"] = shape;
+        }
+        result.to_string()
     };
-    let mut rendered = render(&facts, &excerpts);
+    let mut rendered = render(&facts, &excerpts, false);
     // Give up the biggest excerpts first, then the least protocol-critical
-    // facts, rather than cutting the middle of the JSON.
+    // facts, then the detail of the shape, rather than cutting the middle of
+    // the JSON.
     while rendered.len() > allowance && !excerpts.is_empty() {
         excerpts.pop();
-        rendered = render(&facts, &excerpts);
+        rendered = render(&facts, &excerpts, false);
     }
     while rendered.len() > allowance && facts.len() > 1 {
         facts.pop();
-        rendered = render(&facts, &excerpts);
+        rendered = render(&facts, &excerpts, false);
+    }
+    if rendered.len() > allowance {
+        rendered = render(&facts, &excerpts, true);
     }
     (rendered.len() < raw.len()).then_some(rendered)
 }
@@ -5702,19 +6076,27 @@ fn collection_snapshot(raw: &str) -> Option<CollectionSnapshot> {
     })
 }
 
-fn complete_collection_note(total: usize) -> String {
+fn complete_collection_note(total: usize, hint: Option<&PartialReadHint>) -> String {
+    let next = match hint {
+        Some(hint) => hint.how_to_ask(),
+        None => "Narrow the query or use an `extract` if you need the omitted detail.".to_string(),
+    };
     format!(
         "\n\n[compacted by Kronn: all {total} collection items are still present; nested fields \
-         and long values were removed or shortened to fit the context window. Narrow the query \
-         or use an `extract` if you need the omitted detail.]"
+         and long values were removed or shortened to fit the context window. {next}]"
     )
 }
 
-fn incomplete_collection_note(kept: usize, total: usize) -> String {
+fn incomplete_collection_note(kept: usize, total: usize, hint: Option<&PartialReadHint>) -> String {
+    let next = match hint {
+        Some(hint) => hint.how_to_ask(),
+        None => "Narrow the query (a filter, a smaller page size, or an `extract` of the fields \
+                 you need) and ask again."
+            .to_string(),
+    };
     format!(
         "\n\n[truncated by Kronn: this list is INCOMPLETE — {kept} of {total} items kept to \
-         fit the context window. Do NOT report the count as final; narrow the query (a filter, \
-         a smaller page size, or an `extract` of the fields you need) and ask again.]"
+         fit the context window. Do NOT report the count as final. {next}]"
     )
 }
 
@@ -5722,13 +6104,17 @@ fn collection_replacement(
     snapshot: &CollectionSnapshot,
     max_encoded_len: usize,
     current_len: usize,
+    hint: Option<&PartialReadHint>,
 ) -> Option<String> {
     for candidate in [&snapshot.shallow, &snapshot.identifiers]
         .into_iter()
         .flatten()
     {
         let serialized = serde_json::to_string(candidate).ok()?;
-        let replacement = format!("{serialized}{}", complete_collection_note(snapshot.total));
+        let replacement = format!(
+            "{serialized}{}",
+            complete_collection_note(snapshot.total, hint)
+        );
         let encoded_len = serde_json::to_string(&replacement).ok()?.len();
         if encoded_len <= max_encoded_len && replacement.len() < current_len {
             return Some(replacement);
@@ -5749,7 +6135,7 @@ fn collection_replacement(
         let serialized = serde_json::to_string(&candidate).ok()?;
         Some(format!(
             "{serialized}{}",
-            incomplete_collection_note(kept, snapshot.total)
+            incomplete_collection_note(kept, snapshot.total, hint)
         ))
     };
 
@@ -5828,6 +6214,10 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
     // system or user turn, and returns on its own once nothing is left to cut.
     // Trimming hard is the correct answer to a large catalogue, not a hazard.
     let budget = budget.saturating_sub(declared_bytes);
+    if body["messages"].to_string().len() <= budget {
+        // Nothing to trim: skip parsing every result to describe it.
+        return;
+    }
 
     // Keep the untouched collection once. Every trimming pass can then rebuild
     // valid JSON from it instead of reparsing a previous diagnostic suffix.
@@ -5842,6 +6232,17 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
                     let raw = m["content"].as_str()?;
                     Some((i, collection_snapshot(raw)?))
                 })
+                .collect()
+        })
+        .unwrap_or_default();
+    // How to ask for a part of each API response, from the original and before
+    // any cutting: the shortened text below can only say it was shortened.
+    let hints: std::collections::HashMap<usize, PartialReadHint> = body["messages"]
+        .as_array()
+        .map(|messages| {
+            (0..messages.len())
+                .filter(|&i| messages[i]["role"] == "tool")
+                .filter_map(|i| Some((i, partial_read_hint(messages, i)?)))
                 .collect()
         })
         .unwrap_or_default();
@@ -5884,13 +6285,15 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
         let other_messages_len = body_len.saturating_sub(encoded_content_len);
         let max_encoded_len = budget.saturating_sub(other_messages_len);
         if let Some(snapshot) = collections.get(&idx) {
-            if let Some(replacement) = collection_replacement(snapshot, max_encoded_len, len) {
+            if let Some(replacement) =
+                collection_replacement(snapshot, max_encoded_len, len, hints.get(&idx))
+            {
                 messages[idx]["content"] = serde_json::json!(replacement);
                 continue;
             }
         }
         // Compact before truncating so retrying cannot keep returning the same cut result.
-        if let Some(shortened) = compact_tool_result(&content, max_encoded_len) {
+        if let Some(shortened) = compact_tool_result(&content, max_encoded_len, hints.get(&idx)) {
             messages[idx]["content"] = serde_json::json!(shortened);
             continue;
         }
@@ -8558,19 +8961,7 @@ async fn start_ollama_http(
                 // bytes and teach the model nothing, so answer from the first result
                 // and say plainly that repeating will not change it. This breaks the
                 // loop several rounds before the cap, and the cap stays as backstop.
-                // Canonical: serde_json preserves insertion order, so the same
-                // call re-emitted with its keys in another order would otherwise
-                // look new. Sorting the pairs makes the signature about content.
-                let canonical_args = match call.arguments.as_object() {
-                    Some(map) => {
-                        let mut pairs: Vec<_> =
-                            map.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                        pairs.sort();
-                        pairs.join(",")
-                    }
-                    None => call.arguments.to_string(),
-                };
-                let signature = format!("{}|{}", call.name, canonical_args);
+                let (canonical_args, signature) = tool_call_signature(&call.name, &call.arguments);
 
                 let used = calls_per_tool.entry(call.name.clone()).or_insert(0);
                 *used += 1;

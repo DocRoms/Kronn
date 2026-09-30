@@ -354,6 +354,47 @@ An override above the advertised model window or RAM-derived ceiling is
 accepted with all applicable warnings, but impossible/fat-finger values are
 bounded. The saved value is per model and survives restart.
 
+### What `qwen3.8:27b-mlx` gets on a 64 GB Mac (KT-929)
+
+The question came from a discussion where an Ollama agent on this model lost part
+of a large API answer and the brief suspected a 32K window. Which window a run
+gets depends on who runs the model, not only on the machine:
+
+| Rule | Window | Where |
+|---|---|---|
+| Memory band for 64 GiB, weights and cache cost not yet known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:4940] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` |
+| Discussion principal (`ToolRunMode::General`) | 65,536, requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:216] |
+| Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:93] |
+| Per-model override (Settings), any value from 2,048 to 1,048,576 | the override, for a discussion; a worker is still held at 32,768 or below | `resolve_ctx_cap_for_model` |
+| `KRONN_OLLAMA_NUM_CTX_CAP` | that number, for both | `resolve_ctx_cap_for_model` |
+
+These rows are computed by the functions a run calls, and the test pins them, the
+override cases included
+[src: file: backend/src/agents/runner_test.rs:2520]. They are not an observation of
+a running Ollama: the band, the trained window and the 64 GiB are inputs, and
+`GET /api/ollama/models` (`context_ceiling`, `context_origin`) and the
+`kronn::ollama` log line give what a given machine actually resolved. Once the
+model has been loaded at two different windows, the exact figure the machine can
+hold (70 % of memory minus the weights, over the measured cache cost per token)
+replaces the band
+[src: file: backend/src/agents/runner.rs:5208].
+
+So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
+Mac is at 65,536 unless a per-model override or the environment variable says
+otherwise. That is the one thing this section could not read: the override map
+of the machine that produced the discussion. `ollama_context_overrides` in the
+Kronn configuration, or `context_origin: "model_override"` in the model list, says
+whether the discussion was at 65,536 or at a number somebody chose.
+
+No cap was changed. The worker ceiling is there because a nominal 65K slot cost
+31 GB and produced no first tool call in seventeen minutes (comment at
+`MLX_WORKER_EFFECTIVE_CTX_CAP`), which is evidence against raising it. The
+discussion's 65,536 is already above what the failing case needed once `api_call`
+can select: a 198 KB answer, the full catalogue and a 32,768-token window ended at
+19,319 estimated tokens (see
+[HTTP-agent capabilities](../architecture/http-agent-capabilities.md#asking-for-part-of-an-api-response-kt-929)).
+
 ## Runtime gotchas (handled and empirically verified)
 
 1. **num_ctx** — Ollama's default context window is huge (up to 256K for some

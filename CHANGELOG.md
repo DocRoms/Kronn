@@ -290,6 +290,26 @@ Release notes for 0.9.3 and earlier are available in the
   runtime reports them (migration 205), for the Full and the partial audit. A
   runtime that reports nothing gives an unknown figure (`—`), never 0; the run
   total is unknown until a step has reported.
+- A local model can now read a large API response in parts instead of losing it
+  (KT-929). The `api_call` tool of the HTTP agents (Ollama, LiteLLM, NVIDIA)
+  takes an `extract`, a JSONPath applied to the response, the same one workflows
+  and the CLI bridge already took; only what it selects comes back. Until now a
+  response too big for the window was shortened with the advice to "ask for a
+  part you have not seen", and the tool had no way to ask. The model asked again
+  for the same thing, was refused as a repeat, and the turn ended half done: a
+  SpeedCurve answer with LCP, FCP, INP and TTFB missing. A shortened API result
+  now says what it holds (its keys, with the paging shown as values, the length of
+  its main list, the keys of one element down to its nested objects) and gives
+  paths that select something on that very response, one of them for a whole
+  element. A call that differs from the previous one only by its `extract` or a
+  query parameter is a new question and runs; only an identical call is answered
+  as a repeat. A result that was already an extract is told to select less
+  instead. Measured on a 198 KB answer of a hundred runs in a 32K window: the
+  first result is shortened to 8 KB, one targeted call returns the four metrics of
+  all runs in 2 KB, and the conversation stays at 19,319 of 32,768 tokens. The
+  window itself is unchanged: a discussion already runs `qwen3.8:27b-mlx` at
+  65,536 tokens on a 64 GB Mac, and the 32K ceiling applies only to a native MLX
+  worker (see `docs/operations/ollama-local-models.md`).
 
 - A room that a CLI peer joined without being identified opens again
   (KT-925). The bridge joins such a peer as `Unknown`; the discussion detail,
