@@ -51,6 +51,22 @@ Release notes for 0.9.3 and earlier are available in the
   (`file_diffs`, the artifact's HTML included) and, for workflows, Quick APIs
   and Quick Execs, a field-by-field diff (`field_diff`). The Compare sheet asks
   for it when it opens and shows a loading state meanwhile.
+- The sheet of a resource in the "AI & automation" tab (skill, Quick Prompt,
+  Quick Exec, Quick API, workflow, artifact) now shows the resource itself, under
+  its details: a "Repository / Kronn / Diff" picker over the file as the
+  repository holds it, as Kronn holds it (masked, as a publish would write it) or
+  what differs, using the same diff as the Compare sheet. A skill's `SKILL.md` is
+  rendered as Markdown, with a "Rendered / Source" switch; every other kind is
+  shown as text. A mode with nothing to show is off with the reason on hover
+  ("not in the repository", "not in Kronn", "identical"). The sheet opens on
+  Repository when only the repository has it, on Kronn when only Kronn has it or
+  when the two are identical, and on Diff when they differ, saying which side is
+  newer when only one moved. The text comes from
+  `GET .../repository-resources/comparison`, which now answers for every
+  resource, not only the ones that differ: `files` lists each file with its
+  `repository` and `kronn` text (either absent when that side has no file, cut
+  and flagged `truncated` past 512 KiB). The listing still carries no content
+  (KT-913).
 - A native skill outside `kronn/` can be used in Kronn without `kronn.lock`
   (`POST .../repository-resources/skills/use`: a read-only reference to its
   path) or copied into Kronn as a managed skill

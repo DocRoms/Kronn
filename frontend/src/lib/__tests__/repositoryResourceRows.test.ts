@@ -8,7 +8,6 @@ import {
   attentionItems,
   AUTOMATION_TYPE_FILTERS,
   buildRows,
-  isComparable,
   matchesAutomationType,
   matchesPresence,
   matchesQuery,
@@ -272,30 +271,15 @@ describe('repository resource rows', () => {
     expect(tail.length).toBeLessThanOrEqual(18);
   });
 
-  it('has diffs to fetch only for a row that exists on both sides and can differ', () => {
-    const rows = buildRows(listing({
-      resources: [
-        resource({ id: 'a', name: 'A', kind: 'quick_prompt', status: 'kronn_only' }),
-        resource({ id: 'repository:quick_exec:b', name: 'B', kind: 'quick_exec', status: 'repository_only' }),
-        resource({ id: 'c', name: 'C', kind: 'workflow', status: 'repository_newer' }),
-        resource({ id: 'd', name: 'D', kind: 'workflow', status: 'kronn_newer' }),
-        resource({ id: 'e', name: 'E', kind: 'quick_api', status: 'conflict' }),
-        resource({ id: 'f', name: 'F', kind: 'quick_exec', status: 'approval_required' }),
-        resource({ id: 'g', name: 'G', kind: 'quick_prompt', status: 'up_to_date' }),
-      ],
-    }));
-    expect(Object.fromEntries(rows.automation.map(row => [row.name, isComparable(row)]))).toEqual({
-      A: false, B: false, C: true, D: true, E: true, F: true, G: false,
-    });
-  });
-
-  it('never carries a diff in a row: the listing says that two sides differ, not how', () => {
+  it('never carries a diff or a content in a row: the listing says that two sides differ, not how', () => {
     const [row] = buildRows(listing({
       resources: [resource({ id: 'e', name: 'E', kind: 'quick_api', status: 'conflict' })],
     })).automation;
     expect(Object.keys(row)).not.toEqual(expect.arrayContaining(['diff']));
     expect(row).not.toHaveProperty('fileDiffs');
     expect(row).not.toHaveProperty('fieldDiff');
+    expect(row).not.toHaveProperty('files');
+    expect(row).not.toHaveProperty('content');
   });
 
   it('carries both ends of every link on the row, keyed like the rows they point at', () => {

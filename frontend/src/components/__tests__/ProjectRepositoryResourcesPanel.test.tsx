@@ -68,6 +68,7 @@ describe('ProjectRepositoryResourcesPanel', () => {
     [repositoryResources, repositoryResourceComparison, publishRepositoryResource, importRepositoryResource,
       approveRepositoryResource, useNativeSkill, copyNativeSkill, setDefaultSkills, quickExecsList,
       quickExecsDelete].forEach(mock => mock.mockReset());
+    repositoryResourceComparison.mockResolvedValue({ files: [], file_diffs: [], field_diff: [] });
     publishRepositoryResource.mockResolvedValue({});
     importRepositoryResource.mockResolvedValue({});
     localStorage.removeItem('kronn:projectRepositoryResourcesTab');
@@ -427,6 +428,12 @@ describe('ProjectRepositoryResourcesPanel', () => {
     });
     const NIGHTLY_DIFF = '--- repository\n+++ Kronn\n@@ -1,2 +1,2 @@\n name: nightly\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n';
     const nightlyComparison = () => ({
+      files: [{
+        path: 'kronn/workflows/nightly.yaml',
+        repository: 'name: nightly\ncron: 0 3 * * *\n',
+        kronn: 'name: nightly\ncron: 0 4 * * *\n',
+        truncated: false,
+      }],
       diff: NIGHTLY_DIFF,
       file_diffs: [{ path: 'kronn/workflows/nightly.yaml', diff: NIGHTLY_DIFF }],
       field_diff: [{ field: 'trigger.schedule', repository: '0 3 * * *', kronn: '0 4 * * *' }],
@@ -511,15 +518,23 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(repositoryResourceComparison).toHaveBeenCalledTimes(2);
     });
 
-    it('asks for nothing when the two sides agree: there is nothing to compare', async () => {
+    it('asks for the content of a row whose two sides agree, and has no diff to offer', async () => {
+      const same = 'name: same\n';
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: 'kronn/prompts/same.md', repository: same, kronn: same, truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
       await show(listing({ resources: [resource({ id: 'ok', name: 'Same', kind: 'quick_prompt', status: 'up_to_date' })] }));
       openTab('automation');
+      expect(repositoryResourceComparison).not.toHaveBeenCalled();
 
       fireEvent.click(rowOf('Same'));
       const dialog = within(await screen.findByRole('dialog'));
 
-      expect(dialog.getByText(`${R}compare.noDiff`)).toBeInTheDocument();
-      expect(repositoryResourceComparison).not.toHaveBeenCalled();
+      expect(await dialog.findByText(`${R}compare.noDiff`)).toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(1);
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'quick_prompt', 'ok');
     });
 
     it('keeping the repository overwrites Kronn and says so beforehand', async () => {
@@ -1279,6 +1294,196 @@ describe('ProjectRepositoryResourcesPanel', () => {
     it('titles it at the size of the other section titles', () => {
       expect(panelCss).toMatch(/\.project-repository-resources-banner strong \{[^}]*font-size: 12px/);
       expect(panelCss).toMatch(/\.project-repository-resources h3 \{[^}]*font-size: 12px/);
+    });
+  });
+
+  describe('the content of a resource in its sheet', () => {
+    const SKILL_FILE = '.agents/skills/block-migration/SKILL.md';
+    const SKILL_TEXT = '---\nname: block-migration\ndescription: Migrate a block.\n---\n\n# Migrate a block\n\nMove the markup first.\n';
+    const installed = () => listing({
+      skills_present: [skill({
+        id: 'block-migration', name: 'Block migration', status: 'up_to_date',
+        repository_paths: [SKILL_FILE], repository_updated_at: '2026-09-01T10:00:00Z',
+      })],
+    });
+    const sameOnBothSides = () => ({
+      files: [{ path: SKILL_FILE, repository: SKILL_TEXT, kronn: SKILL_TEXT, truncated: false }],
+      file_diffs: [],
+      field_diff: [],
+    });
+    const openInstalled = () => (
+      fireEvent.click(within(rowOf('Block migration')).getByRole('button', { name: `${R}action.view` }))
+    );
+
+    it('shows the installed skill itself under its details, read from Kronn since both sides agree', async () => {
+      repositoryResourceComparison.mockResolvedValue(sameOnBothSides());
+      await show(installed());
+
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(await dialog.findByRole('heading', { name: 'Migrate a block' })).toBeInTheDocument();
+      expect(dialog.getByText(SKILL_FILE, { selector: '.rr-diff-path' })).toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toHaveAttribute('aria-pressed', 'true');
+      expect(dialog.getByRole('button', { name: `${R}content.mode.diff` })).toBeDisabled();
+      // The details it already showed are still there, above the content.
+      expect(dialog.getByTestId('fingerprint-repository')).toBeInTheDocument();
+      const details = dialog.getByRole('region', { name: `${R}columns.repository` });
+      const content = dialog.getByTestId('resource-content');
+      expect(details.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'skill', 'block-migration');
+    });
+
+    it('reads a skill as source on request, and keeps the source across the modes', async () => {
+      repositoryResourceComparison.mockResolvedValue(sameOnBothSides());
+      await show(installed());
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+      await dialog.findByTestId('content-rendered');
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}content.source` }));
+      expect(dialog.getByTestId('content-source')).toHaveTextContent('description: Migrate a block.');
+      fireEvent.click(dialog.getByRole('button', { name: `${R}content.mode.repository` }));
+      expect(dialog.getByTestId('content-source')).toHaveTextContent('# Migrate a block');
+    });
+
+    it('loads the content when the sheet opens, once, and never with the listing', async () => {
+      repositoryResourceComparison.mockResolvedValue(sameOnBothSides());
+      await show(installed());
+      expect(repositoryResourceComparison).not.toHaveBeenCalled();
+      expect(JSON.stringify(await repositoryResources.mock.results[0].value)).not.toContain('Move the markup first');
+
+      openInstalled();
+      await screen.findByRole('dialog');
+      await waitFor(() => expect(screen.getByTestId('resource-content')).toBeInTheDocument());
+
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits behind a loading state, then shows the content and the modes', async () => {
+      let resolve: (value: ReturnType<typeof sameOnBothSides>) => void = () => {};
+      repositoryResourceComparison.mockReturnValue(new Promise(done => { resolve = done; }));
+      await show(installed());
+
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(screen.getByTestId('repository-compare-loading')).toBeInTheDocument();
+      expect(dialog.getByText(`${R}compare.loading`)).toBeInTheDocument();
+      expect(dialog.queryByTestId('resource-content')).not.toBeInTheDocument();
+
+      resolve(sameOnBothSides());
+      expect(await dialog.findByTestId('resource-content')).toBeInTheDocument();
+      expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument();
+    });
+
+    it('says when the content could not be loaded and loads it again on "Try again"', async () => {
+      repositoryResourceComparison.mockRejectedValueOnce(new Error('boom'));
+      repositoryResourceComparison.mockResolvedValueOnce(sameOnBothSides());
+      await show(installed());
+
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(await dialog.findByRole('alert')).toHaveTextContent(`${R}compare.loadFailed`);
+      expect(dialog.queryByTestId('resource-content')).not.toBeInTheDocument();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}compare.retry` }));
+      expect(await dialog.findByRole('heading', { name: 'Migrate a block' })).toBeInTheDocument();
+      expect(dialog.queryByRole('alert')).not.toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(2);
+    });
+
+    it('opens a conflict on the diff, and the repository side stays one click away', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{
+          path: 'kronn/workflows/nightly.yaml', repository: 'cron: 0 3 * * *\n', kronn: 'cron: 0 4 * * *\n', truncated: false,
+        }],
+        file_diffs: [{ path: 'kronn/workflows/nightly.yaml', diff: '@@ -1 +1 @@\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n' }],
+        field_diff: [],
+      });
+      await show(listing({
+        resources: [resource({ id: 'wf-1', name: 'Nightly', slug: 'nightly', kind: 'workflow', status: 'conflict' })],
+      }));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(await dialog.findByText('-cron: 0 3 * * *')).toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}content.mode.diff` })).toHaveAttribute('aria-pressed', 'true');
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}content.mode.repository` }));
+      expect(dialog.getByTestId('content-source')).toHaveTextContent('cron: 0 3 * * *');
+      expect(dialog.getByRole('button', { name: `${R}compare.keepKronn` })).toBeInTheDocument();
+    });
+
+    it('says which side is newer beside the diff, from the state the listing already carries', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: SKILL_FILE, repository: 'new text\n', kronn: 'old text\n', truncated: false }],
+        file_diffs: [{ path: SKILL_FILE, diff: '@@ -1 +1 @@\n-old text\n+new text\n' }],
+        field_diff: [],
+      });
+      await show(listing({
+        skills_present: [skill({
+          id: 'block-migration', name: 'Block migration', status: 'repository_newer',
+          repository_paths: [SKILL_FILE], repository_updated_at: '2026-09-02T10:00:00Z', kronn_updated_at: '2026-09-01T10:00:00Z',
+        })],
+      }));
+
+      fireEvent.click(rowOf('Block migration'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(await dialog.findByTestId('content-newer')).toHaveTextContent(`${R}content.newer.repository`);
+    });
+
+    it('opens an attached skill that only Kronn holds, with the repository mode off and why', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: '.agents/skills/custom-review/SKILL.md', kronn: '# Review\n', truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
+      await show(listing({
+        skills_present: [skill({ id: 'custom-review', name: 'Review', provenance: 'kronn', status: 'kronn_only' })],
+      }));
+
+      fireEvent.click(rowOf('Review'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      const repository = await dialog.findByRole('button', { name: `${R}content.mode.repository` });
+      expect(repository).toBeDisabled();
+      expect(repository.closest('span')).toHaveAttribute('title', `${R}content.disabled.absent_repository`);
+      expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('asks for the content of a skill found in a repository folder, which Kronn does not hold', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: '.claude/skills/lint/SKILL.md', repository: '# Lint\n', truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
+      await show(listing({
+        skills_present: [skill({
+          id: 'repository:lint', name: 'Lint', provenance: 'repository', status: 'native_skill',
+          repository_paths: ['.claude/skills/lint/SKILL.md'],
+        })],
+      }));
+
+      fireEvent.click(rowOf('Lint'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(await dialog.findByRole('button', { name: `${R}content.mode.repository` })).toHaveAttribute('aria-pressed', 'true');
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'skill', 'repository:lint');
+      expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toBeDisabled();
+    });
+
+    it('puts the mode picker across the full width of the sheet at 400 px, and the sheet full screen', () => {
+      const rules = sheetsCss.slice(sheetsCss.indexOf('@media (max-width: 640px)'));
+      expect(rules).toMatch(/\.rr-modal[^{]*\{[^}]*width: 100%; height: 100%/);
+      expect(rules).toMatch(/\.rr-content-modes \{[^}]*display: grid; grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+      expect(rules).toMatch(/\.rr-content-mode \.rr-chip[^{]*\{[^}]*width: 100%/);
+      expect(rules).toMatch(/\.rr-modal \.rr-chip[^}]*min-height: 44px/);
+    });
+
+    it('lets the pointer reach the reason behind a disabled mode', () => {
+      expect(sheetsCss).toMatch(/\.rr-content-mode \.rr-chip:disabled \{[^}]*pointer-events: none/);
     });
   });
 

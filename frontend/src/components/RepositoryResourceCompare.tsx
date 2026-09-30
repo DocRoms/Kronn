@@ -1,50 +1,21 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { formatResourceDate } from '../lib/formatResourceDate';
-import { formatFieldValue, parseUnifiedDiff, sideBySide } from '../lib/repositoryResourceDiff';
-import { isComparable, type ResourceRow, type RowLink } from '../lib/repositoryResourceRows';
+import { formatFieldValue } from '../lib/repositoryResourceDiff';
+import type { ResourceRow, RowLink } from '../lib/repositoryResourceRows';
 import type { RepositoryResourceComparison } from '../types/generated';
+import { RepositoryResourceContent } from './RepositoryResourceContent';
 import { RepositoryResourceModal } from './RepositoryResourceModal';
 
-type DiffMode = 'unified' | 'side';
+type ComparisonPhase = 'loading' | 'ready' | 'error';
 
-const DIFF_MARK = { added: '+', removed: '-', context: ' ', hunk: '' } as const;
-
-function DiffView({ diff, mode }: { diff: string; mode: DiffMode }) {
-  const lines = useMemo(() => parseUnifiedDiff(diff), [diff]);
-  const rows = useMemo(() => sideBySide(lines), [lines]);
-  if (mode === 'unified') {
-    return (
-      <pre className="rr-diff" data-mode="unified">
-        {lines.map((line, index) => (
-          <span key={index} data-line={line.kind}>
-            {line.kind === 'hunk' ? line.text : `${DIFF_MARK[line.kind]}${line.text}`}{'\n'}
-          </span>
-        ))}
-      </pre>
-    );
-  }
-  return (
-    <div className="rr-diff" data-mode="side">
-      {rows.map((row, index) => (
-        <div key={index} className="rr-diff-row" data-line={row.kind}>
-          <code data-side="repository" data-empty={row.left === null || undefined}>{row.left ?? ''}</code>
-          <code data-side="kronn" data-empty={row.right === null || undefined}>{row.right ?? ''}</code>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-type ComparisonPhase = 'idle' | 'loading' | 'ready' | 'error';
-
-/** The diffs behind a listed row. The listing only says that the two sides
- *  differ; they are built by the backend when this sheet opens, so nothing is
- *  computed (or masked) for the rows nobody opens. */
+/** What sits behind a listed row: the text of each side and the diffs. The
+ *  listing only says that the two sides differ and carries no content; the
+ *  backend builds it when this sheet opens, so nothing is read or masked for the
+ *  rows nobody opens. Every row has at least one side to show. */
 function useComparison(projectId: string, row: ResourceRow) {
-  const comparable = isComparable(row);
   const [attempt, setAttempt] = useState(0);
   // The answer is filed under the request it belongs to, so a stale answer, or a
   // row whose content changed underneath the open sheet, reads as "loading"
@@ -53,19 +24,15 @@ function useComparison(projectId: string, row: ResourceRow) {
   const [settled, setSettled] = useState<{ key: string; comparison?: RepositoryResourceComparison } | null>(null);
 
   useEffect(() => {
-    if (!comparable) return;
     let active = true;
     projectsApi.repositoryResourceComparison(projectId, row.kind, row.id)
       .then(comparison => { if (active) setSettled({ key: requestKey, comparison }); })
       .catch(() => { if (active) setSettled({ key: requestKey }); });
     return () => { active = false; };
-  }, [comparable, projectId, row.kind, row.id, requestKey]);
+  }, [projectId, row.kind, row.id, requestKey]);
 
-  let phase: ComparisonPhase = 'idle';
-  if (comparable) {
-    if (settled?.key !== requestKey) phase = 'loading';
-    else phase = settled.comparison ? 'ready' : 'error';
-  }
+  let phase: ComparisonPhase = 'loading';
+  if (settled?.key === requestKey) phase = settled.comparison ? 'ready' : 'error';
   return {
     phase,
     comparison: phase === 'ready' ? settled?.comparison : undefined,
@@ -125,13 +92,13 @@ interface Props {
   onClose: () => void;
 }
 
-/** Both sides of one resource: where each lives, what differs, and — when the
- *  two versions disagree — the three ways out, each naming what it overwrites. */
+/** Both sides of one resource: where each lives, what each holds (the file as
+ *  the repository has it, as Kronn has it, or what differs) and — when the two
+ *  versions disagree — the three ways out, each naming what it overwrites. */
 export function RepositoryResourceCompare({
   projectId, row, openable, canWrite, busy, onKeepRepository, onKeepKronn, onRefresh, onPrimary, onOpenLink, onClose,
 }: Props) {
   const { t, locale } = useT();
-  const [mode, setMode] = useState<DiffMode>('unified');
   const [merging, setMerging] = useState(false);
   const isConflict = row.state === 'conflict';
   const date = (iso?: string) => formatResourceDate(iso, locale);
@@ -218,7 +185,7 @@ export function RepositoryResourceCompare({
 
       {phase === 'loading' && (
         <section className="rr-section" aria-busy="true" data-testid="repository-compare-loading">
-          <h3>{t('projects.repositoryResources.compare.differs')}</h3>
+          <h3>{t('projects.repositoryResources.content.title')}</h3>
           <p className="rr-muted" role="status">
             <Loader2 size={14} className="animate-spin" aria-hidden="true" />{' '}
             {t('projects.repositoryResources.compare.loading')}
@@ -227,67 +194,37 @@ export function RepositoryResourceCompare({
       )}
       {phase === 'error' && (
         <section className="rr-section">
-          <h3>{t('projects.repositoryResources.compare.differs')}</h3>
+          <h3>{t('projects.repositoryResources.content.title')}</h3>
           <p className="rr-muted" role="alert">{t('projects.repositoryResources.compare.loadFailed')}</p>
           <button type="button" className="rr-button" onClick={retry}>
             {t('projects.repositoryResources.compare.retry')}
           </button>
         </section>
       )}
-      {(fieldDiff.length > 0 || diffs.length > 0) && (
+      {fieldDiff.length > 0 && (
         <section className="rr-section">
           <h3>{t('projects.repositoryResources.compare.differs')}</h3>
-          {fieldDiff.length > 0 && (
-            <table className="rr-fields">
-              <thead>
-                <tr>
-                  <th scope="col">{t('projects.repositoryResources.compare.field')}</th>
-                  <th scope="col">{t('projects.repositoryResources.columns.repository')}</th>
-                  <th scope="col">{t('projects.repositoryResources.columns.kronn')}</th>
+          <table className="rr-fields">
+            <thead>
+              <tr>
+                <th scope="col">{t('projects.repositoryResources.compare.field')}</th>
+                <th scope="col">{t('projects.repositoryResources.columns.repository')}</th>
+                <th scope="col">{t('projects.repositoryResources.columns.kronn')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {fieldDiff.map(field => (
+                <tr key={field.field}>
+                  <th scope="row"><code>{field.field}</code></th>
+                  <td><code>{formatFieldValue(field.repository)}</code></td>
+                  <td><code>{formatFieldValue(field.kronn)}</code></td>
                 </tr>
-              </thead>
-              <tbody>
-                {fieldDiff.map(field => (
-                  <tr key={field.field}>
-                    <th scope="row"><code>{field.field}</code></th>
-                    <td><code>{formatFieldValue(field.repository)}</code></td>
-                    <td><code>{formatFieldValue(field.kronn)}</code></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          {diffs.length > 0 && (
-            <>
-              <div className="rr-diff-toolbar">
-                <span>{t('projects.repositoryResources.compare.files', diffs.length)}</span>
-                <div role="group" aria-label={t('projects.repositoryResources.compare.view')}>
-                  {(['unified', 'side'] as const).map(option => (
-                    <button
-                      key={option}
-                      type="button"
-                      className="rr-chip"
-                      aria-pressed={mode === option}
-                      onClick={() => setMode(option)}
-                    >
-                      {t(`projects.repositoryResources.compare.${option}`)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {diffs.map(file => (
-                <div key={file.path} className="rr-diff-file">
-                  <code className="rr-diff-path">{file.path}</code>
-                  <DiffView diff={file.diff} mode={mode} />
-                </div>
               ))}
-            </>
-          )}
+            </tbody>
+          </table>
         </section>
       )}
-      {(phase === 'idle' || phase === 'ready') && fieldDiff.length === 0 && diffs.length === 0 && (
-        <p className="rr-muted">{t('projects.repositoryResources.compare.noDiff')}</p>
-      )}
+      {comparison && <RepositoryResourceContent row={row} comparison={comparison} diffs={diffs} />}
 
       {row.writePreview.length > 0 && !isConflict && (
         <section className="rr-section">

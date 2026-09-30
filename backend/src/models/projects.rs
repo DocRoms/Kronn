@@ -304,14 +304,20 @@ pub struct RequiredSecretStatus {
     pub configured: bool,
 }
 
-/// What differs between the repository and Kronn for one resource, computed
-/// when someone opens the Compare sheet rather than on every listing: the
-/// listing only says *that* the two sides differ (its `status`), never *how*.
-/// The Kronn side is the masked rendering a publish would write, so it holds
-/// no secret value; the repository side is the file as it stands.
+/// What the repository and Kronn hold for one resource, and what differs,
+/// computed when someone opens its sheet rather than on every listing: the
+/// listing only says *that* the two sides differ (its `status`), never *how*,
+/// and carries no content. The Kronn side is the masked rendering a publish
+/// would write, so it holds no secret value; the repository side is the file as
+/// it stands.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RepositoryResourceComparison {
+    /// Every file of the resource with its text on each side that holds it —
+    /// the content itself, whether or not the two sides agree. Empty when
+    /// neither side has a file.
+    #[serde(default)]
+    pub files: Vec<RepositoryResourceFileContent>,
     /// Real unified diff of the resource's main file (the rendered HTML for
     /// an artifact). Present only for `repository_newer`, `kronn_newer` and
     /// `conflict`; `file_diffs` carries every file.
@@ -327,6 +333,25 @@ pub struct RepositoryResourceComparison {
     /// for the same three states as `diff`.
     #[serde(default)]
     pub field_diff: Vec<RepositoryResourceFieldDiff>,
+}
+
+/// One file of a resource as each side holds it. A side without the file has
+/// no text (`None`), which is how the sheet knows a mode has nothing to show.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryResourceFileContent {
+    pub path: String,
+    /// The file as it stands in the repository; absent when it is not there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repository: Option<String>,
+    /// The masked rendering Kronn would write; absent when Kronn has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kronn: Option<String>,
+    /// A side was cut at the size bound. The diff always covers the whole file.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// The unified diff (repository side against Kronn side) of one file a

@@ -18,8 +18,8 @@ use crate::models::{
     ProjectRepositoryResourceMutation, ProjectRepositoryResourceStatus, ProjectRepositoryResources,
     ProjectRepositorySkill, ProjectRepositorySkillProvenance,
     PublishProjectRepositoryResourceRequest, QuickApi, QuickExec, QuickPrompt,
-    RepositoryNativeSkillRequest, RepositoryResourceComparison, RepositoryResourceFileDiff,
-    ResourceAdrLevel, Skill, UpdateLivePageRequest, Workflow,
+    RepositoryNativeSkillRequest, RepositoryResourceComparison, RepositoryResourceFileContent,
+    RepositoryResourceFileDiff, ResourceAdrLevel, Skill, UpdateLivePageRequest, Workflow,
 };
 use crate::AppState;
 
@@ -252,6 +252,62 @@ fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
+/// What the sheet carries of one side of one file: a longer text is cut here
+/// and flagged, so a large artifact cannot turn the answer into megabytes. The
+/// diff is built from the whole file, whatever is cut.
+const MAX_CONTENT_BYTES: usize = 512 * 1024;
+
+fn side_text(bytes: &[u8]) -> (String, bool) {
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= MAX_CONTENT_BYTES {
+        return (text.into_owned(), false);
+    }
+    let mut end = MAX_CONTENT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+/// Every file a resource has on either side, with its text on each: the
+/// repository's as it stands, Kronn's as the masked rendering a publish would
+/// write. A file neither side holds is left out; `first` (the main file) comes
+/// first, the rest in path order.
+fn resource_file_contents(
+    root: &Path,
+    repository_paths: &[String],
+    kronn_files: &BTreeMap<String, Vec<u8>>,
+    first: Option<&String>,
+) -> Vec<RepositoryResourceFileContent> {
+    let paths: BTreeSet<&String> = repository_paths.iter().chain(kronn_files.keys()).collect();
+    let mut ordered: Vec<&String> = paths.into_iter().collect();
+    ordered.sort_by_key(|path| Some(*path) != first);
+    ordered
+        .into_iter()
+        .filter_map(|path| {
+            let repository = read_repository_file(root, path);
+            let kronn = kronn_files.get(path);
+            if repository.is_none() && kronn.is_none() {
+                return None;
+            }
+            let (repository, repository_cut) = repository
+                .as_deref()
+                .map(side_text)
+                .map_or((None, false), |(text, cut)| (Some(text), cut));
+            let (kronn, kronn_cut) = kronn
+                .map(Vec::as_slice)
+                .map(side_text)
+                .map_or((None, false), |(text, cut)| (Some(text), cut));
+            Some(RepositoryResourceFileContent {
+                path: path.clone(),
+                repository,
+                kronn,
+                truncated: repository_cut || kronn_cut,
+            })
+        })
+        .collect()
+}
+
 /// One unified diff per file the resource is written to, repository side
 /// against Kronn side; a file present on one side only diffs against nothing.
 fn resource_file_diffs(
@@ -296,17 +352,23 @@ fn primary_diff_path(
     }
 }
 
-/// Both sides of one resource, compared: a unified diff per file and, for the
-/// kinds that have one, a field-by-field diff of the definition. Only the
-/// states where the two sides differ have anything to show. Built on demand —
-/// it reads the repository files and diffs the masked Kronn rendering, work the
-/// listing never does.
+/// Both sides of one resource: the text of every file on each side and, when
+/// the two differ, a unified diff per file and, for the kinds that have one, a
+/// field-by-field diff of the definition. Only the states where the two sides
+/// differ have a diff to show. Built on demand — it reads the repository files
+/// and diffs the masked Kronn rendering, work the listing never does.
 fn resource_comparison(
     root: &Path,
     entry: &crate::core::repository_resources::RepositoryLockResource,
     rendered: &crate::core::repository_resources::RenderedRepositoryResource,
     sync_status: ProjectRepositoryResourceStatus,
 ) -> RepositoryResourceComparison {
+    let files = resource_file_contents(
+        root,
+        &entry.paths,
+        &rendered.files,
+        primary_diff_path(entry),
+    );
     let needs_diff = matches!(
         sync_status,
         ProjectRepositoryResourceStatus::RepositoryNewer
@@ -314,7 +376,10 @@ fn resource_comparison(
             | ProjectRepositoryResourceStatus::Conflict
     );
     if !needs_diff {
-        return RepositoryResourceComparison::default();
+        return RepositoryResourceComparison {
+            files,
+            ..RepositoryResourceComparison::default()
+        };
     }
     let file_diffs = resource_file_diffs(root, entry, rendered);
     let diff = primary_diff_path(entry)
@@ -340,6 +405,7 @@ fn resource_comparison(
         Vec::new()
     };
     RepositoryResourceComparison {
+        files,
         diff,
         file_diffs,
         field_diff,
@@ -349,7 +415,7 @@ fn resource_comparison(
 /// The comparison of a skill whose repository copy is still under
 /// `kronn/skills`: that copy as the standard file a migration would write
 /// against the Kronn rendering, so the diff shows real differences and not the
-/// change of file format.
+/// change of file format. The repository text is that same standard file.
 fn legacy_skill_comparison(
     root: &Path,
     slug: &str,
@@ -357,14 +423,6 @@ fn legacy_skill_comparison(
     rendered: &crate::core::repository_resources::RenderedRepositoryResource,
     sync_status: ProjectRepositoryResourceStatus,
 ) -> RepositoryResourceComparison {
-    if !matches!(
-        sync_status,
-        ProjectRepositoryResourceStatus::RepositoryNewer
-            | ProjectRepositoryResourceStatus::KronnNewer
-            | ProjectRepositoryResourceStatus::Conflict
-    ) {
-        return RepositoryResourceComparison::default();
-    }
     let path = crate::core::repository_resources::skill_path(slug);
     let repository =
         crate::core::repository_resources::legacy_skill_as_standard(root, slug, legacy_path)
@@ -374,11 +432,34 @@ fn legacy_skill_comparison(
         .get(&path)
         .map(Vec::as_slice)
         .unwrap_or_default();
+    let (repository_text, repository_cut) = side_text(&repository);
+    let (kronn_text, kronn_cut) = side_text(kronn);
+    let files = vec![RepositoryResourceFileContent {
+        path: path.clone(),
+        repository: (!repository.is_empty()).then_some(repository_text),
+        kronn: (!kronn.is_empty()).then_some(kronn_text),
+        truncated: repository_cut || kronn_cut,
+    }];
+    if !matches!(
+        sync_status,
+        ProjectRepositoryResourceStatus::RepositoryNewer
+            | ProjectRepositoryResourceStatus::KronnNewer
+            | ProjectRepositoryResourceStatus::Conflict
+    ) {
+        return RepositoryResourceComparison {
+            files,
+            ..RepositoryResourceComparison::default()
+        };
+    }
     let diff = crate::core::repository_resources::unified_diff(&repository, kronn);
     if diff.is_empty() {
-        return RepositoryResourceComparison::default();
+        return RepositoryResourceComparison {
+            files,
+            ..RepositoryResourceComparison::default()
+        };
     }
     RepositoryResourceComparison {
+        files,
         diff: Some(diff.clone()),
         file_diffs: vec![RepositoryResourceFileDiff { path, diff }],
         field_diff: Vec::new(),
@@ -1321,13 +1402,123 @@ fn seed_of(
     })
 }
 
+/// The files a resource has in the repository only, each with its text.
+fn repository_only_comparison(root: &Path, paths: &[String]) -> RepositoryResourceComparison {
+    RepositoryResourceComparison {
+        files: resource_file_contents(root, paths, &BTreeMap::new(), paths.first()),
+        ..RepositoryResourceComparison::default()
+    }
+}
+
+/// Both sides of one skill row, read the way the listing reads it: a skill
+/// `kronn.lock` lists is aligned against its baseline; one attached to the
+/// project is compared with the file at its publication path; one only found in
+/// a native folder is that folder's files and nothing in Kronn; one the catalog
+/// alone holds is Kronn's rendering and nothing in the repository.
+fn skill_comparison(
+    conn: &rusqlite::Connection,
+    project: &crate::models::Project,
+    root: &Path,
+    project_key: &str,
+    lock: Option<&crate::core::repository_resources::RepositoryLock>,
+    skill_id: &str,
+) -> anyhow::Result<RepositoryResourceComparison> {
+    let lock_entry_of = |slug: &str| {
+        lock.and_then(|lock| {
+            lock.resources.iter().find(|entry| {
+                entry.kind == ProjectRepositoryResourceKind::Skill && entry.slug == slug
+            })
+        })
+    };
+    if let Some(slug) = skill_id.strip_prefix("repository:") {
+        // A skill found in a native folder that the catalog does not know.
+        let mut paths = discover_repository_skills(root)
+            .remove(slug)
+            .map(|seed| seed.repository_paths)
+            .unwrap_or_default();
+        if let Some(entry) = lock_entry_of(slug) {
+            paths = merge_paths(&paths, &entry.paths);
+        }
+        return Ok(repository_only_comparison(root, &paths));
+    }
+    let slug = crate::core::native_files::slug(skill_id);
+    let publication_path = crate::core::repository_resources::skill_path(&slug);
+    let Some(skill) = crate::core::skills::get_skill(skill_id) else {
+        // Attached once, gone from the catalog since: only the file is left.
+        return Ok(repository_only_comparison(
+            root,
+            std::slice::from_ref(&publication_path),
+        ));
+    };
+    if let Some(entry) = lock_entry_of(&slug) {
+        let AlignedSkill { rendered, view } =
+            align_skill(conn, root, project_key, skill_id, &slug, entry)?;
+        if let Some(legacy) = entry
+            .paths
+            .iter()
+            .find(|path| crate::core::repository_resources::is_legacy_skill_path(path))
+        {
+            return Ok(legacy_skill_comparison(
+                root,
+                &slug,
+                legacy,
+                &rendered,
+                view.sync_status,
+            ));
+        }
+        return Ok(resource_comparison(
+            root,
+            entry,
+            &rendered,
+            view.sync_status,
+        ));
+    }
+    let linked = project.default_skill_ids.iter().any(|id| id == skill_id);
+    if !linked {
+        let copy_origins = native_copy_origins(conn, project_key, &project.default_skill_ids)?;
+        if let Some(seed) = take_repository_skill(
+            &mut discover_repository_skills(root),
+            skill_id,
+            copy_origins.get(skill_id).map(String::as_str),
+        ) {
+            return Ok(repository_only_comparison(root, &seed.repository_paths));
+        }
+    }
+    // The text does not depend on the date, so a fixed one keeps the memoized
+    // rendering shared between opens.
+    let rendered = render_database_resource(
+        conn,
+        ProjectRepositoryResourceKind::Skill,
+        skill_id,
+        &slug,
+        Some(
+            crate::core::skills::custom_skill_modified_at(skill_id)
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+        ),
+    )?;
+    let entry = lock_entry(
+        None,
+        ProjectRepositoryResourceKind::Skill,
+        &slug,
+        &skill.name,
+        std::slice::from_ref(&publication_path),
+    );
+    let status = if linked {
+        attached_skill_status(root, &publication_path)
+    } else {
+        ProjectRepositoryResourceStatus::KronnOnly
+    };
+    Ok(resource_comparison(root, &entry, &rendered, status))
+}
+
 /// GET /api/projects/:id/repository-resources/comparison?kind=…&id=…
 ///
-/// The diffs behind one row of the listing, built when its Compare sheet
-/// opens. They come from the same masked rendering a publish would write, so
-/// no secret value can be read here that the repository files would not hold.
-/// A resource with only one side, or with both in sync, has nothing to compare
-/// and answers an empty comparison.
+/// Both sides of one row of the listing, built when its sheet opens: the text
+/// of each file on each side that holds it and, where the two differ, the
+/// diffs. The Kronn side comes from the same masked rendering a publish would
+/// write, so no secret value can be read here that the repository files would
+/// not hold. A resource with only one side carries that side's text and no diff;
+/// one with both in sync carries the same text twice and no diff.
 pub async fn repository_resource_comparison(
     State(state): State<AppState>,
     AxumPath(project_id): AxumPath<String>,
@@ -1344,46 +1535,39 @@ pub async fn repository_resource_comparison(
             let lock =
                 crate::core::repository_resources::load_lock(&root).map_err(anyhow::Error::msg)?;
             if query.kind == ProjectRepositoryResourceKind::Skill {
-                // Only a skill attached in Kronn that `kronn.lock` also lists
-                // has two sides to compare; a native one is a single file.
-                let slug = crate::core::native_files::slug(&query.id);
-                let entry = lock.as_ref().and_then(|lock| {
-                    lock.resources.iter().find(|entry| {
-                        entry.kind == ProjectRepositoryResourceKind::Skill && entry.slug == slug
-                    })
-                });
-                let Some(entry) = entry.filter(|_| !query.id.starts_with("repository:")) else {
-                    return Ok(Some(RepositoryResourceComparison::default()));
-                };
-                let AlignedSkill { rendered, view } =
-                    align_skill(conn, &root, &project_key, &query.id, &slug, entry)?;
-                if let Some(legacy) = entry
-                    .paths
-                    .iter()
-                    .find(|path| crate::core::repository_resources::is_legacy_skill_path(path))
-                {
-                    return Ok(Some(legacy_skill_comparison(
-                        &root,
-                        &slug,
-                        legacy,
-                        &rendered,
-                        view.sync_status,
-                    )));
-                }
-                return Ok(Some(resource_comparison(
+                return skill_comparison(
+                    conn,
+                    &project,
                     &root,
-                    entry,
-                    &rendered,
-                    view.sync_status,
-                )));
+                    &project_key,
+                    lock.as_ref(),
+                    &query.id,
+                )
+                .map(Some);
             }
             let Some(seed) = seed_of(conn, &project_id, query.kind, &query.id)? else {
                 // A repository-only row (`repository:kind:slug`) has no Kronn
-                // side; anything else is unknown to this project.
-                return Ok(query
+                // side: its files are all there is. Anything else is unknown
+                // to this project.
+                let Some((kind, slug)) = query
                     .id
-                    .starts_with("repository:")
-                    .then(RepositoryResourceComparison::default));
+                    .strip_prefix("repository:")
+                    .and_then(|rest| rest.split_once(':'))
+                else {
+                    return Ok(None);
+                };
+                let entry = lock.as_ref().and_then(|lock| {
+                    lock.resources.iter().find(|entry| {
+                        entry.kind == query.kind
+                            && entry.slug == slug
+                            && entry.kind.identity_kind() == kind
+                    })
+                });
+                return Ok(Some(
+                    entry.map_or_else(RepositoryResourceComparison::default, |entry| {
+                        repository_only_comparison(&root, &entry.paths)
+                    }),
+                ));
             };
             let resolved = resolve_resource(conn, &project_key, lock.as_ref(), &seed)?;
             let view = alignment_status(
@@ -3836,6 +4020,232 @@ mod tests {
         .data
         .expect("a repository-only row has an empty comparison");
         assert!(repository_only.diff.is_none() && repository_only.field_diff.is_empty());
+    }
+
+    fn file_of<'a>(
+        comparison: &'a RepositoryResourceComparison,
+        path: &str,
+    ) -> &'a RepositoryResourceFileContent {
+        comparison
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("no {path} in {:?}", comparison.files))
+    }
+
+    #[tokio::test]
+    async fn the_comparison_carries_the_masked_text_of_each_side_whatever_the_state() {
+        const PROMPT_SECRET: &str = "leak-probe-content-secret";
+        const VENDOR_KEY: &str = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt(
+                        "project-1",
+                        "qp-1",
+                        &format!("Use password={PROMPT_SECRET} and the key {VENDOR_KEY}."),
+                    ),
+                )
+            })
+            .await
+            .unwrap();
+        let path = "kronn/prompts/prompt-qp-1.md";
+        let compare_prompt = || {
+            compare(
+                &state,
+                &project_id,
+                ProjectRepositoryResourceKind::QuickPrompt,
+                "qp-1",
+            )
+        };
+
+        // Kronn only: its text, masked, and no diff to build.
+        let kronn_only = compare_prompt().await.0.data.expect("comparison");
+        let file = file_of(&kronn_only, path);
+        assert!(file.repository.is_none());
+        assert!(file.kronn.as_deref().unwrap().contains("Use password="));
+        assert!(kronn_only.diff.is_none() && kronn_only.file_diffs.is_empty());
+
+        // In sync: the same text on both sides, still no diff.
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(PublishProjectRepositoryResourceRequest {
+                kind: ProjectRepositoryResourceKind::QuickPrompt,
+                id: "qp-1".into(),
+                overwrite_repository_changes: false,
+            }),
+        )
+        .await;
+        assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        let in_sync = compare_prompt().await.0.data.expect("comparison");
+        let file = file_of(&in_sync, path);
+        assert!(file.repository.is_some() && file.repository == file.kronn);
+        assert!(in_sync.diff.is_none() && in_sync.file_diffs.is_empty());
+
+        // Two versions: both texts, told apart, and the diff beside them.
+        let repository_file = root.path().join(path);
+        let mut edited = std::fs::read_to_string(&repository_file).unwrap();
+        edited.push_str("\nEdited in Git.\n");
+        std::fs::write(&repository_file, edited).unwrap();
+        let differing = compare_prompt().await.0.data.expect("comparison");
+        let file = file_of(&differing, path);
+        assert!(file
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+        assert!(!file.kronn.as_deref().unwrap().contains("Edited in Git."));
+        assert!(differing.diff.is_some());
+
+        // Nothing in any of the three answers holds a secret value.
+        for comparison in [&kronn_only, &in_sync, &differing] {
+            let shown = serde_json::to_string(comparison).unwrap();
+            for secret in [PROMPT_SECRET, VENDOR_KEY] {
+                assert!(!shown.contains(secret), "{secret} leaked into the content");
+            }
+            assert!(shown.contains("secret://KRONN_QUICKPROMPT_"));
+        }
+
+        // The prompt leaves Kronn: the repository copy is all that is left.
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM quick_prompts WHERE id = 'qp-1'", [])?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        let listing = list_resources(&state, &project_id).await;
+        let orphan = listing
+            .resources
+            .iter()
+            .find(|item| item.status == ProjectRepositoryResourceStatus::RepositoryOnly)
+            .expect("the published file is now repository only");
+        let repository_only = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickPrompt,
+            &orphan.id,
+        )
+        .await
+        .0
+        .data
+        .expect("comparison");
+        let file = file_of(&repository_only, path);
+        assert!(file
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+        assert!(file.kronn.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_skill_shows_the_side_or_sides_that_hold_it() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        let skill_compare = |id: &'static str| {
+            compare(
+                &state,
+                &project_id,
+                ProjectRepositoryResourceKind::Skill,
+                id,
+            )
+        };
+        let standard = ".agents/skills/rust/SKILL.md";
+
+        // A catalog skill the project does not use: Kronn's text, nothing in the repository.
+        let catalog = skill_compare("rust").await.0.data.expect("comparison");
+        let file = file_of(&catalog, standard);
+        assert!(file.repository.is_none());
+        assert!(file
+            .kronn
+            .as_deref()
+            .unwrap()
+            .starts_with("---\nname: rust\n"));
+
+        // A skill found in a native folder, unknown to the catalog: that text only.
+        write_native_skill(
+            root.path(),
+            ".claude/skills",
+            "review",
+            "Review",
+            "Version A.",
+        );
+        write_native_skill(
+            root.path(),
+            ".agents/skills",
+            "review",
+            "Review",
+            "Version B.",
+        );
+        let native = skill_compare("repository:review")
+            .await
+            .0
+            .data
+            .expect("comparison");
+        assert_eq!(
+            native.files.len(),
+            2,
+            "every copy is listed under its own path"
+        );
+        assert!(file_of(&native, ".claude/skills/review/SKILL.md")
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Version A."));
+        assert!(native.files.iter().all(|file| file.kronn.is_none()));
+
+        // Attached and published: the same text twice, then two versions with their diff.
+        attach_skills(&state, &project_id, &["rust"]).await;
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            publish_request("rust"),
+        )
+        .await;
+        assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        let in_sync = skill_compare("rust").await.0.data.expect("comparison");
+        let file = file_of(&in_sync, standard);
+        assert!(file.repository.is_some() && file.repository == file.kronn);
+        assert!(in_sync.diff.is_none());
+        let path = root.path().join(standard);
+        let mut edited = std::fs::read_to_string(&path).unwrap();
+        edited.push_str("\nEdited in Git.\n");
+        std::fs::write(&path, edited).unwrap();
+        let differing = skill_compare("rust").await.0.data.expect("comparison");
+        let file = file_of(&differing, standard);
+        assert!(file
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+        assert!(!file.kronn.as_deref().unwrap().contains("Edited in Git."));
+        assert!(differing
+            .diff
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+    }
+
+    #[test]
+    fn a_side_longer_than_the_bound_is_cut_on_a_character_and_flagged() {
+        let (text, cut) = side_text("short".as_bytes());
+        assert_eq!((text.as_str(), cut), ("short", false));
+        let (text, cut) = side_text(&vec![b'a'; MAX_CONTENT_BYTES + 10]);
+        assert_eq!((text.len(), cut), (MAX_CONTENT_BYTES, true));
+        // Two-byte characters straddling the bound never split.
+        let (text, cut) = side_text("é".repeat(MAX_CONTENT_BYTES).as_bytes());
+        assert!(cut && text.len() <= MAX_CONTENT_BYTES && text.chars().all(|c| c == 'é'));
     }
 
     /// 60 prompts of about 8 KB and 20 Quick Execs, all Kronn-side (nothing

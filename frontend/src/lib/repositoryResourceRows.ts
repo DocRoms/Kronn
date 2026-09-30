@@ -102,15 +102,6 @@ export const EXECUTABLE_KINDS: ProjectRepositoryResourceKind[] = [
 
 export const resourceKey = (kind: ProjectRepositoryResourceKind, id: string) => `${kind}:${id}`;
 
-/** States where both sides exist and can differ: the only ones the backend has
- *  something to compare for. The listing never carries the diffs themselves —
- *  the Compare sheet asks for them when it opens. */
-const COMPARABLE_STATES: SyncState[] = ['repository_newer', 'kronn_newer', 'conflict', 'approval_required'];
-
-export const isComparable = (row: ResourceRow): boolean => (
-  COMPARABLE_STATES.includes(row.state) && !row.id.startsWith('repository:')
-);
-
 const rowLink = (link: RepositoryResourceLink): RowLink => ({
   key: resourceKey(link.kind, link.id),
   kind: link.kind,

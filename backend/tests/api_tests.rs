@@ -3431,8 +3431,10 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     // The listing says that the two sides differ, never how, and holds no secret…
     assert!(conflict["data"]["resources"][0].get("diff").is_none());
     assert!(conflict["data"]["resources"][0].get("file_diffs").is_none());
+    assert!(conflict["data"]["resources"][0].get("files").is_none());
     assert!(!conflict.to_string().contains("literal-secret-value"));
-    // …the diff is asked for when the Compare sheet opens, masked like the file.
+    // …the diff and the text of each side are asked for when the sheet opens,
+    // masked like the file.
     let (comparison_status, comparison) = get_json(
         app.clone(),
         "/api/projects/portable-project/repository-resources/comparison?kind=quick_exec&id=qe-portable",
@@ -3444,6 +3446,11 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         .as_str()
         .unwrap()
         .contains("--- repository"));
+    let files = comparison["data"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{comparison}");
+    assert!(files[0]["repository"].is_string() && files[0]["kronn"].is_string());
+    assert_ne!(files[0]["repository"], files[0]["kronn"]);
+    assert!(files[0]["kronn"].as_str().unwrap().contains("Kronn edit"));
     assert!(!comparison.to_string().contains("literal-secret-value"));
 
     let (_, refused) = post_json(
