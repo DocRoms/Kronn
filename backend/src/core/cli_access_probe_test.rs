@@ -45,9 +45,15 @@ fn extract_semver_finds_a_triple_inside_free_form_cli_output() {
 #[tokio::test]
 async fn run_step_reports_success_for_a_clean_exit() {
     let (_dir, roots) = roots();
-    let result = run_step("git", &["--version"], &roots[0], &roots, &CancellationToken::new())
-        .await
-        .unwrap();
+    let result = run_step(
+        "git",
+        &["--version"],
+        &roots[0],
+        &roots,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     assert!(result.status.is_success());
 }
 
@@ -159,8 +165,8 @@ async fn probe_reports_the_declared_fastly_and_gitlab_shapes_without_panicking()
     // without erroring or panicking.
     let (_dir, roots) = roots();
     for server_id in ["mcp-fastly", "mcp-gitlab"] {
-        let declared = crate::core::registry::cli_access_probe(server_id)
-            .expect("declared CLI access probe");
+        let declared =
+            crate::core::registry::cli_access_probe(server_id).expect("declared CLI access probe");
         let result = probe(&declared, &roots, &CancellationToken::new()).await;
         assert!(
             matches!(

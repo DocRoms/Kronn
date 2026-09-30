@@ -313,7 +313,10 @@ pub fn build_profiles_prompt_for_run(run_id: &str, profile_ids: &[String]) -> St
 }
 
 fn resolve_profiles(profile_ids: &[String]) -> Vec<AgentProfile> {
-    profile_ids.iter().filter_map(|id| get_profile(id)).collect()
+    profile_ids
+        .iter()
+        .filter_map(|id| get_profile(id))
+        .collect()
 }
 
 fn resolve_profiles_for_run(run_id: &str, profile_ids: &[String]) -> Vec<AgentProfile> {

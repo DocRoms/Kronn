@@ -3257,7 +3257,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         // Compare judges cannot discover a skill through a tool, and compact
         // injection would omit the normative anchors after the first lines.
         match config.run_snapshot_id {
-            Some(run_id) => crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids),
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids)
+            }
             None => crate::core::skills::build_skills_prompt(config.skill_ids),
         }
     } else if native_skills {
@@ -3271,7 +3273,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     } else {
         match config.run_snapshot_id {
-            Some(run_id) => crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids),
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids)
+            }
             None => crate::core::skills::build_skills_prompt(config.skill_ids),
         }
     };
@@ -3326,9 +3330,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         // a token-saving fallback in case the agent's one-shot mode
         // doesn't auto-pick the file up (which was the EW-7189 failure).
         match config.run_snapshot_id {
-            Some(run_id) => {
-                crate::core::profiles::build_profiles_prompt_compact_for_run(run_id, config.profile_ids)
-            }
+            Some(run_id) => crate::core::profiles::build_profiles_prompt_compact_for_run(
+                run_id,
+                config.profile_ids,
+            ),
             None => crate::core::profiles::build_profiles_prompt_compact(config.profile_ids),
         }
     } else {

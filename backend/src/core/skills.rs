@@ -651,8 +651,15 @@ pub fn save_custom_skill(
 
     let slug = unique_skill_slug(&dir, name)?;
     let id = format!("custom-{}", slug);
-    let file_content =
-        render_skill_markdown(name, description, icon, category, content, license, allowed_tools);
+    let file_content = render_skill_markdown(
+        name,
+        description,
+        icon,
+        category,
+        content,
+        license,
+        allowed_tools,
+    );
 
     let path = dir.join(format!("{}.md", slug));
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
@@ -693,8 +700,15 @@ pub fn update_custom_skill(
         return Err(format!("Skill '{}' not found", id));
     }
 
-    let file_content =
-        render_skill_markdown(name, description, icon, category, content, license, allowed_tools);
+    let file_content = render_skill_markdown(
+        name,
+        description,
+        icon,
+        category,
+        content,
+        license,
+        allowed_tools,
+    );
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
 

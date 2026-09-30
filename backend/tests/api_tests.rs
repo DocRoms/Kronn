@@ -2731,7 +2731,13 @@ async fn artifact_import_reuses_a_pre_migration_global_identity_when_importing_i
         .db
         .with_conn(move |conn| {
             kronn::db::quick_prompts::insert_quick_prompt(conn, &existing_quick_prompt)?;
-            kronn::db::resource_identities::upsert(conn, "", "quick_prompt", "qp-portable", "existing-qp")
+            kronn::db::resource_identities::upsert(
+                conn,
+                "",
+                "quick_prompt",
+                "qp-portable",
+                "existing-qp",
+            )
         })
         .await
         .unwrap();
@@ -2870,9 +2876,7 @@ async fn artifact_import_resolves_workflow_skill_profile_directive_ids_and_warns
         ("directive", "does-not-exist-directive"),
     ] {
         assert!(
-            warnings
-                .iter()
-                .any(|w| w["kind"] == kind && w["id"] == id),
+            warnings.iter().any(|w| w["kind"] == kind && w["id"] == id),
             "missing {kind} {id} must be signalled clearly: {warnings:?}"
         );
     }
@@ -3376,8 +3380,8 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     let published_text = std::fs::read_to_string(&resource_path).unwrap();
     assert!(!published_text.contains("literal-secret-value"));
     assert!(published_text.contains("secret://KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
-    let config_text = std::fs::read_to_string(project_directory.path().join("kronn/kronn.toml"))
-        .unwrap();
+    let config_text =
+        std::fs::read_to_string(project_directory.path().join("kronn/kronn.toml")).unwrap();
     assert!(config_text.contains("KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
     assert!(!config_text.contains("literal-secret-value"));
     for relative in [
@@ -3547,7 +3551,10 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     )
     .await;
     // An unapproved imported change surfaces as approval_required first.
-    assert_eq!(changed["data"]["resources"][0]["status"], "approval_required");
+    assert_eq!(
+        changed["data"]["resources"][0]["status"],
+        "approval_required"
+    );
     assert_eq!(changed["data"]["resources"][0]["approval_required"], true);
 
     let (_, republished) = post_json(
@@ -3618,8 +3625,8 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     state
         .db
         .with_conn(|conn| {
-            let mut item = kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?
-                .expect("quick exec");
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
             item.args.push("--dry-run".into());
             item.updated_at = chrono::Utc::now();
             kronn::db::quick_execs::update_quick_exec(conn, &item)
@@ -3961,8 +3968,11 @@ async fn project_repository_resources_classifies_repository_and_kronn_skills() {
         "[package]\nname='demo'\n",
     )
     .unwrap();
-    std::fs::write(project_directory.path().join("go.mod"), "module example.test/demo\n")
-        .unwrap();
+    std::fs::write(
+        project_directory.path().join("go.mod"),
+        "module example.test/demo\n",
+    )
+    .unwrap();
     state
         .db
         .with_conn({
@@ -15491,7 +15501,8 @@ async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates
         .unwrap();
 
     let app = build_router_with_auth(state.clone(), false);
-    let (status, dry) = post_json(app, "/api/mcps/refresh?dry_run=true", serde_json::json!({})).await;
+    let (status, dry) =
+        post_json(app, "/api/mcps/refresh?dry_run=true", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "dry-run refresh failed: {dry:?}");
     assert_eq!(dry["success"], true, "{dry:?}");
     assert_eq!(dry["data"]["dry_run"], true);

@@ -2661,7 +2661,11 @@ mod tests {
         assert_eq!(effective_plugin_kind(&server), PluginKind::Cli);
         assert_eq!(
             available_plugin_interfaces(&server),
-            vec![PluginInterface::Api, PluginInterface::Mcp, PluginInterface::Cli]
+            vec![
+                PluginInterface::Api,
+                PluginInterface::Mcp,
+                PluginInterface::Cli
+            ]
         );
     }
 

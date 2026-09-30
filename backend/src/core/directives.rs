@@ -326,7 +326,8 @@ pub fn save_custom_directive(
 
     let slug = unique_directive_slug(&dir, name);
     let id = format!("custom-{}", slug);
-    let file_content = render_directive_markdown(name, description, icon, category, content, conflicts);
+    let file_content =
+        render_directive_markdown(name, description, icon, category, content, conflicts);
 
     let path = dir.join(format!("{}.md", slug));
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
@@ -363,7 +364,8 @@ pub fn update_custom_directive(
         return Err(format!("Directive '{}' not found", id));
     }
 
-    let file_content = render_directive_markdown(name, description, icon, category, content, conflicts);
+    let file_content =
+        render_directive_markdown(name, description, icon, category, content, conflicts);
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write directive: {}", e))?;
 
