@@ -522,64 +522,11 @@ async fn the_partial_audit_applies_the_same_gate_and_launcher() {
 // the prompt as the model receives it, not a string the test assembled. No socket.
 
 #[cfg(unix)]
-/// Three other projects registered in Kronn, none of them linked to the audited one.
-const OTHER_PROJECTS: [(&str, &str); 3] = [
-    ("orchid-billing-api", "/srv/zz-clients/orchid-billing-api"),
-    ("zephyr-mobile-app", "/srv/zz-clients/zephyr-mobile-app"),
-    ("quartz-infra", "/srv/zz-clients/quartz-infra"),
-];
-#[cfg(unix)]
-const LINKED_NAME: &str = "linked-design-system";
-#[cfg(unix)]
-const LINKED_LOCATION: &str = "/srv/zz-clients/linked-design-system";
-#[cfg(unix)]
-/// In the audited project's briefing, which every step prompt carries: a turn that
-/// holds it is a step prompt, not a retry note or a validation turn.
-const BRIEFING_MARKER: &str = "BRIEFING-MARKER-KT926";
-#[cfg(unix)]
-const TURN_SEPARATOR: &str = "=====KT926-TURN=====";
-
-#[cfg(unix)]
-async fn register_project(state: &AppState, id: &str, name: &str, path: &str, extra: Value) {
-    let mut row = json!({
-        "id": id, "name": name, "path": path,
-        "repo_url": null, "token_override": null, "ai_config": {"detected": false, "configs": []},
-        "created_at": chrono::Utc::now().to_rfc3339(), "updated_at": chrono::Utc::now().to_rfc3339()
-    });
-    row.as_object_mut()
-        .unwrap()
-        .extend(extra.as_object().cloned().unwrap_or_default());
-    let row: crate::models::Project = serde_json::from_value(row).unwrap();
-    state
-        .db
-        .with_conn(move |conn| crate::db::projects::insert_project(conn, &row))
-        .await
-        .unwrap();
-}
-
-#[cfg(unix)]
-/// The audited project (with a linked repo when asked) next to the three unlinked ones.
-async fn audited_project_among_others(state: &AppState, dir: &Path, linked: bool) {
-    let linked_repos = if linked {
-        json!([{
-            "id": "lr-1", "name": LINKED_NAME, "kind": "design",
-            "location": LINKED_LOCATION, "description": "the design system"
-        }])
-    } else {
-        json!([])
-    };
-    register_project(
-        state,
-        "proj-audited",
-        "audited",
-        &dir.to_string_lossy(),
-        json!({"briefing_notes": BRIEFING_MARKER, "linked_repos": linked_repos}),
-    )
-    .await;
-    for (index, (name, path)) in OTHER_PROJECTS.iter().enumerate() {
-        register_project(state, &format!("proj-other-{index}"), name, path, json!({})).await;
-    }
-}
+use crate::api::other_projects_fixture::{
+    assert_no_candidate_pool, assert_no_unlinked_project, fresh_state, project_among_others,
+    recorded_turns, recording_claude, route_claude, BRIEFING_MARKER, LINKED_LOCATION, LINKED_NAME,
+    PROJECT_ID,
+};
 
 #[cfg(unix)]
 async fn sse_body(response: axum::response::Response) -> String {
@@ -623,40 +570,17 @@ fn expected_step_count(pipeline: &str) -> usize {
 async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
     use axum::response::IntoResponse;
     let tools = tempfile::tempdir().unwrap();
-    let log = tools.path().join("turns.log");
-    let script = format!(
-        "{{ cat; printf '%s\\n' \"$*\"; printf '%s\\n' '{TURN_SEPARATOR}'; }} >> '{}'\n{}",
-        log.display(),
-        r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done."}}}'
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}'"#
-    );
-    let fixture = crate::acp::test_support::write_fixture_script(tools.path(), &script);
+    let (fixture, log) = recording_claude(tools.path());
 
-    let state = AppState::new_defaults(
-        Arc::new(tokio::sync::RwLock::new(
-            crate::core::config::default_config(),
-        )),
-        Arc::new(crate::db::Database::open_in_memory().unwrap()),
-        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
-    );
+    let state = fresh_state();
     let project = tempfile::tempdir().unwrap();
-    audited_project_among_others(&state, project.path(), linked).await;
-    let project_path = project.path().to_string_lossy().into_owned();
-    let work_dir =
-        crate::agents::runner::resolve_agent_work_dir(Some(&project_path), &project_path).unwrap();
-    let _route = crate::agents::runner::test_acp_routes::route(
-        &work_dir,
-        Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
-            fixture.to_string_lossy(),
-            None,
-            false,
-        )),
-    );
+    project_among_others(&state, project.path(), linked).await;
+    let _route = route_claude(project.path(), &fixture);
 
     let response = if pipeline == "full" {
         crate::api::audit::full::full_audit(
             axum::extract::State(state.clone()),
-            axum::extract::Path("proj-audited".to_string()),
+            axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::LaunchAuditRequest {
                 agent: AgentType::ClaudeCode,
                 tier: None,
@@ -670,7 +594,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
     } else {
         crate::api::audit::drift::partial_audit(
             axum::extract::State(state.clone()),
-            axum::extract::Path("proj-audited".to_string()),
+            axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::PartialAuditRequest {
                 agent: AgentType::ClaudeCode,
                 tier: None,
@@ -685,11 +609,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         !stream.contains("event: error"),
         "the {pipeline} audit must start: {stream}"
     );
-    let turns = std::fs::read_to_string(&log).unwrap_or_default();
-    let prompts: Vec<String> = turns
-        .split(TURN_SEPARATOR)
+    let prompts: Vec<String> = recorded_turns(&log)
+        .into_iter()
         .filter(|turn| turn.contains(BRIEFING_MARKER))
-        .map(str::to_owned)
         .collect();
     assert!(
         !prompts.is_empty(),
@@ -710,10 +632,7 @@ async fn no_step_of_the_full_or_partial_audit_names_an_unlinked_kronn_project() 
             expected_step_count(pipeline)
         );
         for prompt in &prompts {
-            for (name, path) in OTHER_PROJECTS {
-                assert!(!prompt.contains(name), "{pipeline}: prompt names {name}");
-                assert!(!prompt.contains(path), "{pipeline}: prompt names {path}");
-            }
+            assert_no_unlinked_project(prompt, pipeline);
         }
     }
 }
@@ -734,10 +653,7 @@ async fn an_explicitly_linked_repo_stays_in_every_step_prompt_and_the_others_sta
                 prompt.contains(LINKED_NAME) && prompt.contains(LINKED_LOCATION),
                 "{pipeline}: the linked repo is a voluntary declaration and stays"
             );
-            for (name, path) in OTHER_PROJECTS {
-                assert!(!prompt.contains(name), "{pipeline}: prompt names {name}");
-                assert!(!prompt.contains(path), "{pipeline}: prompt names {path}");
-            }
+            assert_no_unlinked_project(prompt, pipeline);
         }
     }
 }
@@ -747,19 +663,7 @@ async fn an_explicitly_linked_repo_stays_in_every_step_prompt_and_the_others_sta
 async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machines_projects() {
     for pipeline in ["full", "partial"] {
         for prompt in step_prompts_of(pipeline, false).await {
-            for retired in [
-                "Suggested companion repos",
-                "Other Kronn projects",
-                "andidate pool",
-                "companion-repo candidate",
-                "registered in Kronn",
-                "AGENTS.md at the path above",
-            ] {
-                assert!(
-                    !prompt.contains(retired),
-                    "{pipeline}: prompt still says {retired:?}"
-                );
-            }
+            assert_no_candidate_pool(&prompt, pipeline);
             // Only a linked repo is read through its `docs/AGENTS.md`; with none
             // linked, no step tells the agent to open another repo's docs.
             assert!(

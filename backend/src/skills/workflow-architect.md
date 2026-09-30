@@ -870,16 +870,14 @@ The 7 steps:
 
 **Cross-repo evidence — when the project has `linked_repos` set:**
 
-The runner auto-appends two blocks to EVERY `Agent` step's prompt at run-time, symmetric with the Kronn AI Audit pipeline:
-- `## Linked repositories (companion repos)` — the user-curated list of related repos (legacy versions, sibling APIs, shared-lib, design system). READ-ONLY references — agents must NEVER modify them.
-- `## Other Kronn projects on this machine` — a candidate pool for cross-project suggestion (only Kronn-known repos, not random `~/Repositories` scans).
+The only other repos an `Agent` step can be pointed at are the ones the user linked to the project themselves (the project's "Linked repos"): a user-curated list of related repos (legacy versions, sibling APIs, shared-lib, design system), kept in the project's `docs/linked-repos.md`. READ-ONLY references — agents must NEVER modify them. A step prompt never lists the user's OTHER Kronn projects (name or path): it goes to the model provider, so nothing about the machine's projects is sent with it. Do not ask a step to go looking for companion repos among them.
 
 In a migration ticket (e.g. `EW-7247 — Africanews → Euronews multi-brand`), the triage step is expected to:
 1. **Read the legacy repo's `docs/AGENTS.md` FIRST**, then concrete files (color tokens, templates, constants) the migration must preserve.
 2. **Cite evidence** in every `decided` or `mocked` entry where evidence COULD exist in a linked repo, using the format `evidence: <linked_repo>/<path>:<line>` in the `why` (decided) or `strategy` (mocked) field.
 3. **Promote `mocked` → `decided`** whenever the linked repo provides a concrete, unambiguous value. A surviving `mocked` item must explain why evidence does NOT exist in the linked repos.
 
-The implement step picks up the same blocks and the same `evidence:` annotations and is told to **lift** concrete values (color hex, URL, constant) from the cited file rather than invent them.
+The implement step picks up the same linked repos and the same `evidence:` annotations and is told to **lift** concrete values (color hex, URL, constant) from the cited file rather than invent them.
 
 This is enforced at runtime by the triage prompt addendum + the implement step's rule 6 — you don't have to write it yourself. Just point the user at the preset; the pattern bakes the discipline in.
 

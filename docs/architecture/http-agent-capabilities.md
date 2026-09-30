@@ -322,11 +322,13 @@ list every other project registered in Kronn (name and absolute path), tell the
 agent to read their `docs/AGENTS.md` and to write a `## Suggested companion
 repos` section into the audited repository's own `docs/AGENTS.md` — asking an
 HTTP agent for a read its tools refuse, and copying an unrelated project's name
-into a versioned file. Neither pipeline injects that list any more. The only
+into a versioned file. Neither pipeline injects that list any more, and no
+discussion or workflow Agent step does either (the audit's validation and
+briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
-[src: file: backend/src/api/audit/full.rs:243]
-[src: file: backend/src/api/audit/drift.rs:101]. What remains: the block for a
+[src: file: backend/src/api/audit/full.rs:247]
+[src: file: backend/src/api/audit/drift.rs:105]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block

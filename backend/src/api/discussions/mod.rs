@@ -16,6 +16,8 @@ use axum::response::sse::Event;
 use futures::stream::Stream;
 
 pub(crate) mod ceilings;
+#[cfg(all(test, unix))]
+mod companion_privacy_tests;
 pub mod context;
 pub mod crud;
 pub mod messaging;

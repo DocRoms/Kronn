@@ -2507,22 +2507,6 @@ async fn make_agent_stream_inner(
         format!("{}{}", preamble, context_files_prompt)
     };
 
-    // 0.8.3 (TD-265) — companion-repo context (linked_repos + Kronn
-    // projects universe). Same blocks the audit pipeline and workflow
-    // runner already inject. Without this, an agent chatting in a
-    // discussion can't see what companion repos the user has wired —
-    // it would re-ask "do you have a frontend repo for this?" every
-    // turn even though the user has `front_api` registered as a
-    // linked_repo on the project. Empty string for general (no-project)
-    // discussions; cheap (2 DB reads) on project discussions.
-    let companion_context =
-        crate::api::projects::compute_companion_context(&state, disc.project_id.as_deref()).await;
-    let context_files_prompt = if companion_context.is_empty() {
-        context_files_prompt
-    } else {
-        format!("{}{}", context_files_prompt, companion_context)
-    };
-
     // Planning stays pull-based: inject no task body, list or description.
     // Only signal that linked state changed since this discussion's last
     // agent reply; the agent can then call plan_get/task_changes if relevant.

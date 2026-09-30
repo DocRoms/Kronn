@@ -526,15 +526,6 @@ pub async fn orchestrate(
         String::new()
     };
 
-    // 0.8.3 (TD-265) — companion-repo context (linked_repos + Kronn
-    // projects universe). Computed once here so each agent round +
-    // the final synthesis pass shares the same blocks without paying
-    // the DB hits per agent. Internal summarization calls (line 286,
-    // 689, 864) do NOT receive this — they compress conversation
-    // history and don't reason about the project's companions.
-    let companion_context =
-        crate::api::projects::compute_companion_context(&state, disc.project_id.as_deref()).await;
-
     // For general discussions (no project), write .mcp.json + build MCP context
     let global_mcp_context = if project_path.is_empty() {
         crate::api::disc_git::prepare_general_mcp(&state, &orch_workspace_path).await
@@ -854,7 +845,6 @@ pub async fn orchestrate(
                     http_endpoints: Some(&http_endpoints),
                     external_http: external_http.as_ref(),
                     model_override: round_model_override.as_deref(),
-                    context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
                     acp_session_store: Some(runner::AcpSessionStore::new(
                         state.db.clone(),
@@ -1068,7 +1058,6 @@ pub async fn orchestrate(
                 http_endpoints: Some(&http_endpoints),
                 external_http: synthesis_external_http.as_ref(),
                 model_override: synthesis_model_override.as_deref(),
-                context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
                 acp_session_store: Some(runner::AcpSessionStore::new(state.db.clone(), id.clone())),
                 tools: spawn_uses_native_tools(SpawnToolPolicy::AgentWork, &primary_agent_type)
