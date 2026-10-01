@@ -591,26 +591,48 @@ async fn inventory_failure_is_compatible_only_after_its_diagnostic_was_saved() {
 
 /// KT-930 — the official library, scripted: the registry route is tested
 /// without ever reaching the real one.
-struct ScriptedLibrary(std::collections::HashMap<String, Vec<u8>>);
+#[derive(Default)]
+struct ScriptedLibrary(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+
+impl ScriptedLibrary {
+    fn publish(&self, name: &str, body: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), body.as_bytes().to_vec());
+    }
+}
 
 #[async_trait::async_trait]
 impl kronn::core::ollama_registry::ManifestSource for ScriptedLibrary {
     async fn manifest(&self, model: &kronn::core::ollama_registry::LibraryRef) -> Option<Vec<u8>> {
-        self.0.get(&model.key()).cloned()
+        self.0.lock().unwrap().get(&model.key()).cloned()
     }
 }
 
 const CURRENT_MANIFEST: &str = r#"{"config":{"size":100},"layers":[{"size":3000000000}]}"#;
 const NEWER_MANIFEST: &str = r#"{"config":{"size":100},"layers":[{"size":3100000000}]}"#;
 
+/// The scripted library, and the registry that reads from it (so a test can
+/// publish a new manifest after the registry has cached the old one).
+fn library_with(
+    entries: &[(&str, &str)],
+) -> (
+    Arc<ScriptedLibrary>,
+    Arc<kronn::core::ollama_registry::OllamaRegistry>,
+) {
+    let source = Arc::new(ScriptedLibrary::default());
+    for (name, body) in entries {
+        source.publish(name, body);
+    }
+    let registry = Arc::new(kronn::core::ollama_registry::OllamaRegistry::new(
+        source.clone(),
+    ));
+    (source, registry)
+}
+
 fn scripted_library(entries: &[(&str, &str)]) -> Arc<kronn::core::ollama_registry::OllamaRegistry> {
-    let bodies = entries
-        .iter()
-        .map(|(name, body)| (name.to_string(), body.as_bytes().to_vec()))
-        .collect();
-    Arc::new(kronn::core::ollama_registry::OllamaRegistry::new(Arc::new(
-        ScriptedLibrary(bodies),
-    )))
+    library_with(entries).1
 }
 
 fn app_with_library(
@@ -732,6 +754,42 @@ async fn the_registry_route_still_sizes_suggestions_when_ollama_is_down() {
     assert_eq!(
         json["data"]["suggestions"],
         json!([{ "name": "qwen3:8b", "size": "3.0 GB" }])
+    );
+}
+
+/// Answers are cached for hours; `fresh=true` (after an update, on Refresh)
+/// asks the library again and replaces what was cached. No mock server needed.
+#[tokio::test]
+#[serial]
+async fn the_registry_route_serves_the_cache_until_asked_for_fresh() {
+    let (source, library) = library_with(&[("qwen3:8b", CURRENT_MANIFEST)]);
+    let size = |json: &Value| json["data"]["suggestions"][0]["size"].clone();
+    let uri = "/api/ollama/registry?suggested=qwen3:8b";
+    let app = || app_with_library("http://127.0.0.1:1", library.clone());
+
+    assert_eq!(size(&get(app(), uri).await), "3.0 GB");
+
+    // The library publishes a new build of the tag.
+    source.publish("qwen3:8b", NEWER_MANIFEST);
+    assert_eq!(
+        size(&get(app(), uri).await),
+        "3.0 GB",
+        "still the cached one"
+    );
+    assert_eq!(
+        size(&get(app(), "/api/ollama/registry?suggested=qwen3:8b&fresh=false").await),
+        "3.0 GB",
+        "fresh=false is the ordinary visit"
+    );
+    assert_eq!(
+        size(&get(app(), "/api/ollama/registry?suggested=qwen3:8b&fresh=true").await),
+        "3.1 GB",
+        "fresh=true asks the library again"
+    );
+    assert_eq!(
+        size(&get(app(), uri).await),
+        "3.1 GB",
+        "and the recheck replaced the cached answer"
     );
 }
 

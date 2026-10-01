@@ -49,6 +49,30 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
 /// finished by then is used and cached; the rest stays unknown until the next
 /// look.
 pub const BATCH_BUDGET: Duration = Duration::from_secs(8);
+
+/// How hard one answer may work.
+#[derive(Debug, Clone, Copy)]
+pub struct Look {
+    /// What the whole answer may take.
+    pub budget: Duration,
+    /// Ask the registry again even where the cache holds a fresh answer: after
+    /// an update (the cached manifest may predate the copy just pulled) and on
+    /// an explicit Refresh.
+    pub recheck: bool,
+}
+
+impl Look {
+    /// The ordinary visit: cached answers are good for hours.
+    pub const CACHED: Look = Look {
+        budget: BATCH_BUDGET,
+        recheck: false,
+    };
+    /// "Look again now."
+    pub const RECHECK: Look = Look {
+        budget: BATCH_BUDGET,
+        recheck: true,
+    };
+}
 /// A real manifest is under 2 KB; this only guards against a hostile or
 /// broken endpoint streaming something enormous.
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
@@ -311,42 +335,55 @@ impl OllamaRegistry {
         cache.insert(key, CacheEntry { at: now, manifest });
     }
 
-    /// One tag's manifest: from the cache while it is fresh, else from the
-    /// source. A failure is cached too, briefly, as `None`.
-    pub async fn lookup_at(&self, model: &LibraryRef, now: Instant) -> Option<Manifest> {
-        let key = model.key();
-        if let Some(hit) = self.cached(&key, now) {
-            return hit;
-        }
+    /// One tag's manifest from the source, remembered. A failure is cached
+    /// too, briefly, as `None`.
+    async fn fetch_at(&self, model: &LibraryRef, now: Instant) -> Option<Manifest> {
         let manifest = self
             .source
             .manifest(model)
             .await
             .and_then(|body| parse_manifest(&body));
-        self.remember(key, manifest.clone(), now);
+        self.remember(model.key(), manifest.clone(), now);
         manifest
     }
 
-    pub async fn lookup(&self, model: &LibraryRef) -> Option<Manifest> {
-        self.lookup_at(model, Instant::now()).await
+    /// One tag's manifest: from the cache while it is fresh, else from the
+    /// source.
+    pub async fn lookup_at(&self, model: &LibraryRef, now: Instant) -> Option<Manifest> {
+        match self.cached(&model.key(), now) {
+            Some(hit) => hit,
+            None => self.fetch_at(model, now).await,
+        }
+    }
+
+    /// One tag's manifest from the source, whatever the cache holds, which the
+    /// new answer then replaces. If the source does not answer, that is the
+    /// answer: a stale one is not passed off as current.
+    pub async fn recheck_at(&self, model: &LibraryRef, now: Instant) -> Option<Manifest> {
+        self.fetch_at(model, now).await
     }
 
     /// Several tags at once, [`MAX_CONCURRENT_LOOKUPS`] at a time, within
-    /// `budget` overall. A tag missing from the result did not answer in time.
+    /// `look.budget` overall. A tag missing from the result did not answer in time.
     /// Lookups finished by the deadline are already cached, so asking again
     /// resumes instead of starting over.
     pub async fn lookup_all(
         &self,
         models: &[LibraryRef],
-        budget: Duration,
+        look: Look,
     ) -> HashMap<String, Option<Manifest>> {
-        let deadline = tokio::time::Instant::now() + budget;
+        let deadline = tokio::time::Instant::now() + look.budget;
         let mut answers = HashMap::new();
         // Owned items: a stream of borrowed ones makes this future's `Send`
         // unprovable once it sits behind an axum handler.
         let mut pending = futures::stream::iter(models.to_vec())
             .map(|model| async move {
-                let manifest = self.lookup(&model).await;
+                let now = Instant::now();
+                let manifest = if look.recheck {
+                    self.recheck_at(&model, now).await
+                } else {
+                    self.lookup_at(&model, now).await
+                };
                 (model.key(), manifest)
             })
             .buffer_unordered(MAX_CONCURRENT_LOOKUPS);
@@ -372,7 +409,7 @@ pub async fn report(
     registry: &OllamaRegistry,
     installed: &[(String, String)],
     suggested: &[String],
-    budget: Duration,
+    look: Look,
 ) -> OllamaRegistryResponse {
     let mut refs = Vec::new();
     let mut seen = HashSet::new();
@@ -385,7 +422,7 @@ pub async fn report(
             refs.push(model);
         }
     }
-    let answers = registry.lookup_all(&refs, budget).await;
+    let answers = registry.lookup_all(&refs, look).await;
     let manifest_of = |name: &str| -> Option<&Manifest> {
         let model = LibraryRef::parse(name)?;
         answers.get(&model.key())?.as_ref()
@@ -699,7 +736,7 @@ mod tests {
             &registry_of(source),
             &installed(&[("qwen3:8b", FIXTURE_DIGEST)]),
             &[],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(
@@ -716,7 +753,7 @@ mod tests {
             &registry_of(source),
             &installed(&[("qwen3:8b", FIXTURE_DIGEST)]),
             &[],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(
@@ -736,7 +773,7 @@ mod tests {
                 ("gemma4:12b-mlx", FIXTURE_DIGEST),
             ]),
             &["qwen3.5:4b".to_string()],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(
@@ -767,7 +804,7 @@ mod tests {
                 ("qwen3:8b", FIXTURE_DIGEST),
             ]),
             &["../../etc/passwd".to_string(), "a b".to_string()],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(
@@ -800,7 +837,7 @@ mod tests {
             &registry_of(source),
             &installed(&[("qwen3:8b", "")]),
             &[],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(
@@ -822,7 +859,7 @@ mod tests {
                 // Asked twice, answered once.
                 "qwen3.5:4b".to_string(),
             ],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(response.suggestions.len(), 1, "{:?}", response.suggestions);
@@ -837,7 +874,7 @@ mod tests {
             &registry_of(source.clone()),
             &installed(&[("qwen3:8b", FIXTURE_DIGEST)]),
             &["qwen3:8b".to_string()],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(source.asked().len(), 1);
@@ -904,6 +941,80 @@ mod tests {
         assert_eq!(source.asked().len(), 2);
     }
 
+    /// The case a cache alone gets wrong: the tag moved on after it was cached,
+    /// the user then updated, and the copy now installed is NEWER than the
+    /// cached manifest. Taken at its word the cache says "update available"
+    /// for a model that was just updated; a recheck says what is true.
+    #[tokio::test]
+    async fn a_recheck_corrects_the_verdict_a_stale_cache_would_give_after_an_update() {
+        let source = Arc::new(FakeSource::serving(&[("qwen3:8b", FIXTURE)]));
+        let registry = registry_of(source.clone());
+        let newer = newer_fixture();
+        let newer_digest = sha256_hex(newer.as_bytes());
+
+        // Visit 1: the installed copy is the library's, and that is cached.
+        let before = report(
+            &registry,
+            &installed(&[("qwen3:8b", FIXTURE_DIGEST)]),
+            &[],
+            Look::CACHED,
+        )
+        .await;
+        assert_eq!(status_of(&before, "qwen3:8b"), OllamaUpdateStatus::UpToDate);
+
+        // The tag moves on, and the user pulls it: installed is now `newer`.
+        source.set("qwen3:8b", &newer);
+        let local = installed(&[("qwen3:8b", newer_digest.as_str())]);
+
+        let cached = report(&registry, &local, &[], Look::CACHED).await;
+        assert_eq!(
+            status_of(&cached, "qwen3:8b"),
+            OllamaUpdateStatus::UpdateAvailable,
+            "the stale cache still holds the manifest from before"
+        );
+        assert_eq!(source.asked().len(), 1, "and it never asked again");
+
+        let rechecked = report(&registry, &local, &[], Look::RECHECK).await;
+        assert_eq!(
+            status_of(&rechecked, "qwen3:8b"),
+            OllamaUpdateStatus::UpToDate
+        );
+        assert_eq!(source.asked().len(), 2);
+
+        // The recheck replaced the cached manifest: an ordinary visit now agrees.
+        let after = report(&registry, &local, &[], Look::CACHED).await;
+        assert_eq!(status_of(&after, "qwen3:8b"), OllamaUpdateStatus::UpToDate);
+        assert_eq!(source.asked().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_recheck_that_gets_no_answer_does_not_pass_the_cached_one_off_as_current() {
+        let source = Arc::new(FakeSource::serving(&[("qwen3:8b", FIXTURE)]));
+        let registry = registry_of(source.clone());
+        let local = installed(&[("qwen3:8b", FIXTURE_DIGEST)]);
+        let first = report(&registry, &local, &[], Look::CACHED).await;
+        assert_eq!(status_of(&first, "qwen3:8b"), OllamaUpdateStatus::UpToDate);
+
+        // The network drops, and the user presses Refresh.
+        source.bodies.lock().unwrap().clear();
+        let refreshed = report(&registry, &local, &[], Look::RECHECK).await;
+        assert_eq!(
+            status_of(&refreshed, "qwen3:8b"),
+            OllamaUpdateStatus::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recheck_still_honours_the_lookup_cap_and_the_outside_world_filter() {
+        let source = Arc::new(FakeSource::default());
+        let suggested: Vec<String> = (0..MAX_LOOKUPS * 2)
+            .map(|i| format!("m{i}:1"))
+            .chain(["../x".to_string(), "hf.co/a/b:c".to_string()])
+            .collect();
+        let _ = report(&registry_of(source.clone()), &[], &suggested, Look::RECHECK).await;
+        assert_eq!(source.asked().len(), MAX_LOOKUPS);
+    }
+
     #[tokio::test]
     async fn a_body_that_is_not_a_manifest_counts_as_no_answer() {
         let source = Arc::new(FakeSource::serving(&[(
@@ -914,7 +1025,7 @@ mod tests {
             &registry_of(source),
             &installed(&[("qwen3:8b", FIXTURE_DIGEST)]),
             &["qwen3:8b".to_string()],
-            BATCH_BUDGET,
+            Look::CACHED,
         )
         .await;
         assert_eq!(
@@ -937,7 +1048,7 @@ mod tests {
         let refs: Vec<LibraryRef> = names.iter().map(|n| model(n)).collect();
 
         let answers = registry_of(source.clone())
-            .lookup_all(&refs, BATCH_BUDGET)
+            .lookup_all(&refs, Look::CACHED)
             .await;
 
         assert_eq!(answers.len(), 12);
@@ -967,7 +1078,10 @@ mod tests {
                 ("qwen3:30b-a3b", FIXTURE_DIGEST),
             ]),
             &[],
-            Duration::from_secs(2),
+            Look {
+                budget: Duration::from_secs(2),
+                ..Look::CACHED
+            },
         )
         .await;
 
@@ -987,7 +1101,7 @@ mod tests {
     async fn a_request_cannot_fan_out_past_the_lookup_cap() {
         let source = Arc::new(FakeSource::default());
         let suggested: Vec<String> = (0..MAX_LOOKUPS * 2).map(|i| format!("m{i}:1")).collect();
-        let _ = report(&registry_of(source.clone()), &[], &suggested, BATCH_BUDGET).await;
+        let _ = report(&registry_of(source.clone()), &[], &suggested, Look::CACHED).await;
         assert_eq!(source.asked().len(), MAX_LOOKUPS);
     }
 

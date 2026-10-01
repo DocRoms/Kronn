@@ -170,8 +170,9 @@ Release notes for 0.9.3 and earlier are available in the
   could not confirm either way (the registry did not answer, or the model is not
   from the official library): never "up to date" on a guess. The comparison
   downloads nothing: the SHA-256 of the registry's manifest for the tag is the
-  digest Ollama reports locally. The block's folded summary counts the updates
-  waiting. On a Mac with Apple Silicon running Ollama 0.34 or later, the `-mlx`
+  digest Ollama reports locally. Answers are cached for hours; Refresh, and a
+  finished update, check again instead. The block's folded summary counts the
+  updates waiting. On a Mac with Apple Silicon running Ollama 0.34 or later, the `-mlx`
   builds (`gemma4:12b-mlx`, `qwen3.8:27b-mlx`) come first in the suggestions,
   marked "Optimized for Mac". The backend decides (`mlx_capable` and `version` on
   `GET /api/ollama/health`, from the host and the server's own version), never

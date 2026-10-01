@@ -288,6 +288,9 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
 pub struct OllamaRegistryQuery {
     /// The tags the card suggests, comma-separated: their sizes are wanted.
     suggested: Option<String>,
+    /// `true` asks the registry again even where an answer is cached: after an
+    /// update, and on an explicit Refresh.
+    fresh: Option<bool>,
 }
 
 /// `"a:1, b:2,,"` → `["a:1", "b:2"]`, at most as many as one answer may look
@@ -332,7 +335,11 @@ pub async fn registry(
             library,
             &installed,
             &suggested,
-            crate::core::ollama_registry::BATCH_BUDGET,
+            if query.fresh == Some(true) {
+                crate::core::ollama_registry::Look::RECHECK
+            } else {
+                crate::core::ollama_registry::Look::CACHED
+            },
         )
         .await,
     ))

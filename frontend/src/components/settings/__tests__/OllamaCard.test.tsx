@@ -805,6 +805,44 @@ describe('OllamaCard — what the official library says (KT-930)', () => {
     await waitFor(() => expect(within(installedRow('qwen3:8b')).getByText('ollama.fresh.up_to_date')).toBeTruthy());
     expect(within(installedRow('qwen3:8b')).queryByText('ollama.fresh.update_available')).toBeNull();
     expect(ollama.registry.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // The ordinary look may use the backend's cache; the one after an update
+    // must not: a cached manifest can predate the copy just pulled.
+    expect(ollama.registry.mock.calls[0][1]).toBe(false);
+    expect(ollama.registry.mock.calls.at(-1)![1]).toBe(true);
+  });
+
+  it('asks the library again, not from cache, when Refresh is pressed', async () => {
+    await mountCard();
+    await waitFor(() => expect(ollama.registry).toHaveBeenCalledTimes(1));
+    expect(ollama.registry.mock.calls[0][1]).toBe(false);
+
+    fireEvent.click(screen.getByLabelText('ollama.refresh'));
+
+    await waitFor(() => expect(ollama.registry.mock.calls.some(call => call[1] === true)).toBe(true));
+  });
+
+  it('keeps asking fresh when a Refresh request is superseded before it answers, then stops', async () => {
+    // Refresh: the models list changes while the fresh request is in flight,
+    // which restarts the look. The restarted one must be fresh too, or it could
+    // be answered from a cache the first one was about to replace.
+    ollama.models
+      .mockResolvedValueOnce({ models: [installedModel('qwen3:8b')] })
+      .mockResolvedValue({ models: [installedModel('qwen3:8b'), installedModel('gemma4:12b-mlx')] });
+    ollama.registry
+      .mockResolvedValueOnce(answer([['qwen3:8b', 'up_to_date']]))
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['gemma4:12b-mlx', 'up_to_date']]));
+    await mountCard();
+    await waitFor(() => expect(ollama.registry).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByLabelText('ollama.refresh'));
+
+    await waitFor(() => expect(ollama.registry).toHaveBeenCalledTimes(3));
+    expect(ollama.registry.mock.calls.map(call => call[1])).toEqual([false, true, true]);
+    // Once a fresh answer has landed nothing asks again by itself.
+    await act(async () => {});
+    expect(ollama.registry).toHaveBeenCalledTimes(3);
+    expect(within(installedRow('gemma4:12b-mlx')).getByText('ollama.fresh.up_to_date')).toBeTruthy();
   });
 
   it('shows no verdict for a tag it just updated until the library has been asked again', async () => {

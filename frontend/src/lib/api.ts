@@ -2905,9 +2905,14 @@ export const ollama = {
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
   /** What the official Ollama library says about the installed models (is
    *  there an update?) and the given suggested tags (how big?). Asks the
-   *  internet through the backend: never wait on it to draw the card. */
-  registry: (suggested: string[]) =>
-    api<OllamaRegistryResponse>('GET', `/ollama/registry?suggested=${encodeURIComponent(suggested.join(','))}`),
+   *  internet through the backend: never wait on it to draw the card. The
+   *  backend caches for hours; `fresh` makes it ask again (after an update,
+   *  on Refresh). */
+  registry: (suggested: string[], fresh = false) =>
+    api<OllamaRegistryResponse>(
+      'GET',
+      `/ollama/registry?suggested=${encodeURIComponent(suggested.join(','))}${fresh ? '&fresh=true' : ''}`,
+    ),
   pull: (
     model: string,
     handlers: {

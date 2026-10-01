@@ -562,7 +562,7 @@ default itself is never written, so someone who never touched it keeps the
 automatic behaviour. Folded, its summary line counts the suggestions and the
 downloads in progress. A download or an update in flight is drawn above the
 block, outside the fold, with its progress and its Cancel, so folding the block
-back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:138]
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:157]
 [src: file: frontend/src/hooks/usePersistentFold.ts:19]
 
 ### The suggestions, and what "verified" means here
@@ -609,14 +609,14 @@ The installed models are listed inside the download block with an **Update**
 button. It is the download flow pointed at a tag Ollama already holds:
 `POST /api/ollama/pull` with that exact tag, the same progress, the same Cancel,
 the same error messages, then a refresh of the installed list. There is no
-separate update endpoint to drift from the download one. [src: file: backend/src/api/ollama.rs:442]
+separate update endpoint to drift from the download one. [src: file: backend/src/api/ollama.rs:502]
 
 Update re-asks Ollama for the tag; the files that did not change stay as they are.
 Next to each model's Update button a badge says whether the tag has moved on:
 **Update available**, **Up to date**, or **Not checked**. When the block is
 folded, its summary counts the updates waiting. Updating a model withholds its
 badge until the library has been asked again, so a verdict that described the
-replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:439]
+replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:449]
 
 ### Reading the official library
 
@@ -632,8 +632,8 @@ downloaded. [src: file: backend/src/core/ollama_registry.rs:43]
   2026-10-01 on the user's machine: `qwen3.8:27b-mlx` (`5642e97495e1a088…`), `qwen3.5:4b`
   and `qwen3.5:2b` identical; `gemma4:12b-mlx` different (registry `ded7a27350032202…`,
   local `117d0d84cf2ab865…`), a real pending update. Equal is "up to date",
-  different is "update available". [src: file: backend/src/core/ollama_registry.rs:160]
-  [src: file: backend/src/core/ollama_registry.rs:187]
+  different is "update available". [src: file: backend/src/core/ollama_registry.rs:184]
+  [src: file: backend/src/core/ollama_registry.rs:211]
 - **Size.** The manifest's `config.size` plus every `layers[].size`, formatted
   like the installed list ("4.1 GB"). A manifest with a missing or overflowing
   size gives no size rather than a partial sum.
@@ -655,9 +655,20 @@ answer is bounded to 8 s; whatever finished by then is used and cached. Answers 
 cached for 6 hours, a failure for 2 minutes (long enough that a blocked network is
 not asked again on every visit, short enough that it never sticks). The only thing
 that leaves the machine is a library tag name, sent by the Kronn backend, not the
-browser. [src: file: backend/src/api/ollama.rs:313]
+browser. [src: file: backend/src/api/ollama.rs:316]
+
+The cache can be bypassed: `&fresh=true` asks the registry again and replaces what
+was cached. The card does it on the Refresh button and after an update finishes,
+and only then. Without it, a model updated right after its tag moved on again would
+be compared with a manifest cached before the move and called outdated; with it,
+the verdict follows what is installed now. If the registry does not answer a
+recheck, the model reads "not checked": a stale answer is not passed off as current.
+The card marks a recheck done only once its answer has landed, so a request that a
+newer render supersedes is followed by another fresh one, never by a cached one
+that raced it. [src: file: backend/src/core/ollama_registry.rs:55]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:424]
 [src: file: backend/src/core/ollama_registry.rs:47]
-[src: file: backend/src/core/ollama_registry.rs:57]
+[src: file: backend/src/core/ollama_registry.rs:81]
 
 To check one model by hand:
 
@@ -672,7 +683,7 @@ fixture is a hand-built manifest in the same shape (its fake blob digests aside)
 whose SHA-256 was computed independently with `shasum -a 256`. They cover identical
 and different digests, a dead registry, a model outside the library, a body that is
 not a manifest, the cache's expiry, the concurrency bound, the time budget and the
-size sum. [src: file: backend/src/core/ollama_registry.rs:421]
+size sum. [src: file: backend/src/core/ollama_registry.rs:459]
 
 ### Mac MLX builds
 

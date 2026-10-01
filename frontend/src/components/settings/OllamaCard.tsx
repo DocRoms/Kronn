@@ -159,6 +159,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
   // again (after a refresh, after an update changed what is installed).
   const [registry, setRegistry] = useState<OllamaRegistryResponse | null>(null);
   const [registryTick, setRegistryTick] = useState(0);
+  const recheckedTick = useRef(0);
   // Tags just pulled: what the library said about them described the copy that
   // was replaced, so they show no verdict until it has been asked again.
   const [withheld, setWithheld] = useState<Set<string>>(() => new Set());
@@ -414,19 +415,28 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
       return;
     }
     let active = true;
+    // The first look may use what the backend cached for hours. A Refresh, or
+    // a model just updated, asks the library again: the cached manifest may
+    // predate the copy now installed, and would call it outdated. Marked done
+    // only once an answer has landed, so a request superseded by another
+    // render is followed by a fresh one, never by a cached one that raced it.
+    const tick = registryTick;
+    const fresh = tick !== recheckedTick.current;
     // Deliberately apart from `loading`: the card is drawn from the local
     // answers, and this fills in whatever the library says whenever it
     // arrives, or never. A failure is an empty answer, so every installed
     // model reads "not checked" instead of silently showing nothing.
     Promise.resolve()
-      .then(() => ollamaApi.registry(suggestedTags ? suggestedTags.split(',') : []))
+      .then(() => ollamaApi.registry(suggestedTags ? suggestedTags.split(',') : [], fresh))
       .then(answer => {
         if (!active) return;
+        recheckedTick.current = tick;
         setRegistry(answer);
         setWithheld(new Set());
       })
       .catch(() => {
         if (!active) return;
+        recheckedTick.current = tick;
         setRegistry({ models: [], suggestions: [] });
         setWithheld(new Set());
       });
