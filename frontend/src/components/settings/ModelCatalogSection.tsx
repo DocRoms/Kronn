@@ -324,7 +324,7 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
             </label>
           </div>
           <div className="set-ext-api-test-actions">
-            {(['chat', 'image', 'video'] as const).map(capability => (
+            {(['chat', 'vision', 'image', 'video'] as const).map(capability => (
               <label key={capability} className="set-model-catalog-capability">
                 <input type="checkbox" checked={form.capabilities.includes(capability)} onChange={event => setForm(current => current && ({
                   ...current,
@@ -332,7 +332,7 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
                     ? [...current.capabilities, capability]
                     : current.capabilities.filter(value => value !== capability),
                 }))} />
-                {capability}
+                {capability === 'vision' ? t('modelCatalog.visionCapability') : capability}
               </label>
             ))}
             <button type="button" className="set-btn-primary" disabled={busy} onClick={() => void save()}>{t('common.save')}</button>

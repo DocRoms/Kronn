@@ -97,6 +97,7 @@ const zh: TranslationDict = {
   "modelCatalog.description": "每个目标已检测、缓存或手动配置的模型。",
   "modelCatalog.addHint": "用于检测无结果的目标：此时手动声明模型。",
   "modelCatalog.add": "添加模型",
+  "modelCatalog.visionCapability": "视觉（读取图像）",
   "modelCatalog.target": "智能体或连接",
   "modelCatalog.modelId": "准确模型标识符",
   "modelCatalog.displayName": "显示名称",

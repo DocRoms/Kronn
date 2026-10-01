@@ -93,6 +93,7 @@ const es: TranslationDict = {
   "modelCatalog.keepConfigured": "Se conserva el valor configurado. Comprueba el catálogo o elige un reemplazo explícitamente.",
   "modelCatalog.loadError": "No se puede cargar el catálogo de modelos. La configuración existente no ha cambiado.",
   "modelCatalog.reload": "Actualizar los catálogos de modelos",
+  'modelCatalog.visionCapability': 'Visión (leer imágenes)',
   'modelCatalog.title': 'Catálogos de modelos',
   'modelCatalog.description': 'Modelos detectados, almacenados en caché o configurados manualmente por destino.',
   'modelCatalog.addHint': 'Para un destino cuya detección no devuelve nada: el modelo se declara a mano.',

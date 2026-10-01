@@ -117,3 +117,43 @@ under an unrelated agent.
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.
   [src: url: https://mimo.mi.com/docs/en-US/api/guidance/error-codes]
+
+
+## Discussion attachments (KT-946)
+
+Ordinary HTTP discussion turns load the room's image attachments separately
+from its text context. A model with the catalogue capability `vision` receives
+OpenAI `image_url` data-URL parts (LiteLLM, NVIDIA and named connections), or
+Ollama `images` base64 values. Settings → model catalogue exposes **Vision
+(read images)** independently of the `image` generation capability. Provider
+image-input declarations also populate it; without a catalogue declaration,
+Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
+model. A missing declaration never causes an image to be sent speculatively.
+[src: file: backend/src/agents/vision.rs:1]
+[src: file: backend/src/api/discussions/streaming.rs:1757]
+
+Every withheld image is named in the model's context with an explicit instruction
+not to describe its contents, and a way for the user to supply the information.
+PNG, JPEG, GIF and WebP are supported. The eight most recent attachments are
+eligible, bounded to 5 MiB per transmitted image and 12 MiB in total before
+base64. Uploads up to 10 MiB that exceed the transmission limit are decoded
+under allocation/dimension limits and downscaled to PNG, preserving the original
+file. Failed decoding or remaining limits produce the same explicit withholding
+notice. Transmission/downscaling counts are logged without the image payload.
+Prompt estimates count a bounded image allowance instead of base64 text bytes.
+[src: file: backend/src/agents/vision.rs:1]
+
+`read_file` accepts only file paths registered to the current discussion, even
+without a project. This exception grants no directory listing or writing rights;
+`.kronn/context-files` remains read-only inside a project too. Symlink
+attachments are refused. Unrelated files outside the workspace keep the existing
+refusal. Images are never returned as lossy text by `read_file`.
+[src: file: backend/src/api/agent_tools.rs:3159]
+[src: file: backend/src/api/agent_workspace_tools.rs:1226]
+
+CLI agents retain the existing attachment prompt: an image's path and an
+instruction to inspect it with their own image/file tools before describing it.
+Kronn does not claim that every CLI/model can decode every format. The HTTP
+image parts described here apply to ordinary discussion turns; workflow Agent
+steps do not implicitly import attachments from an unrelated discussion.
+[src: file: backend/src/core/context_files.rs:544]

@@ -319,6 +319,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Images attached to a discussion now reach HTTP vision models as image input:
+  OpenAI-compatible connections receive data-URL parts and Ollama receives
+  native image arrays. The model is explicitly told when an image cannot be
+  seen (unknown capability, unreadable file, unsupported format or request
+  limit), instead of receiving only a path and guessing its content. The model
+  catalogue exposes an independent Vision capability and imports image-input
+  declarations separately from image generation. Large uploads are downscaled
+  for transmission without changing the original. A discussion's own attached
+  files are readable outside the workspace, while attachment edits and reads
+  of unrelated outside files remain refused (KT-946).
+
 - The context a local Ollama model is given on a Mac is computed from the model
   and no longer cut from the installed RAM (KT-943). The ceiling used to be one
   slice per RAM size — 65,536 tokens on a 64 GB Mac, for every model — which is

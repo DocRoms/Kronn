@@ -4168,6 +4168,27 @@ pub fn get_context_files_for_prompt(
     Ok(rows)
 }
 
+/// A discussion's attachments that were stored on disk, as `(filename,
+/// disk_path)` — the closed list an agent's file tools may read from, read-only
+/// (KT-946). Only this discussion's rows: another discussion's attachment is not
+/// reachable by guessing its path.
+pub fn list_attachment_files(
+    conn: &Connection,
+    discussion_id: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT filename, disk_path FROM context_files
+         WHERE discussion_id = ?1 AND disk_path IS NOT NULL AND disk_path != ''
+         ORDER BY created_at",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![discussion_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 #[path = "discussions_test.rs"]
 mod discussions_test;

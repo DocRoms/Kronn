@@ -29,6 +29,10 @@ mod audit_scope_tests;
 mod quick_prompt_tests;
 
 #[cfg(test)]
+#[path = "agent_attachment_tests.rs"]
+mod attachment_tests;
+
+#[cfg(test)]
 #[path = "agent_quick_prompt_bench.rs"]
 mod quick_prompt_bench;
 
@@ -3155,6 +3159,40 @@ impl KronnToolExecutor {
         )
     }
 
+    /// KT-946 — `read_file` on a file attached to this very discussion. `None`
+    /// means "not an attachment of this room": the caller proceeds with the
+    /// ordinary workspace rules, which stay exactly as KT-338 drew them.
+    async fn read_attached_file(&self, call: &ToolCall) -> Option<ToolOutcome> {
+        use crate::api::agent_workspace_tools as ws;
+        let requested = call.arguments["path"].as_str()?;
+        if !ws::could_reference_attachment(requested) {
+            return None;
+        }
+        let disc_id = self.disc_id.clone()?;
+        let attachments = self
+            .state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussions::list_attachment_files(conn, &disc_id)
+                    .map_err(|error| anyhow::anyhow!(error))
+            })
+            .await
+            .ok()?;
+        let disk_path = ws::match_attachment(&attachments, requested)?;
+        let as_count = |field: &str| count_arg(call, field).map(|value| value as usize);
+        Some(
+            match ws::read_attachment_payload(
+                disk_path,
+                requested,
+                as_count("offset"),
+                as_count("limit"),
+            ) {
+                Ok(payload) => ok(call, payload),
+                Err(message) => fail(call, message),
+            },
+        )
+    }
+
     /// KT-338 — web and workspace tools. Every refusal is a readable `fail`, never
     /// an opaque error: the model must be able to correct its own call.
     async fn execute_workspace_tool(&self, call: &ToolCall) -> ToolOutcome {
@@ -3171,10 +3209,33 @@ impl KronnToolExecutor {
                 },
             };
         }
+        // KT-946 — a file attached to THIS discussion is readable wherever Kronn
+        // stored it, even by a room with no workspace at all, so this comes
+        // before the workspace is demanded. Anything that is not one of the
+        // room's own attachments falls through to the unchanged scope below.
+        if call.name == "read_file" {
+            if let Some(outcome) = self.read_attached_file(call).await {
+                return outcome;
+            }
+        }
         // The remaining tools are workspace-scoped.
         let Some(root) = self.workspace_root().await else {
             return fail(call, ws::Refusal::NoWorkspace.message());
         };
+        if matches!(
+            call.name.as_str(),
+            "write_file" | "edit_file" | "edit_lines" | "insert_after_line"
+        ) {
+            if let (Some(path), Ok(storage)) = (
+                call.arguments["path"].as_str(),
+                root.join(".kronn/context-files").canonicalize(),
+            ) {
+                if ws::resolve_in_workspace(&root, path).is_ok_and(|path| path.starts_with(storage))
+                {
+                    return fail(call, "Discussion attachments are read-only; copy the content to a separate workspace file to edit it.");
+                }
+            }
+        }
         match call.name.as_str() {
             "read_file" => match call.arguments["path"].as_str() {
                 None => fail(call, "missing required field `path`"),

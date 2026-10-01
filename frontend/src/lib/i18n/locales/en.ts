@@ -93,6 +93,7 @@ const en: TranslationDict = {
   "modelCatalog.keepConfigured": "Configured value retained. Recheck the catalog or choose a replacement explicitly.",
   "modelCatalog.loadError": "Unable to load the model catalog. Existing settings are unchanged.",
   "modelCatalog.reload": "Refresh model catalogs",
+  'modelCatalog.visionCapability': 'Vision (read images)',
   'modelCatalog.accessUnverified': 'Listed by CLI — access not tested',
   'modelCatalog.cliDefault': 'CLI default — may change',
   'modelCatalog.accessHint': 'Discovery lists models without running them or verifying account access. Recheck after switching CLI accounts.',

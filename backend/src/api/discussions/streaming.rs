@@ -1750,6 +1750,49 @@ async fn resume_with_delta_if_possible(
     (delta_prompt, Some(conversation_id), checkpoint)
 }
 
+/// What an HTTP agent needs to deliver a discussion's images (KT-946): the images
+/// themselves, and which models of its target the catalogue declares as able to
+/// see. A catalogue that cannot be read is an empty set — "nobody said", which
+/// the runner treats as "cannot see" rather than guessing.
+async fn http_context_images(
+    db: &crate::db::Database,
+    entries: Vec<crate::core::context_files::ContextEntry>,
+    runtime_target_id: String,
+    language: &str,
+) -> crate::agents::vision::ContextImages {
+    let catalog_vision_models = if entries.is_empty() {
+        Default::default()
+    } else {
+        db.with_read_conn(move |conn| {
+            Ok(
+                crate::db::model_catalog::list_for_target(conn, &runtime_target_id)?
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.capabilities.iter().any(|capability| {
+                            capability
+                                .eq_ignore_ascii_case(crate::agents::vision::CAPABILITY_VISION)
+                        })
+                    })
+                    .map(|entry| entry.model_id)
+                    .collect::<std::collections::HashSet<_>>(),
+            )
+        })
+        .await
+        .unwrap_or_default()
+    };
+    crate::agents::vision::ContextImages {
+        items: entries
+            .into_iter()
+            .map(|entry| crate::agents::vision::ContextImage {
+                filename: entry.filename,
+                path: entry.disk_path,
+            })
+            .collect(),
+        catalog_vision_models,
+        language: language.to_string(),
+    }
+}
+
 async fn make_agent_stream_inner(
     state: AppState,
     discussion_id: String,
@@ -2486,7 +2529,7 @@ async fn make_agent_stream_inner(
     };
 
     // Load context files for prompt injection
-    let context_files_prompt = {
+    let (context_files_prompt, context_image_entries) = {
         let did = discussion_id.clone();
         let entries = state
             .db
@@ -2496,7 +2539,23 @@ async fn make_agent_stream_inner(
             })
             .await
             .unwrap_or_default();
-        crate::core::context_files::build_context_prompt(&entries)
+        if runner::is_http_chat_agent(&agent_type) {
+            // KT-946 — an HTTP agent cannot open a path. Its images leave the
+            // text prompt: the runner delivers each as an image part when the
+            // model can see, or states that it cannot — never a bare path.
+            let (images, others): (Vec<_>, Vec<_>) = entries
+                .into_iter()
+                .partition(|entry| crate::core::context_files::is_image(&entry.filename));
+            (
+                crate::core::context_files::build_context_prompt(&others),
+                images,
+            )
+        } else {
+            (
+                crate::core::context_files::build_context_prompt(&entries),
+                Vec::new(),
+            )
+        }
     };
 
     // Inject user bio (first exchange only) + global context (always).
@@ -2949,6 +3008,21 @@ async fn make_agent_stream_inner(
     };
     let disc_model = preflight.effective_model;
     let attempted_model = disc_model.clone();
+    let context_images = if runner::is_http_chat_agent(&agent_type) {
+        Some(
+            http_context_images(
+                &state.db,
+                context_image_entries,
+                runtime_target_id.clone().unwrap_or_else(|| {
+                    crate::db::model_catalog::agent_runtime_target_id(&agent_type)
+                }),
+                &disc.language,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     // Both notices open the reply the same way: sent as a chunk first, and kept
     // at the head of what is stored.
     let catalog_warning_notice = [
@@ -3170,6 +3244,7 @@ async fn make_agent_stream_inner(
             reasoning_effort_override: qp_reasoning_effort.as_deref(),
             max_tokens_override: qp_max_tokens,
             context_files_prompt: &context_files_prompt,
+            context_images: context_images.as_ref(),
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),

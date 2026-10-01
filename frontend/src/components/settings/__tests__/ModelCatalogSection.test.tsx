@@ -239,12 +239,14 @@ describe('ModelCatalogSection', () => {
     fireEvent.click(screen.getByRole('option', { name: 'Router two' }));
     fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'new-model' } });
     fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'New model' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'modelCatalog.visionCapability' }));
     fireEvent.click(screen.getByText('common.save'));
 
     await waitFor(() => expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
       runtime_target_id: 'http:two',
       agent_type: 'Custom',
       model_id: 'new-model',
+      capabilities: ['chat', 'vision'],
     })));
   });
 

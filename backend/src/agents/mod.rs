@@ -32,6 +32,7 @@ pub(crate) mod ollama_memory;
 pub mod provenance;
 pub mod runner;
 pub mod tools;
+pub mod vision;
 
 /// Cache for runtime probe results (npx availability).
 /// Key: binary name, Value: (available, probed_at)

@@ -989,6 +989,14 @@ fn catalog_models_from_body(
                 if capabilities.is_empty() {
                     capabilities.push(default_capability.to_string());
                 }
+                if model["architecture"]["input_modalities"]
+                    .as_array()
+                    .is_some_and(|inputs| inputs.iter().any(|input| input == "image"))
+                    || model["supports_vision"] == true
+                    || model["model_info"]["supports_vision"] == true
+                {
+                    capabilities.push("vision".to_string());
+                }
                 Some(TestConnectionModel {
                     id,
                     display_name,
@@ -1709,6 +1717,20 @@ mod tests {
             model_ids_from_body(&serde_json::json!({"data": [{"name": "missing-id"}]})),
             None
         );
+    }
+
+    #[test]
+    fn image_input_declares_vision_independently_of_image_generation() {
+        let models = catalog_models_from_body(&serde_json::json!({"data": [
+            {"id": "reader", "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]}},
+            {"id": "generator", "architecture": {"output_modalities": ["image"]}},
+            {"id": "declared", "supports_vision": true},
+            {"id": "text-only", "supports_vision": false}
+        ]}), "chat").unwrap();
+        assert_eq!(models[0].capabilities, vec!["chat", "vision"]);
+        assert_eq!(models[1].capabilities, vec!["image"]);
+        assert_eq!(models[2].capabilities, vec!["chat", "vision"]);
+        assert_eq!(models[3].capabilities, vec!["chat"]);
     }
 
     #[test]

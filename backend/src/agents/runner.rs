@@ -279,7 +279,7 @@ const CATALOGUE_BYTES_PER_TOKEN: u64 = 7;
 const CATALOGUE_BYTES_PER_TOKEN_SCALE: u64 = 2;
 
 fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
-    let wire_bytes = body["messages"].to_string().len() as u64;
+    let wire_bytes = super::vision::messages_wire_len(body) as u64;
     let mut estimate = (wire_bytes / 3) + 2048;
     for field in ["tools", "format"] {
         if let Some(value) = body.get(field) {
@@ -2632,6 +2632,11 @@ pub struct AgentStartConfig<'a> {
     pub external_http: Option<&'a ExternalHttpRuntime>,
     /// Pre-built context files prompt (uploaded file contents for this discussion).
     pub context_files_prompt: &'a str,
+    /// The discussion's attached images, for an HTTP agent (KT-946). A CLI agent
+    /// is handed the path in `context_files_prompt` and opens the file itself; an
+    /// HTTP agent has no hands, so these either ride the request as real image
+    /// parts or are announced as unseen — never delivered as a bare path.
+    pub context_images: Option<&'a super::vision::ContextImages>,
     /// Discussion id this run targets, when known. Forwarded to the
     /// agent process as `KRONN_DISCUSSION_ID` so the in-process
     /// `kronn-internal` MCP bridge knows which discussion to introspect.
@@ -2770,6 +2775,7 @@ impl<'a> AgentStartConfig<'a> {
             http_endpoints: None,
             external_http: None,
             context_files_prompt: "",
+            context_images: None,
             discussion_id: None,
             acp_session_store: None,
             native_acp_full_prompt: None,
@@ -3661,6 +3667,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.max_tokens_override,
             config.provenance.clone(),
             config.idle_timeout,
+            config.context_images,
         )
         .await;
     }
@@ -5391,13 +5398,11 @@ pub(crate) fn parse_context_length(show_response: &serde_json::Value) -> Option<
 pub(crate) struct OllamaModelProfile {
     context_length: Option<u64>,
     storage_format: Option<String>,
-    /// What a token of context costs the cache, when `/api/show` says (GGUF).
-    /// An MLX model does not: its shape is read from the store's `config.json`.
     kv_shape: Option<KvShape>,
+    vision: super::vision::ImageSupport,
 }
 
 impl OllamaModelProfile {
-    /// The model's trained context length, as `/api/show` reports it.
     pub(crate) fn context_length(&self) -> Option<u64> {
         self.context_length
     }
@@ -5411,6 +5416,41 @@ pub(crate) fn parse_ollama_model_profile(show_response: &serde_json::Value) -> O
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         kv_shape: kv_shape_from_show(show_response),
+        vision: super::vision::ollama_show_vision(show_response),
+    }
+}
+
+/// What the PROVIDER says about `model` accepting images (KT-946). The catalogue's
+/// own `vision` tag is consulted first and wins, so a model an operator declared
+/// by hand costs no probe. NVIDIA exposes no model metadata beyond its listing;
+/// it stays `Unknown` unless the catalogue says otherwise.
+async fn provider_image_support(
+    agent_type: &AgentType,
+    images: &super::vision::ContextImages,
+    model: &str,
+    http_base_url: Option<&str>,
+    http_api_key: Option<&str>,
+) -> super::vision::ImageSupport {
+    use super::vision::ImageSupport;
+    if images.catalog_vision_models.contains(model) {
+        return ImageSupport::Supported;
+    }
+    match agent_type {
+        AgentType::LiteLlm => {
+            let base = crate::api::lite_llm::resolve_base_url_pub(http_base_url);
+            super::vision::litellm_vision(&base, http_api_key, model).await
+        }
+        AgentType::Custom => match http_base_url.map(str::trim).filter(|url| !url.is_empty()) {
+            Some(base) => super::vision::litellm_vision(base, http_api_key, model).await,
+            None => ImageSupport::Unknown,
+        },
+        AgentType::Nvidia => ImageSupport::Unknown,
+        _ => {
+            let base = crate::api::ollama::resolve_base_url_pub(http_base_url);
+            ollama_model_profile(&base, model)
+                .await
+                .map_or(ImageSupport::Unknown, |profile| profile.vision)
+        }
     }
 }
 
@@ -5630,7 +5670,7 @@ pub(crate) fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
 /// Size once for messages and all reachable tool declarations. Omitting tools
 /// risks silent prompt truncation; changing num_ctx mid-run reloads the model.
 pub(crate) fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
-    let messages = body["messages"].to_string().len();
+    let messages = super::vision::messages_wire_len(body);
     let tools = reachable_tools_bytes(body);
     let est = estimated_prompt_tokens(messages, tools);
     let ceiling = ctx_cap.max(OLLAMA_NUM_CTX_FLOOR);
@@ -6345,7 +6385,7 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
     // system or user turn, and returns on its own once nothing is left to cut.
     // Trimming hard is the correct answer to a large catalogue, not a hazard.
     let budget = budget.saturating_sub(declared_bytes);
-    if body["messages"].to_string().len() <= budget {
+    if super::vision::messages_wire_len(body) <= budget {
         // Nothing to trim: skip parsing every result to describe it.
         return;
     }
@@ -6379,7 +6419,7 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
         .unwrap_or_default();
 
     loop {
-        let over = body["messages"].to_string().len().saturating_sub(budget);
+        let over = super::vision::messages_wire_len(body).saturating_sub(budget);
         if over == 0 {
             return;
         }
@@ -7498,6 +7538,7 @@ async fn start_ollama_http(
         max_tokens,
         provenance,
         None,
+        None,
     )
     .await
 }
@@ -7517,6 +7558,10 @@ async fn start_ollama_http(
 /// is dropped, which is what tells Ollama to stop generating. `None` is
 /// [`idle_watchdog::DEFAULT_IDLE_TIMEOUT`]. It does not apply to a request that
 /// is not streamed (`format` set): that one answers once, when it is finished.
+///
+/// `images` (KT-946) = the discussion's attached images. When the model can see
+/// them they ride the user message as image parts; otherwise the system context
+/// says, per image, that it is attached and unseen.
 #[allow(clippy::too_many_arguments)]
 async fn start_ollama_http_with_idle(
     agent_type: &AgentType,
@@ -7534,6 +7579,7 @@ async fn start_ollama_http_with_idle(
     max_tokens: Option<u64>,
     provenance: Option<AgentProvenanceCapture>,
     idle_timeout: Option<Duration>,
+    images: Option<&super::vision::ContextImages>,
 ) -> Result<AgentProcess, String> {
     let idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
     let identity_context = http_agent_identity_context(agent_type, model);
@@ -7541,6 +7587,22 @@ async fn start_ollama_http_with_idle(
         identity_context
     } else {
         format!("{identity_context}\n\n{system_context}")
+    };
+    // KT-946 — decide what the model gets of the attached images BEFORE the body
+    // exists: the notice joins the system context, the parts join the user
+    // message. A discussion without images costs nothing here.
+    let prepared_images = match images.filter(|images| !images.items.is_empty()) {
+        Some(images) => {
+            let provider =
+                provider_image_support(agent_type, images, model, http_base_url, http_api_key)
+                    .await;
+            super::vision::prepare(images, model, provider).await
+        }
+        None => super::vision::PreparedImages::default(),
+    };
+    let system_context = match prepared_images.notice() {
+        notice if notice.is_empty() => system_context,
+        notice => format!("{system_context}\n\n{notice}"),
     };
     // Endpoint, request body and line decoding are the only per-backend parts;
     // everything below this block is shared transport. Codec choice is the
@@ -7562,13 +7624,14 @@ async fn start_ollama_http_with_idle(
             };
             // No `num_ctx` equivalent: the window belongs to whatever upstream the
             // proxy fronts, so there is nothing here to cap or to warn about.
-            let body = crate::agents::chat_codec::build_openai_chat_body(
+            let mut body = crate::agents::chat_codec::build_openai_chat_body(
                 model,
                 &system_context,
                 user_prompt,
                 format,
                 format.is_none(),
             );
+            super::vision::attach_to_chat_body(&mut body, true, &prepared_images.sent);
             tracing::info!(
                 target: "kronn::lite_llm",
                 model = %model,
@@ -7624,8 +7687,10 @@ async fn start_ollama_http_with_idle(
                 .as_ref()
                 .map(|exec| serde_json::Value::Array(exec.catalogue()).to_string().len())
                 .unwrap_or(0);
-            let est =
-                estimated_prompt_tokens(system_context.len() + user_prompt.len(), tools_bytes);
+            let est = estimated_prompt_tokens(
+                system_context.len() + user_prompt.len() + prepared_images.prompt_bytes(),
+                tools_bytes,
+            );
             if est > ctx_cap {
                 // KT-382 — refuse, do not announce and send anyway. Ollama does not
                 // reject an oversized prompt: it silently drops the head of the
@@ -7693,7 +7758,7 @@ async fn start_ollama_http_with_idle(
                  from the remainder, so Kronn refuses instead: {remedy}."
                 ));
             }
-            let body = build_ollama_chat_body(
+            let mut body = build_ollama_chat_body(
                 model,
                 &system_context,
                 user_prompt,
@@ -7701,6 +7766,7 @@ async fn start_ollama_http_with_idle(
                 ctx_cap,
                 ollama_server_version(&base).await,
             );
+            super::vision::attach_to_chat_body(&mut body, false, &prepared_images.sent);
             (
                 base,
                 body,
@@ -12572,6 +12638,10 @@ mod runner_test;
 #[cfg(test)]
 #[path = "runner_idle_test.rs"]
 mod runner_idle_test;
+
+#[cfg(test)]
+#[path = "runner_vision_test.rs"]
+mod runner_vision_test;
 
 fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     let provider = match env_key {

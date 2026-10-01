@@ -10400,6 +10400,7 @@ Suite de la réponse.";
                 context_length: Some(262144),
                 storage_format: Some("safetensors".into()),
                 kv_shape: None,
+                vision: crate::agents::vision::ImageSupport::Unknown,
             }
         );
 
@@ -10409,6 +10410,7 @@ Suite de la réponse.";
                 context_length: None,
                 storage_format: None,
                 kv_shape: None,
+                vision: crate::agents::vision::ImageSupport::Unknown,
             }
         );
     }
