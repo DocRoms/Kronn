@@ -93,13 +93,23 @@ pub(super) struct AuditAgentLauncher {
 
 impl AuditAgentLauncher {
     pub(super) async fn new(state: &AppState, agent: &AgentType) -> Self {
+        Self::with_route(state, agent, crate::acp::resolve_acp_route(agent)).await
+    }
+
+    /// `new` with the ACP route given rather than read from the environment, so a
+    /// test can pick it without mutating process-wide variables.
+    pub(super) async fn with_route(
+        state: &AppState,
+        agent: &AgentType,
+        route: crate::acp::AcpProductionRoute,
+    ) -> Self {
         let http = if runner::is_http_chat_agent(agent) {
             Some(HttpSettings::load(state, agent).await)
         } else {
             None
         };
         let acp = matches!(
-            crate::acp::resolve_acp_route(agent),
+            route,
             crate::acp::AcpProductionRoute::NativeAcp | crate::acp::AcpProductionRoute::AdaptedAcp
         );
         Self {

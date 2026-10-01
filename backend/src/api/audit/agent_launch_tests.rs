@@ -325,7 +325,9 @@ async fn a_cli_agent_keeps_the_spawn_it_always_had() {
         AgentType::Kiro,
         AgentType::CopilotCli,
     ] {
-        let launcher = AuditAgentLauncher::new(&state, &agent).await;
+        let launcher =
+            AuditAgentLauncher::with_route(&state, &agent, crate::acp::production_route(&agent))
+                .await;
         assert!(
             launcher.http.is_none(),
             "{agent:?} has a filesystem of its own"
@@ -348,13 +350,15 @@ async fn a_cli_agent_keeps_the_spawn_it_always_had() {
 }
 
 #[tokio::test]
-#[serial_test::serial(acp_adapter_env_toggle)]
 async fn an_agent_forced_onto_its_direct_cli_is_still_stopped_by_its_pid() {
     // The explicit compatibility override: the process IS the agent again.
-    std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
     let state = litellm_state("http://127.0.0.1:1").await;
-    let launcher = AuditAgentLauncher::new(&state, &AgentType::ClaudeCode).await;
-    std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+    let launcher = AuditAgentLauncher::with_route(
+        &state,
+        &AgentType::ClaudeCode,
+        crate::acp::AcpProductionRoute::DirectCliMigration,
+    )
+    .await;
     assert!(launcher.http.is_none());
     assert!(
         !launcher.stops_with_token(),
