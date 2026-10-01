@@ -847,7 +847,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             let run = crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
                 .into_iter()
                 .next()
-                .unwrap();
+                .ok_or_else(|| anyhow::anyhow!("no audit run recorded"))?;
             let discussion = crate::db::discussions::get_discussion(conn, &discussion_id)?;
             let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
             Ok((run, discussion, steps))
@@ -986,10 +986,10 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
     let run = state
         .db
         .with_conn(move |conn| {
-            Ok(crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+            crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
                 .into_iter()
                 .next()
-                .unwrap())
+                .ok_or_else(|| anyhow::anyhow!("no audit run recorded"))
         })
         .await
         .unwrap();
