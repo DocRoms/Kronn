@@ -79,6 +79,40 @@ pub struct TestConnectionRequest {
     /// never be used as an implicit connectivity probe.
     #[serde(default)]
     pub models: Vec<String>,
+    /// The model chosen for each tier (`economy` | `default` | `reasoning`).
+    /// When present for a LiteLLM connection, each one gets its own minimal
+    /// call and the answer is reported per tier in `tier_checks` (KT-941);
+    /// `models` alone keeps the older all-or-nothing verdict.
+    #[serde(default)]
+    pub tier_models: Vec<TierModelRequest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TierModelRequest {
+    pub tier: String,
+    pub model: String,
+}
+
+/// A validated tier → model pair of a connection test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TierModel {
+    tier: &'static str,
+    model: String,
+}
+
+/// What one tier's model answered to a real one-token call (KT-941). Carries a
+/// status and a generic hint only — never the upstream body, which can echo
+/// account metadata, and never the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TierCheck {
+    pub tier: String,
+    pub model: String,
+    pub ok: bool,
+    /// `ok` | `not_found` | `access_denied` | `http_error` | `timeout` |
+    /// `transport_error`.
+    pub status: String,
+    pub http_status: Option<u16>,
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -99,6 +133,8 @@ pub struct TestConnectionResponse {
     pub image_capability_known: bool,
     pub video_capability_known: bool,
     pub hint: Option<String>,
+    /// One entry per tier the caller asked to verify; empty otherwise.
+    pub tier_checks: Vec<TierCheck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -191,6 +227,7 @@ async fn probe_models(
     api_key: Option<&str>,
     origin_preset: Option<ExternalApiConnectionPreset>,
     requested_models: &[String],
+    tier_models: &[TierModel],
 ) -> TestConnectionResponse {
     let is_open_router = origin_preset == Some(ExternalApiConnectionPreset::OpenRouter);
     if is_open_router {
@@ -269,6 +306,13 @@ async fn probe_models(
                         requested_models.len()
                     )
                 });
+            } else if origin_preset == Some(ExternalApiConnectionPreset::LiteLlm)
+                && !tier_models.is_empty()
+            {
+                // A LiteLLM proxy lists aliases its upstream cannot serve, so
+                // one refused model must not fail the connection or empty the
+                // pickers: report each tier and let the operator re-choose.
+                return probe_tier_models(endpoint, key, catalogue, tier_models).await;
             } else if !requested_models.is_empty() {
                 for model in requested_models {
                     if let Some(auth_failure) = probe_auth(endpoint, key, model, None).await {
@@ -448,6 +492,35 @@ async fn probe_auth(
     model: &str,
     retained_models: Option<&[String]>,
 ) -> Option<TestConnectionResponse> {
+    failure_response(
+        model,
+        &chat_probe(endpoint, api_key, model).await,
+        retained_models,
+    )
+}
+
+/// The raw outcome of one minimal chat call, before it becomes a verdict.
+/// Bodies are kept only so a refusal can be classified (a LiteLLM allow-list
+/// says so in its body); they are never surfaced.
+#[derive(Debug)]
+enum ChatProbe {
+    Answered,
+    Billing,
+    /// 401/403.
+    Refused {
+        status: u16,
+        body: String,
+    },
+    /// Any other non-2xx.
+    Http {
+        status: u16,
+        body: String,
+    },
+    Timeout,
+    Transport,
+}
+
+async fn chat_probe(endpoint: &str, api_key: &str, model: &str) -> ChatProbe {
     let body = serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": "ping"}],
@@ -460,41 +533,60 @@ async fn probe_auth(
         .bearer_auth(api_key)
         .json(&body);
     match request.send().await {
-        // Billing failures must stop the fallback before a later model error
-        // can hide the reason this account cannot generate a response.
         Ok(response) if response.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
-            Some(TestConnectionResponse {
-                status: "billing_error".into(),
-                hint: Some(BILLING_ERROR_HINT.into()),
-                ..Default::default()
-            })
+            ChatProbe::Billing
         }
-        Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
-            // A 401/403 here has TWO possible causes and the message must not
-            // pick one: the key may be rejected, or the key may be valid while
-            // this model is out of reach for the account, or simply not served
-            // by this endpoint. Blaming the key alone sent users hunting a
-            // credential that was fine — observed on an image-generation model,
-            // which lives on another endpoint. The status stays `auth_error`
-            // because a public catalogue does not prove the credential either.
-            Some(TestConnectionResponse {
-                ok: false,
-                status: "auth_error".into(),
-                models: vec![],
-                catalog: vec![],
-                hint: Some(format!(
-                    "The endpoint refused '{model}'. Either the API key is rejected, or the key is valid but this model is not available to this account on this endpoint — image and video models are often served elsewhere. Check both before replacing the key."
-                )),
-                ..Default::default()
-            })
-        }
-        Ok(response) if response.status().is_success() => None,
+        Ok(response) if response.status().is_success() => ChatProbe::Answered,
         Ok(response) => {
             let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            if matches!(status, 401 | 403) {
+                ChatProbe::Refused { status, body }
+            } else {
+                ChatProbe::Http { status, body }
+            }
+        }
+        Err(error) if error.is_timeout() => ChatProbe::Timeout,
+        Err(_) => ChatProbe::Transport,
+    }
+}
+
+/// The connection-level failure a probe stands for; `None` = the model
+/// answered. Billing failures must stop the fallback before a later model error
+/// can hide the reason this account cannot generate a response. A 401/403 has
+/// TWO possible causes and the message must not pick one: the key may be
+/// rejected, or the key may be valid while this model is out of reach for the
+/// account, or simply not served by this endpoint. Blaming the key alone sent
+/// users hunting a credential that was fine — observed on an image-generation
+/// model, which lives on another endpoint. The status stays `auth_error`
+/// because a public catalogue does not prove the credential either.
+fn failure_response(
+    model: &str,
+    probe: &ChatProbe,
+    retained_models: Option<&[String]>,
+) -> Option<TestConnectionResponse> {
+    match probe {
+        ChatProbe::Answered => None,
+        ChatProbe::Billing => Some(TestConnectionResponse {
+            status: "billing_error".into(),
+            hint: Some(BILLING_ERROR_HINT.into()),
+            ..Default::default()
+        }),
+        ChatProbe::Refused { .. } => Some(TestConnectionResponse {
+            ok: false,
+            status: "auth_error".into(),
+            models: vec![],
+            catalog: vec![],
+            hint: Some(format!(
+                "The endpoint refused '{model}'. Either the API key is rejected, or the key is valid but this model is not available to this account on this endpoint — image and video models are often served elsewhere. Check both before replacing the key."
+            )),
+            ..Default::default()
+        }),
+        ChatProbe::Http { status, .. } => {
             let models = retained_models
                 .map(|items| items.to_vec())
                 .unwrap_or_default();
-            let hint = http_error_hint(status, model, retained_models.is_some());
+            let hint = http_error_hint(*status, model, retained_models.is_some());
             Some(TestConnectionResponse {
                 ok: false,
                 status: "http_error".into(),
@@ -504,7 +596,7 @@ async fn probe_auth(
                 ..Default::default()
             })
         }
-        Err(error) if error.is_timeout() => Some(TestConnectionResponse {
+        ChatProbe::Timeout => Some(TestConnectionResponse {
             ok: false,
             status: "timeout".into(),
             models: retained_models
@@ -520,7 +612,7 @@ async fn probe_auth(
             }),
             ..Default::default()
         }),
-        Err(_) => Some(TestConnectionResponse {
+        ChatProbe::Transport => Some(TestConnectionResponse {
             ok: false,
             status: "transport_error".into(),
             models: retained_models
@@ -536,6 +628,189 @@ async fn probe_auth(
             }),
             ..Default::default()
         }),
+    }
+}
+
+/// Probe the model of every tier with a real one-token call and report each
+/// answer (KT-941). `catalogue` is the already-loaded `/v1/models` response and
+/// stays the result's base: a model that does not answer is a verdict on that
+/// tier, not on the connection, so the pickers keep their catalogue and the
+/// operator can pick another model.
+///
+/// The key is judged by what the proxy did, not by one refusal: a proxy checks
+/// the key before it looks at the model, so ANY answer other than a bare
+/// 401/403 — a success, a 404, a 500, a refusal that names the model — proves
+/// the key was accepted, and the remaining refusals are then that model's
+/// allow-list. Only when nothing shows the key was accepted is it reported as
+/// a credential or reachability failure, exactly as before.
+async fn probe_tier_models(
+    endpoint: &str,
+    api_key: &str,
+    catalogue: TestConnectionResponse,
+    tier_models: &[TierModel],
+) -> TestConnectionResponse {
+    let mut distinct: Vec<&str> = Vec::new();
+    for entry in tier_models {
+        if !distinct.contains(&entry.model.as_str()) {
+            distinct.push(&entry.model);
+        }
+    }
+    let answers = futures::future::join_all(
+        distinct
+            .iter()
+            .map(|model| chat_probe(endpoint, api_key, model)),
+    )
+    .await;
+    let probes: Vec<(&str, ChatProbe)> = distinct.into_iter().zip(answers).collect();
+    assemble_tier_report(catalogue, tier_models, &probes)
+}
+
+/// The verdict half of [`probe_tier_models`], free of any network call:
+/// `probes` holds one answer per distinct model of `tier_models`.
+fn assemble_tier_report(
+    mut catalogue: TestConnectionResponse,
+    tier_models: &[TierModel],
+    probes: &[(&str, ChatProbe)],
+) -> TestConnectionResponse {
+    if let Some((model, probe)) = probes
+        .iter()
+        .find(|(_, probe)| matches!(probe, ChatProbe::Billing))
+    {
+        return failure_response(model, probe, None).expect("billing is a failure");
+    }
+    let key_accepted = probes.iter().any(|(_, probe)| match probe {
+        ChatProbe::Answered | ChatProbe::Http { .. } => true,
+        ChatProbe::Refused { status, body } => {
+            crate::api::lite_llm::classify_model_failure(*status, body).is_some()
+        }
+        ChatProbe::Billing | ChatProbe::Timeout | ChatProbe::Transport => false,
+    });
+    if !key_accepted {
+        let (model, probe) = &probes[0];
+        return failure_response(model, probe, None)
+            .expect("a probe that did not answer is a failure");
+    }
+
+    let checks: Vec<TierCheck> = tier_models
+        .iter()
+        .map(|entry| {
+            let (_, probe) = probes
+                .iter()
+                .find(|(model, _)| *model == entry.model)
+                .expect("every tier model was probed");
+            tier_check(entry, probe)
+        })
+        .collect();
+    let failing: Vec<String> = checks
+        .iter()
+        .filter(|check| !check.ok)
+        .map(|check| {
+            format!(
+                "The {} model {} does not answer: {}",
+                check.tier,
+                check.model,
+                check.hint.as_deref().unwrap_or(&check.status)
+            )
+        })
+        .collect();
+    if failing.is_empty() {
+        catalogue.hint = Some(format!(
+            "{} configured model(s) answered successfully.",
+            probes.len()
+        ));
+    } else {
+        catalogue.status = "model_error".into();
+        catalogue.hint = Some(failing.join(" "));
+    }
+    catalogue.tier_checks = checks;
+    catalogue
+}
+
+/// Write what the tier calls proved into the catalogue: a model that answered
+/// loses a previous not-found / access-denied flag, one that was refused gets
+/// it, with the reason a picker shows. A timeout or an unclassified error
+/// proves nothing lasting about the model and leaves it as it was.
+fn record_tier_verdicts(
+    conn: &rusqlite::Connection,
+    runtime_target_id: &str,
+    checks: &[TierCheck],
+) -> anyhow::Result<()> {
+    for check in checks {
+        let reason = match check.status.as_str() {
+            "ok" => {
+                catalog_store::clear_model_failure(conn, runtime_target_id, &check.model)?;
+                continue;
+            }
+            "not_found" => ModelUnavailableReason::NotFound,
+            "access_denied" => ModelUnavailableReason::AccessDenied,
+            _ => continue,
+        };
+        catalog_store::mark_unavailable(
+            conn,
+            runtime_target_id,
+            &check.model,
+            reason,
+            Some(&crate::api::lite_llm::model_failure_detail(
+                reason,
+                check.http_status.unwrap_or_default(),
+            )),
+        )?;
+    }
+    Ok(())
+}
+
+fn tier_check(entry: &TierModel, probe: &ChatProbe) -> TierCheck {
+    let refused = |status: u16| {
+        (
+            "access_denied",
+            Some(status),
+            Some(format!(
+                "HTTP {status}: the proxy refuses this model for this key or project. Choose another model for this tier."
+            )),
+        )
+    };
+    let (status, http_status, hint): (&str, Option<u16>, Option<String>) = match probe {
+        ChatProbe::Answered => ("ok", None, None),
+        // Reached only once another answer proved the key accepted, so this
+        // refusal is the model's own allow-list.
+        ChatProbe::Refused { status, .. } => refused(*status),
+        ChatProbe::Http { status, body } => {
+            match crate::api::lite_llm::classify_model_failure(*status, body) {
+                Some(ModelUnavailableReason::NotFound) => (
+                    "not_found",
+                    Some(*status),
+                    Some(format!(
+                        "HTTP {status}: the proxy lists this model but its upstream deployment was not found, or access to it is denied. Choose another model for this tier."
+                    )),
+                ),
+                Some(_) => refused(*status),
+                None => (
+                    "http_error",
+                    Some(*status),
+                    Some(format!(
+                        "HTTP {status}: the model answered with an error — it may not be a chat model, or its upstream is failing. Choose another model for this tier."
+                    )),
+                ),
+            }
+        }
+        ChatProbe::Timeout => (
+            "timeout",
+            None,
+            Some("no answer in time. Test again or choose another model.".into()),
+        ),
+        ChatProbe::Billing | ChatProbe::Transport => (
+            "transport_error",
+            None,
+            Some("Kronn could not reach the proxy for this model.".into()),
+        ),
+    };
+    TierCheck {
+        tier: entry.tier.to_string(),
+        model: entry.model.clone(),
+        ok: status == "ok",
+        status: status.to_string(),
+        http_status,
+        hint,
     }
 }
 
@@ -570,6 +845,7 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
                     catalog,
                     image_capability_known: modality_declared,
                     video_capability_known: modality_declared,
+                    tier_checks: Vec::new(),
                     }
                 }
                 _ => TestConnectionResponse {
@@ -829,10 +1105,35 @@ pub async fn test(
         .as_deref()
         .or(stored_key.as_deref())
         .filter(|key| !key.trim().is_empty());
-    let mut requested_models = Vec::new();
-    for model in req.models {
-        // The UI has exactly three tiers. Keep this endpoint bounded even when
-        // called directly so one request cannot fan out into arbitrary probes.
+    // The UI has exactly three tiers. Keep this endpoint bounded even when
+    // called directly so one request cannot fan out into arbitrary probes.
+    let mut tier_models: Vec<TierModel> = Vec::new();
+    for entry in req.tier_models {
+        let Some(tier) = ["economy", "default", "reasoning"]
+            .into_iter()
+            .find(|tier| *tier == entry.tier)
+        else {
+            continue;
+        };
+        if tier_models.iter().any(|known| known.tier == tier) {
+            continue;
+        }
+        if let Some(model) = clean(Some(entry.model)) {
+            if model.chars().count() <= 256 {
+                tier_models.push(TierModel { tier, model });
+            }
+        }
+    }
+    let mut requested_models: Vec<String> = Vec::new();
+    let candidates: Vec<String> = if tier_models.is_empty() {
+        req.models
+    } else {
+        tier_models
+            .iter()
+            .map(|entry| entry.model.clone())
+            .collect()
+    };
+    for model in candidates {
         if requested_models.len() == 3 {
             break;
         }
@@ -842,7 +1143,14 @@ pub async fn test(
             }
         }
     }
-    let response = probe_models(&endpoint, key, req.origin_preset, &requested_models).await;
+    let response = probe_models(
+        &endpoint,
+        key,
+        req.origin_preset,
+        &requested_models,
+        &tier_models,
+    )
+    .await;
 
     if let Some(connection) = saved_connection {
         // Keep credentials stable through the compare-and-commit boundary;
@@ -881,6 +1189,7 @@ pub async fn test(
                 .clone()
                 .unwrap_or_else(|| response.status.clone());
             let success = response.ok;
+            let tier_checks = response.tier_checks.clone();
             let persisted = state
                 .db
                 .with_conn(move |conn| {
@@ -890,6 +1199,9 @@ pub async fn test(
                     }
                     if success {
                         catalog_store::reconcile_live(&transaction, &target, &agent_type, &models)?;
+                        // After the reconcile, so a verdict from a real call
+                        // wins over "the proxy lists it" (KT-941).
+                        record_tier_verdicts(&transaction, &target, &tier_checks)?;
                     } else {
                         catalog_store::record_refresh_failure(
                             &transaction,
@@ -1456,5 +1768,305 @@ mod tests {
 
         assert!(!catalog_declares_modality(&serde_json::json!({"data": []})));
         assert!(!catalog_declares_modality(&serde_json::json!({})));
+    }
+
+    // ── KT-941 — per-tier verification of a LiteLLM connection ───────────
+
+    const VERTEX_404: &str = "Publisher model `projects/enws-private-project/models/claude-sonnet-5` was not found or your project does not have access";
+    const TAGS_401: &str =
+        "Not allowed to access model vertex_ai/claude-fable-5 due to tags configuration";
+
+    fn tiers(economy: &str, default: &str, reasoning: &str) -> Vec<TierModel> {
+        [
+            ("economy", economy),
+            ("default", default),
+            ("reasoning", reasoning),
+        ]
+        .into_iter()
+        .map(|(tier, model)| TierModel {
+            tier,
+            model: model.to_string(),
+        })
+        .collect()
+    }
+
+    fn loaded_catalogue() -> TestConnectionResponse {
+        TestConnectionResponse {
+            ok: true,
+            status: "success".into(),
+            models: vec!["flash".into(), "vertex_ai/claude-sonnet-5".into()],
+            ..Default::default()
+        }
+    }
+
+    fn http(status: u16, body: &str) -> ChatProbe {
+        ChatProbe::Http {
+            status,
+            body: body.into(),
+        }
+    }
+
+    fn refused(status: u16, body: &str) -> ChatProbe {
+        ChatProbe::Refused {
+            status,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn each_tier_reports_whether_its_model_answers() {
+        // The 01/10 proxy: economy answers, default is a Vertex 404, reasoning
+        // is refused by the proxy's tag routing.
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            &tiers(
+                "flash",
+                "vertex_ai/claude-sonnet-5",
+                "vertex_ai/claude-fable-5",
+            ),
+            &[
+                ("flash", ChatProbe::Answered),
+                ("vertex_ai/claude-sonnet-5", http(404, VERTEX_404)),
+                ("vertex_ai/claude-fable-5", refused(401, TAGS_401)),
+            ],
+        );
+
+        // The connection works and keeps its catalogue: the operator must be
+        // able to open the pickers and choose another model.
+        assert!(report.ok);
+        assert_eq!(report.status, "model_error");
+        assert_eq!(report.models.len(), 2);
+        let by_tier = |tier: &str| {
+            report
+                .tier_checks
+                .iter()
+                .find(|check| check.tier == tier)
+                .unwrap()
+        };
+        assert!(by_tier("economy").ok);
+        assert_eq!(by_tier("economy").status, "ok");
+        assert_eq!(by_tier("default").status, "not_found");
+        assert_eq!(by_tier("default").http_status, Some(404));
+        assert_eq!(by_tier("reasoning").status, "access_denied");
+        assert_eq!(by_tier("reasoning").http_status, Some(401));
+        let hint = report.hint.as_deref().unwrap();
+        assert!(hint.contains("vertex_ai/claude-sonnet-5"), "{hint}");
+        assert!(hint.contains("vertex_ai/claude-fable-5"), "{hint}");
+        assert!(hint.contains("Choose another model"), "{hint}");
+    }
+
+    #[test]
+    fn the_result_carries_neither_the_upstream_body_nor_a_secret() {
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            &tiers(
+                "flash",
+                "vertex_ai/claude-sonnet-5",
+                "vertex_ai/claude-sonnet-5",
+            ),
+            &[
+                ("flash", ChatProbe::Answered),
+                ("vertex_ai/claude-sonnet-5", http(404, VERTEX_404)),
+            ],
+        );
+        let wire = serde_json::to_string(&report).unwrap();
+        assert!(!wire.contains("enws-private-project"), "{wire}");
+        assert!(!wire.contains("Publisher model"), "{wire}");
+    }
+
+    #[test]
+    fn a_fully_answering_tier_set_is_a_plain_success() {
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            // Two tiers share one model: it is called once and reported twice.
+            &tiers(
+                "flash",
+                "vertex_ai/claude-sonnet-5",
+                "vertex_ai/claude-sonnet-5",
+            ),
+            &[
+                ("flash", ChatProbe::Answered),
+                ("vertex_ai/claude-sonnet-5", ChatProbe::Answered),
+            ],
+        );
+        assert!(report.ok);
+        assert_eq!(report.status, "success");
+        assert_eq!(report.tier_checks.len(), 3);
+        assert!(report.tier_checks.iter().all(|check| check.ok));
+        assert_eq!(
+            report.hint.as_deref(),
+            Some("2 configured model(s) answered successfully.")
+        );
+    }
+
+    #[test]
+    fn a_bare_refusal_on_every_model_is_still_a_credential_failure() {
+        // Nothing shows the proxy accepted the key: invented per-tier "access
+        // denied" verdicts would send the operator hunting the wrong problem.
+        let invalid = "Authentication Error, Invalid proxy server token passed";
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            &tiers("flash", "other", "other"),
+            &[
+                ("flash", refused(401, invalid)),
+                ("other", refused(401, invalid)),
+            ],
+        );
+        assert!(!report.ok);
+        assert_eq!(report.status, "auth_error");
+        assert!(report.tier_checks.is_empty());
+    }
+
+    #[test]
+    fn once_one_model_answers_a_bare_refusal_on_another_is_that_models_allow_list() {
+        // The proxy checks the key before the model: an answer elsewhere proves
+        // it, so this 403 is about the model.
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            &tiers("flash", "other", "other"),
+            &[
+                ("flash", ChatProbe::Answered),
+                ("other", refused(403, "Forbidden")),
+            ],
+        );
+        assert!(report.ok);
+        let default = report
+            .tier_checks
+            .iter()
+            .find(|check| check.tier == "default")
+            .unwrap();
+        assert_eq!(default.status, "access_denied");
+        assert_eq!(default.http_status, Some(403));
+    }
+
+    #[test]
+    fn a_failing_upstream_or_a_slow_one_is_reported_but_never_called_not_found() {
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            &tiers("flash", "haiku", "slow"),
+            &[
+                ("flash", ChatProbe::Answered),
+                ("haiku", http(500, "upstream exploded")),
+                ("slow", ChatProbe::Timeout),
+            ],
+        );
+        let status = |tier: &str| {
+            report
+                .tier_checks
+                .iter()
+                .find(|check| check.tier == tier)
+                .map(|check| check.status.as_str())
+                .unwrap()
+        };
+        assert_eq!(status("default"), "http_error");
+        assert_eq!(status("reasoning"), "timeout");
+    }
+
+    #[test]
+    fn a_proxy_that_answers_no_call_is_an_unreachable_connection_not_three_bad_models() {
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            &tiers("flash", "other", "other"),
+            &[("flash", ChatProbe::Timeout), ("other", ChatProbe::Timeout)],
+        );
+        assert!(!report.ok);
+        assert_eq!(report.status, "timeout");
+        assert!(report.tier_checks.is_empty());
+    }
+
+    #[test]
+    fn a_billing_refusal_stops_the_report() {
+        let report = assemble_tier_report(
+            loaded_catalogue(),
+            &tiers("flash", "other", "other"),
+            &[
+                ("flash", ChatProbe::Answered),
+                ("other", ChatProbe::Billing),
+            ],
+        );
+        assert!(!report.ok);
+        assert_eq!(report.status, "billing_error");
+    }
+
+    fn catalogue_with(models: &[&str]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let discovered: Vec<_> = models
+            .iter()
+            .map(|id| catalog_store::DiscoveredModel {
+                model_id: (*id).into(),
+                display_name: (*id).into(),
+                resolved_model: None,
+                description: None,
+                capabilities: vec![],
+                reasoning_modes: vec![],
+                default_reasoning_mode: None,
+            })
+            .collect();
+        catalog_store::reconcile_live(&conn, "http:conn", &AgentType::LiteLlm, &discovered)
+            .unwrap();
+        conn
+    }
+
+    fn check(tier: &str, model: &str, status: &str, http_status: Option<u16>) -> TierCheck {
+        TierCheck {
+            tier: tier.into(),
+            model: model.into(),
+            ok: status == "ok",
+            status: status.into(),
+            http_status,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn tier_verdicts_flag_refused_models_in_the_catalogue_and_clear_recovered_ones() {
+        let conn = catalogue_with(&["flash", "gone-404", "tagged-401", "slow"]);
+        record_tier_verdicts(
+            &conn,
+            "http:conn",
+            &[
+                check("economy", "flash", "ok", None),
+                check("default", "gone-404", "not_found", Some(404)),
+                check("reasoning", "tagged-401", "access_denied", Some(401)),
+                check("economy", "slow", "timeout", None),
+            ],
+        )
+        .unwrap();
+
+        let entries = catalog_store::list_for_target(&conn, "http:conn").unwrap();
+        let entry = |id: &str| entries.iter().find(|entry| entry.model_id == id).unwrap();
+        assert_eq!(entry("flash").availability, ModelAvailability::Available);
+        assert_eq!(entry("slow").availability, ModelAvailability::Available);
+        assert_eq!(
+            entry("gone-404").availability,
+            ModelAvailability::Unavailable
+        );
+        assert_eq!(
+            entry("gone-404").unavailable_reason,
+            Some(ModelUnavailableReason::NotFound)
+        );
+        let detail = entry("gone-404").unavailable_detail.as_deref().unwrap();
+        assert!(detail.contains("404"), "{detail}");
+        assert!(detail.contains("Choose another model"), "{detail}");
+        assert_eq!(
+            entry("tagged-401").unavailable_reason,
+            Some(ModelUnavailableReason::AccessDenied)
+        );
+
+        // The proxy is fixed and the model answers: the flag goes.
+        record_tier_verdicts(
+            &conn,
+            "http:conn",
+            &[check("default", "gone-404", "ok", None)],
+        )
+        .unwrap();
+        let entries = catalog_store::list_for_target(&conn, "http:conn").unwrap();
+        let recovered = entries
+            .iter()
+            .find(|entry| entry.model_id == "gone-404")
+            .unwrap();
+        assert_eq!(recovered.availability, ModelAvailability::Available);
+        assert_eq!(recovered.unavailable_reason, None);
     }
 }

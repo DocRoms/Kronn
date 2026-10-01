@@ -12569,6 +12569,385 @@ async fn external_api_test_route_public_catalogue_rejects_non_successful_chat_st
     }
 }
 
+/// A LiteLLM proxy as observed on 01/10 (KT-941): it lists every alias it was
+/// configured with, but only some answer. `gemini-3.6-flash` works, the Vertex
+/// alias is a 404 from the upstream project, the Fable alias is refused by the
+/// proxy's tag routing.
+const LITELLM_PRIVATE_404: &str =
+    "Publisher model `projects/enws-private-project/models/claude-sonnet-5` was not found or your project does not have access";
+const LITELLM_PRIVATE_TAGS: &str =
+    "Not allowed to access model vertex_ai/claude-fable-5 due to tags configuration: private-team-tag";
+
+async fn mount_simulated_litellm_proxy(upstream: &wiremock::MockServer) {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "gemini-3.6-flash"},
+                {"id": "vertex_ai/claude-sonnet-5"},
+                {"id": "vertex_ai/claude-fable-5"},
+                {"id": "claude-sonnet-4-6"}
+            ]
+        })))
+        .mount(upstream)
+        .await;
+    let chat = |model: &'static str, response: ResponseTemplate| {
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer proxy-secret"))
+            .and(body_partial_json(serde_json::json!({
+                "model": model, "max_tokens": 1
+            })))
+            .respond_with(response)
+    };
+    chat(
+        "gemini-3.6-flash",
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": "pong"}}]
+        })),
+    )
+    .mount(upstream)
+    .await;
+    chat(
+        "claude-sonnet-4-6",
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": "pong"}}]
+        })),
+    )
+    .mount(upstream)
+    .await;
+    chat(
+        "vertex_ai/claude-sonnet-5",
+        ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": {"message": LITELLM_PRIVATE_404, "code": "404"}
+        })),
+    )
+    .mount(upstream)
+    .await;
+    chat(
+        "vertex_ai/claude-fable-5",
+        ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": {"message": LITELLM_PRIVATE_TAGS, "code": "401"}
+        })),
+    )
+    .mount(upstream)
+    .await;
+}
+
+fn tier_models_body(
+    endpoint: &str,
+    economy: &str,
+    default: &str,
+    reasoning: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "endpoint": endpoint,
+        "api_key": "proxy-secret",
+        "origin_preset": "lite_llm",
+        "tier_models": [
+            {"tier": "economy", "model": economy},
+            {"tier": "default", "model": default},
+            {"tier": "reasoning", "model": reasoning}
+        ]
+    })
+}
+
+#[tokio::test]
+async fn litellm_test_probes_each_tier_and_says_which_model_answers() {
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+
+    let (status, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        tier_models_body(
+            &upstream.uri(),
+            "gemini-3.6-flash",
+            "vertex_ai/claude-sonnet-5",
+            "vertex_ai/claude-fable-5",
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let data = &response["data"];
+    // The connection itself works: the catalogue stays, so the operator can
+    // still open the pickers and choose another model.
+    assert_eq!(data["ok"], true, "{response}");
+    assert_eq!(data["status"], "model_error", "{response}");
+    assert_eq!(data["models"].as_array().unwrap().len(), 4, "{response}");
+
+    let checks = data["tier_checks"].as_array().unwrap();
+    let check = |tier: &str| checks.iter().find(|check| check["tier"] == tier).unwrap();
+    assert_eq!(check("economy")["model"], "gemini-3.6-flash");
+    assert_eq!(check("economy")["ok"], true);
+    assert_eq!(check("economy")["status"], "ok");
+    assert_eq!(check("default")["model"], "vertex_ai/claude-sonnet-5");
+    assert_eq!(check("default")["ok"], false);
+    assert_eq!(check("default")["status"], "not_found");
+    assert_eq!(check("default")["http_status"], 404);
+    assert_eq!(check("reasoning")["status"], "access_denied");
+    assert_eq!(check("reasoning")["http_status"], 401);
+
+    // The hint names the failing tiers' models and how to move on.
+    let hint = data["hint"].as_str().unwrap();
+    assert!(hint.contains("vertex_ai/claude-sonnet-5"), "{hint}");
+    assert!(hint.contains("Choose another model"), "{hint}");
+
+    // No secret, no upstream body in the result.
+    let text = response.to_string();
+    for private in [
+        "proxy-secret",
+        "enws-private-project",
+        "private-team-tag",
+        "Publisher model",
+    ] {
+        assert!(!text.contains(private), "{private} leaked: {text}");
+    }
+    // One call per distinct model, one token each.
+    assert_eq!(
+        upstream
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "POST")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn litellm_test_reports_a_fully_working_tier_set_as_success() {
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        // Two tiers share one model: it is called once, reported twice.
+        tier_models_body(
+            &upstream.uri(),
+            "gemini-3.6-flash",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6",
+        ),
+    )
+    .await;
+
+    assert_eq!(response["data"]["ok"], true, "{response}");
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    let checks = response["data"]["tier_checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 3);
+    assert!(checks.iter().all(|check| check["ok"] == true), "{response}");
+    assert!(response["data"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("2 configured model(s) answered"));
+}
+
+#[tokio::test]
+async fn litellm_test_still_blames_the_key_when_nothing_shows_it_was_accepted() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "model-a"}, {"id": "model-b"}]
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": {"message": "Authentication Error, Invalid proxy server token passed"}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        tier_models_body(&upstream.uri(), "model-a", "model-b", "model-b"),
+    )
+    .await;
+
+    // A bare 401 on every model is a verdict on the credential, not on three
+    // models at once: no per-tier "access denied" is invented.
+    assert_eq!(response["data"]["ok"], false, "{response}");
+    assert_eq!(response["data"]["status"], "auth_error", "{response}");
+    assert_eq!(response["data"]["tier_checks"], serde_json::json!([]));
+}
+
+async fn litellm_saved_connection_state(endpoint: String) -> AppState {
+    let state = test_state();
+    let connection = kronn::models::ExternalApiConnection {
+        id: "litellm-saved".into(),
+        display_name: "Euronews proxy".into(),
+        mention_alias: "euronews".into(),
+        endpoint: Some(endpoint),
+        credential_slug: "conn-euronews".into(),
+        origin_preset: kronn::models::ExternalApiConnectionPreset::LiteLlm,
+        economy_model: Some("gemini-3.6-flash".into()),
+        default_model: Some("vertex_ai/claude-sonnet-5".into()),
+        reasoning_model: Some("vertex_ai/claude-fable-5".into()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        image_model: None,
+        video_model: None,
+        media_endpoint: None,
+    };
+    let insert = connection.clone();
+    state
+        .db
+        .with_conn(move |conn| kronn::db::external_api_connections::insert(conn, &insert))
+        .await
+        .unwrap();
+    state
+        .config
+        .write()
+        .await
+        .tokens
+        .keys
+        .push(kronn::models::ApiKey {
+            id: "euronews-key".into(),
+            name: "proxy credential".into(),
+            provider: connection.credential_slug,
+            value: "proxy-secret".into(),
+            active: true,
+        });
+    state
+}
+
+async fn saved_litellm_catalogue(
+    state: &AppState,
+) -> std::collections::HashMap<String, kronn::models::CatalogModelEntry> {
+    state
+        .db
+        .with_read_conn(|conn| {
+            kronn::db::model_catalog::list_for_target(conn, "http:litellm-saved")
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.model_id.clone(), entry))
+        .collect()
+}
+
+#[tokio::test]
+async fn litellm_test_marks_models_that_refuse_a_call_unavailable_in_the_catalogue() {
+    use kronn::models::{ModelAvailability, ModelUnavailableReason};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let body = serde_json::json!({
+        "endpoint": upstream.uri(),
+        "connection_id": "litellm-saved",
+        "origin_preset": "lite_llm",
+        "tier_models": [
+            {"tier": "economy", "model": "gemini-3.6-flash"},
+            {"tier": "default", "model": "vertex_ai/claude-sonnet-5"},
+            {"tier": "reasoning", "model": "vertex_ai/claude-fable-5"}
+        ]
+    });
+
+    let (_, response) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(response["data"]["status"], "model_error", "{response}");
+
+    let catalogue = saved_litellm_catalogue(&state).await;
+    // All four were listed `live`; before this change all four read "available".
+    assert_eq!(catalogue.len(), 4);
+    let not_found = &catalogue["vertex_ai/claude-sonnet-5"];
+    assert_eq!(not_found.availability, ModelAvailability::Unavailable);
+    assert_eq!(
+        not_found.unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+    let detail = not_found.unavailable_detail.as_deref().unwrap();
+    assert!(
+        detail.contains("404") && detail.contains("Choose another model"),
+        "{detail}"
+    );
+    assert!(!detail.contains("enws-private-project"), "{detail}");
+    let denied = &catalogue["vertex_ai/claude-fable-5"];
+    assert_eq!(denied.availability, ModelAvailability::Unavailable);
+    assert_eq!(
+        denied.unavailable_reason,
+        Some(ModelUnavailableReason::AccessDenied)
+    );
+    assert_eq!(
+        catalogue["gemini-3.6-flash"].availability,
+        ModelAvailability::Available
+    );
+    // Never probed, never accused.
+    assert_eq!(
+        catalogue["claude-sonnet-4-6"].availability,
+        ModelAvailability::Available
+    );
+    // What a picker receives: the flag and its reason, as serialised.
+    let wire = serde_json::to_value(not_found).unwrap();
+    assert_eq!(wire["availability"], "unavailable");
+    assert_eq!(wire["unavailable_reason"], "not_found");
+    assert_eq!(
+        serde_json::to_value(denied).unwrap()["unavailable_reason"],
+        "access_denied"
+    );
+
+    // Testing again while the proxy still refuses keeps the verdict: being
+    // listed is not being served.
+    let (_, again) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(again["data"]["status"], "model_error", "{again}");
+    assert_eq!(
+        saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"].availability,
+        ModelAvailability::Unavailable
+    );
+
+    // The proxy is fixed: the next test of that model clears the flag.
+    upstream.reset().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "vertex_ai/claude-sonnet-5"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "pong"}}]
+            })))
+            .with_priority(1)
+            .mount(&upstream)
+            .await;
+    }
+    let (_, fixed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        body,
+    )
+    .await;
+    assert_eq!(fixed["data"]["tier_checks"][1]["status"], "ok", "{fixed}");
+    let recovered = &saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"];
+    assert_eq!(recovered.availability, ModelAvailability::Available);
+    assert_eq!(recovered.unavailable_reason, None);
+}
+
 #[tokio::test]
 async fn external_api_test_route_maps_auth_empty_and_transport_failures_without_upstream_bodies() {
     use wiremock::matchers::{method, path};

@@ -591,6 +591,37 @@ Release notes for 0.9.3 and earlier are available in the
   leading with the context note. Covered by tests against a simulated Ollama
   that refuses the call once, after a tool round, and every time.
 
+- A LiteLLM model the proxy lists but cannot serve is now caught by the test,
+  marked in the catalogue, and explained in the discussion (KT-941). On 01/10
+  the proxy listed 96 models and Kronn showed all 96 as available, yet every
+  `vertex_ai/…` one answered a 404 ("Publisher model … was not found or your
+  project does not have access") and one a 401 ("Not allowed … due to tags
+  configuration"): a connection whose default was `vertex_ai/claude-sonnet-5`
+  failed every turn, and the error was the proxy's raw, nested and escaped
+  JSON, which named no model and said nothing to do. **Test** now sends a
+  one-token call to the model chosen for each tier — economy, default,
+  reasoning — and shows, under each selector and on the connection card,
+  whether that model answers or is not found, refused by the proxy, failing or
+  too slow. The connection stays usable when one tier fails: the pickers keep
+  the catalogue so another model can be chosen. A bare 401 on every model is
+  still reported as a rejected key, not as three refused models, and neither
+  the upstream body nor the key is ever in the result. A model that answers a
+  real call with a 404, or a 401/403 naming the proxy's own allow-list, is
+  marked unavailable in the model catalogue with its reason (not found, access
+  denied) and its HTTP code — whether it was found by Test or by a turn that
+  failed — and the selectors show it as unavailable with that reason. Being
+  listed again does not clear it; a successful call does (the next Test of that
+  model, or Retry on the LiteLLM card). A flagged model is refused up front,
+  naming it, instead of re-sending a call that cannot succeed, and Kronn never
+  runs another model in its place. The discussion now reads "Model “X” is not
+  accessible through this proxy (HTTP 404: not found or access denied). Choose
+  another model in Config › Agents › LiteLLM." (in the discussion's language),
+  with the proxy's raw answer under *Technical details*. That sentence had never
+  appeared for a real error: Kronn read the status of `LiteLLM error 404: …` as
+  `404:` and found none, so every provider error skipped the model diagnostics
+  and surfaced as the raw body; the status is now read correctly, for every HTTP
+  agent.
+
 ## [0.14.1] - 2026-09-26
 
 ### Added

@@ -921,11 +921,67 @@ fn persist_agent_start_error(
     inserted.and(linked).and(cleared)
 }
 
+/// The HTTP status of an HTTP-agent failure. The runner writes
+/// `<backend> error <status>[ after N attempts]: Provider response: …`, so the
+/// status is followed by a colon whenever the call was not retried — parsing
+/// `404:` as a number failed, and every real provider error then read as "no
+/// status", skipping the model diagnostics below (KT-941).
 fn agent_http_status(error: &str) -> Option<u16> {
     error
         .split_once(" error ")
         .and_then(|(_, suffix)| suffix.split_whitespace().next())
-        .and_then(|status| status.parse::<u16>().ok())
+        .and_then(|status| status.trim_end_matches(':').parse::<u16>().ok())
+}
+
+/// The sentence a LiteLLM user reads when the proxy lists a model it cannot
+/// serve (KT-941): which model, what the proxy answered, and where to change
+/// it. The proxy's raw JSON — nested and escaped — stays in the collapsible
+/// details. `status` is `None` when the refusal comes from the catalogue's
+/// memory of an earlier failure rather than from a fresh call.
+fn lite_llm_model_unreachable_summary(language: &str, model: &str, status: Option<u16>) -> String {
+    let code = |separator: &str| {
+        status
+            .map(|status| format!("HTTP {status}{separator}"))
+            .unwrap_or_default()
+    };
+    match language {
+        "fr" => format!(
+            "Le modèle « {model} » n'est pas accessible via ce proxy ({}introuvable ou accès refusé). Choisissez un autre modèle dans Config › Agents › LiteLLM.",
+            code(" : ")
+        ),
+        "es" => format!(
+            "El modelo «{model}» no es accesible a través de este proxy ({}no encontrado o acceso denegado). Elige otro modelo en Config › Agentes › LiteLLM.",
+            code(": ")
+        ),
+        "zh" => format!(
+            "此代理无法访问模型“{model}”（{}未找到或访问被拒绝）。请在 配置 › 智能体 › LiteLLM 中选择其他模型。",
+            code("：")
+        ),
+        _ => format!(
+            "Model “{model}” is not accessible through this proxy ({}not found or access denied). Choose another model in Config › Agents › LiteLLM.",
+            code(": ")
+        ),
+    }
+}
+
+/// The readable refusal for a launch the catalogue stopped because the proxy
+/// lists the model but cannot serve it. `None` for any other agent or reason,
+/// which keep their existing diagnostics.
+fn lite_llm_preflight_refusal_message(
+    agent_type: &AgentType,
+    language: &str,
+    failure: &CatalogPreflightFailure,
+) -> Option<String> {
+    if *agent_type != AgentType::LiteLlm
+        || !matches!(
+            failure.reason,
+            ModelUnavailableReason::NotFound | ModelUnavailableReason::AccessDenied
+        )
+    {
+        return None;
+    }
+    let model = failure.model_id.as_deref()?;
+    Some(lite_llm_model_unreachable_summary(language, model, None))
 }
 
 /// A model-routing failure is useful to operators in full, but dumping a
@@ -943,12 +999,24 @@ fn agent_start_error_content(
 ) -> Option<String> {
     let backend = format!("{agent_type:?}");
     let status = agent_http_status(error);
-    let is_model_error =
-        status.is_some_and(|code| matches!(code, 400 | 404 | 422)) && model.is_some();
+    // A LiteLLM refusal that names the model — 404, or a 401/403 from the
+    // proxy's own allow-list — is a verdict on the model, not on the request.
+    let unreachable_lite_llm_model = (*agent_type == AgentType::LiteLlm)
+        .then_some(model)
+        .flatten()
+        .filter(|_| {
+            status.is_some_and(|code| {
+                crate::api::lite_llm::classify_model_failure(code, error).is_some()
+            })
+        });
+    let is_model_error = unreachable_lite_llm_model.is_some()
+        || (status.is_some_and(|code| matches!(code, 400 | 404 | 422)) && model.is_some());
     if !is_model_error && !matches!(agent_type, AgentType::LiteLlm | AgentType::Ollama) {
         return None;
     }
-    let summary = if is_model_error {
+    let summary = if let Some(model) = unreachable_lite_llm_model {
+        lite_llm_model_unreachable_summary(language, model, status)
+    } else if is_model_error {
         let status = status.expect("model error has an HTTP status");
         let model = model.expect("model error has an attempted model");
         match language {
@@ -2841,6 +2909,11 @@ async fn make_agent_stream_inner(
     let runtime_target_id = external_connection
         .as_ref()
         .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    // The catalogue namespace a failed model is flagged in: the named
+    // connection's own, or the family's when none is attached.
+    let catalog_target_id = runtime_target_id
+        .clone()
+        .unwrap_or_else(|| crate::db::model_catalog::agent_runtime_target_id(&agent_type));
     let preflight = match crate::core::model_catalog::preflight_resolve(
         &state.db,
         runtime_target_id.as_deref(),
@@ -2853,8 +2926,15 @@ async fn make_agent_stream_inner(
     {
         Ok(resolution) => resolution,
         Err(failure) => {
+            // A flagged LiteLLM model is refused here before any call. The
+            // opaque code would reach the user as-is, so it is replaced by the
+            // sentence that names the model and says where to change it; the
+            // code and the structured failure stay in the payload.
+            let message = lite_llm_preflight_refusal_message(&agent_type, &disc.language, &failure)
+                .unwrap_or_else(|| "model_catalog_preflight_failed".to_string());
             let payload = serde_json::json!({
-                "error": "model_catalog_preflight_failed",
+                "error": message,
+                "code": "model_catalog_preflight_failed",
                 "preflight_failure": failure,
             });
             finish_tracked_preflight(
@@ -4616,6 +4696,20 @@ async fn make_agent_stream_inner(
                     if let (Some(status), Some(model)) =
                         (agent_http_status(&e), attempted_model.as_deref())
                     {
+                        // KT-941 — a 404, or a refusal from the proxy's own
+                        // allow-list, means the proxy lists this model but
+                        // cannot serve it. Mark it unavailable in the catalogue
+                        // so the pickers say so and the next launch is refused
+                        // up front, naming the model, instead of repeating the
+                        // call or quietly running another model.
+                        crate::api::lite_llm::flag_unreachable_model(
+                            &state.db,
+                            &catalog_target_id,
+                            model,
+                            status,
+                            &e,
+                        )
+                        .await;
                         if matches!(status, 400 | 404 | 422) {
                             let endpoint = crate::api::lite_llm::resolve_base_url_pub(
                                 http_endpoints.lite_llm.as_deref(),
@@ -5215,11 +5309,12 @@ mod pretty_kronn_args_tests {
 #[cfg(test)]
 mod agent_lifecycle_tests {
     use super::{
-        agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
-        cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
-        connection_mismatch, effective_global_timeout, effective_stall_timeout,
-        finish_tracked_preflight, forwards_to_log_panel, lift_acp_tool_calls,
-        AgentExecutionOutcome, ConnectionMismatch, NON_STREAMING_STALL_TIMEOUT,
+        agent_http_status, agent_start_error_content, agent_start_failure_outcome,
+        auth_required_system_message, cap_agent_response, child_run_counts_as_success,
+        configured_agent_global_timeout, connection_mismatch, effective_global_timeout,
+        effective_stall_timeout, finish_tracked_preflight, forwards_to_log_panel,
+        lift_acp_tool_calls, lite_llm_preflight_refusal_message, AgentExecutionOutcome,
+        ConnectionMismatch, NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -5791,6 +5886,188 @@ mod agent_lifecycle_tests {
             .contains("vertex_ai/mistral-large-2411"));
         assert_eq!(payload["detail"], raw);
         assert_eq!(payload["retry_dispatch_id"], "job-lite");
+    }
+
+    /// What the runner really writes (`format_provider_failure`): a colon
+    /// straight after the status. The nested, escaped body is LiteLLM's own.
+    const REAL_VERTEX_404: &str = r#"LiteLLM error 404: Provider response: {"error":{"message":"litellm.NotFoundError: Vertex_aiException - {\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Publisher Model `projects/enws-common-share-ressources/locations/us-east5/publishers/anthropic/models/claude-sonnet-5` was not found or your project does not have access to it.\",\n    \"status\": \"NOT_FOUND\"\n  }\n}\n","type":null,"param":null,"code":"404"}}"#;
+    const REAL_TAGS_401: &str = r#"LiteLLM error 401: Provider response: {"error":{"message":"Not allowed to access model due to tags configuration. Model=vertex_ai/claude-fable-5","type":"auth_error","code":"401"}}"#;
+
+    fn error_event(
+        agent: AgentType,
+        model: &str,
+        language: &str,
+        raw: &str,
+    ) -> Option<serde_json::Value> {
+        agent_start_error_content(
+            &agent,
+            Some(model),
+            crate::models::ModelTier::Default,
+            language,
+            raw,
+            Some("job-1"),
+        )
+        .map(|content| {
+            serde_json::from_str(content.strip_prefix("[kronn:agent-error]\n").unwrap()).unwrap()
+        })
+    }
+
+    #[test]
+    fn the_status_is_read_from_the_runners_real_error_format() {
+        // `404:` used to fail to parse, so a real provider error never reached
+        // the model diagnostics (KT-941).
+        assert_eq!(agent_http_status(REAL_VERTEX_404), Some(404));
+        assert_eq!(agent_http_status(REAL_TAGS_401), Some(401));
+        assert_eq!(
+            agent_http_status("LiteLLM error 404 after 3 attempts: Provider response: x"),
+            Some(404)
+        );
+        assert_eq!(
+            agent_http_status("LiteLLM error 404 Not Found: {}"),
+            Some(404)
+        );
+        assert_eq!(
+            agent_http_status("LiteLLM unreachable at http://proxy: connection refused"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_404_names_the_model_and_says_where_to_change_it_instead_of_dumping_json() {
+        let event = error_event(
+            AgentType::LiteLlm,
+            "vertex_ai/claude-sonnet-5",
+            "en",
+            REAL_VERTEX_404,
+        )
+        .expect("a 404 on a listed model is a structured event");
+
+        assert_eq!(event["kind"], "model_error");
+        assert_eq!(event["status"], 404);
+        let summary = event["summary"].as_str().unwrap();
+        assert_eq!(
+            summary,
+            "Model “vertex_ai/claude-sonnet-5” is not accessible through this proxy (HTTP 404: not found or access denied). Choose another model in Config › Agents › LiteLLM."
+        );
+        // What the user reads is the sentence, never the proxy's JSON …
+        assert!(!summary.contains("Publisher"));
+        assert!(!summary.contains('{'));
+        // … which stays one click away, verbatim.
+        assert_eq!(event["detail"], REAL_VERTEX_404);
+    }
+
+    #[test]
+    fn the_explanation_is_written_in_the_discussions_language() {
+        let fr = error_event(
+            AgentType::LiteLlm,
+            "vertex_ai/claude-sonnet-5",
+            "fr",
+            REAL_VERTEX_404,
+        )
+        .unwrap();
+        assert_eq!(
+            fr["summary"],
+            "Le modèle « vertex_ai/claude-sonnet-5 » n'est pas accessible via ce proxy (HTTP 404 : introuvable ou accès refusé). Choisissez un autre modèle dans Config › Agents › LiteLLM."
+        );
+        for language in ["es", "zh"] {
+            let event = error_event(
+                AgentType::LiteLlm,
+                "vertex_ai/claude-sonnet-5",
+                language,
+                REAL_VERTEX_404,
+            )
+            .unwrap();
+            let summary = event["summary"].as_str().unwrap();
+            assert!(summary.contains("vertex_ai/claude-sonnet-5"), "{summary}");
+            assert!(summary.contains("LiteLLM"), "{summary}");
+            assert!(summary.contains("404"), "{summary}");
+        }
+    }
+
+    #[test]
+    fn a_tag_denial_from_the_proxy_is_a_model_error_but_a_bad_key_is_not() {
+        let denied = error_event(
+            AgentType::LiteLlm,
+            "vertex_ai/claude-fable-5",
+            "en",
+            REAL_TAGS_401,
+        )
+        .expect("the proxy's allow-list refusal names the model");
+        assert_eq!(denied["kind"], "model_error");
+        assert_eq!(denied["status"], 401);
+        assert!(denied["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Choose another model in Config › Agents › LiteLLM"));
+
+        // A rejected key is not the model's fault: it must not tell the user
+        // to swap models.
+        let bad_key = error_event(
+            AgentType::LiteLlm,
+            "claude-sonnet-4-6",
+            "en",
+            r#"LiteLLM error 401: Provider response: {"error":{"message":"Authentication Error, Invalid proxy server token passed"}}"#,
+        )
+        .unwrap();
+        assert_eq!(bad_key["kind"], "agent_error");
+        assert!(!bad_key["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Choose another model"));
+    }
+
+    #[test]
+    fn the_new_wording_is_litellm_only_other_agents_keep_theirs() {
+        let ollama = error_event(
+            AgentType::Ollama,
+            "qwen3:8b",
+            "en",
+            "Ollama error 404: Provider response: model not found",
+        )
+        .unwrap();
+        let summary = ollama["summary"].as_str().unwrap();
+        assert!(!summary.contains("LiteLLM"), "{summary}");
+        assert!(summary.contains("Ollama returned HTTP 404"), "{summary}");
+    }
+
+    #[test]
+    fn a_flagged_model_refused_at_launch_is_explained_not_coded() {
+        use crate::models::{CatalogPreflightFailure, ModelUnavailableReason};
+        let failure = |reason| CatalogPreflightFailure {
+            runtime_target_id: "http:conn".into(),
+            agent_type: AgentType::LiteLlm,
+            model_id: Some("vertex_ai/claude-sonnet-5".into()),
+            reason,
+            detail: "Not found or access denied (HTTP 404)".into(),
+            last_checked_at: chrono::Utc::now(),
+            recommended_action: "choose_another_model".into(),
+            replacement: None,
+        };
+
+        for reason in [
+            ModelUnavailableReason::NotFound,
+            ModelUnavailableReason::AccessDenied,
+        ] {
+            let message =
+                lite_llm_preflight_refusal_message(&AgentType::LiteLlm, "en", &failure(reason))
+                    .expect("a flagged model has a readable refusal");
+            assert!(message.contains("vertex_ai/claude-sonnet-5"), "{message}");
+            assert!(message.contains("Config › Agents › LiteLLM"), "{message}");
+            assert!(!message.contains("preflight"), "{message}");
+        }
+        // Every other agent / reason keeps its existing diagnostic.
+        assert!(lite_llm_preflight_refusal_message(
+            &AgentType::LiteLlm,
+            "en",
+            &failure(ModelUnavailableReason::Disappeared)
+        )
+        .is_none());
+        assert!(lite_llm_preflight_refusal_message(
+            &AgentType::Ollama,
+            "en",
+            &failure(ModelUnavailableReason::NotFound)
+        )
+        .is_none());
     }
 
     #[test]

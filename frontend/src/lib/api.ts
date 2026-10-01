@@ -3065,10 +3065,25 @@ export interface UpsertExternalApiConnection {
   api_key?: string | null;
 }
 
+/** What one tier's model answered to a real one-token call (KT-941). */
+export interface ExternalApiTierCheck {
+  tier: 'economy' | 'default' | 'reasoning';
+  model: string;
+  ok: boolean;
+  status: 'ok' | 'not_found' | 'access_denied' | 'http_error' | 'timeout' | 'transport_error';
+  http_status?: number | null;
+  /** Generic, never the upstream body or the key. */
+  hint?: string | null;
+}
+
 export interface ExternalApiConnectionTestResult {
   ok: boolean;
-  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'billing_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
+  /** `model_error`: the connection works but a tier's model does not answer
+   * (see `tier_checks`); `ok` stays true so the pickers keep their catalogue. */
+  status: 'success' | 'model_error' | 'invalid_url' | 'credential_required' | 'auth_error' | 'billing_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
   models: string[];
+  /** One entry per tier verified by the test, for a LiteLLM connection. */
+  tier_checks?: ExternalApiTierCheck[];
   /** Capability-bearing union from provider-specific catalogue routes. Older
    * backends omit it; callers keep `models` as the chat-only fallback. */
   catalog?: Array<{
@@ -3197,7 +3212,11 @@ export const externalApi = {
   reveal: (id: string) =>
     api<string>('POST', `/external-api/connections/${id}/reveal`),
   remove: (id: string) => api<null>('DELETE', `/external-api/connections/${id}`),
-  test: (body: { endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[] }) =>
+  test: (body: {
+    endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[];
+    /** The model of each tier: a LiteLLM test calls each one and answers per tier. */
+    tier_models?: Array<{ tier: ExternalApiTierCheck['tier']; model: string }>;
+  }) =>
     api<ExternalApiConnectionTestResult>('POST', '/external-api/connections/test', body),
 };
 

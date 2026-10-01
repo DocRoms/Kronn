@@ -1076,6 +1076,26 @@ describe('MessageBubble — inline CTAs', () => {
       agentType: 'LiteLlm', tier: 'default',
     });
   });
+
+  it('shows a sentence, not the proxy JSON, for a persisted error in the runner\'s real format (KT-941)', () => {
+    // The colon right after the status is what the runner writes; the nested,
+    // escaped body is LiteLLM's own.
+    const raw = 'LiteLLM error 404: Provider response: {"error":{"message":"litellm.NotFoundError: Vertex_aiException - {\\n \\"error\\": {\\"code\\": 404}}"}}';
+    renderBubble(makeMessage({
+      role: 'System',
+      content: raw,
+      agent_type: 'LiteLlm',
+      model: 'vertex_ai/claude-sonnet-5',
+      model_tier: 'default',
+    }));
+
+    const block = screen.getByTestId('disc-model-error-content');
+    // Collapsed: only the summary key is on screen as visible prose …
+    expect(block.querySelector('p')).toHaveTextContent('disc.modelErrorSummary');
+    expect(block.querySelector('p')).not.toHaveTextContent('litellm.NotFoundError');
+    // … the raw body stays reachable under the technical details.
+    expect(block.querySelector('details pre')).toHaveTextContent('litellm.NotFoundError');
+  });
 });
 
 describe('MessageBubble — summary-cached expand toggle', () => {

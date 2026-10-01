@@ -942,6 +942,11 @@ fn recommended_action_for(reason: ModelUnavailableReason) -> &'static str {
             "recheck_catalog"
         }
         ModelUnavailableReason::Disappeared => "choose_replacement",
+        // The proxy lists it but refuses to serve it: only the operator can
+        // pick another model (or fix the proxy), Kronn must not substitute one.
+        ModelUnavailableReason::NotFound | ModelUnavailableReason::AccessDenied => {
+            "choose_another_model"
+        }
         ModelUnavailableReason::InvalidCatalog | ModelUnavailableReason::Unsupported => {
             "configure_manual_model"
         }
@@ -1719,6 +1724,80 @@ mod tests {
         assert_eq!(failure.model_id.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(failure.reason, ModelUnavailableReason::Disappeared);
         assert_eq!(failure.recommended_action, "choose_replacement");
+    }
+
+    #[tokio::test]
+    async fn a_listed_model_the_proxy_refuses_is_refused_not_swapped_for_another() {
+        // KT-941 — `vertex_ai/claude-sonnet-5` is listed but answers 404 (or is
+        // denied by the proxy's tags). A healthy model sits right next to it, and
+        // the launch must still stop and name the refused one: choosing for the
+        // operator is a silent substitution.
+        for reason in [
+            ModelUnavailableReason::NotFound,
+            ModelUnavailableReason::AccessDenied,
+        ] {
+            let db = test_db();
+            db.with_conn(move |conn| {
+                let listed = |id: &str| DiscoveredModel {
+                    model_id: id.into(),
+                    display_name: id.into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec![],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    "http:connection-a",
+                    &AgentType::LiteLlm,
+                    &[
+                        listed("vertex_ai/claude-sonnet-5"),
+                        listed("claude-sonnet-4-6"),
+                    ],
+                )?;
+                db::mark_unavailable(
+                    conn,
+                    "http:connection-a",
+                    "vertex_ai/claude-sonnet-5",
+                    reason,
+                    Some("Not found or access denied (HTTP 404)"),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+            let failure = preflight_check(
+                &db,
+                Some("http:connection-a"),
+                AgentType::LiteLlm,
+                ModelTier::Default,
+                Some("vertex_ai/claude-sonnet-5"),
+                None,
+            )
+            .await
+            .expect("a model the proxy refuses must fail preflight");
+            assert_eq!(
+                failure.model_id.as_deref(),
+                Some("vertex_ai/claude-sonnet-5")
+            );
+            assert_eq!(failure.reason, reason);
+            assert_eq!(failure.recommended_action, "choose_another_model");
+            assert!(failure.replacement.is_none(), "{failure:?}");
+
+            // The healthy sibling still launches when it is the one asked for.
+            assert!(preflight_check(
+                &db,
+                Some("http:connection-a"),
+                AgentType::LiteLlm,
+                ModelTier::Default,
+                Some("claude-sonnet-4-6"),
+                None,
+            )
+            .await
+            .is_none());
+        }
     }
 
     #[tokio::test]

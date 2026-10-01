@@ -1214,7 +1214,8 @@ last_checked_at: string, created_at: string, updated_at: string, };
 export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: AgentType, model_id?: string | null, reason: ModelUnavailableReason, detail: string, last_checked_at: string,
 /**
  * Machine-readable recommended next step (`"configure_manual_model"`,
- * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`). The frontend
+ * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`,
+ * `"choose_another_model"`). The frontend
  * maps this to the recheck/settings shortcut; it is deliberately not a
  * prose sentence so i18n stays centralized in the frontend dictionaries.
  */
@@ -4406,7 +4407,7 @@ export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierC
  * not confirm it. Shared verbatim across the catalog, preflight diagnostics
  * and audit history so the UI never has to parse a provider-specific string.
  */
-export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported";
+export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported" | "not_found" | "access_denied";
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
