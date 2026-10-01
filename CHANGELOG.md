@@ -163,8 +163,8 @@ Release notes for 0.9.3 and earlier are available in the
 - An installed Ollama model can be updated from its card, and a Mac is offered
   the builds made for it (KT-930). In Config › Agents › Local models › Ollama,
   the download block now lists the installed models, each with an **Update**
-  button: it asks Ollama to pull that exact tag again, with the download's own
-  progress, Cancel and error messages. A badge beside it says **Update
+  button, except a model confirmed up to date: it asks Ollama to pull that exact
+  tag again, with the download's own progress, Cancel and error messages. A badge beside it says **Update
   available** when the official Ollama library's copy of that tag is no longer
   the one you hold, **Up to date** when it is, and **Not checked** whenever Kronn
   could not confirm either way (the registry did not answer, or the model is not

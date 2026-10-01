@@ -606,16 +606,20 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
                           <code className="set-ollama-cmd">{model.name}</code>
                           <span className="set-ollama-suggestion-desc">{model.size}</span>
                           <FreshnessBadge status={freshnessOf(model.name)} t={t} />
-                          <button
-                            type="button"
-                            className="set-ollama-pull-button"
-                            disabled={activePulls.has(model.name)}
-                            aria-label={t('ollama.updateFor', model.name)}
-                            onClick={() => startPull(model.name)}
-                          >
-                            {activePulls.has(model.name) ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />}
-                            {t('ollama.updateButton')}
-                          </button>
+                          {/* A model the registry confirmed current has nothing to update;
+                              "not checked" keeps the action, since nothing was confirmed. */}
+                          {(freshnessOf(model.name) !== 'up_to_date' || activePulls.has(model.name)) && (
+                            <button
+                              type="button"
+                              className="set-ollama-pull-button"
+                              disabled={activePulls.has(model.name)}
+                              aria-label={t('ollama.updateFor', model.name)}
+                              onClick={() => startPull(model.name)}
+                            >
+                              {activePulls.has(model.name) ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />}
+                              {t('ollama.updateButton')}
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))}

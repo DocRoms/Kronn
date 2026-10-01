@@ -606,7 +606,8 @@ download that fails in front of the user.
 ### Updating an installed model
 
 The installed models are listed inside the download block with an **Update**
-button. It is the download flow pointed at a tag Ollama already holds:
+button, hidden for a model the registry confirmed up to date (a **Not checked**
+model keeps it, since nothing was confirmed). It is the download flow pointed at a tag Ollama already holds:
 `POST /api/ollama/pull` with that exact tag, the same progress, the same Cancel,
 the same error messages, then a refresh of the installed list. There is no
 separate update endpoint to drift from the download one. [src: file: backend/src/api/ollama.rs:502]

@@ -697,12 +697,13 @@ describe('OllamaCard — what the official library says (KT-930)', () => {
     expect(within(installedRow('qwen3:8b')).queryByText('ollama.fresh.update_available')).toBeNull();
   });
 
-  it('still lets a model that is up to date be updated by hand', async () => {
-    ollama.registry.mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['gemma4:12b-mlx', 'up_to_date']]));
+  it('offers no Update action for a model the registry confirmed up to date', async () => {
+    ollama.registry.mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['gemma4:12b-mlx', 'update_available']]));
     await mountCard();
     fireEvent.click(screen.getByText('ollama.pullTitle'));
     await within(installedRow('qwen3:8b')).findByText('ollama.fresh.up_to_date');
-    expect(screen.getByRole('button', { name: 'ollama.updateFor(qwen3:8b)' })).not.toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'ollama.updateFor(qwen3:8b)' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'ollama.updateFor(gemma4:12b-mlx)' })).not.toBeDisabled();
   });
 
   it('says "not checked", never "up to date", for a model the library said nothing about', async () => {
