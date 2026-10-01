@@ -878,3 +878,130 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
         (1..=total).filter(|step| *step != failed_step).collect();
     assert_eq!(still_done, expected);
 }
+
+// KT-931 review (Romuald) — the founding step (step 1, the one producing
+// `docs/AGENTS.md`) gates the partial validation: if IT is the one that
+// failed, the other 15 successes get no validation discussion, only a
+// resumable run naming step 1 to redo.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
+    use axum::response::IntoResponse;
+    let tools = tempfile::tempdir().unwrap();
+    let (fixture, log) = recording_claude(tools.path());
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    let _route = route_claude(project.path(), &fixture);
+    // Step 1 (the founding step) never wrote `docs/AGENTS.md`: no entry
+    // point exists on disk, same as in the predecessor run. The `docs/`
+    // directory itself exists (steps 2..=16 "succeeded" and would have
+    // written into it), so the documentary-optimization gate has
+    // something to resolve against and doesn't block on its own.
+    std::fs::create_dir_all(project.path().join("docs")).unwrap();
+
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let total = chain.len() as u32;
+    let founding_step = 1u32;
+
+    // The interrupted predecessor: every step finished, the founding one
+    // unsuccessfully.
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let started = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(conn, "run-prev", PROJECT_ID, "Full", "ClaudeCode", started)?;
+            let mut succeeded = 0;
+            for step in 1..=total {
+                let label = format!("docs/step-{step}.md");
+                runs::insert_audit_step_start(conn, "run-prev", step, &label, started)?;
+                let ok = step != founding_step;
+                runs::finalize_audit_step(
+                    conn,
+                    "run-prev",
+                    step,
+                    started,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    ok,
+                    (!ok).then_some("Mac went to sleep"),
+                    false,
+                )?;
+                if ok {
+                    succeeded += 1;
+                    runs::update_last_completed_step(conn, "run-prev", succeeded)?;
+                }
+            }
+            runs::mark_interrupted(conn, "run-prev", "warned steps: [1]")
+        })
+        .await
+        .unwrap();
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("run-prev".into()),
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+    assert!(
+        !stream.contains("event: error"),
+        "the resume must run: {stream}"
+    );
+
+    // A resume re-runs ONLY the founding step: one agent turn, the rest skipped.
+    let step_prompts = recorded_turns(&log)
+        .into_iter()
+        .filter(|turn| turn.contains(BRIEFING_MARKER))
+        .count();
+    assert_eq!(
+        step_prompts, 1,
+        "only step {founding_step} may reach the agent: {stream}"
+    );
+    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 1);
+
+    // The founding step fails again: no validation discussion is created,
+    // even though 15 other steps succeeded.
+    let done = sse_events(&stream, "done")
+        .pop()
+        .expect("a terminal done event");
+    assert_eq!(done["status"], "interrupted", "{done}");
+    assert_eq!(done["last_completed_step"], total - 1, "{done}");
+    assert_eq!(done["steps_to_redo"], json!([founding_step]), "{done}");
+    assert!(
+        done["discussion_id"].is_null(),
+        "no entry point, no validation: {done}"
+    );
+    assert!(!stream.contains("event: validation_created"), "{stream}");
+
+    let run = state
+        .db
+        .with_conn(move |conn| {
+            Ok(crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+                .into_iter()
+                .next()
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert_ne!(run.id, "run-prev");
+    assert_eq!(run.status, "Interrupted");
+    assert_eq!(
+        run.last_completed_step,
+        total - 1,
+        "the progress still counts every success"
+    );
+    assert!(
+        run.validation_discussion_id.is_none(),
+        "the run must link no validation discussion"
+    );
+}

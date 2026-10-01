@@ -804,7 +804,8 @@ pub async fn full_audit(
         let mut progress = RunProgress::new(
             total_steps as u32,
             already_succeeded_steps.iter().copied(),
-        );
+        )
+        .with_founding_step(founding_step_index(&steps));
         // The documentary-optimization gate (an invented path) blocks the
         // validation of the whole run — it is a run-level verdict, not a step's.
         let mut docs_blocked: bool = false;
@@ -2005,7 +2006,12 @@ pub async fn full_audit(
         // validate, and an invented path found by the documentary
         // optimization still blocks every kind of validation.
         let steps_to_redo = progress.steps_to_redo();
-        let validation_wanted = outcome != RunOutcome::Nothing && !docs_blocked;
+        // KT-931 — a partial run is only validatable if its founding step
+        // (the one producing `docs/AGENTS.md`) succeeded: without the entry
+        // point the documentation has nowhere to start from, so the run
+        // stays Interrupted with no validation and `steps_to_redo` names the
+        // founding step along with the rest.
+        let validation_wanted = progress.is_validatable() && !docs_blocked;
         let audit_fully_succeeded = run_is_complete && !docs_blocked;
         if !audit_fully_succeeded {
             tracing::info!(
@@ -2417,6 +2423,21 @@ pub(crate) enum RunOutcome {
     Nothing,
 }
 
+/// KT-931 — the target file of the founding step of a Full chain: the entry
+/// point every other document hangs off.
+pub(crate) const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
+
+/// KT-931 — the 1-based position in `steps` of the founding step, found by its
+/// target file and never by a hard-coded index (the chain is assembled, its
+/// order is not this function's to know). `None` when no step of the chain
+/// writes the entry point.
+pub(crate) fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> {
+    steps
+        .iter()
+        .position(|step| step.target_file == FOUNDING_STEP_TARGET)
+        .map(|position| position as u32 + 1)
+}
+
 /// KT-931 — the exact progress of one run: which steps succeeded (the ones a
 /// resumed predecessor completed included) and which failed. A run no longer
 /// reduces to "the last step that succeeded" or "did anything warn": a failed
@@ -2427,6 +2448,9 @@ pub(crate) struct RunProgress {
     succeeded: std::collections::BTreeSet<u32>,
     /// Steps that ran THIS run and did not succeed, in execution order.
     failed: Vec<u32>,
+    /// The step producing the entry point (`founding_step_index`), when the
+    /// chain has one.
+    founding_step: Option<u32>,
 }
 
 impl RunProgress {
@@ -2440,7 +2464,14 @@ impl RunProgress {
                 .filter(|step| (1..=total_steps).contains(step))
                 .collect(),
             failed: Vec::new(),
+            founding_step: None,
         }
+    }
+
+    /// Name the step producing the entry point (`founding_step_index`).
+    pub(crate) fn with_founding_step(mut self, step: Option<u32>) -> Self {
+        self.founding_step = step;
+        self
     }
 
     /// Record a success and return the exact number of steps that succeeded so
@@ -2481,6 +2512,29 @@ impl RunProgress {
             RunOutcome::Complete
         } else {
             RunOutcome::Partial
+        }
+    }
+
+    /// The founding step succeeded, in this run or in a predecessor this one
+    /// carries over. A chain with no founding step (every sub-audit: each is
+    /// one step, so it is never `Partial` anyway) has none to gate on, so
+    /// this holds vacuously.
+    pub(crate) fn founding_step_succeeded(&self) -> bool {
+        match self.founding_step {
+            Some(step) => self.succeeded.contains(&step),
+            None => true,
+        }
+    }
+
+    /// Whether the run has something to validate. A complete run always does.
+    /// A partial one does only if its founding step succeeded: without the
+    /// entry point the documentation has nowhere to start from, so the run
+    /// stays Interrupted with no validation and a resume names what is left.
+    pub(crate) fn is_validatable(&self) -> bool {
+        match self.outcome() {
+            RunOutcome::Complete => true,
+            RunOutcome::Partial => self.founding_step_succeeded(),
+            RunOutcome::Nothing => false,
         }
     }
 }
@@ -3756,10 +3810,11 @@ mod resume_resolution_tests {
 #[cfg(test)]
 mod partial_run_tests {
     use super::{
-        already_succeeded_step_indices, interruption_reason, write_terminal_state, RunOutcome,
-        RunProgress, SeverityCounts, TerminalWrite,
+        already_succeeded_step_indices, founding_step_index, interruption_reason,
+        write_terminal_state, RunOutcome, RunProgress, SeverityCounts, TerminalWrite,
     };
     use crate::api::audit::helpers::partial_run_block;
+    use crate::api::audit::AnalysisStep;
     use crate::models::{Discussion, DiscussionMessage};
     use std::sync::Arc;
 
@@ -3886,6 +3941,98 @@ mod partial_run_tests {
         let progress = RunProgress::new(3, [0, 1, 2, 3, 4, 99]);
         assert_eq!(progress.succeeded_count(), 3);
         assert_eq!(progress.outcome(), RunOutcome::Complete);
+    }
+
+    fn step_targeting(target_file: &'static str) -> AnalysisStep {
+        AnalysisStep {
+            target_file,
+            prompt: "",
+            sources: &[],
+        }
+    }
+
+    #[test]
+    fn founding_step_index_finds_the_step_that_writes_the_entry_point() {
+        let steps = [
+            step_targeting("docs/glossary.md"),
+            step_targeting("docs/AGENTS.md"),
+            step_targeting("docs/repo-map.md"),
+        ];
+        assert_eq!(founding_step_index(&steps), Some(2));
+    }
+
+    #[test]
+    fn founding_step_index_is_none_without_an_entry_point_step() {
+        let steps = [step_targeting("docs/inconsistencies-security.md")];
+        assert_eq!(founding_step_index(&steps), None);
+    }
+
+    // KT-931 review (Romuald) — a partial run is only validatable if its
+    // founding step (the one producing `docs/AGENTS.md`, step 1 of the Full
+    // chain) succeeded: without the entry point the documentation has
+    // nowhere to start from.
+
+    #[test]
+    fn a_partial_run_is_validatable_when_the_founding_step_succeeded() {
+        // (a) the founding step succeeds, another step (5) fails.
+        let mut progress = RunProgress::new(TOTAL, []).with_founding_step(Some(1));
+        for step in 1..=TOTAL {
+            if step == FAILED_STEP {
+                progress.record_failure(step);
+            } else {
+                progress.record_success(step);
+            }
+        }
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert!(progress.founding_step_succeeded());
+        assert!(progress.is_validatable());
+    }
+
+    #[test]
+    fn a_partial_run_is_not_validatable_when_the_founding_step_failed() {
+        // (b) the founding step fails, every other step succeeds: no
+        // validation, and `steps_to_redo` names the founding step.
+        let mut progress = RunProgress::new(TOTAL, []).with_founding_step(Some(1));
+        progress.record_failure(1);
+        for step in 2..=TOTAL {
+            progress.record_success(step);
+        }
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert!(!progress.founding_step_succeeded());
+        assert!(!progress.is_validatable());
+        assert!(
+            progress.steps_to_redo().contains(&1),
+            "{:?}",
+            progress.steps_to_redo()
+        );
+    }
+
+    #[test]
+    fn a_lone_success_that_is_not_the_founding_step_is_not_validatable() {
+        // (c) 1 success out of 16, and it isn't the founding step.
+        let mut progress = RunProgress::new(TOTAL, []).with_founding_step(Some(1));
+        progress.record_success(7);
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert!(!progress.is_validatable());
+    }
+
+    #[test]
+    fn the_real_full_chain_s_founding_step_is_step_1() {
+        // The pipeline wires `founding_step_index(&steps)` on the chain it
+        // actually assembles — pin the real Full chain's answer so the tests
+        // above (`Some(1)`) stay true to it.
+        let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+        assert_eq!(founding_step_index(&chain), Some(1));
+    }
+
+    #[test]
+    fn a_chain_with_no_founding_step_is_unaffected_by_the_gate() {
+        // Every sub-audit kind is one step, so it is never `Partial`
+        // anyway — but the gate must not retroactively block a kind whose
+        // chain has no `docs/AGENTS.md` step.
+        let progress = RunProgress::new(1, []);
+        assert_eq!(progress.outcome(), RunOutcome::Nothing);
+        assert!(progress.founding_step_succeeded());
     }
 
     fn seed_project_and_run(conn: &rusqlite::Connection, run_id: &str) -> anyhow::Result<()> {
