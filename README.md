@@ -52,6 +52,13 @@
 - **Audits on a local model:** an audit can run on Ollama or LiteLLM. The model
   reads and writes only inside the project, through file tools Kronn executes
   for it, with no shell, web or commit, and a step that writes nothing fails.
+  With OpenCode, environment templates are readable, Stop takes seconds and
+  each step counts its tokens.
+- **Local models that finish the job:** an HTTP agent can ask for just the part
+  of a large API response it needs, a shortened response says what it holds,
+  and OpenCode models declared in a project show up in the model pickers.
+- **Prompts that stay private:** no prompt sent to a model lists your other
+  Kronn projects; only the repositories you linked to a project are named.
 - **Rooms that always open:** a CLI the bridge cannot identify no longer makes
   its room unreadable, OpenCode is recognised when it joins, and a discussion
   that fails to load says why, with a retry.
