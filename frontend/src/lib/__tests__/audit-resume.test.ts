@@ -4,6 +4,7 @@ import {
   loadAuditCheckpoint,
   clearAuditCheckpoint,
   AUDIT_CHECKPOINT_CONFIG,
+  formatStepList,
   type AuditCheckpoint,
 } from '../audit-resume';
 
@@ -84,5 +85,26 @@ describe('audit-resume checkpoint', () => {
     expect(() => saveAuditCheckpoint({ ...baseCp, projectId: '' })).not.toThrow();
     expect(() => clearAuditCheckpoint('')).not.toThrow();
     expect(loadAuditCheckpoint('')).toBeNull();
+  });
+});
+
+describe('formatStepList (KT-931 — the steps a resume re-runs)', () => {
+  it('names a single failed step', () => {
+    expect(formatStepList([5])).toBe('5');
+  });
+
+  it('lists scattered steps and keeps pairs as a list', () => {
+    expect(formatStepList([9, 5])).toBe('5, 9');
+    expect(formatStepList([4, 5])).toBe('4, 5');
+  });
+
+  it('folds three or more consecutive steps into a range', () => {
+    expect(formatStepList([5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])).toBe('5–16');
+    expect(formatStepList([3, 5, 6, 7, 12])).toBe('3, 5–7, 12');
+  });
+
+  it('is empty for no step and ignores duplicates', () => {
+    expect(formatStepList([])).toBe('');
+    expect(formatStepList([5, 5])).toBe('5');
   });
 });

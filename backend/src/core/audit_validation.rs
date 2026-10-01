@@ -58,13 +58,16 @@ fn valid_td_id(value: &str) -> bool {
 }
 
 fn linked_project_path(conn: &Connection, discussion_id: &str) -> Result<PathBuf> {
+    // `Interrupted` too (KT-931): a Full run with failed steps links the
+    // validation discussion of its successful steps in the same transaction as
+    // its Interrupted status — its TD cards must be answerable like any other.
     let linked: Option<(String, String)> = conn
         .query_row(
             "SELECT p.path, r.id
              FROM discussions d
              JOIN projects p ON p.id = d.project_id
              JOIN audit_runs r ON r.validation_discussion_id = d.id
-             WHERE d.id = ?1 AND d.archived = 0 AND r.status = 'Completed'
+             WHERE d.id = ?1 AND d.archived = 0 AND r.status IN ('Completed', 'Interrupted')
              ORDER BY r.started_at DESC, r.rowid DESC
              LIMIT 1",
             [discussion_id],

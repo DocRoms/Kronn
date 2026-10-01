@@ -707,3 +707,174 @@ fn no_static_audit_prompt_carries_the_retired_companion_pool() {
         assert!(!prompt.contains("Other Kronn projects"));
     }
 }
+
+// ── KT-931 — a failed step no longer voids the run ───────────────────────────
+//
+// The real `full_audit` pipeline, resuming a run that lost ONE step (the bench
+// run A1: 15 of 16 steps done, the fifth failed for an external cause) on the
+// scripted `claude`. The agent writes nothing, so the resumed step fails its
+// gates again — exactly the case where the run used to end with no validation
+// at all while the 15 documents of the other steps existed.
+
+/// The `data:` payloads of every `event: <name>` frame in an SSE body.
+#[cfg(unix)]
+fn sse_events(body: &str, name: &str) -> Vec<Value> {
+    let header = format!("event: {name}\n");
+    body.split("\n\n")
+        .filter_map(|frame| frame.trim_start().strip_prefix(header.as_str()))
+        .filter_map(|rest| rest.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str(data).ok())
+        .collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_validated() {
+    use axum::response::IntoResponse;
+    let tools = tempfile::tempdir().unwrap();
+    let (fixture, log) = recording_claude(tools.path());
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    let _route = route_claude(project.path(), &fixture);
+    // The 15 carried steps wrote their documents in the predecessor run; the
+    // project already has its docs, so no raw template is installed over them
+    // (whose unrewritten links the invented-path guard would, rightly, refuse).
+    std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
+    std::fs::write(
+        project.path().join("docs/AGENTS.md"),
+        "# Audited project\n\nWritten by the predecessor run.\n",
+    )
+    .unwrap();
+    // The anti-hallucination section every run (re)writes into docs/AGENTS.md
+    // links to this convention.
+    std::fs::write(
+        project
+            .path()
+            .join("docs/conventions/agents-md-format-v1.md"),
+        "# AGENTS.md format\n\nThe format of the entry file.\n",
+    )
+    .unwrap();
+
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let total = chain.len() as u32;
+    let failed_step = 5u32;
+
+    // The interrupted predecessor: every step finished, the fifth unsuccessfully.
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let started = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(conn, "run-prev", PROJECT_ID, "Full", "ClaudeCode", started)?;
+            let mut succeeded = 0;
+            for step in 1..=total {
+                let label = format!("docs/step-{step}.md");
+                runs::insert_audit_step_start(conn, "run-prev", step, &label, started)?;
+                let ok = step != failed_step;
+                runs::finalize_audit_step(
+                    conn,
+                    "run-prev",
+                    step,
+                    started,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    ok,
+                    (!ok).then_some("Mac went to sleep"),
+                    false,
+                )?;
+                if ok {
+                    succeeded += 1;
+                    runs::update_last_completed_step(conn, "run-prev", succeeded)?;
+                }
+            }
+            runs::mark_interrupted(conn, "run-prev", "warned steps: [5]")
+        })
+        .await
+        .unwrap();
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("run-prev".into()),
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+    assert!(
+        !stream.contains("event: error"),
+        "the resume must run: {stream}"
+    );
+
+    // A resume re-runs ONLY the failed step: one agent turn, 15 steps skipped.
+    let step_prompts = recorded_turns(&log)
+        .into_iter()
+        .filter(|turn| turn.contains(BRIEFING_MARKER))
+        .count();
+    assert_eq!(
+        step_prompts, 1,
+        "only step {failed_step} may reach the agent: {stream}"
+    );
+    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 1);
+    let started = sse_events(&stream, "step_start");
+    assert_eq!(started.len(), 1, "{stream}");
+    assert_eq!(started[0]["step"], failed_step);
+
+    // The step failed again, yet the run is not voided: it is validated for
+    // the 15 steps that succeeded and names the one to redo.
+    let done = sse_events(&stream, "done")
+        .pop()
+        .expect("a terminal done event");
+    assert_eq!(done["status"], "interrupted", "{done}");
+    assert_eq!(done["last_completed_step"], total - 1, "{done}");
+    assert_eq!(done["steps_to_redo"], json!([failed_step]), "{done}");
+    let discussion_id = done["discussion_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a partial run must create its validation discussion: {stream}"))
+        .to_string();
+    assert!(stream.contains("event: validation_created"), "{stream}");
+
+    let (run, discussion, resumed_steps) = state
+        .db
+        .with_conn(move |conn| {
+            let run = crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+                .into_iter()
+                .next()
+                .unwrap();
+            let discussion = crate::db::discussions::get_discussion(conn, &discussion_id)?;
+            let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+            Ok((run, discussion, steps))
+        })
+        .await
+        .unwrap();
+    assert_ne!(run.id, "run-prev");
+    assert_eq!(run.status, "Interrupted");
+    assert_eq!(
+        run.last_completed_step,
+        total - 1,
+        "the progress counts every success"
+    );
+    assert_eq!(
+        run.validation_discussion_id,
+        done["discussion_id"].as_str().map(str::to_string)
+    );
+    let prompt = &discussion.expect("the discussion is persisted").messages[0].content;
+    assert!(
+        prompt.contains(&format!("{failed_step}/{total}")),
+        "the validation lists the step to redo: {prompt}"
+    );
+
+    // The resumed run recorded what it carried over: a second resume still
+    // only has the failed step to run.
+    let still_done = crate::api::audit::full::already_succeeded_step_indices(&resumed_steps);
+    let expected: std::collections::HashSet<u32> =
+        (1..=total).filter(|step| *step != failed_step).collect();
+    assert_eq!(still_done, expected);
+}

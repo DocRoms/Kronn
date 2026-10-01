@@ -248,9 +248,14 @@ pub fn set_validation_discussion(conn: &Connection, run_id: &str, disc_id: &str)
     Ok(())
 }
 
-/// Whether `disc_id` is the durable validation discussion of a completed
-/// audit for `project_id`. The streaming path uses this relation instead of
-/// titles, which users can edit and partial audits localize differently.
+/// Whether `disc_id` is the durable validation discussion of an audit run for
+/// `project_id`. The streaming path uses this relation instead of titles,
+/// which users can edit and partial audits localize differently.
+///
+/// The run is `Completed`, or `Interrupted` (KT-931): a Full run some of whose
+/// steps failed still gets a validation discussion for the steps that
+/// succeeded, linked in the same transaction as its `Interrupted` status. Any
+/// other status carries no link.
 pub fn validation_discussion_belongs_to_project(
     conn: &Connection,
     disc_id: &str,
@@ -261,7 +266,7 @@ pub fn validation_discussion_belongs_to_project(
             SELECT 1 FROM audit_runs
             WHERE validation_discussion_id = ?1
               AND project_id = ?2
-              AND status = 'Completed'
+              AND status IN ('Completed', 'Interrupted')
         )",
         params![disc_id, project_id],
         |row| row.get(0),
@@ -343,8 +348,13 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
 }
 
 /// 0.8.3 (#311) — bump `last_completed_step` on every successful
-/// `step_done` event so the resume mechanism knows where to pick up
-/// if the SSE stream gets interrupted mid-run. `step` is 1-based.
+/// `step_done` event so an interrupted run reports how far it got.
+/// KT-931 — the value is the NUMBER of steps that succeeded in the run
+/// (steps inherited from the resumed predecessor included), not the index
+/// of the last one: a step that failed in the middle of the chain must not
+/// make the progress read as if everything up to the end had succeeded.
+/// Which steps are left is read from `audit_run_steps`, never from this
+/// scalar.
 /// Idempotent: if the new value isn't greater than the current one
 /// (rare race where two updates land out of order), the existing
 /// value wins. No-op on terminal rows.
@@ -508,6 +518,34 @@ pub fn insert_audit_step_start(
             started_at.to_rfc3339()
         ],
     )?;
+    Ok(())
+}
+
+/// KT-931 — a resumed run inherits the steps its predecessor completed
+/// cleanly: one finished row per inherited step (success, zero duration, no
+/// tokens — this run spent nothing on them) and the progress count seeded
+/// from them. Without those rows a second resume — of a run that skipped
+/// them — would find none of them succeeded and replay the whole chain, not
+/// just the step that failed again. Idempotent on `(audit_run_id,
+/// step_index)`, all-or-nothing.
+pub fn carry_over_steps(
+    conn: &Connection,
+    audit_run_id: &str,
+    steps: &[(u32, String)],
+    at: DateTime<Utc>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let at = at.to_rfc3339();
+    for (step_index, file_label) in steps {
+        tx.execute(
+            "INSERT OR IGNORE INTO audit_run_steps
+                (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms, cli_success)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, 1)",
+            params![audit_run_id, *step_index as i64, file_label, at],
+        )?;
+    }
+    update_last_completed_step(&tx, audit_run_id, steps.len() as u32)?;
+    tx.commit()?;
     Ok(())
 }
 

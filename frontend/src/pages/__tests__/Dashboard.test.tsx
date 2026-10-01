@@ -434,4 +434,16 @@ describe('Dashboard — audit_finished toast (0.9.0)', () => {
     const toast = await screen.findByText(/Audit terminé avec avertissements/);
     expect(toast.textContent).toContain('6, 8');
   });
+
+  it('interrupted run that still created its validation discussion → says the other steps are validated (KT-931)', async () => {
+    await wrap(<Dashboard onReset={vi.fn()} />);
+    await fireWs({
+      type: 'audit_finished', project_id: 'p-x', status: 'interrupted',
+      last_completed_step: 15, total_steps: 16, warned_steps: [5], discussion_id: 'disc-partial',
+    });
+    const toast = await screen.findByText(/Audit terminé avec des étapes en échec/);
+    expect(toast.textContent).toContain('5');
+    expect(toast.textContent).toContain('validation');
+    expect(screen.queryByText(/validation non lancée/)).toBeNull();
+  });
 });

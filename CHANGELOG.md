@@ -11,6 +11,24 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Fixed
+
+- A Full audit in which a step fails no longer invalidates the whole run.
+  Until now one failed step — often for an outside reason, such as the Mac going
+  to sleep — left the run Interrupted with no validation discussion, even when
+  the other fifteen documents existed. The run still ends Interrupted (only a
+  complete run can be validated and earn the Validated badge), but it now gets a
+  validation discussion for the steps that succeeded, which names the steps to
+  redo and tells the agent not to validate their documents. The documentary
+  check that refuses a run with an invented link still applies. The progress is
+  now the exact number of steps that succeeded, the ones after a failure
+  included — a run that lost step 5 of 16 reads 15/16, no longer 4 or 16. The
+  Resume button names the steps it will run ("Resume — redo step(s) 5"), and a
+  resume runs only those: a resumed run now records the steps it carried over,
+  so resuming it again no longer replays the whole chain, and a step that was
+  started but never finished is no longer mistaken for a successful one
+  (KT-931).
+
 ## [0.14.2] - 2026-09-30
 
 ### Added

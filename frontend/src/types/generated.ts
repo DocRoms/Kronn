@@ -734,16 +734,17 @@ kind: string, agent_type: string, started_at: string, ended_at?: string | null, 
  * the SSE stream ended before the executed chain completed, without an
  * explicit cancel — typically a rate-limit, claude crash, or
  * network blip. The frontend treats `Interrupted` specifically:
- * it shows a dynamic resume button for `last_completed_step + 1`
+ * it shows a dynamic resume button naming the steps still to redo
  * instead of a fresh "Lancer".
  */
 status: string,
 /**
- * 0.8.3 (#311) — last successfully completed step (1-based,
- * matches the executed step-chain indexing). 0 = no step done yet.
- * A chained Full currently completes at 16. Set on every `step_done` where
- * `validate_step_output` returns success=true. Drives
- * the resume mechanism: on resume we start at `this + 1`.
+ * 0.8.3 (#311) — how many steps of the executed chain succeeded
+ * (KT-931: a count, not the index of the last one — a step that failed
+ * in the middle leaves the ones after it done). 0 = no step done yet.
+ * A chained Full currently completes at 16. Raised on every `step_done`
+ * where `validate_step_output` returns success=true; the steps a resume
+ * re-runs come from `audit_run_steps`, not from this figure.
  */
 last_completed_step: number,
 /**

@@ -1020,7 +1020,17 @@ export const projects = {
    * grafts a stale selector kind onto a resumed run.
    */
   auditResumable: (id: string) =>
-    api<{ id: string; kind: AuditKind; last_completed_step: number; started_at: string } | null>(
+    api<{
+      id: string;
+      kind: AuditKind;
+      /** KT-931 — the NUMBER of steps that succeeded, not a position in the
+       *  chain: a step that failed in the middle leaves later ones done. */
+      last_completed_step: number;
+      /** KT-931 — the steps a resume re-runs (failed or never run), 1-based.
+       *  Absent from a backend that predates it. */
+      steps_to_redo?: number[];
+      started_at: string;
+    } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
   /**
@@ -1373,7 +1383,9 @@ export const projects = {
        * — a coherent `done interrupted` still follows. */
       onWarning?: (message: string) => void;
       onValidationCreated: (discussionId: string) => void;
-      onDone: (discussionId: string | null, templateWasInstalled: boolean) => void;
+      /** `status` is `complete` or `interrupted`. An interrupted run may still
+       * carry a `discussionId` (KT-931): the validation of its successful steps. */
+      onDone: (discussionId: string | null, templateWasInstalled: boolean, status?: string) => void;
       /** TERMINAL: the stream is over after this fires — onDone is sealed
        * and never follows (no double cleanup). */
       onError: (error: string) => void;
@@ -1381,8 +1393,13 @@ export const projects = {
     signal?: AbortSignal,
   ) => {
     let finished = false;
-    const done = (discId: string | null, tmpl: boolean) => {
-      if (!finished) { finished = true; handlers.onDone(discId, tmpl); }
+    const done = (discId: string | null, tmpl: boolean, status?: string) => {
+      if (finished) return;
+      finished = true;
+      // The status is only passed when the backend sent one: callers and
+      // tests that predate it keep seeing the two-argument call.
+      if (status === undefined) handlers.onDone(discId, tmpl);
+      else handlers.onDone(discId, tmpl, status);
     };
     // Terminal error: seal `finished` so the stream-close onDone is a no-op
     // — onError owns the cleanup, a second callback would double the toasts.
@@ -1473,7 +1490,7 @@ export const projects = {
             case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
             case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
             case 'validation_created': handlers.onValidationCreated(p.discussion_id as string); break;
-            case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
+            case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false, p.status); break;
             case 'error': fail(p.error ?? 'Unknown error'); break;
           }
         },
