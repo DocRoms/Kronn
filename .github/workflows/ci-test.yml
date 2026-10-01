@@ -174,7 +174,8 @@ jobs:
   test-backend-coverage:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The instrumented run already took 25-30 min; the floor itself is unchanged.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend
