@@ -548,6 +548,86 @@ This is a loop POLICY (derived from the step having run on Ollama), not a knob.
 The escalation RATE — logged on `kronn::ollama::escalation` — is the health
 metric that reveals which steps are too hard for the chosen local model.
 
+## Downloading, updating and Mac MLX builds from Settings (KT-930)
+
+Config › Agents › Local models › Ollama.
+
+### The download block folds
+
+The "Download a model" block opens by itself while nothing is installed (a first
+use) and is folded as soon as one model is. It is the way to ADD a model, not
+something to scroll past forever. Once the user clicks it, that choice is kept in
+this browser under `kronn:ollamaDownloadOpen` and wins over the default; the
+default itself is never written, so someone who never touched it keeps the
+automatic behaviour. Folded, its summary line counts the suggestions and the
+downloads in progress. A download or an update in flight is drawn above the
+block, outside the fold, with its progress and its Cancel, so folding the block
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:138]
+[src: file: frontend/src/hooks/usePersistentFold.ts:19]
+
+### The suggestions, and what "verified" means here
+
+`frontend/src/components/settings/ollamaModels.ts` holds one portable suggestion
+per hardware tier and a short list of Mac MLX builds. Every entry is an exact tag
+with the repository file it was taken from, and a tag goes in only when something
+in this repository shows it exists AND ran. Sizes are not stored: a figure typed
+here goes stale, and the real one is on the download's own progress and the
+installed list. [src: file: frontend/src/components/settings/ollamaModels.ts:31]
+
+| Tag | Tier | Seen to exist and run in |
+|---|---|---|
+| `qwen3.5:4b` | CPU, no GPU | `docs/research/native-tool-catalogue-2026-09-22.md` (2026-09-22 run) |
+| `qwen3:8b` | ≥ 16 GB RAM | the Ollama Default seed of the model catalogue [src: file: backend/src/core/model_catalog/mod.rs:100]; the bench table below |
+| `qwen3:30b-a3b` | GPU or ≥ 32 GB | the Ollama Reasoning seed [src: file: backend/src/core/model_catalog/mod.rs:101]; the bench table below |
+| `gemma4:12b-mlx` | ≥ 16 GB RAM, Mac only | `docs/research/native-tool-catalogue-2026-09-22.md` |
+| `qwen3.8:27b-mlx` | GPU or ≥ 32 GB, Mac only | `docs/research/native-qp-litellm-ollama-2026-09-22.md` |
+
+**Not yet checked against the live library.** The environment this list was
+written in could not reach ollama.com, so the tags are verified against the
+repository's own dated runs, not against the library page. Before a release,
+confirm each one: open `https://ollama.com/library/<family>/tags`, or
+`ollama pull <tag>` on a spare machine. A plain sibling of an MLX tag
+(`gemma4:12b`, `qwen3.8:27b`) is deliberately NOT suggested: nothing here shows
+it exists, and a name that does not exist is a download that fails in front of
+the user.
+
+### Updating an installed model
+
+The installed models are listed inside the download block with an **Update**
+button. It is the download flow pointed at a tag Ollama already holds:
+`POST /api/ollama/pull` with that exact tag, the same progress, the same Cancel,
+the same error messages, then a refresh of the installed list. There is no
+separate update endpoint to drift from the download one. [src: file: backend/src/api/ollama.rs:442]
+
+Kronn does **not** report "update available". Comparing the installed digest with
+the registry's without downloading is a registry behaviour that was not verified
+here, and a guessed "update available" is worse than none, so the card says
+so next to the list instead of inventing a signal. Update re-asks Ollama for the
+tag; the files that did not change stay as they are.
+
+### Mac MLX builds
+
+`GET /api/ollama/health` carries `version` (the running server's, from
+`/api/version`, read fresh on each probe so a Refresh sees an update to Ollama)
+and `mlx_capable`. The browser never decides: a user agent says nothing about
+where Ollama runs. [src: file: backend/src/api/ollama.rs:102]
+
+`mlx_capable` is true when both hold:
+
+1. **The host is a Mac on Apple Silicon.** The OS is `host_os_label()`, so a
+   Kronn in Docker on a Mac answers for the Mac; the chip is the build's own
+   architecture (`aarch64`). An amd64 image emulated on Apple Silicon reads as
+   Intel, which errs towards not offering MLX. [src: file: backend/src/core/env.rs:81]
+2. **Ollama is at least 0.34.** That is the version the runner already scopes
+   its MLX worker mitigations to, and the one MLX was measured on (0.34.2 reused
+   9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
+   prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
+   should steer a user to.
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:5448]
+
+When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
+then the portable list. Everywhere else the list is exactly the portable one.
+
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 
 | Model | tok/s (warm) | Note |

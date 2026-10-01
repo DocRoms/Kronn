@@ -15,6 +15,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
+import { SUGGESTED_MODELS, MLX_SUGGESTED_MODELS } from '../ollamaModels';
 import type { CatalogModelEntry, ModelTiersConfig, OllamaModel } from '../../../types/generated';
 
 const { ollama, config, catalogList } = vi.hoisted(() => ({
@@ -56,8 +57,9 @@ const installedModel = (name: string, overrides: Partial<OllamaModel> = {}): Oll
 
 beforeEach(() => {
   for (const mock of [...Object.values(ollama), ...Object.values(config), catalogList]) mock.mockReset();
+  localStorage.clear();
   ollama.health.mockResolvedValue({
-    status: 'not_installed', version: null, endpoint: '', models_count: 0, hint: null,
+    status: 'not_installed', version: null, endpoint: '', models_count: 0, hint: null, mlx_capable: false,
   });
   ollama.models.mockResolvedValue({ models: [] });
   ollama.pull.mockResolvedValue(undefined);
@@ -79,6 +81,16 @@ beforeEach(() => {
 });
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+/** The tags of the download block's suggestion list, in display order. */
+function suggestionNames(): string[] {
+  const list = document.querySelector('.set-ollama-download .set-ollama-suggestions');
+  return [...(list?.querySelectorAll('.set-ollama-cmd') ?? [])].map(node => node.textContent ?? '');
+}
+
+function downloadBlock(): HTMLDetailsElement {
+  return screen.getByText('ollama.pullTitle').closest('details') as HTMLDetailsElement;
+}
 
 async function mountCard(modelCostSuffix?: (model: string) => string) {
   let result: ReturnType<typeof render>;
@@ -121,9 +133,8 @@ describe('OllamaCard — 4-state rendering', () => {
     });
     ollama.models.mockResolvedValue({ models: [] });
     await mountCard();
-    // At least one of the suggested models appears in the UI. (The list now
-    // includes both `llama3.2:1b` and `llama3.2`, so match-all + count.)
-    expect(screen.getAllByText(/llama3\.2/).length).toBeGreaterThan(0);
+    // First use: the download block is open and lists the portable suggestions.
+    expect(suggestionNames()).toEqual(['qwen3.5:4b', 'qwen3:8b', 'qwen3:30b-a3b']);
   });
 
   it('online + models → installed model name appears + status reflects count', async () => {
@@ -453,6 +464,248 @@ describe('OllamaCard — direct model downloads', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('downloaded successfully');
     expect(screen.getByRole('alert')).toHaveTextContent('refresh unavailable');
     expect(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]).not.toBeDisabled();
+  });
+});
+
+describe('OllamaCard — download block fold (KT-930)', () => {
+  const online = (models_count: number, extra: Record<string, unknown> = {}) => ({
+    status: 'online', version: '0.34.2', endpoint: 'http://localhost:11434',
+    models_count, hint: null, mlx_capable: false, ...extra,
+  });
+
+  it('is folded by default once a model is installed, with a summary of what is inside', async () => {
+    ollama.health.mockResolvedValue(online(1));
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b')] });
+    await mountCard();
+
+    expect(downloadBlock().open).toBe(false);
+    expect(downloadBlock()).toHaveTextContent(`ollama.pullSummarySuggestions(${SUGGESTED_MODELS.length})`);
+    expect(downloadBlock()).not.toHaveTextContent('ollama.pullSummaryActive');
+  });
+
+  it('is open for a first use, when nothing is installed', async () => {
+    ollama.health.mockResolvedValue(online(0));
+    await mountCard();
+
+    expect(downloadBlock().open).toBe(true);
+    // Open, the summary line steps aside: the list itself is the information.
+    expect(downloadBlock()).not.toHaveTextContent('ollama.pullSummarySuggestions');
+  });
+
+  it('opens and folds on click, and remembers the choice in this browser', async () => {
+    ollama.health.mockResolvedValue(online(1));
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b')] });
+    const first = await mountCard();
+
+    expect(localStorage.getItem('kronn:ollamaDownloadOpen')).toBeNull();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+    expect(downloadBlock().open).toBe(true);
+    expect(localStorage.getItem('kronn:ollamaDownloadOpen')).toBe('1');
+
+    first.unmount();
+    await mountCard();
+    expect(downloadBlock().open).toBe(true);
+
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+    expect(downloadBlock().open).toBe(false);
+    expect(localStorage.getItem('kronn:ollamaDownloadOpen')).toBe('0');
+  });
+
+  it('stays folded for someone who folded it, even with nothing installed', async () => {
+    localStorage.setItem('kronn:ollamaDownloadOpen', '0');
+    ollama.health.mockResolvedValue(online(0));
+    await mountCard();
+    expect(downloadBlock().open).toBe(false);
+  });
+
+  it('never writes its own default to storage', async () => {
+    ollama.health.mockResolvedValue(online(0));
+    await mountCard();
+    expect(downloadBlock().open).toBe(true);
+    expect(localStorage.getItem('kronn:ollamaDownloadOpen')).toBeNull();
+  });
+
+  it('ignores an unreadable stored value and falls back to the default', async () => {
+    localStorage.setItem('kronn:ollamaDownloadOpen', 'maybe');
+    ollama.health.mockResolvedValue(online(1));
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b')] });
+    await mountCard();
+    expect(downloadBlock().open).toBe(false);
+  });
+
+  it('keeps a download in flight visible, and cancellable, while the block is folded', async () => {
+    let resolvePull!: () => void;
+    ollama.health.mockResolvedValue(online(1));
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b')] });
+    ollama.pull.mockImplementation((_model: string, handlers: { onProgress: (event: unknown) => void }) => {
+      handlers.onProgress({ status: 'downloading', digest: 'sha256:abc', completed: 1_000_000, total: 4_000_000 });
+      return new Promise<void>(resolve => { resolvePull = resolve; });
+    });
+    await mountCard();
+
+    // Open the block, start a download of a suggestion, then fold it back.
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+    fireEvent.click(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]);
+    await waitFor(() => expect(screen.getByText(/1 MB.*4 MB.*25%/)).toBeTruthy());
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    expect(downloadBlock().open).toBe(false);
+    // The progress lives outside the foldable block, not merely un-hidden by it.
+    expect(downloadBlock().contains(screen.getByText(/1 MB.*4 MB.*25%/))).toBe(false);
+    expect(screen.getByRole('button', { name: 'ollama.pullCancel' })).toBeTruthy();
+    expect(downloadBlock()).toHaveTextContent('ollama.pullSummaryActive(1)');
+    await act(async () => resolvePull());
+  });
+
+  it('shows no installed-models list, and no update action, before anything is installed', async () => {
+    ollama.health.mockResolvedValue(online(0));
+    await mountCard();
+    expect(screen.queryByText('ollama.installedModels')).toBeNull();
+    expect(screen.queryByText('ollama.updateButton')).toBeNull();
+  });
+});
+
+describe('OllamaCard — updating an installed model (KT-930)', () => {
+  beforeEach(() => {
+    ollama.health.mockResolvedValue({
+      status: 'online', version: '0.34.2', endpoint: 'http://localhost:11434',
+      models_count: 1, hint: null, mlx_capable: false,
+    });
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b')] });
+  });
+
+  const updateButton = (name: string) => screen.getByRole('button', { name: `ollama.updateFor(${name})` });
+
+  it('offers one update action per installed model, with the honest hint that no check is made', async () => {
+    ollama.models.mockResolvedValue({
+      models: [installedModel('qwen3:8b'), installedModel('custom:latest')],
+    });
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    expect(screen.getByText('ollama.installedModels')).toBeTruthy();
+    expect(updateButton('qwen3:8b')).not.toBeDisabled();
+    expect(updateButton('custom:latest')).not.toBeDisabled();
+    expect(screen.getByText('ollama.updateHint')).toBeTruthy();
+  });
+
+  it('re-pulls the exact installed tag through the download flow, with progress', async () => {
+    let resolvePull!: () => void;
+    ollama.pull.mockImplementation((_model: string, handlers: { onProgress: (event: unknown) => void }) => {
+      handlers.onProgress({ status: 'downloading', digest: 'sha256:abc', completed: 2_000_000, total: 8_000_000 });
+      return new Promise<void>(resolve => { resolvePull = resolve; });
+    });
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    fireEvent.click(updateButton('qwen3:8b'));
+    fireEvent.click(updateButton('qwen3:8b'));
+    await waitFor(() => expect(ollama.pull).toHaveBeenCalledTimes(1));
+    expect(ollama.pull.mock.calls[0][0]).toBe('qwen3:8b');
+    expect(ollama.pull.mock.calls[0][2]).toBeInstanceOf(AbortSignal);
+    expect(screen.getByText(/2 MB.*8 MB.*25%/)).toBeTruthy();
+    expect(updateButton('qwen3:8b')).toBeDisabled();
+    await act(async () => resolvePull());
+  });
+
+  it('refreshes the installed list after a successful update and frees the action again', async () => {
+    ollama.pull.mockImplementation(async (_model: string, handlers: { onSuccess: (event: unknown) => void }) => {
+      handlers.onSuccess({ status: 'success', digest: null, completed: null, total: null });
+    });
+    ollama.models
+      .mockResolvedValueOnce({ models: [installedModel('qwen3:8b', { size: '4.0 GB' })] })
+      .mockResolvedValueOnce({ models: [installedModel('qwen3:8b', { size: '5.2 GB' })] });
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    fireEvent.click(updateButton('qwen3:8b'));
+    await waitFor(() => expect(ollama.models).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('success')).toBeTruthy();
+    await waitFor(() => expect(updateButton('qwen3:8b')).not.toBeDisabled());
+    expect(screen.getAllByText('5.2 GB').length).toBeGreaterThan(0);
+  });
+
+  it('cancels an update in flight and leaves it relaunchable', async () => {
+    let receivedSignal!: AbortSignal;
+    ollama.pull.mockImplementation((_model: string, _handlers: unknown, signal: AbortSignal) => new Promise<void>(resolve => {
+      receivedSignal = signal;
+      signal.addEventListener('abort', () => resolve());
+    }));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    fireEvent.click(updateButton('qwen3:8b'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'ollama.pullCancel' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'ollama.pullCancel' }));
+    await waitFor(() => expect(receivedSignal.aborted).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'ollama.pullCancel' })).toBeNull());
+    expect(updateButton('qwen3:8b')).not.toBeDisabled();
+  });
+
+  it('surfaces a failed update without refreshing or claiming success', async () => {
+    ollama.pull.mockImplementation(async (_model: string, handlers: { onError: (message: string) => void }) => {
+      handlers.onError('Ollama lost network access while downloading. Check your connection, then try again.');
+    });
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    fireEvent.click(updateButton('qwen3:8b'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('lost network access');
+    expect(ollama.models).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('success')).toBeNull();
+    expect(updateButton('qwen3:8b')).not.toBeDisabled();
+  });
+});
+
+describe('OllamaCard — MLX builds on a Mac that runs them (KT-930)', () => {
+  const health = (mlx_capable?: boolean) => ({
+    status: 'online', version: '0.34.2', endpoint: 'http://localhost:11434',
+    models_count: 0, hint: null, ...(mlx_capable === undefined ? {} : { mlx_capable }),
+  });
+
+  it('lists the -mlx builds first, flagged as optimized for Mac, then the portable list', async () => {
+    ollama.health.mockResolvedValue(health(true));
+    await mountCard();
+
+    expect(suggestionNames()).toEqual([
+      ...MLX_SUGGESTED_MODELS.map(m => m.name),
+      ...SUGGESTED_MODELS.map(m => m.name),
+    ]);
+    expect(suggestionNames().slice(0, MLX_SUGGESTED_MODELS.length).every(name => name.endsWith('-mlx'))).toBe(true);
+    expect(screen.getAllByText('ollama.mlxBadge')).toHaveLength(MLX_SUGGESTED_MODELS.length);
+  });
+
+  it('changes nothing when the backend does not report MLX', async () => {
+    for (const reported of [false, undefined]) {
+      ollama.health.mockResolvedValue(health(reported));
+      const view = await mountCard();
+      expect(suggestionNames()).toEqual(SUGGESTED_MODELS.map(m => m.name));
+      expect(screen.queryByText('ollama.mlxBadge')).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it('decides from the backend verdict, not from the browser user agent', async () => {
+    const original = navigator.userAgent;
+    Object.defineProperty(navigator, 'userAgent', {
+      value: 'Mozilla/5.0 (Macintosh; Apple M3 Mac OS X 14_0)', configurable: true,
+    });
+    try {
+      ollama.health.mockResolvedValue(health(false));
+      await mountCard();
+      expect(screen.queryByText('ollama.mlxBadge')).toBeNull();
+      expect(suggestionNames().some(name => name.endsWith('-mlx'))).toBe(false);
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', { value: original, configurable: true });
+    }
+  });
+
+  it('pulls an MLX build under its exact tag', async () => {
+    ollama.health.mockResolvedValue(health(true));
+    await mountCard();
+    fireEvent.click(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]);
+    await waitFor(() => expect(ollama.pull).toHaveBeenCalledTimes(1));
+    expect(ollama.pull.mock.calls[0][0]).toBe(MLX_SUGGESTED_MODELS[0].name);
   });
 });
 

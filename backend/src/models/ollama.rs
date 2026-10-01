@@ -42,12 +42,20 @@ pub struct OllamaModel {
 pub struct OllamaHealthResponse {
     /// "online", "offline", "not_installed", "unreachable"
     pub status: String,
+    /// The server's own version, from `/api/version`. `None` when the server
+    /// is not online or did not answer that probe.
     pub version: Option<String>,
     pub endpoint: String,
     pub models_count: u32,
     /// User-facing explanation when status != "online". Contextualized
     /// for the detected environment (native, Docker, WSL).
     pub hint: Option<String>,
+    /// KT-930 — this host is a Mac on Apple Silicon AND the running Ollama is
+    /// recent enough to run `-mlx` models as Kronn expects. Decided here, from
+    /// the host and the server's reported version — never from the browser's
+    /// user agent, which says nothing about where Ollama runs. `false` when
+    /// either fact is missing or unknown.
+    pub mlx_capable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

@@ -4606,12 +4606,25 @@ export type OllamaHealthResponse = {
 /**
  * "online", "offline", "not_installed", "unreachable"
  */
-status: string, version: string | null, endpoint: string, models_count: number,
+status: string,
+/**
+ * The server's own version, from `/api/version`. `None` when the server
+ * is not online or did not answer that probe.
+ */
+version: string | null, endpoint: string, models_count: number,
 /**
  * User-facing explanation when status != "online". Contextualized
  * for the detected environment (native, Docker, WSL).
  */
-hint: string | null, };
+hint: string | null,
+/**
+ * KT-930 — this host is a Mac on Apple Silicon AND the running Ollama is
+ * recent enough to run `-mlx` models as Kronn expects. Decided here, from
+ * the host and the server's reported version — never from the browser's
+ * user agent, which says nothing about where Ollama runs. `false` when
+ * either fact is missing or unknown.
+ */
+mlx_capable: boolean, };
 
 export type OllamaModel = { name: string, size: string, modified: string,
 /**

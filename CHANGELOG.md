@@ -160,7 +160,32 @@ Release notes for 0.9.3 and earlier are available in the
   sending a whole repository to a hosted service is a decision the audit does not
   take for you.
 
+- An installed Ollama model can be updated from its card, and a Mac is offered
+  the builds made for it (KT-930). In Config › Agents › Local models › Ollama,
+  the download block now lists the installed models, each with an **Update**
+  button: it asks Ollama to pull that exact tag again, with the download's own
+  progress, Cancel and error messages. Kronn does not claim an update is
+  available: comparing the installed digest with the registry's without
+  downloading was not verified, so the card says it does not check rather than
+  guess. On a Mac with Apple Silicon running Ollama 0.34 or later, the `-mlx`
+  builds (`gemma4:12b-mlx`, `qwen3.8:27b-mlx`) come first in the suggestions,
+  marked "Optimized for Mac". The backend decides (`mlx_capable` and `version` on
+  `GET /api/ollama/health`, from the host and the server's own version), never
+  the browser's user agent; on any other machine the list is unchanged.
+
 ### Changed
+
+- The Ollama card's "Download a model" block is folded once a model is installed
+  (KT-930). It was always open, and took the card over even with a full model
+  library. It stays open for a first use, remembers your choice in this browser
+  and, folded, says how many suggestions it holds and how many downloads are
+  running; a download in flight stays visible, with its Cancel. The suggestions
+  are now one portable model per hardware tier — `qwen3.5:4b`, `qwen3:8b`,
+  `qwen3:30b-a3b` — in place of the former six, each with the repository run that
+  shows it exists (see `docs/operations/ollama-local-models.md`). Sizes are no
+  longer stated: the download and the installed list show the real ones. These
+  tags are checked against Kronn's own runs, not yet against the Ollama library
+  page.
 
 - No prompt Kronn sends to a model lists your other Kronn projects any more
   (KT-926). The steps of a Full or partial audit, and every discussion (the

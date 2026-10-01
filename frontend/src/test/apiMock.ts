@@ -587,7 +587,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     ollama: {
-      health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null }),
+      health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null, mlx_capable: false }),
       models: resolve({ models: [] }),
       setContextOverride: resolve({ model: '', num_ctx: null, warnings: [] }),
     },
