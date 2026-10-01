@@ -38,8 +38,11 @@ resolve. `cargo fmt --check`, Clippy with `--all-targets -- -D warnings`,
 `make check-version` and `git diff --check` pass.
 
 These findings come from source review and deterministic regression checks.
-The A/B result referenced by the user was unavailable during this review;
-no improvement in task quality, token use or latency is claimed here.
+The A/B artifacts were subsequently recovered and assessed by two independent
+Codex sessions; see the [Sonnet comparison](sonnet-template-comparison-2026-10-01.md).
+Those runs predate these corrections. They show pipeline completion and cleaner
+concrete citation ranges, but do not establish better overall content. No
+quality, token or latency gain is attributed to the fixes above.
 
 Any subsequent A/B comparison should identify the exact template revisions,
 models, tasks and delivered context for both arms. Assess rule compliance and

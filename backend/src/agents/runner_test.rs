@@ -13463,6 +13463,191 @@ sleep 3600
         assert_eq!(body["tools"].as_array().unwrap().len(), before);
     }
 
+    struct AuditMutationTools {
+        revision: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for AuditMutationTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            ["read_file", "write_file"].into_iter().map(|name| serde_json::json!({
+                "type": "function", "function": {
+                    "name": name, "description": name,
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                }
+            })).collect()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            if call.name == "write_file" {
+                self.revision
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                ok: true,
+                content: serde_json::json!({"revision": self.revision.load(std::sync::atomic::Ordering::SeqCst)}),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_reads_new_content_after_a_write_even_when_reader_was_withdrawn() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for initial_reads in [1, 3] {
+            let server = MockServer::start().await;
+            let round = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = Arc::new(Mutex::new(None));
+            let captured = observed.clone();
+            Mock::given(method("POST")).and(path("/v1/chat/completions"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let final_read_id = format!("c{}", initial_reads + 3);
+                    if let Some(message) = body["messages"].as_array().unwrap().iter()
+                        .find(|m| m["role"] == "tool" && m["tool_call_id"] == final_read_id) {
+                        *captured.lock().unwrap() = Some(serde_json::from_str::<serde_json::Value>(message["content"].as_str().unwrap()).unwrap());
+                    }
+                    let tool = if n < initial_reads || n == initial_reads + 1 || n == initial_reads + 3 {
+                        Some("read_file")
+                    } else if n == initial_reads || n == initial_reads + 2 {
+                        Some("write_file")
+                    } else { None };
+                    let tool = tool.filter(|name| body["tools"].as_array().is_some_and(|tools|
+                        tools.iter().any(|t| t["function"]["name"] == *name)));
+                    let frame = match tool {
+                        Some(name) => serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                            "index":0,"id":format!("c{n}"),"function":{"name":name,"arguments":"{\"path\":\"docs/result.md\"}"}
+                        }]}}]}),
+                        None => serde_json::json!({"choices":[{"index":0,"delta":{"content":"done"}}]}),
+                    };
+                    ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string()]))
+                }).mount(&server).await;
+            let executor = Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut process = start_ollama_http(
+                &AgentType::LiteLlm,
+                "write then verify the audit document",
+                "",
+                "test-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(executor.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(
+                process.reported_usage_counters(),
+                None,
+                "missing provider usage stays unknown"
+            );
+            assert_eq!(
+                executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "an identical write must remain cached, even after a read refresh"
+            );
+            let observed = observed
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("post-write read reached the provider");
+            let result = observed.get("result").unwrap_or(&observed);
+            assert_eq!(
+                result["revision"], 1,
+                "fresh content after {initial_reads} initial reads: {observed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_structured_usage_sums_turns_and_preserves_unknown_cache() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let round = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let frame = if n == 0 {
+                    serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                        "index":0,"id":"r1","function":{"name":"read_file","arguments":"{\"path\":\"docs/result.md\"}"}
+                    }]}}]})
+                } else { serde_json::json!({"choices":[{"index":0,"delta":{"content":"done"}}]}) };
+                // Repeated cumulative frames for one response count only once.
+                let usage = if n == 0 {
+                    serde_json::json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":40}}})
+                } else { serde_json::json!({"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":7}}) };
+                ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string(), &usage.to_string(), &usage.to_string()]))
+            }).expect(2).mount(&server).await;
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "read the audit document",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+        let usage = process
+            .reported_usage_counters()
+            .expect("HTTP usage must reach audit consumers");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (300, 12));
+        assert_eq!(process.reported_token_usage(), Some(312));
+        assert_eq!(usage.prompt_cache.cached_prompt_tokens, Some(40));
+        assert_eq!(usage.prompt_cache.cache_write_prompt_tokens, None);
+    }
+
+    #[test]
+    fn http_audit_reader_restoration_preserves_call_ceilings_and_error_circuits() {
+        use crate::agents::tools::{CeilingAllowance, ToolRunMode};
+        let withdrawn = ["read_file", "git_status", "git_diff", "api_call"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let circuits = ["git_status"].into_iter().map(str::to_string).collect();
+        let counts = std::collections::HashMap::from([("read_file".into(), MAX_READ_FILE_CALLS)]);
+        let restored = observation_readers_to_restore(
+            &withdrawn,
+            &circuits,
+            &counts,
+            ToolRunMode::General,
+            &CeilingAllowance::default(),
+            is_workspace_observation_tool,
+        );
+        assert_eq!(
+            restored,
+            vec!["git_diff"],
+            "only a repetition-withdrawn reader below its ceiling returns"
+        );
+    }
+
     /// Un exécuteur de plan minimal : `task_get` rend un numéro de révision,
     /// `task_update_dod` l'incrémente. Assez pour prouver qu'une lecture
     /// d'après-mutation rapporte bien la nouvelle valeur.

@@ -733,9 +733,27 @@ pub(crate) fn progress_readers_to_restore(
     run_mode: crate::agents::tools::ToolRunMode,
     allowance: &crate::agents::tools::CeilingAllowance,
 ) -> Vec<String> {
+    observation_readers_to_restore(
+        withdrawn,
+        open_circuits,
+        calls_per_tool,
+        run_mode,
+        allowance,
+        is_progress_observation_tool,
+    )
+}
+
+fn observation_readers_to_restore(
+    withdrawn: &std::collections::HashSet<String>,
+    open_circuits: &std::collections::HashSet<String>,
+    calls_per_tool: &std::collections::HashMap<String, usize>,
+    run_mode: crate::agents::tools::ToolRunMode,
+    allowance: &crate::agents::tools::CeilingAllowance,
+    is_observation: fn(&str) -> bool,
+) -> Vec<String> {
     withdrawn
         .iter()
-        .filter(|name| is_progress_observation_tool(name))
+        .filter(|name| is_observation(name))
         .filter(|name| !open_circuits.contains(*name))
         .filter(|name| {
             // Include human grants when checking the enforced call ceiling.
@@ -7842,9 +7860,19 @@ async fn start_ollama_http_with_idle(
     let mut worker_original_catalogue_seed = Vec::new();
     // Keep reader declarations for restoration in every run mode.
     let mut progress_reader_seed: Vec<serde_json::Value> = Vec::new();
+    let mut workspace_reader_seed: Vec<serde_json::Value> = Vec::new();
     if let Some(exec) = executor.as_ref() {
         let catalogue = exec.catalogue();
         progress_reader_seed = progress_reader_declarations(&catalogue);
+        workspace_reader_seed = catalogue
+            .iter()
+            .filter(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_workspace_observation_tool)
+            })
+            .cloned()
+            .collect();
         if tool_run_mode == crate::agents::tools::ToolRunMode::Worker {
             worker_original_catalogue_seed = catalogue.clone();
         }
@@ -8067,6 +8095,8 @@ async fn start_ollama_http_with_idle(
     // only lets generic callers await an exit status; cancelling/killing that
     // child cannot by itself stop a Tokio provider/tool loop.
     let task_cancel = http_cancel.clone();
+    let usage = Arc::new(Mutex::new(AgentUsage::default()));
+    let task_usage = usage.clone();
 
     // The task outlives this call, so it cannot borrow the caller's `model`.
     let model_owned = model.to_string();
@@ -8347,6 +8377,30 @@ async fn start_ollama_http_with_idle(
             emitted_text |= emitted_this_turn;
 
             let calls = pending_tools.finish();
+            // Each response reports cumulative usage; add it once per tool turn,
+            // not once per usage frame. Audit consumers read this shared counter.
+            if let Ok(mut usage) = task_usage.lock() {
+                usage.input_tokens = usage.input_tokens.saturating_add(tally.prompt);
+                usage.output_tokens = usage.output_tokens.saturating_add(tally.eval);
+                if let Some(cached) = tally.cached_prompt {
+                    usage.prompt_cache.cached_prompt_tokens = Some(
+                        usage
+                            .prompt_cache
+                            .cached_prompt_tokens
+                            .unwrap_or(0)
+                            .saturating_add(cached),
+                    );
+                }
+                if let Some(written) = tally.cache_write_prompt {
+                    usage.prompt_cache.cache_write_prompt_tokens = Some(
+                        usage
+                            .prompt_cache
+                            .cache_write_prompt_tokens
+                            .unwrap_or(0)
+                            .saturating_add(written),
+                    );
+                }
+            }
             let worker_repair_stage_for_turn = worker_repair_stage;
             push_http_turn_trace(
                 &stderr_clone,
@@ -9692,9 +9746,12 @@ async fn start_ollama_http_with_idle(
                         if worker_run && is_workspace_observation_tool(&call.name) {
                             explored_without_progress += 1;
                             annotate_worker_exploration(&mut outcome, explored_without_progress);
-                        } else if worker_run && is_workspace_progress_tool(&call.name) {
-                            explored_without_progress = 0;
-                            worker_workspace_mutated = true;
+                        }
+                        if is_workspace_progress_tool(&call.name) {
+                            if worker_run {
+                                explored_without_progress = 0;
+                                worker_workspace_mutated = true;
+                            }
                             // Repository observations are snapshots. Replaying a
                             // pre-edit read_file/git_status result after a write
                             // can hand the worker a stale CAS receipt or falsely
@@ -9705,6 +9762,34 @@ async fn start_ollama_http_with_idle(
                                 &mut repeated_calls,
                                 &mut results_seen_per_tool,
                             );
+                            // Workers restore readers through their bounded
+                            // finalization policy. Audits and discussions must
+                            // also regain readers withdrawn for stale repeats.
+                            if !worker_run {
+                                let restorable = observation_readers_to_restore(
+                                    &withdrawn_tools,
+                                    &open_tool_circuits,
+                                    &calls_per_tool,
+                                    tool_run_mode,
+                                    &ceiling_allowance,
+                                    is_workspace_observation_tool,
+                                );
+                                for name in &restorable {
+                                    withdrawn_tools.remove(name);
+                                }
+                                let declarations: Vec<_> = workspace_reader_seed
+                                    .iter()
+                                    .filter(|tool| {
+                                        tool.pointer("/function/name")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|name| {
+                                                restorable.iter().any(|r| r == name)
+                                            })
+                                    })
+                                    .cloned()
+                                    .collect();
+                                restore_tool_declarations(&mut body, &declarations);
+                            }
                         }
                     } else {
                         *errors_per_tool.entry(call.name.clone()).or_insert(0) += 1;
@@ -10391,7 +10476,7 @@ async fn start_ollama_http_with_idle(
         agent_type: agent_type.clone(),
         rx,
         stderr_capture,
-        usage: Arc::new(Mutex::new(AgentUsage::default())),
+        usage,
         stderr_task: None,
         http_cancel: Some(http_cancel),
         pgid: None,

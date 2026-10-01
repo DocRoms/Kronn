@@ -319,6 +319,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- HTTP audits and discussions can read fresh repository content after writing
+  it. Previously only orchestration workers invalidated cached observations;
+  an audit could receive a pre-edit file or lose its reader as a repeated call.
+  Successful mutations now invalidate those observations and restore readers
+  withdrawn for repetition, while call ceilings, error circuits and cached
+  write effects remain enforced. HTTP token counters also reach the audit's
+  per-step telemetry, summing each provider response once and preserving
+  unknown usage instead of showing zero (KT-948).
+
 - Images attached to a discussion now reach HTTP vision models as image input:
   OpenAI-compatible connections receive data-URL parts and Ollama receives
   native image arrays. The model is explicitly told when an image cannot be

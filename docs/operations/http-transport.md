@@ -22,6 +22,26 @@ speaks its own native `/api/chat`. The choice is made once, explicitly, by
 `http_transport::resolve_chat_codec` — there is no per-connection codec
 override today.
 
+## Repository mutations and audit usage
+
+After a successful workspace mutation, HTTP runs invalidate their cached file,
+search and Git observations. Audits use the general tool loop, so this must not
+be restricted to orchestration workers. General runs restore readers withdrawn
+for repetition only; exhausted call budgets and open error circuits still
+apply, and effectful calls remain cached. Workers retain their separate bounded
+finalization policy. This prevents a post-edit verification from receiving the
+pre-edit file or a repetition refusal (KT-948).
+[src: file: backend/src/agents/runner.rs:9750]
+
+The HTTP runner also publishes structured input/output and reported cache-token
+counters through `AgentProcess`, which Full and partial audits consume. Each
+provider response contributes once, even when a stream repeats cumulative usage
+frames. Unreported usage stays unknown. Sums cover reported values only; they
+are not an independent billing reconciliation.
+[src: file: backend/src/agents/runner.rs:8380]
+[src: file: backend/src/api/audit/full.rs:1276]
+[src: file: backend/src/api/audit/drift.rs:599]
+
 ## Pre-dispatch capability check
 
 If a named connection's live catalogue (Settings → test a connection) tags a
