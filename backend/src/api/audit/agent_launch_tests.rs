@@ -230,6 +230,7 @@ async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
     use axum::response::IntoResponse;
