@@ -1151,9 +1151,18 @@ mod tests {
         assert_eq!(source.manifest(&model("broken:1")).await, None, "500");
         assert_eq!(source.manifest(&model("huge:1")).await, None, "oversized");
 
-        drop(server);
+        // wiremock pools its servers, so a dropped one may still answer: aim at
+        // a port nothing listens on instead.
+        let closed = HttpManifestSource::with_client(
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(FETCH_TIMEOUT)
+                .build()
+                .unwrap(),
+            "http://127.0.0.1:1".to_string(),
+        );
         assert_eq!(
-            source.manifest(&model("qwen3.5:4b")).await,
+            closed.manifest(&model("qwen3.5:4b")).await,
             None,
             "nothing listening"
         );
