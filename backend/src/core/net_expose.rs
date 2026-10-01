@@ -40,6 +40,18 @@ pub fn restart_required(configured_host: &str) -> bool {
     }
 }
 
+/// The address the backend listens on: an explicit `KRONN_HOST` wins, a real
+/// container binds every interface so nginx can reach it, and anything else —
+/// a native install included, even one that relocated its data dir — keeps the
+/// configured host (loopback by default).
+pub fn resolve_bind_host(kronn_host: Option<&str>, is_docker: bool, config_host: &str) -> String {
+    match kronn_host.map(str::trim) {
+        Some(host) if !host.is_empty() => host.to_string(),
+        _ if is_docker => "0.0.0.0".to_string(),
+        _ => config_host.to_string(),
+    }
+}
+
 /// True when `host` binds ONLY loopback — safe, unreachable from other machines.
 /// Stricter than `!is_exposed_host`: a specific LAN IP (`192.168.x`) is NOT
 /// loopback (it IS reachable), whereas the `is_exposed_host` toggle semantics
@@ -95,6 +107,26 @@ pub fn insecure_lan_boot_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_native_backend_keeps_its_configured_host_whatever_its_data_dir() {
+        // KRONN_DATA_DIR used to stand in for "in Docker" and moved a native
+        // backend onto 0.0.0.0; only a real container does that now.
+        assert_eq!(resolve_bind_host(None, false, "127.0.0.1"), "127.0.0.1");
+        assert_eq!(
+            resolve_bind_host(Some("  "), false, "127.0.0.1"),
+            "127.0.0.1"
+        );
+        assert_eq!(resolve_bind_host(None, true, "127.0.0.1"), "0.0.0.0");
+        assert_eq!(
+            resolve_bind_host(Some("0.0.0.0"), false, "127.0.0.1"),
+            "0.0.0.0"
+        );
+        assert_eq!(
+            resolve_bind_host(Some(" 127.0.0.1 "), true, "0.0.0.0"),
+            "127.0.0.1"
+        );
+    }
 
     #[test]
     fn exposed_host_detection() {

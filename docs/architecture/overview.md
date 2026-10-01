@@ -192,7 +192,7 @@ value-free audit event. See
 
 **CORS**: restricted to configured `ServerConfig.domain` or `localhost:3140`/`localhost:3141`. Built via `build_cors()` in `lib.rs`.
 
-**Docker host binding**: `main.rs` detects `KRONN_DATA_DIR` env var → binds to `0.0.0.0` (needed for nginx container). Otherwise uses `config.server.host` (default `127.0.0.1`).
+**Docker host binding**: `KRONN_HOST` wins when set; otherwise a real container (`core::env::is_docker`) binds `0.0.0.0` (needed for nginx), and everything else, a native install with a relocated `KRONN_DATA_DIR` included, uses `config.server.host` (default `127.0.0.1`) — `core::net_expose::resolve_bind_host`.
 
 **Agent concurrency**: `ServerConfig.max_concurrent_agents` (1–20, default 5)
 caps the aggregate machine-local pool (CLI processes plus Ollama inference).

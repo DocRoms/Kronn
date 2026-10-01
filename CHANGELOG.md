@@ -292,6 +292,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A native backend that relocates its data directory (`KRONN_DATA_DIR`) keeps
+  listening on its configured host instead of `0.0.0.0` (KT-936). The variable
+  used to stand in for "running in Docker", so such a backend was refused at
+  boot by the LAN guard unless `KRONN_HOST=127.0.0.1` was set. Only a real
+  container binds every interface now.
+
 - The model list of Config shows the models OpenCode declares in a project
   too, and a launch runs the model you chose (KT-928). OpenCode builds its
   model list per working directory — its user-level config plus the
