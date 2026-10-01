@@ -330,6 +330,13 @@ Release notes for 0.9.3 and earlier are available in the
   files are readable outside the workspace, while attachment edits and reads
   of unrelated outside files remain refused (KT-946).
 
+- Agent instruction templates now defer language and test requirements to the
+  project's parameters. New adapter files no longer copy an English language
+  default, and re-auditing an existing managed block removes its unconditional
+  English rule while preserving user content. The testing checklist follows
+  the configured test policy, and links to Project parameters reach a real
+  Markdown heading.
+
 - The context a local Ollama model is given on a Mac is computed from the model
   and no longer cut from the installed RAM (KT-943). The ceiling used to be one
   slice per RAM size — 65,536 tokens on a 64 GB Mac, for every model — which is

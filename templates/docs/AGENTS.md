@@ -11,7 +11,10 @@
 
 **Project:** {{PROJECT_NAME}} — {{STACK_SUMMARY}}.
 
-**Project parameters** (set once during audit, apply to every `docs/` file):
+## Project parameters
+
+Set once during audit; apply to every `docs/` file.
+
 - Working language: {{PROJECT_LANGUAGE}}.
 - Documentation language: {{DOCS_LANGUAGE}}. This governs new documentation only; preserve every existing document in its current language.
 - Ticket language: {{TICKET_LANGUAGE}}.
