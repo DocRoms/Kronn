@@ -164,10 +164,14 @@ Release notes for 0.9.3 and earlier are available in the
   the builds made for it (KT-930). In Config › Agents › Local models › Ollama,
   the download block now lists the installed models, each with an **Update**
   button: it asks Ollama to pull that exact tag again, with the download's own
-  progress, Cancel and error messages. Kronn does not claim an update is
-  available: comparing the installed digest with the registry's without
-  downloading was not verified, so the card says it does not check rather than
-  guess. On a Mac with Apple Silicon running Ollama 0.34 or later, the `-mlx`
+  progress, Cancel and error messages. A badge beside it says **Update
+  available** when the official Ollama library's copy of that tag is no longer
+  the one you hold, **Up to date** when it is, and **Not checked** whenever Kronn
+  could not confirm either way (the registry did not answer, or the model is not
+  from the official library): never "up to date" on a guess. The comparison
+  downloads nothing: the SHA-256 of the registry's manifest for the tag is the
+  digest Ollama reports locally. The block's folded summary counts the updates
+  waiting. On a Mac with Apple Silicon running Ollama 0.34 or later, the `-mlx`
   builds (`gemma4:12b-mlx`, `qwen3.8:27b-mlx`) come first in the suggestions,
   marked "Optimized for Mac". The backend decides (`mlx_capable` and `version` on
   `GET /api/ollama/health`, from the host and the server's own version), never
@@ -182,10 +186,13 @@ Release notes for 0.9.3 and earlier are available in the
   running; a download in flight stays visible, with its Cancel. The suggestions
   are now one portable model per hardware tier — `qwen3.5:4b`, `qwen3:8b`,
   `qwen3:30b-a3b` — in place of the former six, each with the repository run that
-  shows it exists (see `docs/operations/ollama-local-models.md`). Sizes are no
-  longer stated: the download and the installed list show the real ones. These
-  tags are checked against Kronn's own runs, not yet against the Ollama library
-  page.
+  shows it exists, and all five are checked against the Ollama library (see
+  `docs/operations/ollama-local-models.md`). Each suggestion shows its real
+  size, read off the library's manifest rather than typed into Kronn; when the
+  library does not answer, no size is shown instead of an invented one. The
+  card draws from your local Ollama first and fills in what the library says
+  when it arrives (answers are cached for hours, and the only thing sent is a
+  library tag name).
 
 - No prompt Kronn sends to a model lists your other Kronn projects any more
   (KT-926). The steps of a Full or partial audit, and every discussion (the

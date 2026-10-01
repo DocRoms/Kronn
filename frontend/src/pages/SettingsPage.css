@@ -6326,6 +6326,21 @@
   color: var(--kr-text-muted);
 }
 
+/* What the official library says about an installed model. Same pill as the
+ * hardware tiers; only an available update is loud. */
+.set-ollama-fresh {
+  font-size: var(--kr-fs-2xs);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.set-ollama-fresh-update_available { background: rgba(var(--kr-accent-rgb), 0.16); color: var(--kr-accent); }
+.set-ollama-fresh-up_to_date,
+.set-ollama-fresh-unknown { background: transparent; color: var(--kr-text-muted); font-weight: 400; }
+.set-ollama-fresh-unknown { cursor: help; }
+
 .set-ollama-installed {
   margin-top: var(--kr-sp-6);
   padding-top: var(--kr-sp-4);

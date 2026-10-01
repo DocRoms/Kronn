@@ -4660,6 +4660,11 @@ context_override: number | null,
  */
 context_origin: string, };
 
+/**
+ * One installed model's freshness.
+ */
+export type OllamaModelFreshness = { name: string, status: OllamaUpdateStatus, };
+
 export type OllamaModelsResponse = { models: Array<OllamaModel>, };
 
 /**
@@ -4668,6 +4673,26 @@ export type OllamaModelsResponse = { models: Array<OllamaModel>, };
  * stages have no byte counter.
  */
 export type OllamaPullProgress = { status: string, digest: string | null, completed: number | null, total: number | null, };
+
+/**
+ * GET /api/ollama/registry — what the official library says about the
+ * installed models and the suggested tags, without downloading anything.
+ * A tag the library did not answer for is simply absent from `suggestions`
+ * and `unknown` in `models`.
+ */
+export type OllamaRegistryResponse = { models: Array<OllamaModelFreshness>, suggestions: Array<OllamaSuggestionSize>, };
+
+/**
+ * What a suggested tag weighs, from the library's manifest (the sum of its
+ * config and layer sizes), formatted like `OllamaModel::size`.
+ */
+export type OllamaSuggestionSize = { name: string, size: string, };
+
+/**
+ * KT-930 — how an installed model compares with the official Ollama library's
+ * current copy of the same tag.
+ */
+export type OllamaUpdateStatus = "up_to_date" | "update_available" | "unknown";
 
 /**
  * What happens when `TypedSchema` validation still fails after a

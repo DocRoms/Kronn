@@ -13,13 +13,13 @@
  *  - health fetch errors degrade to an "offline" rendering without crash
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 import { SUGGESTED_MODELS, MLX_SUGGESTED_MODELS } from '../ollamaModels';
 import type { CatalogModelEntry, ModelTiersConfig, OllamaModel } from '../../../types/generated';
 
 const { ollama, config, catalogList } = vi.hoisted(() => ({
-  ollama: { health: vi.fn(), models: vi.fn(), pull: vi.fn(), setContextOverride: vi.fn() },
+  ollama: { health: vi.fn(), models: vi.fn(), pull: vi.fn(), registry: vi.fn(), setContextOverride: vi.fn() },
   config: { getModelTiers: vi.fn(), setModelTiers: vi.fn() },
   catalogList: vi.fn(),
 }));
@@ -63,6 +63,7 @@ beforeEach(() => {
   });
   ollama.models.mockResolvedValue({ models: [] });
   ollama.pull.mockResolvedValue(undefined);
+  ollama.registry.mockResolvedValue({ models: [], suggestions: [] });
   ollama.setContextOverride.mockResolvedValue({ model: '', num_ctx: null, warnings: [] });
   config.getModelTiers.mockResolvedValue(baseTiers);
   config.setModelTiers.mockResolvedValue(undefined);
@@ -576,7 +577,7 @@ describe('OllamaCard — updating an installed model (KT-930)', () => {
 
   const updateButton = (name: string) => screen.getByRole('button', { name: `ollama.updateFor(${name})` });
 
-  it('offers one update action per installed model, with the honest hint that no check is made', async () => {
+  it('offers one update action per installed model, and says where "newer" is read from', async () => {
     ollama.models.mockResolvedValue({
       models: [installedModel('qwen3:8b'), installedModel('custom:latest')],
     });
@@ -654,6 +655,175 @@ describe('OllamaCard — updating an installed model (KT-930)', () => {
     expect(ollama.models).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('success')).toBeNull();
     expect(updateButton('qwen3:8b')).not.toBeDisabled();
+  });
+});
+
+describe('OllamaCard — what the official library says (KT-930)', () => {
+  type Verdict = 'up_to_date' | 'update_available' | 'unknown';
+  const online = (extra: Record<string, unknown> = {}) => ({
+    status: 'online', version: '0.34.2', endpoint: 'http://localhost:11434',
+    models_count: 2, hint: null, mlx_capable: false, ...extra,
+  });
+  const answer = (models: Array<[string, Verdict]>, suggestions: Array<[string, string]> = []) => ({
+    models: models.map(([name, status]) => ({ name, status })),
+    suggestions: suggestions.map(([name, size]) => ({ name, size })),
+  });
+  const rowOf = (selector: string, name: string) => {
+    const row = [...document.querySelectorAll(selector)]
+      .find(node => node.querySelector('.set-ollama-cmd')?.textContent === name);
+    if (!row) throw new Error(`no row for ${name} in ${selector}`);
+    return row as HTMLElement;
+  };
+  const installedRow = (name: string) => rowOf('.set-ollama-installed .set-ollama-suggestion', name);
+  const suggestionRow = (name: string) => rowOf('.set-ollama-download > .set-ollama-suggestions .set-ollama-suggestion', name);
+  const succeed = async (_model: string, handlers: { onSuccess: (event: unknown) => void }) => {
+    handlers.onSuccess({ status: 'success', digest: null, completed: null, total: null });
+  };
+
+  beforeEach(() => {
+    ollama.health.mockResolvedValue(online());
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b'), installedModel('gemma4:12b-mlx')] });
+  });
+
+  it('flags the model whose tag moved on, next to its Update action, and only that one', async () => {
+    ollama.registry.mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['gemma4:12b-mlx', 'update_available']]));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    const outdated = installedRow('gemma4:12b-mlx');
+    expect(await within(outdated).findByText('ollama.fresh.update_available')).toBeTruthy();
+    expect(within(outdated).getByRole('button', { name: 'ollama.updateFor(gemma4:12b-mlx)' })).toBeTruthy();
+    expect(within(installedRow('qwen3:8b')).getByText('ollama.fresh.up_to_date')).toBeTruthy();
+    expect(within(installedRow('qwen3:8b')).queryByText('ollama.fresh.update_available')).toBeNull();
+  });
+
+  it('still lets a model that is up to date be updated by hand', async () => {
+    ollama.registry.mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['gemma4:12b-mlx', 'up_to_date']]));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+    await within(installedRow('qwen3:8b')).findByText('ollama.fresh.up_to_date');
+    expect(screen.getByRole('button', { name: 'ollama.updateFor(qwen3:8b)' })).not.toBeDisabled();
+  });
+
+  it('says "not checked", never "up to date", for a model the library said nothing about', async () => {
+    ollama.models.mockResolvedValue({
+      models: [installedModel('qwen3:8b'), installedModel('hf.co/someone/model:Q4_K_M')],
+    });
+    ollama.registry.mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['hf.co/someone/model:Q4_K_M', 'unknown']]));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    const outside = installedRow('hf.co/someone/model:Q4_K_M');
+    const badge = await within(outside).findByText('ollama.fresh.unknown');
+    expect(badge).toHaveAttribute('title', 'ollama.fresh.unknownHint');
+    expect(within(outside).queryByText('ollama.fresh.up_to_date')).toBeNull();
+    expect(within(outside).queryByText('ollama.fresh.update_available')).toBeNull();
+  });
+
+  it('reads "not checked" for every model when the library call fails outright', async () => {
+    ollama.registry.mockRejectedValue(new Error('registry unreachable'));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    await waitFor(() => expect(screen.getAllByText('ollama.fresh.unknown')).toHaveLength(2));
+    expect(screen.queryByText('ollama.fresh.up_to_date')).toBeNull();
+    expect(screen.queryByText('ollama.fresh.update_available')).toBeNull();
+  });
+
+  it('draws the whole card, Update actions included, while the library has not answered yet', async () => {
+    ollama.registry.mockImplementation(() => new Promise(() => {}));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    expect(screen.getByRole('button', { name: 'ollama.updateFor(qwen3:8b)' })).not.toBeDisabled();
+    expect(screen.getAllByRole('button', { name: 'ollama.pullButton' }).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^ollama\.fresh\./)).toBeNull();
+    expect(screen.getByLabelText('ollama.refresh')).not.toBeDisabled();
+  });
+
+  it('says how many updates are waiting even while the block is folded', async () => {
+    ollama.registry.mockResolvedValue(answer([['qwen3:8b', 'update_available'], ['gemma4:12b-mlx', 'update_available']]));
+    await mountCard();
+
+    await waitFor(() => expect(downloadBlock()).toHaveTextContent('ollama.pullSummaryUpdates(2)'));
+    expect(downloadBlock().open).toBe(false);
+  });
+
+  it('adds nothing to the folded summary when nothing is outdated or nothing is known', async () => {
+    ollama.registry.mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['gemma4:12b-mlx', 'unknown']]));
+    await mountCard();
+    await waitFor(() => expect(ollama.registry).toHaveBeenCalled());
+    await act(async () => {});
+    expect(downloadBlock()).not.toHaveTextContent('ollama.pullSummaryUpdates');
+  });
+
+  it("shows each suggestion's real size once the manifest gave it, and none it did not", async () => {
+    ollama.registry.mockResolvedValue(answer([], [['qwen3:8b', '5.2 GB'], ['qwen3:30b-a3b', '19.0 GB']]));
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+
+    await waitFor(() => expect(within(suggestionRow('qwen3:8b')).getByText('5.2 GB')).toBeTruthy());
+    expect(within(suggestionRow('qwen3:30b-a3b')).getByText('19.0 GB')).toBeTruthy();
+    // The library gave no size for this one: no figure, and no invented one.
+    expect(suggestionRow('qwen3.5:4b').textContent).not.toMatch(/\d\s?(GB|MB)/);
+  });
+
+  it('asks the backend about exactly the tags it suggests, MLX builds included on a Mac', async () => {
+    ollama.health.mockResolvedValue(online({ mlx_capable: true }));
+    await mountCard();
+    await waitFor(() => expect(ollama.registry).toHaveBeenCalled());
+    expect(ollama.registry.mock.calls.at(-1)![0]).toEqual([
+      ...MLX_SUGGESTED_MODELS.map(m => m.name),
+      ...SUGGESTED_MODELS.map(m => m.name),
+    ]);
+  });
+
+  it('asks only for the portable tags where MLX does not run', async () => {
+    await mountCard();
+    await waitFor(() => expect(ollama.registry).toHaveBeenCalled());
+    expect(ollama.registry.mock.calls.at(-1)![0]).toEqual(SUGGESTED_MODELS.map(m => m.name));
+  });
+
+  it('does not ask the library while Ollama is not online', async () => {
+    ollama.health.mockResolvedValue(online({ status: 'offline', models_count: 0 }));
+    await mountCard();
+    await act(async () => {});
+    expect(ollama.registry).not.toHaveBeenCalled();
+  });
+
+  it('drops the stale verdict after an update and asks the library again', async () => {
+    ollama.registry
+      .mockResolvedValueOnce(answer([['qwen3:8b', 'update_available'], ['gemma4:12b-mlx', 'up_to_date']]))
+      .mockResolvedValue(answer([['qwen3:8b', 'up_to_date'], ['gemma4:12b-mlx', 'up_to_date']]));
+    ollama.pull.mockImplementation(succeed);
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+    await within(installedRow('qwen3:8b')).findByText('ollama.fresh.update_available');
+
+    fireEvent.click(screen.getByRole('button', { name: 'ollama.updateFor(qwen3:8b)' }));
+
+    await waitFor(() => expect(within(installedRow('qwen3:8b')).getByText('ollama.fresh.up_to_date')).toBeTruthy());
+    expect(within(installedRow('qwen3:8b')).queryByText('ollama.fresh.update_available')).toBeNull();
+    expect(ollama.registry.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('shows no verdict for a tag it just updated until the library has been asked again', async () => {
+    let answerAfter!: (value: unknown) => void;
+    ollama.registry
+      .mockResolvedValueOnce(answer([['qwen3:8b', 'update_available'], ['gemma4:12b-mlx', 'up_to_date']]))
+      .mockImplementation(() => new Promise(resolve => { answerAfter = resolve; }));
+    ollama.pull.mockImplementation(succeed);
+    await mountCard();
+    fireEvent.click(screen.getByText('ollama.pullTitle'));
+    await within(installedRow('qwen3:8b')).findByText('ollama.fresh.update_available');
+
+    fireEvent.click(screen.getByRole('button', { name: 'ollama.updateFor(qwen3:8b)' }));
+
+    // Neither the old "update available" nor a made-up "not checked": nothing.
+    await waitFor(() => expect(installedRow('qwen3:8b').textContent).not.toMatch(/ollama\.fresh\./));
+    expect(within(installedRow('gemma4:12b-mlx')).getByText('ollama.fresh.up_to_date')).toBeTruthy();
+    await act(async () => answerAfter(answer([['qwen3:8b', 'up_to_date']])));
+    expect(await within(installedRow('qwen3:8b')).findByText('ollama.fresh.up_to_date')).toBeTruthy();
   });
 });
 

@@ -255,6 +255,10 @@ pub struct AppState {
     /// Invocation-local discovery endpoint for isolated routers. Production
     /// leaves it unset and retains OLLAMA_HOST/Docker resolution.
     pub ollama_base_url_override: Option<Arc<str>>,
+    /// Invocation-local source of the official library's manifests (KT-930),
+    /// so a test never reaches the real registry. Production leaves it unset
+    /// and uses the process-wide one.
+    pub ollama_registry_override: Option<Arc<crate::core::ollama_registry::OllamaRegistry>>,
     /// Production-only data-directory lock. Spawned Git commits inherit a
     /// duplicate of this handle so a replacement backend waits for Git/hooks.
     pub data_dir_lock: Option<Arc<std::fs::File>>,
@@ -297,6 +301,7 @@ impl AppState {
             agent_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
             ollama_base_url_override: None,
+            ollama_registry_override: None,
             data_dir_lock: None,
             workflow_step_rooms: Arc::default(),
         }
@@ -309,6 +314,14 @@ impl AppState {
 
     pub fn with_ollama_base_url(mut self, base_url: impl Into<Arc<str>>) -> Self {
         self.ollama_base_url_override = Some(base_url.into());
+        self
+    }
+
+    pub fn with_ollama_registry(
+        mut self,
+        registry: Arc<crate::core::ollama_registry::OllamaRegistry>,
+    ) -> Self {
+        self.ollama_registry_override = Some(registry);
         self
     }
 }
@@ -1260,6 +1273,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
+        .route("/api/ollama/registry", get(api::ollama::registry))
         .route("/api/ollama/pull", post(api::ollama::pull))
         .route(
             "/api/ollama/context-override",

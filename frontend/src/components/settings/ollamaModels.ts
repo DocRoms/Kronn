@@ -7,12 +7,13 @@
 // sibling tag ("surely there is a plain `gemma4:12b`"): a name that does not
 // exist in the Ollama library is a download that fails in front of the user.
 //
-// What the list does NOT hold: sizes. A figure written here is a figure that
-// goes stale or was never measured; the real size is shown by the download's
-// own progress and by the installed list once the model is on disk.
+// Checked against the library on 2026-10-01: all five tags below answer 200 on
+// https://registry.ollama.ai/v2/library/<name>/manifests/<tag>. Re-check them
+// before a release; the procedure is in docs/operations/ollama-local-models.md.
 //
-// Re-check the tags against https://ollama.com/library before a release. The
-// procedure is in docs/operations/ollama-local-models.md.
+// What the list does NOT hold: sizes. A figure written here goes stale. The
+// card asks the backend, which reads each tag's size off the library's own
+// manifest (backend/src/core/ollama_registry.rs) and shows it when it knows it.
 
 export type ModelTier = 'cpu' | 'mid' | 'power';
 

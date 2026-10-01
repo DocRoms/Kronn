@@ -64,6 +64,50 @@ pub struct OllamaModelsResponse {
     pub models: Vec<OllamaModel>,
 }
 
+/// KT-930 — how an installed model compares with the official Ollama library's
+/// current copy of the same tag.
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum OllamaUpdateStatus {
+    /// The library's manifest hashes to the digest installed here.
+    UpToDate,
+    /// The library's manifest hashes to something else: the tag moved on.
+    UpdateAvailable,
+    /// No answer to compare against: the registry was unreachable or slow, the
+    /// model is not in the official library, or either digest was unreadable.
+    /// Never read as up to date.
+    Unknown,
+}
+
+/// One installed model's freshness.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaModelFreshness {
+    pub name: String,
+    pub status: OllamaUpdateStatus,
+}
+
+/// What a suggested tag weighs, from the library's manifest (the sum of its
+/// config and layer sizes), formatted like `OllamaModel::size`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaSuggestionSize {
+    pub name: String,
+    pub size: String,
+}
+
+/// GET /api/ollama/registry — what the official library says about the
+/// installed models and the suggested tags, without downloading anything.
+/// A tag the library did not answer for is simply absent from `suggestions`
+/// and `unknown` in `models`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaRegistryResponse {
+    pub models: Vec<OllamaModelFreshness>,
+    pub suggestions: Vec<OllamaSuggestionSize>,
+}
+
 /// The sole accepted input for a local Ollama pull.  The endpoint never
 /// accepts arbitrary upstream URLs: it always uses Kronn's configured Ollama
 /// base URL.

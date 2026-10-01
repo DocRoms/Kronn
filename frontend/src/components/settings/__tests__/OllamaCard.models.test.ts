@@ -29,7 +29,7 @@ describe('OllamaCard suggested models', () => {
     }
   });
 
-  it('keeps no size figure: the real one comes from the download and the installed list', () => {
+  it('keeps no size figure of its own: the real one is read off the library manifest at run time', () => {
     for (const m of [...SUGGESTED_MODELS, ...MLX_SUGGESTED_MODELS]) {
       expect(Object.keys(m), `${m.name} carries a size`).not.toContain('size');
     }
@@ -99,17 +99,36 @@ describe('suggestedModelsFor — MLX only where the backend says it runs', () =>
 });
 
 describe('every key of the download and update surface exists in all locales', () => {
-  it('has the fold summary, the update action and its honest hint', () => {
+  it('has the fold summary, the update action, its hint and the library verdicts', () => {
     const keys = [
-      'ollama.pullSummarySuggestions', 'ollama.pullSummaryActive',
+      'ollama.pullSummarySuggestions', 'ollama.pullSummaryActive', 'ollama.pullSummaryUpdates',
       'ollama.updateButton', 'ollama.updateFor', 'ollama.updateHint',
+      'ollama.fresh.update_available', 'ollama.fresh.up_to_date', 'ollama.fresh.unknown',
+      'ollama.fresh.unknownHint',
     ];
     for (const loc of ['fr', 'en', 'es', 'zh'] as const) {
       const dict = dictionaries[loc] as Record<string, string>;
       for (const key of keys) expect(dict[key], `${loc}: missing ${key}`).toBeTruthy();
       expect(dict['ollama.pullSummarySuggestions'], loc).toContain('{0}');
       expect(dict['ollama.pullSummaryActive'], loc).toContain('{0}');
+      expect(dict['ollama.pullSummaryUpdates'], loc).toContain('{0}');
       expect(dict['ollama.updateFor'], loc).toContain('{0}');
+    }
+  });
+
+  it('keeps the three verdicts apart in every locale: an unconfirmed model never reads "up to date"', () => {
+    for (const loc of ['fr', 'en', 'es', 'zh'] as const) {
+      const dict = dictionaries[loc] as Record<string, string>;
+      const labels = ['update_available', 'up_to_date', 'unknown'].map(status => dict[`ollama.fresh.${status}`]);
+      expect(new Set(labels).size, `${loc}: two verdicts share a label`).toBe(3);
+    }
+  });
+
+  it('no longer tells the user that Kronn does not check for updates', () => {
+    const retired = /ne vérifie pas|does not check|no comprueba|不会检查/;
+    for (const loc of ['fr', 'en', 'es', 'zh'] as const) {
+      const dict = dictionaries[loc] as Record<string, string>;
+      expect(dict['ollama.updateHint'], loc).not.toMatch(retired);
     }
   });
 });

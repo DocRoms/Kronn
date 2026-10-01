@@ -8,7 +8,7 @@
 use crate::models::*;
 use crate::AppState;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     response::sse::{Event, Sse},
     Json,
 };
@@ -284,6 +284,60 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct OllamaRegistryQuery {
+    /// The tags the card suggests, comma-separated: their sizes are wanted.
+    suggested: Option<String>,
+}
+
+/// `"a:1, b:2,,"` → `["a:1", "b:2"]`, at most as many as one answer may look
+/// up. Validity of each name is the registry module's call, not this one's.
+fn suggested_from_query(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .take(crate::core::ollama_registry::MAX_LOOKUPS)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// GET /api/ollama/registry?suggested=<tag>,<tag>
+///
+/// KT-930 — what the official Ollama library says about the installed models
+/// (is there an update?) and the suggested tags (how big are they?), without
+/// downloading anything. A separate call from `/models` on purpose: that one
+/// is local and fast and Settings waits for it, this one asks the internet
+/// and must never hold the page up. See `core::ollama_registry` for what is
+/// bounded and cached, and for why anything unconfirmed is `unknown`.
+pub async fn registry(
+    State(state): State<AppState>,
+    Query(query): Query<OllamaRegistryQuery>,
+) -> Json<ApiResponse<OllamaRegistryResponse>> {
+    let base = resolve_base_url_pub(state.ollama_base_url_override.as_deref());
+    // No local server to read digests from is no installed model to judge;
+    // the suggestions' sizes do not depend on it.
+    let installed: Vec<(String, String)> =
+        match crate::core::model_catalog::ollama_discovery::discover(&base).await {
+            Ok(tags) => tags.into_iter().map(|tag| (tag.name, tag.digest)).collect(),
+            Err(_) => Vec::new(),
+        };
+    let suggested = suggested_from_query(query.suggested.as_deref());
+    let library = match state.ollama_registry_override.as_deref() {
+        Some(library) => library,
+        None => crate::core::ollama_registry::shared(),
+    };
+    Json(ApiResponse::ok(
+        crate::core::ollama_registry::report(
+            library,
+            &installed,
+            &suggested,
+            crate::core::ollama_registry::BATCH_BUDGET,
+        )
+        .await,
+    ))
+}
+
 /// Stable string form of `CtxCapOrigin` for the API — the internal enum's
 /// variant names are Rust naming, not a contract; this is.
 fn context_origin_label(origin: &crate::agents::runner::CtxCapOrigin) -> String {
@@ -298,7 +352,7 @@ fn context_origin_label(origin: &crate::agents::runner::CtxCapOrigin) -> String 
 }
 
 /// Format bytes into human-readable size (e.g. "4.1 GB").
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
     } else if bytes >= 1_000_000 {
@@ -682,6 +736,25 @@ mod tests {
         assert_eq!(version_from_body(&json!({ "version": 34 })), None);
         assert_eq!(version_from_body(&json!({})), None);
         assert_eq!(version_from_body(&json!(null)), None);
+    }
+
+    #[test]
+    fn the_suggested_tags_of_a_query_are_split_trimmed_and_bounded() {
+        assert!(suggested_from_query(None).is_empty());
+        assert!(suggested_from_query(Some("")).is_empty());
+        assert!(suggested_from_query(Some(" , ,")).is_empty());
+        assert_eq!(
+            suggested_from_query(Some("qwen3:8b, gemma4:12b-mlx,,qwen3.5:4b ")),
+            vec!["qwen3:8b", "gemma4:12b-mlx", "qwen3.5:4b"]
+        );
+        let many = (0..500)
+            .map(|i| format!("m{i}:1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            suggested_from_query(Some(&many)).len(),
+            crate::core::ollama_registry::MAX_LOOKUPS
+        );
     }
 
     #[test]

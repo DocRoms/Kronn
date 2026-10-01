@@ -588,3 +588,162 @@ async fn inventory_failure_is_compatible_only_after_its_diagnostic_was_saved() {
         "failed diagnostic persistence rolls back the provenance change too"
     );
 }
+
+/// KT-930 — the official library, scripted: the registry route is tested
+/// without ever reaching the real one.
+struct ScriptedLibrary(std::collections::HashMap<String, Vec<u8>>);
+
+#[async_trait::async_trait]
+impl kronn::core::ollama_registry::ManifestSource for ScriptedLibrary {
+    async fn manifest(&self, model: &kronn::core::ollama_registry::LibraryRef) -> Option<Vec<u8>> {
+        self.0.get(&model.key()).cloned()
+    }
+}
+
+const CURRENT_MANIFEST: &str = r#"{"config":{"size":100},"layers":[{"size":3000000000}]}"#;
+const NEWER_MANIFEST: &str = r#"{"config":{"size":100},"layers":[{"size":3100000000}]}"#;
+
+fn scripted_library(entries: &[(&str, &str)]) -> Arc<kronn::core::ollama_registry::OllamaRegistry> {
+    let bodies = entries
+        .iter()
+        .map(|(name, body)| (name.to_string(), body.as_bytes().to_vec()))
+        .collect();
+    Arc::new(kronn::core::ollama_registry::OllamaRegistry::new(Arc::new(
+        ScriptedLibrary(bodies),
+    )))
+}
+
+fn app_with_library(
+    ollama_url: &str,
+    library: Arc<kronn::core::ollama_registry::OllamaRegistry>,
+) -> Router {
+    let mut config = kronn::core::config::default_config();
+    config.server.auth_token = None;
+    let state = AppState::new_defaults(
+        Arc::new(RwLock::new(config)),
+        Arc::new(kronn::db::Database::open_in_memory().unwrap()),
+        DEFAULT_MAX_CONCURRENT_AGENTS,
+    )
+    .with_ollama_base_url(ollama_url.to_string())
+    .with_ollama_registry(library);
+    build_router_with_auth(state, false)
+}
+
+fn manifest_digest(body: &str) -> String {
+    kronn::core::ollama_registry::parse_manifest(body.as_bytes())
+        .expect("a manifest")
+        .digest
+}
+
+#[tokio::test]
+#[serial]
+async fn the_registry_route_flags_updates_and_sizes_suggestions_without_downloading() {
+    let ollama = MockServer::start().await;
+    let installed = |name: &str, digest: &str| {
+        json!({
+            "name": name,
+            "size": 1,
+            "modified_at": "2026-09-01T00:00:00Z",
+            "digest": digest,
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                // Same bytes as the library's copy of the tag.
+                installed("qwen3:8b", &manifest_digest(CURRENT_MANIFEST)),
+                // The library's tag moved on after this was pulled.
+                installed("qwen3.5:4b", &manifest_digest(CURRENT_MANIFEST)),
+                // Not in the official library: never asked about.
+                installed("hf.co/someone/model:Q4_K_M", &manifest_digest(CURRENT_MANIFEST)),
+                // The library does not answer for this tag.
+                installed("gemma4:12b-mlx", &manifest_digest(CURRENT_MANIFEST)),
+            ]
+        })))
+        .mount(&ollama)
+        .await;
+    let library = scripted_library(&[
+        ("qwen3:8b", CURRENT_MANIFEST),
+        ("qwen3.5:4b", NEWER_MANIFEST),
+        ("qwen3:30b-a3b", CURRENT_MANIFEST),
+    ]);
+
+    let json = get(
+        app_with_library(&ollama.uri(), library),
+        "/api/ollama/registry?suggested=qwen3:30b-a3b,qwen3.5:4b,gemma4:12b-mlx",
+    )
+    .await;
+
+    assert_eq!(json["success"], true, "{json}");
+    let status = |name: &str| {
+        json["data"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is reported"))["status"]
+            .clone()
+    };
+    assert_eq!(status("qwen3:8b"), "up_to_date");
+    assert_eq!(status("qwen3.5:4b"), "update_available");
+    assert_eq!(status("hf.co/someone/model:Q4_K_M"), "unknown");
+    assert_eq!(status("gemma4:12b-mlx"), "unknown");
+
+    let sizes = json["data"]["suggestions"].as_array().unwrap();
+    let size_of = |name: &str| {
+        sizes
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .map(|entry| entry["size"].clone())
+    };
+    assert_eq!(size_of("qwen3:30b-a3b"), Some(json!("3.0 GB")));
+    assert_eq!(size_of("qwen3.5:4b"), Some(json!("3.1 GB")));
+    assert_eq!(size_of("gemma4:12b-mlx"), None, "no answer, no size");
+
+    // Reading the library never pulls anything.
+    let requests = ollama.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.url.path() == "/api/tags"),
+        "only the local catalogue was read: {:?}",
+        requests
+            .iter()
+            .map(|r| r.url.path().to_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// With no local server to read digests from there is nothing installed to
+/// judge, but the suggestions' sizes still come back. Nothing listens on port
+/// 1, so this needs no mock server.
+#[tokio::test]
+#[serial]
+async fn the_registry_route_still_sizes_suggestions_when_ollama_is_down() {
+    let library = scripted_library(&[("qwen3:8b", CURRENT_MANIFEST)]);
+    let json = get(
+        app_with_library("http://127.0.0.1:1", library),
+        "/api/ollama/registry?suggested=qwen3:8b,../../etc/passwd",
+    )
+    .await;
+    assert_eq!(json["success"], true, "{json}");
+    assert_eq!(json["data"]["models"], json!([]));
+    assert_eq!(
+        json["data"]["suggestions"],
+        json!([{ "name": "qwen3:8b", "size": "3.0 GB" }])
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn the_registry_route_answers_a_bare_request_with_nothing_to_report() {
+    let json = get(
+        app_with_library("http://127.0.0.1:1", scripted_library(&[])),
+        "/api/ollama/registry",
+    )
+    .await;
+    assert_eq!(json["success"], true, "{json}");
+    assert_eq!(json["data"]["models"], json!([]));
+    assert_eq!(json["data"]["suggestions"], json!([]));
+}

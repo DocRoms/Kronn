@@ -170,6 +170,7 @@ import type {
   ImportQuickExecRequest,
   OllamaHealthResponse,
   OllamaModelsResponse,
+  OllamaRegistryResponse,
   SetOllamaContextOverrideResponse,
   LiteLlmHealthResponse,
   NvidiaModelsResponse,
@@ -2902,6 +2903,11 @@ export const usage = {
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
+  /** What the official Ollama library says about the installed models (is
+   *  there an update?) and the given suggested tags (how big?). Asks the
+   *  internet through the backend: never wait on it to draw the card. */
+  registry: (suggested: string[]) =>
+    api<OllamaRegistryResponse>('GET', `/ollama/registry?suggested=${encodeURIComponent(suggested.join(','))}`),
   pull: (
     model: string,
     handlers: {

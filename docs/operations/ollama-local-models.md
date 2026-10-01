@@ -571,8 +571,9 @@ back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.t
 per hardware tier and a short list of Mac MLX builds. Every entry is an exact tag
 with the repository file it was taken from, and a tag goes in only when something
 in this repository shows it exists AND ran. Sizes are not stored: a figure typed
-here goes stale, and the real one is on the download's own progress and the
-installed list. [src: file: frontend/src/components/settings/ollamaModels.ts:31]
+here goes stale, so the card shows the one the backend reads off the library's own
+manifest (see [Reading the official library](#reading-the-official-library)).
+[src: file: frontend/src/components/settings/ollamaModels.ts:31]
 
 | Tag | Tier | Seen to exist and run in |
 |---|---|---|
@@ -582,14 +583,25 @@ installed list. [src: file: frontend/src/components/settings/ollamaModels.ts:31]
 | `gemma4:12b-mlx` | ≥ 16 GB RAM, Mac only | `docs/research/native-tool-catalogue-2026-09-22.md` |
 | `qwen3.8:27b-mlx` | GPU or ≥ 32 GB, Mac only | `docs/research/native-qp-litellm-ollama-2026-09-22.md` |
 
-**Not yet checked against the live library.** The environment this list was
-written in could not reach ollama.com, so the tags are verified against the
-repository's own dated runs, not against the library page. Before a release,
-confirm each one: open `https://ollama.com/library/<family>/tags`, or
-`ollama pull <tag>` on a spare machine. A plain sibling of an MLX tag
-(`gemma4:12b`, `qwen3.8:27b`) is deliberately NOT suggested: nothing here shows
-it exists, and a name that does not exist is a download that fails in front of
-the user.
+**Checked against the live library on 2026-10-01.** All five tags answer HTTP 200
+on `https://registry.ollama.ai/v2/library/<family>/manifests/<tag>` with
+`Accept: application/vnd.docker.distribution.manifest.v2+json` (`qwen3.5:4b`,
+`qwen3:8b`, `qwen3:30b-a3b`, `gemma4:12b-mlx`, `qwen3.8:27b-mlx`). The check was
+run from the user's own machine by the task's reviewer, because the sandbox the
+list was written in cannot reach the registry; the column above says where each
+tag was first seen to run.
+
+Re-check before a release, one tag at a time:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+  https://registry.ollama.ai/v2/library/qwen3.8/manifests/27b-mlx
+```
+
+A plain sibling of an MLX tag (`gemma4:12b`, `qwen3.8:27b`) is deliberately NOT
+suggested: nothing here shows it exists, and a name that does not exist is a
+download that fails in front of the user.
 
 ### Updating an installed model
 
@@ -599,11 +611,68 @@ button. It is the download flow pointed at a tag Ollama already holds:
 the same error messages, then a refresh of the installed list. There is no
 separate update endpoint to drift from the download one. [src: file: backend/src/api/ollama.rs:442]
 
-Kronn does **not** report "update available". Comparing the installed digest with
-the registry's without downloading is a registry behaviour that was not verified
-here, and a guessed "update available" is worse than none, so the card says
-so next to the list instead of inventing a signal. Update re-asks Ollama for the
-tag; the files that did not change stay as they are.
+Update re-asks Ollama for the tag; the files that did not change stay as they are.
+Next to each model's Update button a badge says whether the tag has moved on:
+**Update available**, **Up to date**, or **Not checked**. When the block is
+folded, its summary counts the updates waiting. Updating a model withholds its
+badge until the library has been asked again, so a verdict that described the
+replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:439]
+
+### Reading the official library
+
+Both the "update available" badge and the size shown on each suggestion come
+from the registry's manifest of a tag, `GET
+https://registry.ollama.ai/v2/library/<family>/manifests/<tag>` with
+`Accept: application/vnd.docker.distribution.manifest.v2+json`. Nothing is
+downloaded. [src: file: backend/src/core/ollama_registry.rs:43]
+
+- **Freshness.** The registry does not send a `Docker-Content-Digest` header, but
+  the SHA-256 of the manifest body, hashed exactly as received, is the `digest`
+  that the local Ollama reports for the same tag in `/api/tags`. Measured on
+  2026-10-01 on the user's machine: `qwen3.8:27b-mlx` (`5642e97495e1a088…`), `qwen3.5:4b`
+  and `qwen3.5:2b` identical; `gemma4:12b-mlx` different (registry `ded7a27350032202…`,
+  local `117d0d84cf2ab865…`), a real pending update. Equal is "up to date",
+  different is "update available". [src: file: backend/src/core/ollama_registry.rs:160]
+  [src: file: backend/src/core/ollama_registry.rs:187]
+- **Size.** The manifest's `config.size` plus every `layers[].size`, formatted
+  like the installed list ("4.1 GB"). A manifest with a missing or overflowing
+  size gives no size rather than a partial sum.
+- **Never a guess.** Each of these reads "not checked" (`unknown`), and never "up
+  to date": the registry did not answer or was too slow, the body was not a
+  manifest (an HTML error page served with a 200), the model is not in the
+  official library (`user/model`, `hf.co/…`, a second colon, an uppercase family),
+  or either digest is unreadable (a local Ollama too old to report one). A model
+  that is not a plain library name is never even sent to the registry. A model
+  made locally under a library name reads as an update, and updating it would
+  replace it: that is the one case this comparison cannot tell apart.
+
+How it stays light: `GET /api/ollama/registry?suggested=<tag>,<tag>` is its own
+call, separate from `/api/ollama/models`, which the card never waits on: it is
+drawn from the local answers and the badges and sizes fill in when the library
+answers, or never. In the backend each lookup has a 4 s timeout, a 256 KiB body
+cap, at most 4 run at once, at most 48 tags are looked up per request, and a whole
+answer is bounded to 8 s; whatever finished by then is used and cached. Answers are
+cached for 6 hours, a failure for 2 minutes (long enough that a blocked network is
+not asked again on every visit, short enough that it never sticks). The only thing
+that leaves the machine is a library tag name, sent by the Kronn backend, not the
+browser. [src: file: backend/src/api/ollama.rs:313]
+[src: file: backend/src/core/ollama_registry.rs:47]
+[src: file: backend/src/core/ollama_registry.rs:57]
+
+To check one model by hand:
+
+```sh
+curl -s -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+  https://registry.ollama.ai/v2/library/gemma4/manifests/12b-mlx | shasum -a 256
+curl -s localhost:11434/api/tags   # "digest" of the same tag
+```
+
+The tests never reach the registry: the manifest source is a trait, and the
+fixture is a hand-built manifest in the same shape (its fake blob digests aside)
+whose SHA-256 was computed independently with `shasum -a 256`. They cover identical
+and different digests, a dead registry, a model outside the library, a body that is
+not a manifest, the cache's expiry, the concurrency bound, the time budget and the
+size sum. [src: file: backend/src/core/ollama_registry.rs:421]
 
 ### Mac MLX builds
 
