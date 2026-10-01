@@ -545,6 +545,30 @@ Release notes for 0.9.3 and earlier are available in the
   replies. The `session_budget` signal reports the four traffic counters and
   the cache share beside its `traffic_tokens` axis; the axis itself still counts
   cache reads, as it was calibrated to.
+- A model that goes silent now fails the run instead of freezing it, and
+  stopping a run frees the model (KT-932). On 30/09 a laptop slept in the middle
+  of a generation: Ollama was idle when it woke, but OpenCode kept an open,
+  mute connection to it and the step stayed frozen until the process was killed
+  by hand — the 600 s limit on event streams only covers what Kronn sends to the
+  browser. ACP agents and the native HTTP agents (Ollama, LiteLLM, NVIDIA,
+  external API) now carry an inactivity watchdog on the model's own output.
+  Progress restarts it — every chunk of an HTTP stream, every frame of an ACP
+  agent, a reasoning chunk that shows nothing included — so a slow model that
+  keeps talking is never cut; a silence of the full delay fails the run with a
+  message saying what stopped, for how long, how far it had got and what Kronn
+  did about it, and cancels the generation. The delay is the discussion's
+  **Agent inactivity timeout** (Config › Server) or the step's
+  `stall_timeout_secs`, and never less than 15 minutes in a discussion, so the
+  first token of a large model loaded cold gets through; anywhere else it is 15
+  minutes. A stalled step is recognised as a stall by its `on_timeout` routing,
+  as before. A request that is not streamed (constrained JSON) has nothing to
+  watch while it runs and keeps only its own timeout. Stopping an agent — Stop,
+  a cancel, a kill — closes its connection to the model, which is what makes
+  Ollama stop generating instead of finishing for nobody while the next request
+  queues behind it: the HTTP stream is dropped, and an ACP agent is cancelled
+  and shut down with its whole process group. Both are covered by tests against
+  a simulated Ollama that watches the connection. See
+  [Agent timeouts](docs/architecture/overview.md).
 
 ## [0.14.1] - 2026-09-26
 

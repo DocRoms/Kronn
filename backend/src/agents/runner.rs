@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+use super::idle_watchdog::{self, IdleWatchdog};
 use super::provenance::{self, AgentProvenanceCapture};
 use crate::core::cmd::{async_cmd, sync_cmd};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
@@ -2694,6 +2695,13 @@ pub struct AgentStartConfig<'a> {
     /// request that happens before an `AgentProcess` exists. Discussion paths
     /// pass the exact visible hosted/local wall-clock budget here.
     pub http_request_timeout: Option<std::time::Duration>,
+    /// KT-932 — how long the model may stay silent before the run is failed and
+    /// its generation cancelled: no byte on the HTTP stream, no frame from the
+    /// ACP agent. Progress restarts it, so a slow model that keeps talking is
+    /// never cut. Discussions and workflow steps pass the operator's inactivity
+    /// setting; `None` is [`idle_watchdog::DEFAULT_IDLE_TIMEOUT`], sized for the
+    /// first token of a large local model loaded cold.
+    pub idle_timeout: Option<std::time::Duration>,
     /// Optional lifecycle owned by the caller (discussion/workflow). HTTP
     /// agents derive a child token from it so cancellation also interrupts the
     /// initial request, before an `AgentProcess`/lifeline exists.
@@ -2771,6 +2779,7 @@ impl<'a> AgentStartConfig<'a> {
             max_tokens_override: None,
             ollama_context_overrides: None,
             http_request_timeout: None,
+            idle_timeout: None,
             cancel_token: None,
             #[cfg(test)]
             test_acp_transport: None,
@@ -3632,7 +3641,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 }
             },
         );
-        return start_ollama_http(
+        return start_ollama_http_with_idle(
             config.agent_type,
             config.prompt,
             &http_system_context,
@@ -3647,6 +3656,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.reasoning_effort_override,
             config.max_tokens_override,
             config.provenance.clone(),
+            config.idle_timeout,
         )
         .await;
     }
@@ -3718,6 +3728,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 fallback_prompt: config.native_acp_full_prompt,
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
+                idle_timeout: config.idle_timeout,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
@@ -3746,6 +3757,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 fallback_prompt: config.native_acp_full_prompt,
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
+                idle_timeout: config.idle_timeout,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
@@ -4112,6 +4124,8 @@ struct AcpSessionRequest<'a> {
     fallback_prompt: Option<&'a str>,
     provenance: Option<AgentProvenanceCapture>,
     activity: Option<super::activity::AgentActivitySink>,
+    /// KT-932 — silence after which the turn is cancelled; `None` is the default.
+    idle_timeout: Option<Duration>,
 }
 
 async fn start_native_acp(
@@ -4287,6 +4301,7 @@ async fn run_acp_session(
         fallback_prompt,
         provenance,
         activity,
+        idle_timeout,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4453,6 +4468,11 @@ async fn run_acp_session(
     let event_agent_label = format!("{agent_type:?}");
     let event_agent_type = agent_type.clone();
     let event_work_dir = work_dir.to_path_buf();
+    // KT-932 — the turn's progress clock. Every event the agent produces beats
+    // it, so what ends a turn is a silence, not a long run: an agent that keeps
+    // streaming is never cut however long it takes.
+    let idle = IdleWatchdog::new(idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT));
+    let forwarder_idle = idle.clone();
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
@@ -4486,6 +4506,7 @@ async fn run_acp_session(
         let event_store = session_store.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                forwarder_idle.beat();
                 match event {
                     AcpSessionEvent::TextDelta(text) => {
                         if tx.send(text).await.is_err() {
@@ -4544,14 +4565,21 @@ async fn run_acp_session(
                             }
                         }
                     }
-                    AcpSessionEvent::Completed => {}
+                    // Proof of life that has nothing to show: it only beat the clock.
+                    AcpSessionEvent::Activity | AcpSessionEvent::Completed => {}
                 }
             }
         });
 
         // On cancellation the prompt future is dropped, which drops its event
         // sender and lets the forwarder finish draining before we report.
-        let (result, cancelled) = tokio::select! {
+        //
+        // A stall ends the turn the same way a stop does — cancel the session,
+        // then the shutdown below takes the agent's whole process group, which
+        // closes its connection to the model server. That close is what tells
+        // Ollama to abandon the generation instead of finishing it for nobody
+        // while the next request queues behind it.
+        let (result, cancelled, stalled) = tokio::select! {
             _ = task_cancel.cancelled() => {
                 // The cancel is a write to the agent's stdin: a wedged agent must
                 // not hold the stop hostage, and the shutdown below kills it
@@ -4561,9 +4589,30 @@ async fn run_acp_session(
                     .unwrap_or_else(|_| {
                         Err(crate::acp::AcpError::Timeout("session/cancel".to_owned()))
                     });
-                (sent, true)
+                (sent, true, false)
             }
-            result = host.prompt(&session, &full_prompt, event_tx) => (result, false),
+            _ = idle.expired() => {
+                let progress = match idle.beats() {
+                    0 => "without ever sending a first token".to_owned(),
+                    beats => format!("after {beats} event(s)"),
+                };
+                let reason = idle_watchdog::stall_reason(
+                    &event_agent_label,
+                    idle.limit(),
+                    &progress,
+                );
+                tracing::warn!(agent = %event_agent_label, "{reason}");
+                if let Ok(mut capture) = task_stderr.lock() {
+                    capture.push(reason);
+                }
+                let sent = tokio::time::timeout(ACP_CANCEL_GRACE, host.cancel(&session))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(crate::acp::AcpError::Timeout("session/cancel".to_owned()))
+                    });
+                (sent, false, true)
+            }
+            result = host.prompt(&session, &full_prompt, event_tx) => (result, false, false),
         };
         let _ = forwarder.await;
         let persistence_error = persistence_error.lock().unwrap().take();
@@ -4576,7 +4625,7 @@ async fn run_acp_session(
                 }
                 false
             }
-            (Ok(()), None) if !cancelled => true,
+            (Ok(()), None) if !cancelled && !stalled => true,
             (Ok(()), None) => false,
             (Err(error), None) => {
                 let diagnostic = acp_failure_diagnostic("prompt", &error.to_string());
@@ -7160,6 +7209,7 @@ async fn send_http_agent_request(
     max_attempts: usize,
     retry_allowed: bool,
     stderr: &Arc<Mutex<Vec<String>>>,
+    idle: Duration,
 ) -> Result<(reqwest::Response, usize), HttpProviderFailure> {
     // Anthropic caches only the prefixes a request marks. Measured at about a
     // quarter of the uncached input cost; `KRONN_LITELLM_PROMPT_CACHE=0` opts out.
@@ -7168,13 +7218,39 @@ async fn send_http_agent_request(
     .then(|| crate::agents::chat_codec::with_prompt_cache_hints(body))
     .flatten();
     let body = hinted.as_ref().unwrap_or(body);
+    // KT-932 — a streamed answer starts with its first token, so response
+    // headers that never come mean a model that never started (or a connection
+    // that died while it loaded). A non-streamed answer carries nothing until
+    // the whole generation is over: silence there proves nothing, and only the
+    // request's own total timeout bounds it.
+    let first_token_within = body["stream"].as_bool().unwrap_or(true).then_some(idle);
     let mut attempt = first_attempt;
     loop {
         let mut request = client.post(url).json(body);
         if let Some(key) = auth_key {
             request = request.bearer_auth(key);
         }
-        match request.send().await {
+        let sent = match first_token_within {
+            Some(limit) => match tokio::time::timeout(limit, request.send()).await {
+                Ok(sent) => sent,
+                // No retry: the wait already cost the whole delay, and a retry
+                // would only buy another one for the same dead connection. The
+                // dropped future closes it, which is what frees the model.
+                Err(_) => {
+                    return Err(HttpProviderFailure {
+                        status: None,
+                        detail: idle_watchdog::stall_reason(
+                            backend,
+                            limit,
+                            "without ever sending a first token",
+                        ),
+                        attempts: attempt,
+                    });
+                }
+            },
+            None => request.send().await,
+        };
+        match sent {
             Ok(response) if response.status().is_success() => return Ok((response, attempt)),
             Ok(response) => {
                 let status = response.status();
@@ -7247,6 +7323,10 @@ fn format_provider_failure(
             "{backend} error {status}{attempts}:{suffix} Provider response: {}",
             failure.detail
         ),
+        // Already a complete sentence that says what Kronn did. Calling this
+        // "unreachable" would send the operator to the network when the server
+        // answered the connection and then said nothing.
+        None if idle_watchdog::is_stall_reason(&failure.detail) => failure.detail.clone(),
         None => format!(
             "{backend} unreachable at {base}{attempts}: {}",
             failure.detail
@@ -7254,16 +7334,10 @@ fn format_provider_failure(
     }
 }
 
-/// Start Ollama via HTTP API (/api/chat) instead of a CLI process.
-/// Returns an AgentProcess with a dummy child process and an rx fed by
-/// the HTTP response. System context and user prompt are sent as separate
-/// messages (role: system, role: user) so the model doesn't confuse MCP
-/// instructions with the user's question.
-///
-/// `format` = an optional JSON Schema (a `TypedSchema` step's schema, already
-/// wrapped in the canonical envelope shape by the caller). When set, decoding
-/// is grammar-constrained and the request is non-streaming (one JSON object).
+/// The default inactivity delay — what every test that does not care about the
+/// watchdog runs under. Production goes through `start_ollama_http_with_idle`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn start_ollama_http(
     agent_type: &AgentType,
     user_prompt: &str,
@@ -7280,6 +7354,60 @@ async fn start_ollama_http(
     max_tokens: Option<u64>,
     provenance: Option<AgentProvenanceCapture>,
 ) -> Result<AgentProcess, String> {
+    start_ollama_http_with_idle(
+        agent_type,
+        user_prompt,
+        system_context,
+        model,
+        format,
+        http_base_url,
+        http_api_key,
+        executor,
+        ollama_context_overrides,
+        http_request_timeout,
+        parent_cancel,
+        reasoning_effort,
+        max_tokens,
+        provenance,
+        None,
+    )
+    .await
+}
+
+/// Start Ollama via HTTP API (/api/chat) instead of a CLI process.
+/// Returns an AgentProcess with a dummy child process and an rx fed by
+/// the HTTP response. System context and user prompt are sent as separate
+/// messages (role: system, role: user) so the model doesn't confuse MCP
+/// instructions with the user's question.
+///
+/// `format` = an optional JSON Schema (a `TypedSchema` step's schema, already
+/// wrapped in the canonical envelope shape by the caller). When set, decoding
+/// is grammar-constrained and the request is non-streaming (one JSON object).
+///
+/// `idle_timeout` (KT-932) = how long the server may send nothing — before the
+/// first token, or between two chunks — before the run fails and the connection
+/// is dropped, which is what tells Ollama to stop generating. `None` is
+/// [`idle_watchdog::DEFAULT_IDLE_TIMEOUT`]. It does not apply to a request that
+/// is not streamed (`format` set): that one answers once, when it is finished.
+#[allow(clippy::too_many_arguments)]
+async fn start_ollama_http_with_idle(
+    agent_type: &AgentType,
+    user_prompt: &str,
+    system_context: &str,
+    model: &str,
+    format: Option<&serde_json::Value>,
+    http_base_url: Option<&str>,
+    http_api_key: Option<&str>,
+    executor: Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>>,
+    ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
+    http_request_timeout: Option<std::time::Duration>,
+    parent_cancel: Option<&tokio_util::sync::CancellationToken>,
+    reasoning_effort: Option<&str>,
+    max_tokens: Option<u64>,
+    provenance: Option<AgentProvenanceCapture>,
+    idle_timeout: Option<Duration>,
+) -> Result<AgentProcess, String> {
+    let idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
     let identity_context = http_agent_identity_context(agent_type, model);
     let system_context = if system_context.trim().is_empty() {
         identity_context
@@ -7638,6 +7766,7 @@ async fn start_ollama_http(
             HTTP_PROVIDER_MAX_ATTEMPTS,
             true,
             &stderr_capture,
+                    idle_limit,
         ) => response,
     };
     // Workflow prompts already carry the schema and the caller validates the
@@ -7675,6 +7804,7 @@ async fn start_ollama_http(
                 response = send_http_agent_request(
                     &client, &url, &body, auth_key.as_deref(), backend,
                     attempt, attempt, false, &stderr_capture,
+                    idle_limit,
                 ) => response,
             };
         }
@@ -7748,7 +7878,6 @@ async fn start_ollama_http(
         use crate::agents::tools::{
             assistant_tool_call_message, tool_result_message, trace_line, ToolCallAccumulator,
         };
-        use futures::StreamExt;
         let mut response = response;
         let mut provider_attempt = initial_provider_attempt;
         let mut request_started_at = initial_request_started_at;
@@ -7881,6 +8010,15 @@ async fn start_ollama_http(
             // boundary unless Kronn verifies it before calling the executor.
             let declared_tools_for_turn = declared_tool_names(&body);
             let mut stream = response.bytes_stream();
+            // KT-932 — each read of a streamed answer is bounded by the idle
+            // delay, so every chunk that arrives restarts it. A response that is
+            // not streamed arrives whole when the generation is over; its
+            // silence says nothing, so it is bounded only by the request timeout.
+            let chunk_within = body["stream"]
+                .as_bool()
+                .unwrap_or(true)
+                .then_some(idle_limit);
+            let mut received_chunks: usize = 0;
             let mut buffer = String::new();
             let mut got_done = false;
             let mut got_error = false;
@@ -7899,9 +8037,30 @@ async fn start_ollama_http(
                         finish(&mut lifeline, false).await;
                         return;
                     }
-                    chunk = stream.next() => chunk,
+                    chunk = idle_watchdog::next_within(&mut stream, chunk_within) => match chunk {
+                        Ok(chunk) => chunk,
+                        Err(idle_watchdog::Silent) => {
+                            // Returning drops the response, which closes the
+                            // connection: that is what makes Ollama abandon
+                            // the generation instead of finishing it for
+                            // nobody while the next request queues behind it.
+                            let progress = if received_chunks == 0 {
+                                "without ever sending a first token".to_owned()
+                            } else {
+                                format!("after {received_chunks} chunk(s)")
+                            };
+                            let reason = idle_watchdog::stall_reason(backend, idle_limit, &progress);
+                            tracing::warn!(target: "kronn::agent::idle", "{reason}");
+                            if let Ok(mut se) = stderr_clone.lock() {
+                                se.push(reason);
+                            }
+                            finish(&mut lifeline, false).await;
+                            return;
+                        }
+                    },
                 };
                 let Some(chunk) = chunk else { break };
+                received_chunks += 1;
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
@@ -8069,6 +8228,7 @@ async fn start_ollama_http(
                         HTTP_PROVIDER_MAX_ATTEMPTS,
                         true,
                         &stderr_clone,
+                    idle_limit,
                     ) => result,
                 };
                 match retried {
@@ -8188,6 +8348,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match delivery_retry {
@@ -8277,6 +8438,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match repair_retry {
@@ -8352,6 +8514,7 @@ async fn start_ollama_http(
                         1,
                         false,
                         &stderr_clone,
+                    idle_limit,
                     ) => result,
                 };
                 response = match finalization_retry {
@@ -8466,6 +8629,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match finalization_retry {
@@ -8530,6 +8694,7 @@ async fn start_ollama_http(
                         1,
                         false,
                         &stderr_clone,
+                    idle_limit,
                     ) => result,
                 };
                 response = match worker_retry {
@@ -8594,6 +8759,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match final_answer {
@@ -9932,6 +10098,7 @@ async fn start_ollama_http(
                     1,
                     false,
                     &stderr_clone,
+                    idle_limit,
                 ) => result,
             };
             response = match next_turn {
@@ -12230,6 +12397,10 @@ fn codex_token_count(marker: &str, count: &str) -> Option<u64> {
 #[path = "runner_test.rs"]
 mod runner_test;
 
+#[cfg(test)]
+#[path = "runner_idle_test.rs"]
+mod runner_idle_test;
+
 fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     let provider = match env_key {
         "ANTHROPIC_API_KEY" => "anthropic",
@@ -12474,6 +12645,7 @@ mod acp_resume_tests {
                 fallback_prompt,
                 provenance: None,
                 activity: None,
+                idle_timeout: None,
             },
             transport,
         )
@@ -12818,6 +12990,7 @@ mod acp_resume_tests {
                     fallback_prompt: Some("complete history"),
                     provenance: None,
                     activity: None,
+                    idle_timeout: None,
                 },
                 transport.clone(),
             )
@@ -13048,6 +13221,7 @@ mod acp_resume_tests {
             fallback_prompt: None,
             provenance: None,
             activity: None,
+            idle_timeout: None,
         }
     }
 

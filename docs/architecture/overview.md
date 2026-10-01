@@ -214,6 +214,33 @@ timeout notice.
 [src: file: backend/src/api/discussions/streaming.rs:1609-1622]
 [src: file: backend/src/api/discussions/orchestration.rs:242-259]
 
+**Model inactivity watchdog (KT-932)**: the stall timeout above watches what the
+consumer reads; it cannot see a model whose connection is open and mute, nor
+tell a model that is loading from one that is gone. The runner therefore also
+watches the model's own output — `AgentStartConfig.idle_timeout`, enforced by
+`agents/idle_watchdog.rs`. Native HTTP agents bound the wait for the first
+response headers (weights loading, prompt being read) and every read of the
+stream; an ACP turn is bounded by a progress clock that every event of the
+agent restarts, including `AcpSessionEvent::Activity`, which the native
+transport emits for a frame that shows nothing (a reasoning chunk, a plan).
+Progress restarts the clock, so only a silence ends a run, never a long
+generation. On expiry the run fails with an explicit `Agent stalled (no output
+for Ns): …` reason (the wording `workflows::steps::is_stall_error` and
+`on_timeout` already match) and the generation is cancelled: the HTTP response
+is dropped, which closes the connection and makes Ollama abandon the
+generation; an ACP session is cancelled, then its agent is shut down with its
+whole process group (KT-927), which closes the agent's own connection. The delay
+is `None` → `DEFAULT_IDLE_TIMEOUT` (15 min, sized for the first token of a large
+local model loaded cold); discussions pass `max(agent_stall_timeout_min, 15
+min)` and workflow steps pass their `stall_timeout_secs`, so the operator's
+existing setting is the knob. A request that is not streamed (`format` set,
+`stream: false`) answers once at the end, so it has no progress to watch and
+only its own request timeout. The delay does not cover a tool an ACP agent runs
+silently for longer than itself; raise the inactivity timeout for those.
+[src: file: backend/src/agents/idle_watchdog.rs]
+[src: file: backend/src/agents/runner.rs]
+[src: file: backend/src/agents/runner_idle_test.rs]
+
 **Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
 
 **Graceful shutdown**: `axum::serve().with_graceful_shutdown()` handles SIGTERM (Unix) + Ctrl+C. In-flight requests finish before exit.

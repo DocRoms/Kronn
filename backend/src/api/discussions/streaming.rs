@@ -672,6 +672,19 @@ fn timeout_notice(reason: AgentTimeoutReason) -> String {
     }
 }
 
+/// KT-932 — the notice for a run that the model's own watchdog ended
+/// (`agents::idle_watchdog`), as opposed to the stall and global timeouts above,
+/// which this consumer enforces itself. The runner writes that reason into the
+/// run's stderr; without lifting it, a reply that stalled after some text would
+/// end as a failure with no explanation, the partial text hiding the cause.
+fn model_stall_notice(stderr: &[String]) -> Option<String> {
+    stderr
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| crate::agents::idle_watchdog::is_stall_reason(line))
+        .map(|reason| format!("⚠️ **Agent interrupted by Kronn.** {reason}"))
+}
+
 /// Whether a finished child run counts as a SUCCESS for batch accounting.
 ///
 /// A clean process exit with an EMPTY assistant reply is NOT a success — the
@@ -2999,7 +3012,7 @@ async fn make_agent_stream_inner(
         let mut tracked_execution_succeeded = false;
         // KT-405 — cloned out of the lock (never held across an await), so
         // an HTTP run can honour a persistent per-model context override.
-        let (ollama_context_overrides, http_request_timeout) = {
+        let (ollama_context_overrides, http_request_timeout, model_idle_timeout) = {
             let cfg = state.config.read().await;
             (
                 cfg.server.ollama_context_overrides.clone(),
@@ -3007,6 +3020,22 @@ async fn make_agent_stream_inner(
                     &agent_type,
                     cfg.server.agent_global_timeout_min,
                     cfg.server.local_agent_global_timeout_min,
+                ),
+                // KT-932 — the model's own silence limit is the operator's
+                // inactivity setting, with the floor the stream consumer
+                // below applies to every agent that does not emit stream-json:
+                // an ACP or HTTP model stays silent while its weights load and
+                // its prompt is read, and 5 minutes would cut a cold start.
+                effective_stall_timeout(
+                    false,
+                    Duration::from_secs(
+                        u64::from(if cfg.server.agent_stall_timeout_min > 0 {
+                            cfg.server.agent_stall_timeout_min
+                        } else {
+                            DEFAULT_STALL_TIMEOUT_MIN
+                        }) * 60,
+                    ),
+                    NON_STREAMING_STALL_TIMEOUT,
                 ),
             )
         };
@@ -3055,6 +3084,7 @@ async fn make_agent_stream_inner(
             external_http: external_http_runtime.as_ref(),
             ollama_context_overrides: Some(&ollama_context_overrides),
             http_request_timeout: Some(http_request_timeout),
+            idle_timeout: Some(model_idle_timeout),
             cancel_token: Some(cancel_token.clone()),
             model_override: disc_model.as_deref(),
             reasoning_effort_override: qp_reasoning_effort.as_deref(),
@@ -3666,6 +3696,12 @@ async fn make_agent_stream_inner(
                 // process at its watchdog deadline.
                 if let Some(reason) = timeout_reason {
                     let notice = timeout_notice(reason);
+                    if full_response.is_empty() {
+                        full_response = notice;
+                    } else {
+                        full_response.push_str(&format!("\n\n---\n{notice}"));
+                    }
+                } else if let Some(notice) = model_stall_notice(&stderr_lines) {
                     if full_response.is_empty() {
                         full_response = notice;
                     } else {
@@ -4931,6 +4967,12 @@ pub(super) async fn run_agent_streaming(
         } else {
             format!("{full_response}\n\n---\n{notice}")
         };
+    } else if let Some(notice) = model_stall_notice(&stderr) {
+        full_response = if full_response.is_empty() {
+            notice
+        } else {
+            format!("{full_response}\n\n---\n{notice}")
+        };
     } else if full_response.is_empty() && !success {
         let exit_info = match &status {
             Some(s) => format!("exit code: {:?}", s.code),
@@ -5270,6 +5312,37 @@ mod agent_lifecycle_tests {
         assert!(notice.contains("Agent inactivity timeout"));
         assert!(!notice.contains("exit code"));
         assert!(!notice.contains("None"));
+    }
+
+    /// KT-932 — a reply that stalled after some text must still say why it
+    /// ended: the model's watchdog writes its reason to stderr, and this lifts
+    /// it out from among whatever else the run logged.
+    #[test]
+    fn a_model_stall_is_named_in_the_reply_it_cut_short() {
+        let reason = crate::agents::idle_watchdog::stall_reason(
+            "Ollama",
+            Duration::from_secs(900),
+            "after 42 chunk(s)",
+        );
+        let stderr = vec![
+            "ollama_tokens:12:3".to_string(),
+            format!("  {reason}"),
+            "[provider-retry: attempt 1/3 failed]".to_string(),
+        ];
+
+        let notice = super::model_stall_notice(&stderr).expect("the stall is found");
+
+        assert!(notice.contains("Agent interrupted by Kronn"), "{notice}");
+        assert!(
+            notice.contains("Ollama sent no data for 15 min"),
+            "{notice}"
+        );
+        assert!(notice.contains("after 42 chunk(s)"), "{notice}");
+        assert_eq!(
+            super::model_stall_notice(&["Agent exited with exit code 1".to_string()]),
+            None,
+            "an ordinary failure is not a stall"
+        );
     }
 
     // ── #2 — empty-but-clean-exit child is NOT a batch success ──

@@ -243,6 +243,8 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Agent stall timeout** — Configurable in `ServerConfig`, default 5 minutes, range 1–60 minutes. If an agent produces no output for this duration, the process is killed and the step/message is marked as failed.
 
+**Model inactivity watchdog** (KT-932) — `backend/src/agents/idle_watchdog.rs`. Fails an ACP or native-HTTP agent run whose model stays silent for the whole delay (bytes on the HTTP stream, frames from the ACP agent; progress restarts it) and cancels the generation, so Ollama is free for the next request. Delay: the discussion's agent inactivity timeout (at least 15 min) or the step's `stall_timeout_secs`; default 15 min. Distinct from the stall timeout, which watches what the consumer reads.
+
 **Agent activity logs** — Real-time stderr + stream-json tool activity streamed via SSE `log` events. Shows what the agent is doing (reading files, running commands, editing) during a conversation or workflow step.
 
 **format_tool_log** — Formats rich log lines from tool name + JSON input. Displays human-readable activity: `Read path`, `$ command`, `Edit path`, etc. Used in agent activity log rendering.

@@ -473,6 +473,12 @@ pub enum AcpSessionEvent {
         output_tokens: u64,
         prompt_cache: crate::agents::runner::PromptCacheUsage,
     },
+    /// A frame from the agent that carries nothing to show — a reasoning chunk,
+    /// a plan, a status update. It is proof of life and nothing else: without
+    /// it, a model thinking for ten minutes before it answers looks exactly like
+    /// one whose connection died, and KT-932's inactivity watchdog cannot tell
+    /// them apart.
+    Activity,
     Completed,
 }
 
@@ -1367,7 +1373,14 @@ impl AcpTransport for AcpJsonRpcTransport {
                 }
                 received = notifications.recv() => match received {
                     Ok(frame) => {
-                        for event in events_from_notifications(vec![frame], &target.session_id) {
+                        let derived = events_from_notifications(vec![frame], &target.session_id);
+                        // A frame is progress even when it says nothing the
+                        // reader can see; tell the host so it is not mistaken
+                        // for silence.
+                        if derived.is_empty() {
+                            let _ = events.send(AcpSessionEvent::Activity).await;
+                        }
+                        for event in derived {
                             let _ = events.send(event).await;
                         }
                     }
