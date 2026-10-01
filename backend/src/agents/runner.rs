@@ -7138,6 +7138,50 @@ fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &s
     .any(|needle| detail.contains(needle))
 }
 
+/// KT-942 — Ollama parses the model's tool call itself (Qwen writes it as XML)
+/// and, when the text is not well-formed, ends the stream with an error instead
+/// of a call: `XML syntax error on line 13: element <parameter> closed by
+/// </function>`. That text is the one observed in production. The other needles
+/// are neighbouring wordings of the same parser failing, kept so a sibling model
+/// format is replayed the same way; none of them is a capacity or quota signal.
+fn is_unreadable_tool_call_failure(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "xml syntax error",
+        "error parsing tool call",
+        "failed to parse tool call",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
+/// What the run owes the reader once the model's tool call stayed unreadable
+/// through every replay. The context-window note was written to the run's
+/// stderr before the first request and would otherwise lead the failure: it is
+/// not the cause here, and it sends the reader to the wrong setting. It goes,
+/// and the sentence that names the real failure takes the head of the log.
+fn record_unreadable_tool_call_failure(
+    stderr: &Arc<Mutex<Vec<String>>>,
+    backend: &str,
+    model: &str,
+    ctx_notice: Option<&str>,
+    attempts: usize,
+) {
+    let sentence = format!(
+        "{backend} could not read a tool call that {model} wrote — the model produced an \
+         unreadable tool call (attempts at this request: {attempts}). This is a failure of \
+         the model's output, not of the context window. Retry the turn, or choose a model \
+         that calls tools more reliably."
+    );
+    tracing::warn!(target: "kronn::agent::tools", "{sentence}");
+    if let Ok(mut lines) = stderr.lock() {
+        if let Some(notice) = ctx_notice {
+            lines.retain(|line| line != notice);
+        }
+        lines.insert(0, sentence);
+    }
+}
+
 fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
     #[cfg(test)]
     {
@@ -7212,6 +7256,8 @@ fn provider_failure_label(status: Option<reqwest::StatusCode>, detail: &str) -> 
         .contains("worker local total request limit reached")
     {
         "worker saturation".to_string()
+    } else if is_unreadable_tool_call_failure(detail) {
+        "unreadable tool call".to_string()
     } else if let Some(status) = status {
         format!("HTTP {status}")
     } else {
@@ -7754,9 +7800,9 @@ async fn start_ollama_http_with_idle(
     let stderr_capture: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     // Romu's rule, and it is the right one: if we hold a model below what it can
     // do, say it where the run is read — not only in a log.
-    if let Some(notice) = ctx_notice {
+    if let Some(notice) = &ctx_notice {
         if let Ok(mut capture) = stderr_capture.lock() {
-            capture.push(notice);
+            capture.push(notice.clone());
         }
     }
     // Capture the immutable request seed before any provider/tool turn is
@@ -7883,8 +7929,11 @@ async fn start_ollama_http_with_idle(
     // child cannot by itself stop a Tokio provider/tool loop.
     let task_cancel = http_cancel.clone();
 
+    // The task outlives this call, so it cannot borrow the caller's `model`.
+    let model_owned = model.to_string();
     // Spawn a background task to read the HTTP stream and forward text to the channel.
     tokio::spawn(async move {
+        let model = model_owned.as_str();
         // Holds the lifeline's stdin open for the duration of the stream.
         let mut lifeline = stdin_guard;
         // Report the stream's outcome as the lifeline child's exit code.
@@ -8199,21 +8248,39 @@ async fn start_ollama_http_with_idle(
             // failure. Re-send the exact request only while nothing escaped to
             // the user and no tool has run; the same AgentProcess and dispatch
             // remain in place, so one run still persists one agent message.
+            // KT-942 — a tool call Ollama could not parse. Nothing was executed
+            // for it (calls run only after the stream ends, and never on an
+            // error), so re-sending the same request is a pure model invocation
+            // even when earlier rounds ran tools: their results are already in the
+            // request. Text the failed attempt streamed is the price of the
+            // replay, cheaper than losing the whole turn. Stochastic generation
+            // usually produces a valid call the second time; no instruction is
+            // added to the prompt.
+            let unreadable_tool_call = !is_openai_wire
+                && provider_error
+                    .as_deref()
+                    .is_some_and(is_unreadable_tool_call_failure);
             let retryable_stream_failure = if let Some(detail) = provider_error.as_deref() {
-                is_transient_provider_failure(None, detail)
+                unreadable_tool_call || is_transient_provider_failure(None, detail)
             } else {
                 !got_done && !got_error && calls.is_empty()
             };
+            let replay_is_safe =
+                unreadable_tool_call || (!external_effect_observed && !emitted_this_turn);
             if retryable_stream_failure
                 && !used_format_fallback
-                && !external_effect_observed
-                && !emitted_this_turn
+                && replay_is_safe
                 && provider_attempt < HTTP_PROVIDER_MAX_ATTEMPTS
             {
                 let detail = provider_error
                     .as_deref()
                     .unwrap_or("stream ended before its terminal frame");
-                let delay = provider_retry_delay(provider_attempt);
+                // A regeneration needs no breathing room, unlike a saturated worker.
+                let delay = if unreadable_tool_call {
+                    Duration::ZERO
+                } else {
+                    provider_retry_delay(provider_attempt)
+                };
                 push_provider_retry_trace(
                     &stderr_clone,
                     format!(
@@ -8247,7 +8314,9 @@ async fn start_ollama_http_with_idle(
                         backend,
                         provider_attempt + 1,
                         HTTP_PROVIDER_MAX_ATTEMPTS,
-                        true,
+                        // The replayed request may itself hit a transient HTTP
+                        // failure; once a tool has run, that one is not replayed.
+                        !external_effect_observed,
                         &stderr_clone,
                     idle_limit,
                     ) => result,
@@ -8269,8 +8338,7 @@ async fn start_ollama_http_with_idle(
             }
             if retryable_stream_failure
                 && !used_format_fallback
-                && !external_effect_observed
-                && !emitted_this_turn
+                && replay_is_safe
                 && provider_attempt >= HTTP_PROVIDER_MAX_ATTEMPTS
             {
                 let detail = provider_error
@@ -8282,6 +8350,16 @@ async fn start_ollama_http_with_idle(
                         "{backend} attempt {provider_attempt}/{HTTP_PROVIDER_MAX_ATTEMPTS} failed ({}); retry budget exhausted",
                         provider_failure_label(None, detail)
                     ),
+                );
+            }
+            // Past the replay budget the failure stays visible, and says what it is.
+            if unreadable_tool_call {
+                record_unreadable_tool_call_failure(
+                    &stderr_clone,
+                    backend,
+                    model,
+                    ctx_notice.as_deref(),
+                    provider_attempt,
                 );
             }
             if forced_synthesis && !calls.is_empty() && !got_error {

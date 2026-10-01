@@ -574,6 +574,22 @@ Release notes for 0.9.3 and earlier are available in the
   the model the instant a terminal update closes the call; a tool call that
   never closes is still cut, by its own bound, with a reason naming the tool.
   See [Agent timeouts](docs/architecture/overview.md).
+- A tool call the model wrote badly no longer ends an Ollama turn, and the
+  failure no longer blames the context window (KT-942). Ollama reads the tool
+  call itself — Qwen writes it as XML — and when the text is malformed it ends
+  the stream with an error such as `XML syntax error on line 13: element
+  <parameter> closed by </function>`; Kronn took that for fatal and stopped the
+  turn, with the note about the context window (« Kronn is running it at 65536 —
+  raise it with `KRONN_OLLAMA_NUM_CTX_CAP` ») ahead of it, pointing at a setting
+  that had nothing to do with it. The same request is now sent again, at most
+  twice: generation is stochastic and a second try usually yields a valid call.
+  Nothing is added to the prompt. Nothing ran for the refused call, so the
+  replay is safe after earlier tool rounds too — the tools already run are not
+  run again — and each replay is written to the run's retry trace. If the model
+  keeps writing an unreadable call, the turn still fails, visibly, and the
+  message now says the model produced an unreadable tool call instead of
+  leading with the context note. Covered by tests against a simulated Ollama
+  that refuses the call once, after a tool round, and every time.
 
 ## [0.14.1] - 2026-09-26
 

@@ -5600,6 +5600,293 @@ mod tests {
         );
     }
 
+    /// KT-942 — the exact text observed in production, and the failures that
+    /// must keep their own handling.
+    const UNREADABLE_TOOL_CALL: &str =
+        "XML syntax error on line 13: element <parameter> closed by </function>";
+
+    #[test]
+    fn unreadable_tool_call_failure_is_told_apart_from_other_stream_errors() {
+        assert!(is_unreadable_tool_call_failure(UNREADABLE_TOOL_CALL));
+        assert!(is_unreadable_tool_call_failure(
+            "Ollama error: XML syntax error on line 2: unexpected EOF"
+        ));
+        assert!(is_unreadable_tool_call_failure(
+            "error parsing tool call: raw='<function=x>'"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "model runner has unexpectedly stopped"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "ResourceExhausted: Worker local total request limit reached (22/16)"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "the prompt outgrew the context window"
+        ));
+        assert_eq!(
+            provider_failure_label(None, UNREADABLE_TOOL_CALL),
+            "unreadable tool call"
+        );
+    }
+
+    /// Mounts `/api/show` and an `/api/chat` that fails with the tool-parser error
+    /// on its first `failures` requests, then answers normally. `/api/show`
+    /// returns no context size, so the run carries the portable-fallback context
+    /// note — the one that used to lead the failure.
+    async fn ollama_failing_tool_parser(
+        failures: usize,
+    ) -> (
+        wiremock::MockServer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chats_for_mock = chats.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = chats_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < failures {
+                    ResponseTemplate::new(200).set_body_string(format!(
+                        "{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"recovered answer\"},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                    )
+                }
+            })
+            .mount(&server)
+            .await;
+        (server, chats)
+    }
+
+    async fn drain(process: &mut AgentProcess) -> (String, bool) {
+        let mut out = String::new();
+        while let Some(chunk) = process.next_line().await {
+            out.push_str(&chunk);
+        }
+        let success = process.child.wait().await.expect("lifeline").success();
+        (out, success)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_is_replayed_and_the_turn_succeeds() {
+        let (server, chats) = ollama_failing_tool_parser(1).await;
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(success, "the second attempt produced a valid call: {out:?}");
+        assert!(out.contains("recovered answer"), "{out:?}");
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one refusal, one replay of the same request"
+        );
+        let trace = process.stderr_capture.lock().unwrap().join("\n");
+        assert!(
+            trace.contains("attempt 1/3 failed (unreadable tool call); retrying attempt 2/3")
+                && trace.contains("completed on attempt 2/3"),
+            "every replay must be journalled: {trace}"
+        );
+        assert!(
+            !trace.contains("could not read a tool call"),
+            "a recovered turn owes no failure message: {trace}"
+        );
+    }
+
+    /// The replay is a pure model invocation: nothing ran for the refused call,
+    /// and the results of earlier rounds are already in the request. A tool must
+    /// therefore not run again, nor the turn be lost because one had run.
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_after_a_tool_ran_is_replayed_without_rerunning_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refused_after_tool = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (chats_for_mock, refused_for_mock) = (chats.clone(), refused_after_tool.clone());
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |request: &wiremock::Request| {
+                use std::sync::atomic::Ordering::SeqCst;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let after_tool = body["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
+                chats_for_mock.fetch_add(1, SeqCst);
+                if !after_tool {
+                    return ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"mcp_list\",\"arguments\":{}}}]},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}\n",
+                    );
+                }
+                if refused_for_mock.fetch_add(1, SeqCst) == 0 {
+                    return ResponseTemplate::new(200).set_body_string(format!(
+                        "{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ));
+                }
+                ResponseTemplate::new(200).set_body_string(
+                    "{\"message\":{\"content\":\"2 servers\"},\"done\":false}\n\
+                     {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                )
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "which servers?",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(
+            success,
+            "the replay after the tool round must succeed: {out:?}"
+        );
+        assert!(out.contains("2 servers"), "{out:?}");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &["mcp_list".to_string()],
+            "the tool ran once; the replay re-sent a request, not the call"
+        );
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "tool request, refused follow-up, replayed follow-up"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_that_never_clears_stops_at_the_cap_and_says_so() {
+        let (server, chats) = ollama_failing_tool_parser(usize::MAX).await;
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(
+            !success,
+            "past the cap the failure stays a failure: {out:?}"
+        );
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            HTTP_PROVIDER_MAX_ATTEMPTS,
+            "the original request plus at most two replays"
+        );
+        let lines = process.stderr_capture.lock().unwrap().clone();
+        let head = lines.first().expect("a failure always says something");
+        assert!(
+            head.contains("unreadable tool call") && head.contains("test-model"),
+            "the message leads with the real cause: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("KRONN_OLLAMA_NUM_CTX_CAP")
+                    || line.contains("portable fallback")),
+            "the context note is not the cause and must not appear: {lines:?}"
+        );
+        let trace = lines.join("\n");
+        assert!(
+            trace.contains("attempt 1/3 failed (unreadable tool call); retrying attempt 2/3")
+                && trace
+                    .contains("attempt 2/3 failed (unreadable tool call); retrying attempt 3/3")
+                && trace
+                    .contains("attempt 3/3 failed (unreadable tool call); retry budget exhausted"),
+            "each replay and the exhausted budget are journalled: {trace}"
+        );
+        assert!(
+            trace.contains(UNREADABLE_TOOL_CALL),
+            "the parser's own error stays visible: {trace}"
+        );
+    }
+
+    /// The terminal message replaces the context note rather than sitting behind it.
+    #[test]
+    fn an_unreadable_tool_call_failure_takes_the_place_of_the_context_note() {
+        let note = "qwen3.8:27b-mlx supports a 262144-token context; Kronn is running it at 65536";
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(vec![
+            note.to_string(),
+            "Ollama error: XML syntax error on line 13".to_string(),
+        ]));
+        record_unreadable_tool_call_failure(&stderr, "Ollama", "qwen3.8:27b-mlx", Some(note), 3);
+        let lines = stderr.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("unreadable tool call"), "{lines:?}");
+        assert!(!lines.iter().any(|line| line == note), "{lines:?}");
+    }
+
     /// The Ollama wire, which the LiteLLM test above does NOT cover. This is
     /// the exact gap that let a real bug through: Ollama 400s on
     /// JSON-string `arguments` and needs a real object, so the loop executed
