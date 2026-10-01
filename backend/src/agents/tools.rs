@@ -53,6 +53,8 @@ pub enum ToolRunMode {
     #[default]
     General,
     Worker,
+    /// Repository audit producing an index and multiple finding documents.
+    Audit,
 }
 
 /// Human-granted discussion budgets. Only call and round counters change; repeat,

@@ -16,6 +16,7 @@ mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
+mod document_repair;
 pub mod drift;
 pub mod full;
 pub mod helpers;

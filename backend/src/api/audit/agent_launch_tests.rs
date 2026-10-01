@@ -184,6 +184,200 @@ async fn an_http_audit_step_writes_inside_the_project_and_is_refused_outside() {
 }
 
 #[tokio::test]
+async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
+    let mut calls: Vec<_> = (1..=16)
+        .map(|n| {
+            (
+                "write_file",
+                json!({
+                    "path":format!("docs/tech-debt/TD-{n}.md"), "content":format!("# Finding {n}\n")
+                }),
+            )
+        })
+        .collect();
+    let index = (1..=16)
+        .map(|n| format!("- [TD-{n}](tech-debt/TD-{n}.md)\n"))
+        .collect::<String>();
+    calls.push((
+        "write_file",
+        json!({"path":"docs/index.md","content":index}),
+    ));
+    let (server, _) = provider(
+        tool_calls(&calls),
+        text("All findings and their index were written."),
+    )
+    .await;
+    let state = litellm_state(&server.uri()).await;
+    let project = tempfile::tempdir().unwrap();
+    assert!(
+        run_step(
+            &state,
+            project.path(),
+            "Write sixteen findings and their index"
+        )
+        .await
+        .0
+    );
+    assert_eq!(
+        std::fs::read_dir(project.path().join("docs/tech-debt"))
+            .unwrap()
+            .count(),
+        16
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("docs/index.md")).unwrap(),
+        index
+    );
+}
+
+#[tokio::test]
+async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
+    use axum::response::IntoResponse;
+    for reference in ["code.rs:1", "invented.rs:1"] {
+        let correct = reference == "code.rs:1";
+        use sha2::{Digest, Sha256};
+        let human = "<!-- kronn:section name=\"decision\" owner=\"human\" -->\nHuman decision remains.\n<!-- kronn:section:end -->\n";
+        let original = format!("# Finding\n[src: file: invented.rs:1]\n{human}");
+        let receipt: String = Sha256::digest(original.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let (server, requests) = provider(
+            tool_calls(&[
+                ("read_file", json!({"path":"docs/tech-debt/TD-repair.md"})),
+                (
+                    "write_file",
+                    json!({
+                        "path":"docs/tech-debt/TD-repair.md",
+                        "expected_sha256":receipt,
+                        "content":format!("# Finding\n\nVerified source [src: file: {reference}]\n")
+                    }),
+                ),
+            ]),
+            text("The documented reference is corrected."),
+        )
+        .await;
+        let state = litellm_state(&server.uri()).await;
+        let project = tempfile::tempdir().unwrap();
+        project_among_others(&state, project.path(), false).await;
+        std::fs::create_dir_all(project.path().join("docs/tech-debt")).unwrap();
+        std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
+        std::fs::write(
+            project
+                .path()
+                .join("docs/conventions/agents-md-format-v1.md"),
+            "# Format\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("docs/AGENTS.md"),
+            format!("# Project\n{}", "Established documentation.\n".repeat(500)),
+        )
+        .unwrap();
+        std::fs::write(project.path().join("code.rs"), "actual source\n").unwrap();
+        std::fs::write(
+            project.path().join("docs/tech-debt/TD-repair.md"),
+            format!("# Finding\n[src: file: invented.rs:1]\n{human}"),
+        )
+        .unwrap();
+        let total =
+            crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+        state
+            .db
+            .with_conn(move |conn| {
+                use crate::db::audit_runs as runs;
+                let now = chrono::Utc::now() - chrono::Duration::hours(1);
+                runs::insert_running(conn, "before-repair", PROJECT_ID, "Full", "LiteLlm", now)?;
+                for step in 1..=total {
+                    runs::insert_audit_step_start(conn, "before-repair", step, "doc", now)?;
+                    runs::finalize_audit_step(
+                        conn,
+                        "before-repair",
+                        step,
+                        now,
+                        10,
+                        &runs::StepTokens::UNKNOWN,
+                        None,
+                        true,
+                        None,
+                        false,
+                    )?;
+                }
+                runs::update_last_completed_step(conn, "before-repair", total)?;
+                runs::mark_interrupted(conn, "before-repair", "final documentary gate failed")
+            })
+            .await
+            .unwrap();
+        let response = crate::api::audit::full::full_audit(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(PROJECT_ID.into()),
+            axum::Json(crate::models::LaunchAuditRequest {
+                agent: AgentType::LiteLlm,
+                tier: Some(ModelTier::Reasoning),
+                kind: None,
+                custom_prompt: None,
+                resume_run_id: Some("before-repair".into()),
+            }),
+        )
+        .await
+        .into_response();
+        let stream = sse_body(response).await;
+        let done = sse_events(&stream, "done").pop().expect("terminal outcome");
+        assert_eq!(
+            done["status"],
+            if correct { "complete" } else { "interrupted" },
+            "{stream}"
+        );
+        assert_eq!(
+            done["steps_to_redo"],
+            if correct { json!([]) } else { json!([1]) },
+            "{stream}"
+        );
+        assert_eq!(
+            done["discussion_id"].is_string(),
+            correct,
+            "validation requires a clean gate: {stream}"
+        );
+        if !correct {
+            assert_eq!(
+                sse_events(&stream, "step_retry").len(),
+                2,
+                "exactly two corrective retries: {stream}"
+            );
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                4,
+                "one tool response and three bounded attempts"
+            );
+        }
+        assert_eq!(
+            sse_events(&stream, "step_start").len(),
+            1,
+            "only the owning recovery step reruns"
+        );
+        let repaired =
+            std::fs::read_to_string(project.path().join("docs/tech-debt/TD-repair.md")).unwrap();
+        assert!(
+            repaired.contains(human.trim_end()),
+            "human section restored before validation: {repaired:?}"
+        );
+        assert_eq!(repaired.contains("invented.rs"), !correct);
+        assert!(
+            std::fs::read_dir(project.path().join("docs/.kronn-citation-originals"))
+                .unwrap()
+                .any(
+                    |entry| std::fs::read_to_string(entry.unwrap().path()).unwrap()
+                        == format!("# Finding\n[src: file: invented.rs:1]\n{human}")
+                ),
+            "the original survives correction"
+        );
+        assert!(requests.lock().unwrap()[0]
+            .to_string()
+            .contains("targeted correction required"));
+    }
+}
+
+#[tokio::test]
 async fn a_prose_only_http_run_exits_cleanly_and_writes_nothing() {
     // The premise of the silent-success risk: a model that answers in prose
     // instead of calling a tool finishes without error, so the exit code alone

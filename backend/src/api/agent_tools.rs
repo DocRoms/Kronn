@@ -1442,7 +1442,9 @@ impl ToolExecutor for KronnToolExecutor {
     }
 
     fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
-        if self.worker_room {
+        if self.audit_workspace.is_some() {
+            crate::agents::tools::ToolRunMode::Audit
+        } else if self.worker_room {
             crate::agents::tools::ToolRunMode::Worker
         } else {
             crate::agents::tools::ToolRunMode::General

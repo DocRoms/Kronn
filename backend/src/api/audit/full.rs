@@ -390,6 +390,20 @@ pub async fn full_audit(
         // the relevance gate into the prompt at build time.
         let first_chained_step = super::ANALYSIS_STEPS.len() + 1;
         let total_steps = steps.len();
+        // Recompute from the actual documents, including predecessors created
+        // before documentary failures were persisted on their owning steps.
+        let documentary_recovery = if resume_run_id_req.is_some() && should_optimize_documents(kind) {
+            match crate::core::document_optimization::analyze(&project_path) {
+                Ok(report) => super::document_repair::recovery_plan(&report.diagnostics, &steps),
+                Err(error) => {
+                    yield Event::default().event("error").data(serde_json::json!({
+                        "error": format!("Cannot inspect documentary recovery targets: {error}")
+                    }).to_string());
+                    return;
+                }
+            }
+        } else { Default::default() };
+        for step in documentary_recovery.keys() { already_succeeded_steps.remove(step); }
         // A checkpoint beyond the pipeline is a corrupt/mismatched row, not a
         // request to skip everything — REFUSE it rather than clamp (a clamp
         // to total_steps would silently jump to validation-only on a run
@@ -1102,19 +1116,30 @@ pub async fn full_audit(
                     }
                 };
 
-            // 0.8.8 PR-A — enforce-mode per-step retry loop. `off`/`warn` run a
-            // single attempt (`max_attempts == 1`) with the gate inert, so the
-            // behaviour is unchanged. In `enforce`, a step that wrote fabricated
-            // `[src:]` citations re-runs with a corrective addendum, bounded by
-            // `MAX_ATTEMPTS`. The terminal attempt falls through to `step_done`
-            // / DB finalize exactly once.
-            let max_attempts = if enforce_mode {
+            // Correct blockers before final validation, at most twice per
+            // step. Full's documentary gate also applies in off/warn mode;
+            // the global provenance setting still controls the enforce gate.
+            let recovery_targets = documentary_recovery.get(&(step as u32)).cloned().unwrap_or_default();
+            let documentary_snapshot = if should_optimize_documents(kind) {
+                match super::document_repair::snapshot_for_recovery(&project_path, &recovery_targets) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(reason) => {
+                        yield Event::default().event("error").data(serde_json::json!({
+                            "step":step,"file":file_label,"error":reason,"fatal":true
+                        }).to_string());
+                        return;
+                    }
+                }
+            } else { None };
+            let max_attempts = if enforce_mode || documentary_snapshot.is_some() {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
                 1
             };
             let mut attempt: usize = 0;
-            let mut citation_feedback: Option<String> = None;
+            let mut citation_feedback = (!recovery_targets.is_empty())
+                .then(|| super::document_repair::feedback(&recovery_targets));
+            let mut previous_attempt_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
             'attempts: loop {
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
@@ -1434,6 +1459,8 @@ pub async fn full_audit(
                     let cli_success = status.map(|s| s.success()).unwrap_or(false);
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
                     run_tokens.add(step_usage.total());
+                    let combined_step_usage = previous_attempt_usage.plus(step_usage);
+                    previous_attempt_usage = combined_step_usage;
 
                     // 0.8.3 — Root-cause guard for the empty-tech-debt
                     // bug on DOCROMS_WEB. The CLI exited 0 (cli_success)
@@ -1460,6 +1487,10 @@ pub async fn full_audit(
                         success = false;
                         warning = Some(ownership_warning);
                     }
+
+                    warning = super::validation::with_tool_ceiling_warning(
+                        success, warning, &process.captured_stderr(),
+                    );
 
                     if let Some(w) = &warning {
                         tracing::warn!(
@@ -1508,6 +1539,42 @@ pub async fn full_audit(
                             // only runs when `success` was still true, i.e. the
                             // validation pass produced no warning.
                             warning = Some(w);
+                        }
+                    }
+
+                    // The final documentary gate is independent of the global
+                    // anti-hallucination mode. Correct its blockers now, while
+                    // the responsible step can still receive bounded feedback.
+                    let mut documentary_repair_proven = false;
+                    if success {
+                        if let Some(before) = &documentary_snapshot {
+                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets);
+                            let reason = match gate {
+                                Ok(blocking) if blocking.is_empty() => {
+                                    documentary_repair_proven = super::document_repair::recovery_changed(
+                                        &project_path, before, &recovery_targets,
+                                    );
+                                    None
+                                }
+                                Ok(blocking) if attempt < max_attempts => {
+                                    citation_feedback = Some(super::document_repair::feedback(&blocking));
+                                    yield Event::default().event("step_retry").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                        "reason":"documentary_blockers","fabricated_count":blocking.len(),
+                                        "diagnostics":blocking,
+                                    }).to_string());
+                                    continue 'attempts;
+                                }
+                                Ok(blocking) => Some(super::document_repair::feedback(&blocking)),
+                                Err(error) => Some(format!("Documentary correction failed: {error}")),
+                            };
+                            if let Some(reason) = reason {
+                                success = false;
+                                yield Event::default().event("step_warning").data(serde_json::json!({
+                                    "step":step,"file":file_label,"reason":reason,"repaired_from_template":false,
+                                }).to_string());
+                                warning = Some(super::validation::StepValidationWarning { reason, repaired:false });
+                            }
                         }
                     }
 
@@ -1585,7 +1652,7 @@ pub async fn full_audit(
                     // only when every earlier gate is green. The decision
                     // itself is a pure function (`rewrite_proof_verdict`, unit
                     // tested below) — this block only maps it to SSE events.
-                    if success {
+                    if success && !documentary_repair_proven {
                         match rewrite_proof_verdict(
                             analysis_step.target_file,
                             &pre_snapshot,
@@ -1636,7 +1703,7 @@ pub async fn full_audit(
                         "step": step,
                         "success": success,
                         "file": file_label,
-                        "tokens": step_usage.total(),
+                        "tokens": combined_step_usage.total(),
                         "duration_ms": duration_ms,
                         "total_tokens": run_tokens.total(),
                     });
@@ -1653,7 +1720,7 @@ pub async fn full_audit(
                         let warn_reason = warning.as_ref().map(|w| w.reason.clone());
                         let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
                         let ended = Utc::now();
-                        let recorded_usage = step_usage;
+                        let recorded_usage = combined_step_usage;
                         let recorded_total = run_tokens.total();
                         if let Err(e) = db.with_conn(move |conn| {
                             crate::db::audit_runs::finalize_audit_step(
@@ -1936,12 +2003,9 @@ pub async fn full_audit(
 
         // ── Phase 2.6: Documentary optimization ──
         // Deterministic and token-free. It runs after generation/reconciliation
-        // and before validation. Only an invented path (a link or citation to
-        // something that doesn't exist) is worth losing the whole run over —
-        // that's the one thing `blocking_diagnostics()` can still contain
-        // (KT-840). Volume, orphans, citation ranges and "obsolete" markers
-        // are surfaced as warnings on the SAME event and never gate
-        // completion.
+        // and before validation. Broken links and invalid file citations
+        // (grammar, path or range) block validation; volume and orphan
+        // diagnostics remain warnings.
         // KT-931 — a run with failed steps is validated too (for the steps that
         // succeeded), so the invented-path guard covers it as well: only a run
         // where nothing succeeded has no document to check.
@@ -1963,6 +2027,23 @@ pub async fn full_audit(
                     );
                     if !blocking.is_empty() {
                         docs_blocked = true;
+                        let recovery = super::document_repair::recovery_plan(&blocking, &steps);
+                        let mut warnings = Vec::new();
+                        for (step, diagnostics) in recovery {
+                            progress.invalidate_success(step);
+                            let reason = super::document_repair::feedback(&diagnostics);
+                            yield Event::default().event("step_warning").data(serde_json::json!({
+                                "step":step,"file":steps[step as usize - 1].target_file,
+                                "reason":reason,"repaired_from_template":false,
+                            }).to_string());
+                            warnings.push((step, reason));
+                        }
+                        let run_id = audit_run_id.clone();
+                        if let Err(error) = db.with_conn(move |conn|
+                            crate::db::audit_runs::invalidate_documentary_steps(conn, &run_id, &warnings)
+                        ).await {
+                            tracing::error!("Could not persist documentary recovery for {audit_run_id}: {error}");
+                        }
                         tracing::warn!(
                             target: "kronn::invariant",
                             diagnostics = blocking.len(),
@@ -2486,6 +2567,12 @@ impl RunProgress {
         if !self.succeeded.contains(&step) && !self.failed.contains(&step) {
             self.failed.push(step);
         }
+    }
+
+    /// A post-generation gate found a blocker in an earlier successful step.
+    pub(crate) fn invalidate_success(&mut self, step: u32) {
+        self.succeeded.remove(&step);
+        self.record_failure(step);
     }
 
     pub(crate) fn succeeded_count(&self) -> u32 {
@@ -3821,6 +3908,21 @@ mod partial_run_tests {
     /// The step the bench run lost to the Mac going to sleep.
     const FAILED_STEP: u32 = 5;
     const TOTAL: u32 = 16;
+
+    #[test]
+    fn final_documentary_gate_reopens_successes_and_blocks_validation_until_repaired() {
+        let mut progress = RunProgress::new(TOTAL, 1..=TOTAL).with_founding_step(Some(1));
+        assert!(progress.is_validatable());
+        progress.invalidate_success(1);
+        progress.invalidate_success(3);
+        assert_eq!(progress.steps_to_redo(), vec![1, 3]);
+        assert_eq!(progress.succeeded_count(), 14);
+        assert!(!progress.is_validatable());
+        progress.record_success(1);
+        progress.record_success(3);
+        assert!(progress.steps_to_redo().is_empty());
+        assert!(progress.is_validatable());
+    }
 
     /// The audit loop of the bench run (room af0af6de, run A1): 16 steps, the
     /// fifth fails for an external cause, every other one succeeds.

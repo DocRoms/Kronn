@@ -199,6 +199,15 @@ pub fn analyze_and_write(project: &Path) -> Result<DocumentaryOptimizationReport
     Ok(report)
 }
 
+/// The same bounded, symlink-filtered surface used by the final audit gate.
+pub(crate) fn document_paths(project: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = markdown_files(&project.join("docs"))?;
+    paths.extend(root_adapters(project)?);
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 fn load_budgets(project: &Path) -> Result<DocumentBudgets, String> {
     let path = project.join(CONFIG_FILE);
     if !path.exists() {
@@ -360,6 +369,11 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
         if raw.contains('<') || raw.contains('>') {
             continue;
         }
+        if raw.contains(',') {
+            out.push(diag("broken_citation", rel,
+                format!("malformed file citation `{raw}`: use one [src: file: path:line] marker per reference")));
+            continue;
+        }
         let Some((path_part, line_part)) = raw.rsplit_once(':') else {
             out.push(diag(
                 "broken_citation",
@@ -378,12 +392,17 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
             continue;
         }
         let max_line = read(&path).map(|s| s.lines().count()).unwrap_or(0);
-        let parsed = line_part
+        let bounds: Vec<_> = line_part
             .trim()
             .split('-')
-            .filter_map(|n| n.parse::<usize>().ok())
-            .max();
-        if parsed.is_none() || parsed.is_some_and(|n| n == 0 || n > max_line) {
+            .map(str::parse::<usize>)
+            .collect();
+        let valid = match bounds.as_slice() {
+            [Ok(line)] => *line > 0 && *line <= max_line,
+            [Ok(start), Ok(end)] => *start > 0 && start <= end && *end <= max_line,
+            _ => false,
+        };
+        if !valid {
             out.push(diag(
                 "broken_citation",
                 rel,

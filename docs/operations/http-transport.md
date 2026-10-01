@@ -25,8 +25,8 @@ override today.
 ## Repository mutations and audit usage
 
 After a successful workspace mutation, HTTP runs invalidate their cached file,
-search and Git observations. Audits use the general tool loop, so this must not
-be restricted to orchestration workers. General runs restore readers withdrawn
+search and Git observations. This applies to audit and general runs as well as
+orchestration workers. Non-worker runs restore readers withdrawn
 for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
@@ -41,6 +41,35 @@ are not an independent billing reconciliation.
 [src: file: backend/src/agents/runner.rs:8380]
 [src: file: backend/src/api/audit/full.rs:1276]
 [src: file: backend/src/api/audit/drift.rs:599]
+
+Audit executors have a separate bounded policy: 64 calls per file mutation tool
+(`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
+`search_text`. Other budgets, context-sized round caps,
+timeouts, identical-call protection and error circuits remain active. When an
+artifact check fails after a ceiling, the step warning records the ceiling
+alongside the missing-output reason. Reaching a search ceiling alone does not
+fail an otherwise valid artifact (KT-951).
+[src: file: backend/src/agents/runner.rs:681]
+[src: file: backend/src/api/audit/validation.rs:102]
+
+Full audits check changed documents against the final documentary gate during
+each step. Comma-bundled file references are split only when every individual
+path and line resolves; human-containing documents and fenced examples are
+excluded from this automatic edit. Originals are saved by content hash under
+`docs/.kronn-citation-originals/*.bak`. Remaining blockers receive at most two
+agent correction attempts, with existing human-section protection. Invalid
+paths and ranges still block validation. Retry usage is included in the step
+total (KT-952).
+[src: file: backend/src/api/audit/document_repair.rs:1]
+[src: file: backend/src/api/audit/full.rs:1122]
+
+The final gate also invalidates the relevant step rows so Resume names earlier
+documents that failed after their agent returned success. Recovery rechecks the
+actual files, including runs made before this fix. Auxiliary documents with no
+durable writer attribution are explicitly assigned to the founding step's
+repair prompt. A corrected reference establishes existence, not factual truth.
+[src: file: backend/src/api/audit/document_repair.rs:26]
+[src: file: backend/src/db/audit_runs.rs:620]
 
 ## Pre-dispatch capability check
 

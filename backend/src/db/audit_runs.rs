@@ -563,6 +563,20 @@ pub struct StepTokens {
 }
 
 impl StepTokens {
+    /// Sum reported usage across independent attempts. A component absent
+    /// from every attempt remains unknown, as with the run-level counter.
+    pub(crate) fn plus(self, other: Self) -> Self {
+        let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (None, None) => None,
+            _ => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
+        Self {
+            input: sum(self.input, other.input),
+            output: sum(self.output, other.output),
+            cache_read: sum(self.cache_read, other.cache_read),
+            cache_write: sum(self.cache_write, other.cache_write),
+        }
+    }
     /// Nothing was reported.
     pub const UNKNOWN: Self = Self {
         input: None,
@@ -593,6 +607,26 @@ impl StepTokens {
             (input, output) => Some(input.unwrap_or(0).saturating_add(output.unwrap_or(0))),
         }
     }
+}
+
+/// A later documentary gate can invalidate an earlier successful agent step.
+/// Preserve its timing/usage and original warning; resume must not skip it.
+pub(crate) fn invalidate_documentary_steps(
+    conn: &Connection,
+    run_id: &str,
+    warnings: &[(u32, String)],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (step, warning) in warnings {
+        tx.execute("UPDATE audit_run_steps SET cli_success = 0,
+            step_warning = CASE WHEN step_warning IS NULL THEN ?3 ELSE step_warning || char(10) || ?3 END
+            WHERE audit_run_id = ?1 AND step_index = ?2", params![run_id, step, warning])?;
+    }
+    tx.execute("UPDATE audit_runs SET last_completed_step = (
+        SELECT COUNT(*) FROM audit_run_steps WHERE audit_run_id = ?1 AND cli_success = 1 AND ended_at IS NOT NULL
+    ) WHERE id = ?1", params![run_id])?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Finalize a step row at `step_done` (or step_warning). `success`
@@ -1620,5 +1654,65 @@ mod tests {
         assert_eq!(runs[0].id, "new");
         assert_eq!(runs[1].id, "mid");
         assert_eq!(runs[2].id, "old");
+    }
+
+    #[test]
+    fn documentary_failure_invalidates_prior_success_without_losing_usage() {
+        let conn = fresh_conn();
+        let now = Utc::now();
+        insert_running(&conn, "repair", "p1", "Full", "LiteLlm", now).unwrap();
+        let attempt = StepTokens {
+            input: Some(100),
+            output: Some(10),
+            cache_read: Some(50),
+            cache_write: None,
+        };
+        let combined = attempt.plus(attempt);
+        assert_eq!(combined.total(), Some(220));
+        assert_eq!(combined.cache_write, None);
+        for step in 1..=3 {
+            insert_audit_step_start(&conn, "repair", step, "docs/a.md", now).unwrap();
+            finalize_audit_step(
+                &conn,
+                "repair",
+                step,
+                now,
+                500,
+                &combined,
+                Some(660),
+                true,
+                None,
+                false,
+            )
+            .unwrap();
+        }
+        invalidate_documentary_steps(
+            &conn,
+            "repair",
+            &[
+                (1, "docs/a.md: invalid line".into()),
+                (3, "docs/c.md: invented path".into()),
+            ],
+        )
+        .unwrap();
+        let steps = list_audit_steps(&conn, "repair").unwrap();
+        assert_eq!(
+            crate::api::audit::full::already_succeeded_step_indices(&steps),
+            [2].into_iter().collect()
+        );
+        assert_eq!(steps[0].step_tokens, Some(220));
+        assert_eq!(steps[0].duration_ms, Some(500));
+        assert!(steps[2]
+            .step_warning
+            .as_ref()
+            .unwrap()
+            .contains("invented path"));
+        assert_eq!(
+            get_by_id(&conn, "repair")
+                .unwrap()
+                .unwrap()
+                .last_completed_step,
+            1
+        );
     }
 }

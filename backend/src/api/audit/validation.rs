@@ -90,6 +90,41 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
+/// Preserve the artifact failure and explain the HTTP ceiling that preceded it.
+/// Reaching a search ceiling alone does not invalidate a complete artifact.
+pub(crate) fn with_tool_ceiling_warning(
+    success: bool,
+    warning: Option<StepValidationWarning>,
+    stderr: &[String],
+) -> Option<StepValidationWarning> {
+    if success {
+        return warning;
+    }
+    let Some(report) = crate::agents::runner::parse_ceiling_report(stderr) else {
+        return warning;
+    };
+    let mut limits: Vec<_> = report
+        .tools
+        .iter()
+        .map(|hit| {
+            format!(
+                "{}: {} calls ({} refused)",
+                hit.tool, hit.limit, hit.refused
+            )
+        })
+        .collect();
+    if let Some(rounds) = report.rounds {
+        limits.push(format!("{rounds} tool rounds"));
+    }
+    let reason = warning
+        .map(|w| w.reason)
+        .unwrap_or_else(|| "Agent did not complete the audit step".into());
+    Some(StepValidationWarning {
+        reason: format!("{reason}. HTTP tool budget reached: {}. Partial files are preserved; resume this step to finish the missing output.", limits.join(", ")),
+        repaired: false,
+    })
+}
+
 /// Check that a step's target file is plausibly filled. If it's
 /// missing or suspiciously small, the step FAILS with a warning —
 /// the file itself is never modified. Returns `(success,
@@ -1069,5 +1104,30 @@ mod tests {
                 .exists(),
             "no sidecar noise either"
         );
+    }
+
+    #[test]
+    fn failed_artifact_retains_http_budget_cause_but_recovered_search_does_not_fail() {
+        let trace = vec![format!(
+            "{}{}",
+            crate::agents::runner::CEILING_TRACE_PREFIX,
+            serde_json::json!({"version":1,"tools":[{"tool":"write_file","limit":64,
+                "refused":1,"refused_calls":["sensitive output must not be copied"]}]})
+        )];
+        let warning = with_tool_ceiling_warning(
+            false,
+            Some(StepValidationWarning {
+                reason: "docs/index.md is missing or empty".into(),
+                repaired: false,
+            }),
+            &trace,
+        )
+        .unwrap();
+        assert!(warning.reason.contains("docs/index.md is missing"));
+        assert!(warning.reason.contains("write_file: 64 calls"));
+        assert!(warning.reason.contains("resume this step"));
+        assert!(!warning.reason.contains("sensitive output"));
+        assert!(with_tool_ceiling_warning(true, None, &trace).is_none());
+        assert!(with_tool_ceiling_warning(false, None, &[]).is_none());
     }
 }

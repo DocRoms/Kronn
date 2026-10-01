@@ -21,6 +21,10 @@ const MAX_CALLS_PER_TOOL: usize = 12;
 // Keep the larger allowance worker-only so a general/API agent still gets the
 // stricter anti-loop policy.
 const MAX_WORKER_SEARCH_TEXT_CALLS: usize = 24;
+// A dimension audit writes many findings, then its index. These remain
+// per-attempt backstops; round, duration, repeat and error guards still apply.
+const MAX_AUDIT_WRITE_CALLS: usize = 64;
+const MAX_AUDIT_SEARCH_CALLS: usize = 48;
 // 48, raised from 24 after a real delegation died of it: a task that crosses
 // an 11 000-line file needed ~30 honest 120-line slices, spent the budget
 // mid-exploration, and the run ended with no edit. The cap is a backstop now,
@@ -670,8 +674,13 @@ fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -
     // Reading several small files is legitimate repository analysis. Keep the
     // stricter anti-loop cap for API/MCP calls, where varying arguments caused
     // the observed 47-call paid loop. Exact duplicate reads are still stopped
-    // separately after one replay, and the global 50-round cap remains.
+    // separately after one replay, and the context-sized round cap remains.
     match (run_mode, name) {
+        (
+            crate::agents::tools::ToolRunMode::Audit,
+            "write_file" | "edit_file" | "edit_lines" | "insert_after_line",
+        ) => MAX_AUDIT_WRITE_CALLS,
+        (crate::agents::tools::ToolRunMode::Audit, "search_text") => MAX_AUDIT_SEARCH_CALLS,
         (_, "read_file") => MAX_READ_FILE_CALLS,
         (_, "web_fetch") => MAX_WEB_FETCH_CALLS,
         (_, "api_call" | "qa_run") => MAX_API_ENUMERATION_CALLS,
@@ -8182,7 +8191,7 @@ async fn start_ollama_http_with_idle(
         let mut consecutive_error_only_rounds = 0usize;
         let mut useful_tool_results = 0usize;
         let mut forced_synthesis = false;
-        // Collect reached ceilings only where a human can answer.
+        // Structured telemetry is also consumed by the audit artifact gate.
         let mut ceiling_report = CeilingReport::default();
         let mut round_ceiling_reached = false;
         // A worker gets one bounded exploration phase and then a small
@@ -9183,6 +9192,10 @@ async fn start_ollama_http_with_idle(
                     );
                 }
             } else if turn > round_cap {
+                if tool_run_mode == crate::agents::tools::ToolRunMode::Audit {
+                    ceiling_report.rounds = Some(round_cap);
+                    ceiling_report.publish(&stderr_clone);
+                }
                 // Refusing to converge is a failure, not a silent
                 // truncation: surface it so the step fails with a reason.
                 let msg =
@@ -9464,7 +9477,9 @@ async fn start_ollama_http_with_idle(
                 if *used > tool_limit {
                     *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
                     withdrawn_tools.insert(call.name.clone());
-                    if ceiling_allowance.ask_on_ceiling {
+                    if ceiling_allowance.ask_on_ceiling
+                        || tool_run_mode == crate::agents::tools::ToolRunMode::Audit
+                    {
                         ceiling_report.record_tool_refusal(&call.name, tool_limit, call);
                         ceiling_report.publish(&stderr_clone);
                     }

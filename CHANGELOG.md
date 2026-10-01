@@ -319,6 +319,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- HTTP audits can write more than twelve findings and their index within a
+  dedicated bounded budget. A missing artifact after a tool ceiling now keeps
+  that cause in its persisted warning (KT-951). Full audits correct verifiable
+  bundled citations, retain originals, and retry remaining documentary blockers
+  at most twice. Resume includes previously successful steps whose documents
+  failed the final gate; invented paths and invalid lines still prevent
+  validation, and human sections remain protected (KT-952).
+
 - HTTP audits and discussions can read fresh repository content after writing
   it. Previously only orchestration workers invalidated cached observations;
   an audit could receive a pre-edit file or lose its reader as a repeated call.

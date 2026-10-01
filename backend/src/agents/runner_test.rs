@@ -13469,6 +13469,10 @@ sleep 3600
 
     #[async_trait::async_trait]
     impl crate::agents::tools::ToolExecutor for AuditMutationTools {
+        fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+            crate::agents::tools::ToolRunMode::Audit
+        }
+
         fn catalogue(&self) -> Vec<serde_json::Value> {
             ["read_file", "write_file"].into_iter().map(|name| serde_json::json!({
                 "type": "function", "function": {
@@ -13645,6 +13649,144 @@ sleep 3600
             restored,
             vec!["git_diff"],
             "only a repetition-withdrawn reader below its ceiling returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_audit_writes_many_findings_and_index_on_both_wires() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for agent in [AgentType::LiteLlm, AgentType::Ollama] {
+            let server = MockServer::start().await;
+            let openai = agent == AgentType::LiteLlm;
+            let round = std::sync::atomic::AtomicUsize::new(0);
+            Mock::given(method("POST"))
+                .and(path(if openai {
+                    "/v1/chat/completions"
+                } else {
+                    "/api/chat"
+                }))
+                .respond_with(move |_: &wiremock::Request| {
+                    let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let arguments = serde_json::json!({"path": if n == 16 {
+                        "docs/index.md".to_string()
+                    } else { format!("docs/TD-{n}.md") }});
+                    let call = serde_json::json!({"index":0,"id":format!("w{n}"),"function":{
+                        "name":"write_file", "arguments": if openai {
+                            serde_json::Value::String(arguments.to_string())
+                        } else { arguments }
+                    }});
+                    let delta = if n < 17 {
+                        serde_json::json!({"tool_calls":[call]})
+                    } else {
+                        serde_json::json!({"content":"done"})
+                    };
+                    let wire = if openai {
+                        sse(&[
+                            &serde_json::json!({"choices":[{"index":0,"delta":delta}]}).to_string()
+                        ])
+                    } else {
+                        format!(
+                            "{}\n{}\n",
+                            serde_json::json!({"message":delta,"done":false}),
+                            serde_json::json!({"done":true})
+                        )
+                    };
+                    ResponseTemplate::new(200).set_body_string(wire)
+                })
+                .mount(&server)
+                .await;
+            let executor = Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut process = start_ollama_http(
+                &agent,
+                "write sixteen findings then their index",
+                "",
+                "test-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(executor.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(
+                executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+                17,
+                "{agent:?}: every finding and the final index must execute"
+            );
+            assert!(parse_ceiling_report(&process.captured_stderr()).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_write_budget_stays_bounded_and_reports_its_cause() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let round = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let delta = if n == 0 {
+                    let calls: Vec<_> = (0..=MAX_AUDIT_WRITE_CALLS).map(|i|
+                        serde_json::json!({"index":i,"id":format!("w{i}"),"function":{
+                            "name":"write_file","arguments":serde_json::json!({"path":format!("docs/TD-{i}.md")}).to_string()
+                        }})).collect();
+                    serde_json::json!({"tool_calls":calls})
+                } else { serde_json::json!({"content":"Partial output; index still missing"}) };
+                ResponseTemplate::new(200).set_body_string(sse(&[
+                    &serde_json::json!({"choices":[{"index":0,"delta":delta}]}).to_string()
+                ]))
+            }).mount(&server).await;
+        let executor = Arc::new(AuditMutationTools {
+            revision: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "write findings",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(executor.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+        assert_eq!(
+            executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_AUDIT_WRITE_CALLS
+        );
+        let report = parse_ceiling_report(&process.captured_stderr())
+            .expect("audit telemetry without a human grant");
+        assert_eq!(report.tools[0].tool, "write_file");
+        assert_eq!(report.tools[0].limit, MAX_AUDIT_WRITE_CALLS);
+        assert_eq!(report.tools[0].refused, 1);
+        assert_eq!(
+            max_calls_for_tool("write_file", crate::agents::tools::ToolRunMode::General),
+            12
+        );
+        assert_eq!(
+            max_calls_for_tool("write_file", crate::agents::tools::ToolRunMode::Worker),
+            12
         );
     }
 
