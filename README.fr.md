@@ -60,7 +60,9 @@
 - **Des modèles locaux qui vont au bout :** un agent HTTP peut demander
   seulement la partie utile d'une grosse réponse d'API, une réponse raccourcie
   dit ce qu'elle contient, et les modèles OpenCode déclarés dans un projet
-  apparaissent dans les sélecteurs.
+  apparaissent dans les sélecteurs. La carte Ollama replie son bloc de
+  téléchargement, signale qu'un modèle installé a une mise à jour et propose
+  d'abord les versions MLX sur Apple Silicon.
 - **Des prompts qui restent privés :** aucun prompt envoyé à un modèle ne liste
   vos autres projets Kronn ; seuls les dépôts liés à un projet sont nommés.
 - **Des rooms qui s'ouvrent toujours :** un CLI que le bridge ne sait pas

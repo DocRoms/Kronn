@@ -56,7 +56,9 @@
   each step counts its tokens.
 - **Local models that finish the job:** an HTTP agent can ask for just the part
   of a large API response it needs, a shortened response says what it holds,
-  and OpenCode models declared in a project show up in the model pickers.
+  and OpenCode models declared in a project show up in the model pickers. The
+  Ollama card folds its download block, says when an installed model has an
+  update, and offers MLX builds first on Apple Silicon.
 - **Prompts that stay private:** no prompt sent to a model lists your other
   Kronn projects; only the repositories you linked to a project are named.
 - **Rooms that always open:** a CLI the bridge cannot identify no longer makes
