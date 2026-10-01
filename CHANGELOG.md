@@ -13,6 +13,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Codex, launched by Kronn in a discussion or a room, can use Kronn's own
+  tools again (KT-953). Kronn starts Codex non-interactively, so a tool left on
+  "ask" was refused ("MCP tool call requires approval, but approval policy is
+  never"): Codex could not read a message, post one, attach a file, generate a
+  media or create a task — even with full access. The Kronn entry Kronn writes
+  into `~/.codex/config.toml` now approves Kronn's tools, and only them; your
+  other MCP servers keep Codex's own setting. Claude Code and Copilot CLI
+  without full access hit the same wall for a fresh install: they now get
+  Kronn's tools, and nothing else, explicitly allowed (Claude:
+  `--allowedTools=mcp__kronn-internal`; Copilot: `--allow-tool=kronn-internal`).
+  Full access and task workers keep their current permissions.
+
 - Testing a LiteLLM connection no longer fails with "Could not persist the
   saved connection's model catalog" (KT-939). A LiteLLM proxy lists a model once
   per deployment; the second copy broke the catalogue's unique key and the whole

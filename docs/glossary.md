@@ -32,7 +32,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Agent semaphore** — `tokio::sync::Semaphore` in `AppState` limiting work performed on the Kronn host. A normal discussion run acquires it only for a CLI or Ollama; LiteLLM and NVIDIA bypass it. Durable dispatch admission separately enforces the same aggregate local limit plus a per-family limit. Size configurable via `max_concurrent_agents`.
 
-**full_access** — Boolean field on `AgentConfig` (persisted in config.toml). When true, agent runner adds `--dangerously-skip-permissions` (Claude) or `--full-auto` (Codex) to CLI invocations. Controlled via `GET/POST /api/config/agent-access`.
+**full_access** — Boolean field on `AgentConfig` (persisted in config.toml). When true, agent runner adds `--dangerously-skip-permissions` (Claude), `--sandbox=danger-full-access` (Codex), `--yolo` (Gemini) or `--allow-all-tools` (Copilot) to CLI invocations; task workers never get them. Kronn's own `kronn-internal` tools are allowed with or without it (KT-953). Controlled via `GET/POST /api/config/agent-access`.
 
 ## Domain concepts
 

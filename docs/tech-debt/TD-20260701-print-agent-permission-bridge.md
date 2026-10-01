@@ -14,7 +14,8 @@
   - **Force skip-permissions for `--print` runs**, OR pre-authorize the Kronn tool surface via `--allowedTools "mcp__kronn-internal__*"` (+ the QP's declared side-effecting endpoints), so orchestrated agents can call their own tools without an interactive prompt that can never appear. `--print` is inherently non-interactive → the interactive-permission UX does not apply.
   - **Detect the denial and surface it**: when a gated tool call is refused in headless mode, emit a clear structured error ("tool X blocked: enable full access or allowlist it") instead of letting the model invent a popup. Consider a system-prompt note for Kronn-launched agents: "you are headless; there is no permission popup — never instruct the user to click Allow."
   - Longer term: a per-run permission policy in Kronn (allowlist of tools an orchestrated agent may call unattended), decoupled from the coarse `full_access` boolean.
-- **Next step**: create ticket.
+- **Status**: partly resolved by KT-953 (0.14.2). Kronn's own tools are now allowed without `full_access`: Claude Code `--allowedTools=mcp__kronn-internal`, Copilot CLI `--allow-tool=kronn-internal`, Codex `default_tools_approval_mode = "approve"` on the `kronn-internal` entry of `~/.codex/config.toml` (Codex refused them even with `full_access`). Still open: surfacing a headless denial instead of a hallucinated popup, Gemini CLI (not verified), a per-run permission policy for side-effecting tools outside Kronn.
+- **Next step**: ticket the remaining items.
 
 ## Notes
 

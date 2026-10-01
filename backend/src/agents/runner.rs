@@ -11256,6 +11256,10 @@ fn agent_command_with_task_worker_policy(
                 args.push("acceptEdits".into());
             } else if full_access {
                 args.push("--dangerously-skip-permissions".into());
+            } else {
+                // `--print` cannot ask, so Kronn's own tools must be allowed up front.
+                // The `=` form matters: a variadic flag followed by a space eats the prompt.
+                args.push("--allowedTools=mcp__kronn-internal".into());
             }
             // Inject MCP context via --append-system-prompt (separate from user prompt)
             if !mcp_context.is_empty() {
@@ -11461,6 +11465,9 @@ fn agent_command_with_task_worker_policy(
             }
             if full_access && !task_worker {
                 args.push("--allow-all-tools".into());
+            } else if !task_worker {
+                // Non-interactive Copilot refuses any tool it would have to ask about.
+                args.push("--allow-tool=kronn-internal".into());
             }
             // Copilot has no system prompt flag — prepend context to prompt
             let full_prompt = if mcp_context.is_empty() {

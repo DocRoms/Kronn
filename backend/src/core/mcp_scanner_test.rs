@@ -3195,6 +3195,74 @@ args = ["@example/old-mcp"]
 
     #[test]
     #[serial]
+    fn codex_global_sync_approves_only_kronn_internal_tools() {
+        let tmp = setup_tmp("codex-global-approval");
+        let home = tmp.join("fake-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        crate::db::mcps::upsert_server(
+            &conn,
+            &crate::models::McpServer {
+                id: "srv-user".into(),
+                name: "Atlassian".into(),
+                description: String::new(),
+                transport: crate::models::McpTransport::Stdio {
+                    command: "uvx".into(),
+                    args: vec!["mcp-atlassian".into()],
+                },
+                source: crate::models::McpSource::Registry,
+                api_spec: None,
+            },
+        )
+        .unwrap();
+        crate::db::mcps::insert_config(
+            &conn,
+            &crate::models::McpConfig {
+                id: "cfg-user".into(),
+                server_id: "srv-user".into(),
+                label: "atlassian".into(),
+                env_keys: vec![],
+                env_encrypted: String::new(),
+                args_override: None,
+                is_global: true,
+                include_general: true,
+                config_hash: "h".into(),
+                project_ids: vec![],
+                host_sync: crate::models::HostSyncMode::GlobalOnly,
+            },
+        )
+        .unwrap();
+
+        let plan = CodexSync.prepare(&conn, "secret-irrelevant").expect("plan");
+        let doc: toml::Table = plan.content.parse().expect("valid TOML");
+        let servers = doc["mcp_servers"].as_table().expect("mcp_servers table");
+        assert_eq!(
+            servers["kronn-internal"].get("default_tools_approval_mode").and_then(|v| v.as_str()),
+            Some("approve"),
+            "Kronn-launched Codex runs with approval policy `never`: kronn-internal must be pre-approved. Got:\n{}",
+            plan.content
+        );
+        assert!(
+            servers["atlassian"]
+                .get("default_tools_approval_mode")
+                .is_none(),
+            "a user MCP must keep Codex's own approval default. Got:\n{}",
+            plan.content
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        cleanup(&tmp);
+    }
+
+    #[test]
+    #[serial]
     fn copilot_global_sync_emits_kronn_internal_into_mcp_config_json() {
         let tmp = setup_tmp("copilot-global-inject");
         let home = tmp.join("fake-home");

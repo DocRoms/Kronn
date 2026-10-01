@@ -8135,6 +8135,46 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn claude_code_without_full_access_allows_only_kronn_internal_tools() {
+        for context in ["", "mcp context"] {
+            let (_, _, args, _, _, _) = super::super::agent_command(
+                &AgentType::ClaudeCode,
+                "test prompt",
+                false,
+                context,
+                None,
+            );
+            assert!(
+                args.contains(&"--allowedTools=mcp__kronn-internal".to_string()),
+                "`--print` cannot ask for permission: Kronn's tools must be allowed. {args:?}"
+            );
+            // A space-separated value would let the variadic flag swallow the prompt.
+            assert!(!args.contains(&"--allowedTools".to_string()), "{args:?}");
+            assert_eq!(args.last().map(String::as_str), Some("test prompt"));
+        }
+    }
+
+    #[test]
+    fn claude_task_worker_keeps_its_narrow_tool_allowance() {
+        let worktree = tempfile::tempdir().unwrap();
+        let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "test prompt",
+            false,
+            "worker context",
+            None,
+            None,
+            true,
+            Some(worktree.path()),
+            None,
+        );
+        assert!(
+            !args.contains(&"--allowedTools=mcp__kronn-internal".to_string()),
+            "{args:?}"
+        );
+    }
+
+    #[test]
     fn claude_task_worker_uses_fail_closed_workspace_sandbox() {
         let worktree = tempfile::tempdir().unwrap();
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
@@ -11077,7 +11117,7 @@ Suite de la réponse.";
         assert_eq!(bin, "copilot");
         assert_eq!(npx, Some("@github/copilot"));
         assert_eq!(env_key, "GH_TOKEN");
-        assert_eq!(args, vec!["-p", "hello"]);
+        assert_eq!(args, vec!["--allow-tool=kronn-internal", "-p", "hello"]);
     }
 
     #[test]
@@ -11096,7 +11136,35 @@ Suite de la réponse.";
             "",
             Some("gpt-4o-mini"),
         );
-        assert_eq!(args, vec!["--model", "gpt-4o-mini", "-p", "hello"]);
+        assert_eq!(
+            args,
+            vec![
+                "--model",
+                "gpt-4o-mini",
+                "--allow-tool=kronn-internal",
+                "-p",
+                "hello"
+            ]
+        );
+    }
+
+    #[test]
+    fn copilot_task_worker_gets_no_kronn_internal_allowance() {
+        let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::CopilotCli,
+            "test prompt",
+            false,
+            "worker context",
+            None,
+            None,
+            true,
+            None,
+            None,
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--allow-tool")),
+            "{args:?}"
+        );
     }
 
     #[test]
