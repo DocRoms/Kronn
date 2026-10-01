@@ -559,43 +559,160 @@ mod tests {
         assert!(canonical_pos < out.find("```sh").unwrap());
     }
 
-    /// The whole KT-843 chain the ticket falsified: STEP 0 → human-owned
-    /// snapshot → an audit step rewrites the section → restore. Before the
-    /// fix STEP 0 swapped `owner="human"` for `owner="audit"` ahead of the
-    /// snapshot, so the snapshot saw no human section and nothing came back.
-    #[test]
-    fn human_anti_hallu_section_survives_step0_then_an_audit_rewrite() {
+    // ─── KT-933: the chain, end to end (Codex harness MSG-039629c2, case 1) ──
+
+    /// One audit step the way `full.rs` runs it, with the REAL functions in
+    /// the REAL order: STEP 0 (`apply`, `full.rs:807`), the human-owned
+    /// snapshot (`full.rs:1057`), whatever the step writes, then the guard +
+    /// restore (`full.rs:1355`). `step_writes` gets the doc as STEP 0 left it
+    /// and returns what the step leaves on disk. Returns what STEP 0 reported,
+    /// the doc as STEP 0 left it, the number of sections the guard restored
+    /// and the final doc.
+    fn replay_step0_then_one_audit_step(
+        project: &Path,
+        step_writes: impl FnOnce(&str) -> String,
+    ) -> (AntiHalluApplyResult, String, usize, String) {
         use crate::api::audit::helpers::{
             capture_human_owned_sections, protect_human_owned_sections,
         };
+        let agents_md = project.join("docs/AGENTS.md");
 
+        let step0 = apply(project).unwrap();
+        let after_step0 = std::fs::read_to_string(&agents_md).unwrap();
+
+        let snapshot = capture_human_owned_sections(project).unwrap();
+        std::fs::write(&agents_md, step_writes(&after_step0)).unwrap();
+        let restored = protect_human_owned_sections(project, &snapshot, "2026-10-01").unwrap();
+
+        let final_doc = std::fs::read_to_string(&agents_md).unwrap();
+        (step0, after_step0, restored, final_doc)
+    }
+
+    fn project_with_agents_md(doc: &str) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        let docs = tmp.path().join("docs");
-        std::fs::create_dir_all(&docs).unwrap();
-        let human_block = "<!-- kronn:section name=\"anti-hallu\" owner=\"human\" audit=\"2020-01-01\" -->\n## 0. Anti-Hallucination Protocol\n\nOur own house rules.\n<!-- kronn:section:end -->";
-        std::fs::write(
-            docs.join("AGENTS.md"),
-            format!("{SPEC_HEADER}\n\n# Header\n\n{human_block}\n\n## 1. Section A\n"),
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(tmp.path().join("docs/AGENTS.md"), doc).unwrap();
+        tmp
+    }
+
+    /// The case the ticket falsified. Before the fix STEP 0 swapped
+    /// `owner="human"` for `curated="ai" owner="audit"` on the live opener,
+    /// ahead of the snapshot: the snapshot then saw no human section, and the
+    /// step's later write to the body triggered no restoration at all.
+    ///
+    /// Against the old `refresh_existing` this fails at the first ownership
+    /// assertion (STEP 0 no longer leaves the section human).
+    #[test]
+    fn human_anti_hallu_survives_step0_then_snapshot_then_a_rewrite_then_the_guard() {
+        use crate::api::audit::anti_hallu_enforce::contains_human_owned_section;
+
+        for opener in [
+            "<!-- kronn:section name=\"anti-hallu\" owner=\"human\" audit=\"2020-01-01\" -->",
+            "<!-- kronn:section name=\"anti-hallu\" curated=\"human\" audit=\"2020-01-01\" -->",
+            "<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" owner=\"human\" audit=\"2020-01-01\" -->",
+            "<!-- kronn:section owner=\"human\" audit=\"2020-01-01\" name=\"anti-hallu\" -->",
+        ] {
+            let human_block = format!(
+                "{opener}\n## 0. Anti-Hallucination Protocol\n\nOur own house rules.\n<!-- kronn:section:end -->"
+            );
+            // With and without the spec header: STEP 0 reports NoOp when only
+            // the (skipped) refresh was due, Refreshed when it also writes the
+            // header. The human block must survive both writes.
+            for (header, expected_step0) in [
+                (format!("{SPEC_HEADER}\n\n"), AntiHalluApplyResult::NoOp),
+                (String::new(), AntiHalluApplyResult::Refreshed),
+            ] {
+                let doc = format!("{header}# Header\n\n{human_block}\n\n## 1. Section A\n");
+                // The doc really goes through `refresh_existing` (the live
+                // opener is found), not through a fresh insertion.
+                assert!(find_marker_line(&doc).is_some(), "live opener: {opener}");
+
+                // What the step does to the section: `body` edits a line in
+                // place; `wholesale` swaps the section for the canonical
+                // audit-owned block (the shape the old STEP 0 had already
+                // produced by itself).
+                for rewrite_name in ["body", "wholesale"] {
+                    let ctx = format!("{opener} / header={} / {rewrite_name}", !header.is_empty());
+                    let tmp = project_with_agents_md(&doc);
+                    let (step0, after_step0, restored, final_doc) =
+                        replay_step0_then_one_audit_step(tmp.path(), |d| match rewrite_name {
+                            "body" => d.replace("Our own house rules.", "Audit-flavoured rules."),
+                            _ => d.replace(human_block.as_str(), &canonical_block_for_today()),
+                        });
+
+                    // Link 1: STEP 0 leaves the human section human, byte for byte.
+                    assert_eq!(step0, expected_step0, "STEP 0 result: {ctx}");
+                    assert!(
+                        after_step0.contains(&human_block),
+                        "STEP 0 left it alone: {ctx}\n{after_step0}"
+                    );
+                    // Link 2: so the snapshot that follows still has something to guard.
+                    assert!(
+                        contains_human_owned_section(&after_step0),
+                        "the snapshot must still see a human-owned section: {ctx}"
+                    );
+                    // Link 3: the step's write is detected and undone by the guard.
+                    assert_eq!(restored, 1, "the rewrite is detected and undone: {ctx}");
+                    assert!(
+                        final_doc.contains(&human_block),
+                        "human block restored: {ctx}\n{final_doc}"
+                    );
+                    assert!(
+                        !final_doc.contains("Audit-flavoured rules."),
+                        "the step's text is gone: {ctx}"
+                    );
+                    assert_eq!(
+                        final_doc.matches("name=\"anti-hallu\"").count(),
+                        1,
+                        "exactly one anti-hallu section, the human one: {ctx}"
+                    );
+                    // The refused proposal is recorded for the human to review.
+                    let report = std::fs::read_to_string(
+                        tmp.path()
+                            .join("docs/reports/2026-10-01-human-section-diff-docs-AGENTS.md"),
+                    )
+                    .unwrap_or_else(|e| panic!("diff report missing ({e}): {ctx}"));
+                    assert!(report.contains("Our own house rules."), "report: {ctx}");
+                }
+            }
+        }
+    }
+
+    /// Control from the same harness: a plain edit of a human section is
+    /// caught through the very same chain. STEP 0 still does its job on the
+    /// audit-owned anti-hallu section next to it, so the protection above is
+    /// about ownership, not a blanket stop.
+    #[test]
+    fn ordinary_edit_of_a_human_section_is_still_caught_after_step0() {
+        let notes = "<!-- kronn:section name=\"team-notes\" owner=\"human\" -->\nOriginal human note.\n<!-- kronn:section:end -->";
+        let doc = format!(
+            "{SPEC_HEADER}\n\n# Header\n\n<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"2020-01-01\" -->\nOLD CANON\n<!-- kronn:section:end -->\n\n{notes}\n"
+        );
+        let tmp = project_with_agents_md(&doc);
+
+        let (step0, after_step0, restored, final_doc) =
+            replay_step0_then_one_audit_step(tmp.path(), |d| {
+                d.replace("Original human note.", "Audit replacement.")
+            });
+
+        assert_eq!(step0, AntiHalluApplyResult::Refreshed);
+        assert!(
+            after_step0.contains(&opening_marker_for_today()),
+            "the audit-owned section is still refreshed:\n{after_step0}"
+        );
+        assert!(
+            after_step0.contains(notes),
+            "human section untouched by STEP 0"
+        );
+        assert_eq!(restored, 1, "the ordinary edit is detected");
+        assert!(final_doc.contains(notes));
+        assert!(!final_doc.contains("Audit replacement."));
+        let report = std::fs::read_to_string(
+            tmp.path()
+                .join("docs/reports/2026-10-01-human-section-diff-docs-AGENTS.md"),
         )
         .unwrap();
-
-        assert_eq!(apply(tmp.path()).unwrap(), AntiHalluApplyResult::NoOp);
-
-        let snapshot = capture_human_owned_sections(tmp.path()).unwrap();
-        let after_step0 = std::fs::read_to_string(docs.join("AGENTS.md")).unwrap();
-        assert!(after_step0.contains(human_block), "STEP 0 left it alone");
-
-        // An audit step "improves" the human section.
-        std::fs::write(
-            docs.join("AGENTS.md"),
-            after_step0.replace("Our own house rules.", "Audit-flavoured rules."),
-        )
-        .unwrap();
-        let restored = protect_human_owned_sections(tmp.path(), &snapshot, "2026-10-01").unwrap();
-        assert_eq!(restored, 1, "the rewrite is detected and undone");
-        let final_doc = std::fs::read_to_string(docs.join("AGENTS.md")).unwrap();
-        assert!(final_doc.contains(human_block));
-        assert!(!final_doc.contains("Audit-flavoured rules."));
+        assert!(report.contains("Original human note.") && report.contains("Audit replacement."));
     }
 
     #[test]
