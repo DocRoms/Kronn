@@ -2512,6 +2512,63 @@ mod tests {
         );
     }
 
+    /// KT-943 — the same model on the same machine once its attention shape and
+    /// its weights are known: a discussion gets the model's whole window instead
+    /// of the memory band, and a worker is still held at the MLX ceiling.
+    #[test]
+    fn once_its_cache_cost_is_known_qwen38_mlx_gets_its_whole_window_on_a_64_gb_mac() {
+        use crate::agents::ollama_memory::{
+            ceiling_for_model, gpu_budget_bytes, kv_shape_from_config, CeilingInputs, KvCacheType,
+        };
+        use crate::agents::tools::ToolRunMode;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MODEL: &str = "qwen3.8:27b-mlx";
+        const TRAINED: u64 = 262_144;
+
+        // The `config.json` of the model: 16 of its 64 layers cache anything.
+        let layer_types: Vec<&str> = (1..=64)
+            .map(|n| {
+                if n % 4 == 0 {
+                    "full_attention"
+                } else {
+                    "linear_attention"
+                }
+            })
+            .collect();
+        let shape = kv_shape_from_config(&serde_json::json!({
+            "text_config": {
+                "num_hidden_layers": 64,
+                "full_attention_interval": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "layer_types": layer_types,
+            }
+        }));
+        let ceiling = ceiling_for_model(&CeilingInputs {
+            total_ram_bytes: Some(64 * GIB),
+            gpu_budget_bytes: Some(gpu_budget_bytes(64 * GIB, None)),
+            weights_bytes: Some(18_200_000_000),
+            measured_kv_bytes_per_token: None,
+            shape,
+            kv_cache_type: Some(KvCacheType::F16),
+        });
+        let resolved = resolve_ctx_cap_within(None, Some(TRAINED), ceiling);
+        assert_eq!(resolved.value, TRAINED, "the band said 65,536");
+        assert_eq!(resolved.origin, CtxCapOrigin::ModelWindow);
+
+        let policy = worker_exploration_policy(MODEL, Some("safetensors"), false, true);
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::General, policy),
+            TRAINED,
+            "a discussion runs at the model's whole window"
+        );
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::Worker, policy),
+            32_768,
+            "a worker is still held at the MLX ceiling"
+        );
+    }
+
     /// What `qwen3.8:27b-mlx` is given on a 64 GB Mac, by each rule that can
     /// decide it, computed by the functions a run calls. A discussion is not a
     /// worker: the 32K MLX ceiling exists for a worker's long exploration and
@@ -10080,7 +10137,9 @@ Suite de la réponse.";
             .mount(&server)
             .await;
 
-        let limit = ollama_model_ctx_limit(&server.uri(), "qwen3-slow-load").await;
+        let limit = ollama_model_profile(&server.uri(), "qwen3-slow-load")
+            .await
+            .and_then(|profile| profile.context_length());
 
         assert_eq!(
             limit,
@@ -10107,7 +10166,9 @@ Suite de la réponse.";
             .mount(&server)
             .await;
 
-        let limit = ollama_model_ctx_limit(&server.uri(), "qwen3-always-down").await;
+        let limit = ollama_model_profile(&server.uri(), "qwen3-always-down")
+            .await
+            .and_then(|profile| profile.context_length());
 
         assert_eq!(limit, None, "a persistent failure still falls back");
         assert_eq!(
@@ -10338,6 +10399,7 @@ Suite de la réponse.";
             OllamaModelProfile {
                 context_length: Some(262144),
                 storage_format: Some("safetensors".into()),
+                kv_shape: None,
             }
         );
 
@@ -10346,6 +10408,7 @@ Suite de la réponse.";
             OllamaModelProfile {
                 context_length: None,
                 storage_format: None,
+                kv_shape: None,
             }
         );
     }

@@ -2745,6 +2745,7 @@ const es: TranslationDict = {
   'ollama.contextOrigin.operator_override': 'variable de entorno',
   'ollama.contextOrigin.model_override': 'override del modelo',
   'ollama.contextOrigin.model_window': 'ventana del modelo',
+  'ollama.contextOrigin.model_estimate': 'estimación del modelo (pesos + caché)',
   'ollama.contextOrigin.machine_ceiling': 'memoria de la máquina',
   'ollama.contextOrigin.portable_fallback': 'fallback portátil',
   'ollama.contextOrigin.refresh_required': 'actualización necesaria',

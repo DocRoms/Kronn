@@ -225,9 +225,7 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
                 .map(|tag| (tag.name, tag.size, tag.modified_at))
                 .collect();
             let env_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
-            let ram_ceiling = crate::agents::runner::ram_derived_ceiling(
-                crate::agents::runner::total_system_memory_bytes(),
-            );
+            let machine = crate::agents::ollama_memory::MachineFacts::read();
             let overrides = state
                 .config
                 .read()
@@ -242,27 +240,47 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
             // opening Settings into a burst of a dozen simultaneous local
             // requests, cold-load stalls included.
             const MAX_CONCURRENT_PROBES: usize = 4;
-            let names_to_probe: Vec<String> =
-                listed.iter().map(|(name, _, _)| name.clone()).collect();
-            let contexts = futures::stream::iter(names_to_probe)
-                .map(|name| {
+            // KT-943 — the ceiling is per model: its weights are what the
+            // listing already says it takes, its cache cost comes from its own
+            // metadata, so the one probe also decides the ceiling.
+            let probes: Vec<(String, u64)> = listed
+                .iter()
+                .map(|(name, size, _)| (name.clone(), *size))
+                .collect();
+            let decided = futures::stream::iter(probes)
+                .map(|(name, size)| {
                     let base = base.clone();
-                    async move { crate::agents::runner::ollama_model_ctx_limit(&base, &name).await }
+                    async move {
+                        let profile =
+                            crate::agents::runner::ollama_model_profile(&base, &name).await;
+                        let ceiling = crate::agents::runner::ollama_machine_ceiling(
+                            &machine,
+                            &base,
+                            &name,
+                            profile.as_ref(),
+                            Some(size),
+                        )
+                        .await;
+                        (
+                            profile.and_then(|profile| profile.context_length()),
+                            ceiling,
+                        )
+                    }
                 })
                 .buffered(MAX_CONCURRENT_PROBES)
                 .collect::<Vec<_>>()
                 .await;
             let models = listed
                 .into_iter()
-                .zip(contexts)
-                .map(|((name, size, modified), advertised_context)| {
+                .zip(decided)
+                .map(|((name, size, modified), (advertised_context, ceiling))| {
                     let context_override = overrides.get(&name).copied();
                     let cap = crate::agents::runner::resolve_ctx_cap_for_model(
                         env_cap.clone(),
                         &name,
                         &overrides,
                         advertised_context,
-                        ram_ceiling,
+                        ceiling,
                     );
                     OllamaModel {
                         name,
@@ -353,6 +371,7 @@ fn context_origin_label(origin: &crate::agents::runner::CtxCapOrigin) -> String 
         crate::agents::runner::CtxCapOrigin::ModelOverride => "model_override",
         crate::agents::runner::CtxCapOrigin::ModelWindow => "model_window",
         crate::agents::runner::CtxCapOrigin::MachineCeiling { .. } => "machine_ceiling",
+        crate::agents::runner::CtxCapOrigin::ModelEstimate { .. } => "model_estimate",
         crate::agents::runner::CtxCapOrigin::PortableFallback => "portable_fallback",
     }
     .to_string()
@@ -660,11 +679,19 @@ pub async fn set_context_override(
     let warnings = match request.num_ctx {
         Some(value) => {
             let base = ollama_base_url();
-            let advertised = crate::agents::runner::ollama_model_ctx_limit(&base, &model).await;
-            let ram_ceiling = crate::agents::runner::ram_derived_ceiling(
-                crate::agents::runner::total_system_memory_bytes(),
-            );
-            override_warnings(&model, value, advertised, ram_ceiling)
+            let profile = crate::agents::runner::ollama_model_profile(&base, &model).await;
+            let advertised = profile
+                .as_ref()
+                .and_then(|profile| profile.context_length());
+            let ceiling = crate::agents::runner::ollama_machine_ceiling(
+                &crate::agents::ollama_memory::MachineFacts::read(),
+                &base,
+                &model,
+                profile.as_ref(),
+                crate::agents::runner::ollama_model_size_bytes(&base, &model).await,
+            )
+            .await;
+            override_warnings(&model, value, advertised, ceiling.tokens)
         }
         None => Vec::new(),
     };
@@ -1118,6 +1145,12 @@ mod tests {
                 model_limit: 262_144
             }),
             "machine_ceiling"
+        );
+        assert_eq!(
+            context_origin_label(&CtxCapOrigin::ModelEstimate {
+                model_limit: 262_144
+            }),
+            "model_estimate"
         );
         assert_eq!(
             context_origin_label(&CtxCapOrigin::PortableFallback),

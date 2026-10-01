@@ -6,6 +6,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
 use super::idle_watchdog::{self, IdleWatchdog};
+use super::ollama_memory::{
+    ceiling_for_model, kv_shape_from_show, kv_shape_from_store, CeilingBasis, CeilingInputs,
+    KvShape, MachineFacts, ModelCeiling,
+};
 use super::provenance::{self, AgentProvenanceCapture};
 use crate::core::cmd::{async_cmd, sync_cmd};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
@@ -5033,11 +5037,13 @@ const OLLAMA_NUM_CTX_BLIND_CEILING: u64 = 32768;
 /// cliff documented above. But a flat 32K was the opposite error — it silently
 /// throttled a large model on a large machine, and said nothing about it.
 ///
-/// Tiers, not a formula: the per-token cost depends on layers, KV heads and
-/// quantisation, none of which `/api/show` reports reliably. A coarse ceiling
-/// that is honest about being coarse beats a precise-looking number built on
-/// figures we do not have. Installed memory, never free memory — free memory
-/// changes minute to minute and would make two identical runs differ.
+/// Tiers, not a formula: this is what stands while the per-token cost of the
+/// model is unknown. `ollama_memory::ceiling_for_model` replaces it with a
+/// per-model figure (KT-943) whenever the model's attention shape and weights
+/// are known, and falls back here when they are not: a coarse ceiling that is
+/// honest about being coarse beats a precise-looking number built on figures we
+/// do not have. Installed memory, never free memory — free memory changes
+/// minute to minute and would make two identical runs differ.
 pub(crate) fn ram_derived_ceiling(total_bytes: Option<u64>) -> u64 {
     const GB: u64 = 1024 * 1024 * 1024;
     match total_bytes {
@@ -5087,8 +5093,13 @@ pub(crate) enum CtxCapOrigin {
     ModelOverride,
     /// The model's own trained context, used in full.
     ModelWindow,
-    /// Below what the model offers, because of what this machine can hold.
+    /// Below what the model offers, because of the coarse band of this machine's
+    /// installed memory — what is used while nothing is known of the model.
     MachineCeiling { model_limit: u64 },
+    /// Below what the model offers, because of what this machine can hold of
+    /// THIS model: its weights and the cost of one token of its cache, computed
+    /// from its own metadata (KT-943), or measured on the running server.
+    ModelEstimate { model_limit: u64 },
     /// Ollama did not answer `/api/show`, so nothing better was known.
     PortableFallback,
 }
@@ -5108,6 +5119,14 @@ impl CtxCap {
                 "{model} supports a {model_limit}-token context; Kronn is running it at {} \
                  — the ceiling this machine's memory allows. Raise it with \
                  KRONN_OLLAMA_NUM_CTX_CAP if the RAM is there.",
+                self.value
+            )),
+            CtxCapOrigin::ModelEstimate { model_limit } => Some(format!(
+                "{model} supports a {model_limit}-token context; Kronn is running it at {} \
+                 — what this machine's memory holds once the model's weights, the cost of \
+                 its cache per token and a safety margin are counted. Raise it with \
+                 KRONN_OLLAMA_NUM_CTX_CAP or this model's override if you know the memory \
+                 is there.",
                 self.value
             )),
             // KT-405 — a prompt fitting inside 8192 is not proof the model was
@@ -5168,7 +5187,7 @@ pub(crate) fn resolve_ctx_cap_for_model(
     model: &str,
     overrides: &std::collections::HashMap<String, u64>,
     model_limit: Option<u64>,
-    ceiling: u64,
+    ceiling: impl Into<ModelCeiling>,
 ) -> CtxCap {
     if let Some(value) = parse_num_ctx_cap(env_raw) {
         return CtxCap {
@@ -5193,7 +5212,7 @@ pub(crate) fn resolve_ctx_cap_for_model(
 pub(crate) fn resolve_ctx_cap_within(
     env_raw: Option<String>,
     model_limit: Option<u64>,
-    ceiling: u64,
+    ceiling: impl Into<ModelCeiling>,
 ) -> CtxCap {
     if let Some(value) = parse_num_ctx_cap(env_raw) {
         return CtxCap {
@@ -5201,13 +5220,22 @@ pub(crate) fn resolve_ctx_cap_within(
             origin: CtxCapOrigin::OperatorOverride,
         };
     }
+    let ceiling: ModelCeiling = ceiling.into();
+    let tokens = ceiling.tokens.max(OLLAMA_NUM_CTX_FLOOR);
     match model_limit {
         Some(limit) => {
-            let value = limit.clamp(OLLAMA_NUM_CTX_FLOOR, ceiling.max(OLLAMA_NUM_CTX_FLOOR));
+            let value = limit.clamp(OLLAMA_NUM_CTX_FLOOR, tokens);
             CtxCap {
                 value,
                 origin: if value < limit {
-                    CtxCapOrigin::MachineCeiling { model_limit: limit }
+                    match ceiling.basis {
+                        CeilingBasis::MemoryBand => {
+                            CtxCapOrigin::MachineCeiling { model_limit: limit }
+                        }
+                        CeilingBasis::ModelEstimate => {
+                            CtxCapOrigin::ModelEstimate { model_limit: limit }
+                        }
+                    }
                 } else {
                     CtxCapOrigin::ModelWindow
                 },
@@ -5215,7 +5243,7 @@ pub(crate) fn resolve_ctx_cap_within(
         }
         // Bound the fallback by host memory.
         None => CtxCap {
-            value: OLLAMA_NUM_CTX_CAP.min(ceiling.max(OLLAMA_NUM_CTX_FLOOR)),
+            value: OLLAMA_NUM_CTX_CAP.min(tokens),
             origin: CtxCapOrigin::PortableFallback,
         },
     }
@@ -5317,6 +5345,36 @@ pub(crate) fn ram_ceiling_for_model(
     }
 }
 
+/// The ceiling this machine can hold for one model (KT-943). `weights` is what
+/// the model occupies on disk, from `/api/tags`; `profile` is its `/api/show`.
+/// The model's own `config.json` is read only where it can matter: on Apple
+/// Silicon, and when `/api/show` did not already give the attention shape.
+pub(crate) async fn ollama_machine_ceiling(
+    machine: &MachineFacts,
+    base: &str,
+    model: &str,
+    profile: Option<&OllamaModelProfile>,
+    weights: Option<u64>,
+) -> ModelCeiling {
+    // A remote server's model store and GPU budget are not this host's.
+    let gpu_budget_bytes = machine
+        .gpu_budget_bytes
+        .filter(|_| super::ollama_memory::server_is_local(base));
+    let shape = match profile.and_then(|profile| profile.kv_shape) {
+        Some(shape) => Some(shape),
+        None if gpu_budget_bytes.is_some() => kv_shape_from_store(model).await,
+        None => None,
+    };
+    ceiling_for_model(&CeilingInputs {
+        total_ram_bytes: machine.total_ram_bytes,
+        gpu_budget_bytes,
+        weights_bytes: weights,
+        measured_kv_bytes_per_token: measured_kv_bytes_per_token(base, model),
+        shape,
+        kv_cache_type: machine.kv_cache_type,
+    })
+}
+
 /// Extract a model's trained context length from an Ollama `/api/show`
 /// response: `model_info` carries an arch-prefixed key (`qwen3.context_length`,
 /// `llama.context_length`, …) — match on the suffix. Pure + unit-tested.
@@ -5333,6 +5391,16 @@ pub(crate) fn parse_context_length(show_response: &serde_json::Value) -> Option<
 pub(crate) struct OllamaModelProfile {
     context_length: Option<u64>,
     storage_format: Option<String>,
+    /// What a token of context costs the cache, when `/api/show` says (GGUF).
+    /// An MLX model does not: its shape is read from the store's `config.json`.
+    kv_shape: Option<KvShape>,
+}
+
+impl OllamaModelProfile {
+    /// The model's trained context length, as `/api/show` reports it.
+    pub(crate) fn context_length(&self) -> Option<u64> {
+        self.context_length
+    }
 }
 
 pub(crate) fn parse_ollama_model_profile(show_response: &serde_json::Value) -> OllamaModelProfile {
@@ -5342,13 +5410,14 @@ pub(crate) fn parse_ollama_model_profile(show_response: &serde_json::Value) -> O
             .pointer("/details/format")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        kv_shape: kv_shape_from_show(show_response),
     }
 }
 
 /// Ask Ollama for the stable metadata Kronn needs while running `model`, with
 /// a process-lifetime cache (one `/api/show` per model per boot).
 /// `None` means transport failure and is deliberately not cached.
-async fn ollama_model_profile(base: &str, model: &str) -> Option<OllamaModelProfile> {
+pub(crate) async fn ollama_model_profile(base: &str, model: &str) -> Option<OllamaModelProfile> {
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, OllamaModelProfile>>,
     > = std::sync::OnceLock::new();
@@ -5517,14 +5586,6 @@ pub(crate) fn parse_ollama_version(raw: &str) -> Option<(u64, u64)> {
 /// 0.34.2: a second turn reused 9428 of its 9500 tokens.
 pub(crate) fn mlx_prefix_cache_reused(version: Option<(u64, u64)>) -> bool {
     version.is_some_and(|version| version >= (0, 34))
-}
-
-/// Ask Ollama for `model`'s trained context length. This compatibility wrapper
-/// shares the full `/api/show` profile cache with the HTTP worker policy.
-pub(crate) async fn ollama_model_ctx_limit(base: &str, model: &str) -> Option<u64> {
-    ollama_model_profile(base, model)
-        .await
-        .and_then(|profile| profile.context_length)
 }
 
 /// Size the context window to the prompt, bounded by [FLOOR, cap]. Text only:
@@ -7531,11 +7592,14 @@ async fn start_ollama_http_with_idle(
                 .and_then(|profile| profile.storage_format.clone());
             // Bound this model by resident weights and observed cache cost when available.
             sample_ollama_memory(&base, model).await;
-            let machine_ceiling = ram_ceiling_for_model(
-                total_system_memory_bytes(),
+            let machine_ceiling = ollama_machine_ceiling(
+                &MachineFacts::read(),
+                &base,
+                model,
+                model_profile.as_ref(),
                 ollama_model_size_bytes(&base, model).await,
-                measured_kv_bytes_per_token(&base, model),
-            );
+            )
+            .await;
             let cap = match ollama_context_overrides {
                 Some(overrides) => resolve_ctx_cap_for_model(
                     std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
@@ -7597,6 +7661,15 @@ async fn start_ollama_http_with_idle(
                         ),
                         "raise KRONN_OLLAMA_NUM_CTX_CAP if the RAM is there, or shorten the \
                      step's input",
+                    ),
+                    CtxCapOrigin::ModelEstimate { model_limit } => (
+                        format!(
+                            "what this machine's memory holds of this model (weights, \
+                         cache cost per token and a safety margin) — the model itself \
+                         supports {model_limit}"
+                        ),
+                        "raise KRONN_OLLAMA_NUM_CTX_CAP or this model's override if the \
+                     memory is there, or shorten the step's input",
                     ),
                     CtxCapOrigin::PortableFallback => (
                         "the portable fallback, because Ollama did not answer /api/show"

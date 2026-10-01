@@ -319,6 +319,31 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The context a local Ollama model is given on a Mac is computed from the model
+  and no longer cut from the installed RAM (KT-943). The ceiling used to be one
+  slice per RAM size — 65,536 tokens on a 64 GB Mac, for every model — which is
+  four times too prudent for `qwen3.8:27b-mlx`: only 16 of its 64 layers cache
+  anything (the others keep a constant state), so a token costs its cache 64 KiB,
+  and 262,144 tokens take 16 GB next to its 18.2 GB of weights, inside the
+  roughly 48 GB macOS lets the GPU use. With nothing configured, the ceiling is
+  now the smaller of the model's own window and what the GPU budget
+  (`iogpu.wired_limit_mb` when set, else 75 % of memory) leaves once the weights
+  and a safety margin (10 %, at least 2 GB) are taken, over the cost of a token
+  of cache. That cost comes from the model itself — `/api/show` for a GGUF
+  model, the `config.json` in Ollama's store for an MLX one, whose `/api/show`
+  does not say — counting only the layers with full attention, and follows
+  `OLLAMA_KV_CACHE_TYPE` (q8_0, q4_0) when the server sets it. That model now
+  runs at its whole 262,144 on 64 GB, about 76,000 on 32 GB, and a dense 70B at
+  about 19,000 on 64 GB. When anything is missing — the attention shape, the
+  weights, a cache type Kronn cannot price, a model with a sliding window — the
+  RAM slice applies exactly as before, and so does it off Apple Silicon. A
+  Settings override and `KRONN_OLLAMA_NUM_CTX_CAP` still win, and the ceiling of
+  a native MLX task worker stays at 32,768. The model list says where the figure
+  comes from — "model estimate (weights + cache)" next to "model window",
+  "machine memory" and the others — and a run held below the model's window
+  names it in its notice. See
+  [Ollama local models](docs/operations/ollama-local-models.md#the-ceiling-is-computed-per-model-kt-943).
+
 - A native backend that relocates its data directory (`KRONN_DATA_DIR`) keeps
   listening on its configured host instead of `0.0.0.0` (KT-936). The variable
   used to stand in for "running in Docker", so such a backend was refused at

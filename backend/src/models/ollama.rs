@@ -30,8 +30,11 @@ pub struct OllamaModel {
     /// Settings can still pre-fill, edit or reset the saved value honestly.
     pub context_override: Option<u64>,
     /// Why `context_ceiling` is what it is: "operator_override" |
-    /// "model_override" | "model_window" | "machine_ceiling" |
-    /// "portable_fallback". A string, not the internal enum — this crosses
+    /// "model_override" | "model_window" | "model_estimate" |
+    /// "machine_ceiling" | "portable_fallback". `model_estimate` is computed
+    /// for this model from its weights and the cost of its cache per token;
+    /// `machine_ceiling` is the coarse band of installed memory, used while
+    /// nothing is known of the model. A string, not the internal enum — this crosses
     /// into the API surface and a frontend has no reason to know Rust
     /// variant names.
     pub context_origin: String,

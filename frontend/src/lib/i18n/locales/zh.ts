@@ -2717,6 +2717,7 @@ const zh: TranslationDict = {
   "ollama.contextOrigin.operator_override": "环境变量",
   "ollama.contextOrigin.model_override": "模型覆盖值",
   "ollama.contextOrigin.model_window": "模型窗口",
+  "ollama.contextOrigin.model_estimate": "模型估算（权重 + 缓存）",
   "ollama.contextOrigin.machine_ceiling": "机器内存",
   "ollama.contextOrigin.portable_fallback": "可移植回退值",
   "ollama.contextOrigin.refresh_required": "需要刷新",
