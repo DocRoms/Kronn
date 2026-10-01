@@ -1406,6 +1406,44 @@ mod compute_audit_info_tests {
             .is_file());
     }
 
+    /// KT-933: the on-disk restore catches the two ways an audit used to turn
+    /// a human section into an "example" without changing a byte of it —
+    /// fencing it, and documenting `section:end` inside it.
+    #[test]
+    fn protect_restores_a_fence_wrapped_human_section_and_one_with_a_quoted_closer() {
+        let dir = tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        let team = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let howto = "<!-- kronn:section name=\"howto\" owner=\"human\" -->\nClose a section with:\n```\n<!-- kronn:section:end -->\n```\nRule after the example.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{team}\n\n{howto}\n");
+        fs::write(docs.join("AGENTS.md"), &pre).unwrap();
+        let snapshot = capture_human_owned_sections(dir.path()).unwrap();
+
+        // Audit: fences the first section, rewrites the rule after the example.
+        let post = pre
+            .replace(team, &format!("```\n{team}\n```"))
+            .replace("Rule after the example.", "Agent-made rule.");
+        fs::write(docs.join("AGENTS.md"), &post).unwrap();
+        let restored = protect_human_owned_sections(dir.path(), &snapshot, "2026-10-01").unwrap();
+
+        assert_eq!(restored, 2, "both sections are flagged");
+        let target = fs::read_to_string(docs.join("AGENTS.md")).unwrap();
+        assert!(
+            target.contains(howto),
+            "quoted-closer section restored whole"
+        );
+        assert!(!target.contains("Agent-made rule."));
+        assert!(
+            crate::api::audit::anti_hallu_enforce::enforce_human_owned_sections(&pre, &target)
+                .is_none(),
+            "every human section is live and intact again:\n{target}"
+        );
+        assert!(docs
+            .join("reports/2026-10-01-human-section-diff-docs-AGENTS.md")
+            .is_file());
+    }
+
     // ── check_ai_dir_permissions — defensive guard tests ────────────
 
     #[test]

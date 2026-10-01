@@ -13,7 +13,7 @@
 //! testable; the streaming generator in [`super::full`] owns the IO and the
 //! retry loop, and only calls into these helpers.
 
-use crate::core::anti_halluc::{self, SourceCheck};
+use crate::core::anti_halluc::{self, scan_fences, FenceScan, SourceCheck};
 use std::path::Path;
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
@@ -170,22 +170,41 @@ struct SectionSpan {
     end: usize,
 }
 
+/// Fence characters that hide a `kronn:section` marker from the ownership
+/// parser. A `~~~` block is code to a renderer exactly like a ``` one.
+const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
+
+/// Which lines of `text` sit inside a fenced code block. A marker on such a
+/// line is documentation (an example, a quoted report), never a live section
+/// boundary: it neither opens nor closes a protected section.
+///
+/// An unclosed fence is read leniently (its lines stay visible, so a stray
+/// fence in a human's own document does not strip protection) — except when
+/// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
+pub(super) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
+    scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
+}
+
 /// Scan `lines` for `<!-- kronn:section name="X" ... -->` … `<!-- kronn:section:end -->`
-/// pairs. An opener with no matching closer is skipped — there is nothing
-/// well-formed to protect there.
-fn parse_named_sections(lines: &[&str]) -> Vec<SectionSpan> {
+/// pairs. `in_code` flags the lines inside fenced code (index-aligned with
+/// `lines`, shorter is fine): their markers are ignored on both ends. An
+/// opener with no matching closer is skipped — there is nothing well-formed to
+/// protect there.
+fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<SectionSpan> {
+    let is_code = |idx: usize| in_code.get(idx).copied().unwrap_or(false);
     let mut spans = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim_start();
-        if trimmed.starts_with("<!-- kronn:section")
+        if !is_code(i)
+            && trimmed.starts_with("<!-- kronn:section")
             && !trimmed.starts_with("<!-- kronn:section:end")
         {
             if let Some(name) = extract_attr(lines[i], "name") {
                 let is_human = is_human_owned_marker(lines[i]);
-                if let Some(end) = ((i + 1)..lines.len())
-                    .find(|&j| lines[j].trim_start().starts_with("<!-- kronn:section:end"))
-                {
+                if let Some(end) = ((i + 1)..lines.len()).find(|&j| {
+                    !is_code(j) && lines[j].trim_start().starts_with("<!-- kronn:section:end")
+                }) {
                     spans.push(SectionSpan {
                         name,
                         is_human,
@@ -202,23 +221,37 @@ fn parse_named_sections(lines: &[&str]) -> Vec<SectionSpan> {
     spans
 }
 
-fn extract_attr(line: &str, attr: &str) -> Option<String> {
+pub(super) fn extract_attr(line: &str, attr: &str) -> Option<String> {
     let needle = format!("{attr}=\"");
     let start = line.find(&needle)? + needle.len();
     let end = line[start..].find('"')?;
     Some(line[start..start + end].to_string())
 }
 
-fn is_human_owned_marker(line: &str) -> bool {
+pub(super) fn is_human_owned_marker(line: &str) -> bool {
     line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
 }
 
 pub fn contains_human_owned_section(content: &str) -> bool {
-    let visible = crate::core::anti_halluc::strip_fenced_code(content);
-    let lines: Vec<&str> = visible.split('\n').collect();
-    parse_named_sections(&lines)
+    let lines: Vec<&str> = content.split('\n').collect();
+    let scan = code_line_mask(content, false);
+    parse_named_sections(&lines, &scan.in_fence)
         .iter()
         .any(|span| span.is_human)
+}
+
+/// Lines of `content` an inserted block must not land on: inside a fenced
+/// code block, or inside a named section (markers included). Index-aligned
+/// with `content.split('\n')`, so it also covers `content.lines()`.
+pub(super) fn section_or_code_lines(content: &str) -> Vec<bool> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut occupied = code_line_mask(content, false).in_fence;
+    occupied.resize(lines.len(), false);
+    let spans = parse_named_sections(&lines, &occupied);
+    for span in spans {
+        occupied[span.start..=span.end].fill(true);
+    }
+    occupied
 }
 
 /// KT-843 mechanical backstop: restore every human-owned section found in
@@ -236,8 +269,16 @@ pub fn enforce_human_owned_sections(
 ) -> Option<(String, Vec<HumanSectionDiff>)> {
     let pre_lines: Vec<&str> = pre.split('\n').collect();
     let post_lines: Vec<&str> = post.split('\n').collect();
-    let pre_spans = parse_named_sections(&pre_lines);
-    let post_spans = parse_named_sections(&post_lines);
+    let pre_scan = code_line_mask(pre, false);
+    let mut post_scan = code_line_mask(post, false);
+    // An audit that leaves a fence open where the document had none turns
+    // everything after it into one code block: read `post` the way a renderer
+    // does, or a human section behind that fence would pass as untouched.
+    if post_scan.unclosed && !pre_scan.unclosed {
+        post_scan = code_line_mask(post, true);
+    }
+    let pre_spans = parse_named_sections(&pre_lines, &pre_scan.in_fence);
+    let post_spans = parse_named_sections(&post_lines, &post_scan.in_fence);
 
     let mut replacements: Vec<(usize, usize, Vec<String>)> = Vec::new();
     let mut diffs: Vec<HumanSectionDiff> = Vec::new();
@@ -550,6 +591,148 @@ mod tests {
         assert_eq!(diffs.len(), 1);
         assert!(restored.contains("Original."));
         assert!(!restored.contains("Changed."));
+    }
+
+    // ─── KT-933: a marker inside a code block is documentation ─────────────
+
+    /// A human section that documents the convention: its example shows both
+    /// a section opener and the closing marker inside a fence.
+    const HUMAN_WITH_EXAMPLE: &str = "<!-- kronn:section name=\"howto\" owner=\"human\" -->\n\
+        Wrap a section like this:\n\
+        ```\n\
+        <!-- kronn:section name=\"demo\" owner=\"human\" -->\n\
+        <!-- kronn:section:end -->\n\
+        ```\n\
+        Rule that follows the example.\n\
+        <!-- kronn:section:end -->";
+
+    #[test]
+    fn fenced_section_end_does_not_close_a_human_section_early() {
+        let pre = format!("# Doc\n{HUMAN_WITH_EXAMPLE}\n## Rest\nfree\n");
+        // The agent rewrites the rule AFTER the documented example. With the
+        // fenced marker taken as the closer, protection stopped above it.
+        let post = pre.replace("Rule that follows the example.", "Agent-made rule.");
+
+        let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("a change below a documented section:end must be caught");
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        assert_eq!(diffs[0].name, "howto");
+        assert!(
+            diffs[0]
+                .pre_block
+                .contains("Rule that follows the example."),
+            "the protected block runs to the REAL closer"
+        );
+        assert_eq!(restored, pre, "restored byte-for-byte");
+    }
+
+    #[test]
+    fn fenced_section_end_does_not_close_a_human_section_early_with_tildes() {
+        let pre = HUMAN_WITH_EXAMPLE.replace("```", "~~~");
+        let post = pre.replace("Rule that follows the example.", "Agent-made rule.");
+        let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("a ~~~ fence hides markers just like a ``` one");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(restored, pre);
+    }
+
+    #[test]
+    fn fenced_example_opener_does_not_open_a_protected_section() {
+        // Only an EXAMPLE of a human section: nothing live to protect.
+        let pre = "# Doc\n```\n<!-- kronn:section name=\"demo\" owner=\"human\" -->\nQuoted.\n<!-- kronn:section:end -->\n```\n";
+        let post = "# Doc\nThe example is gone.\n";
+        assert_eq!(enforce_human_owned_sections(pre, post), None);
+        assert!(!contains_human_owned_section(pre));
+    }
+
+    #[test]
+    fn fenced_example_opener_before_a_real_section_does_not_swallow_it() {
+        let pre = "```\n<!-- kronn:section name=\"fake\" owner=\"human\" -->\n```\n\
+            <!-- kronn:section name=\"real\" owner=\"human\" -->\nKeep.\n<!-- kronn:section:end -->\n";
+        let post = pre.replace("Keep.", "Changed.");
+        let (_, diffs) = enforce_human_owned_sections(pre, &post).expect("real is protected");
+        assert_eq!(
+            diffs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            vec!["real"],
+            "the quoted opener must not become a section of its own"
+        );
+    }
+
+    #[test]
+    fn wrapping_a_human_section_in_a_fence_is_caught_and_the_live_copy_restored() {
+        let section = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{section}\n## Rest\n");
+        for fence in ["```", "~~~", "````"] {
+            // Same bytes, but the section is now an example to any renderer.
+            let post = format!("# Doc\n{fence}\n{section}\n{fence}\n## Rest\n");
+            let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+                .unwrap_or_else(|| panic!("fence-wrapped section must not pass ({fence})"));
+            assert_eq!(diffs.len(), 1, "{fence}");
+            assert!(
+                diffs[0].post_block.is_none(),
+                "no live copy left in post ({fence})"
+            );
+            // The live copy is back, and the guard is now satisfied.
+            assert!(contains_human_owned_section(&restored), "{fence}");
+            assert_eq!(
+                enforce_human_owned_sections(&pre, &restored),
+                None,
+                "a second pass over the restored text is a no-op ({fence})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fenced_decoy_copy_cannot_stand_in_for_a_deleted_human_section() {
+        let section = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{section}\n");
+        // The agent deletes the live section but leaves an identical quoted copy.
+        let post = format!("# Doc\nSee the example:\n```\n{section}\n```\n");
+        let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("the decoy must not satisfy the guard");
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].post_block.is_none());
+        assert!(contains_human_owned_section(&restored));
+    }
+
+    #[test]
+    fn a_fence_left_open_above_a_human_section_is_caught() {
+        let section = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{section}\n");
+        // One stray ``` and no closer: a renderer treats the rest as code.
+        let post = format!("# Doc\n```\n{section}\n");
+        let (_, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("an unclosed fence swallowing the section must not pass");
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].post_block.is_none());
+    }
+
+    #[test]
+    fn a_fence_already_open_in_the_original_does_not_make_every_audit_a_diff() {
+        // The human's own doc has a stray unclosed fence above the section.
+        // Lenient reading on both sides: protected, and untouched = no-op.
+        let pre = "# Doc\n```\n<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep.\n<!-- kronn:section:end -->\n";
+        assert!(contains_human_owned_section(pre));
+        assert_eq!(enforce_human_owned_sections(pre, pre), None);
+        let post = pre.replace("Keep.", "Changed.");
+        assert!(enforce_human_owned_sections(pre, &post).is_some());
+    }
+
+    #[test]
+    fn tilde_fenced_report_excerpt_is_not_a_live_section() {
+        let report = "# Report\n\n~~~\n<!-- kronn:section name=\"quoted\" owner=\"human\" -->\nQuoted.\n<!-- kronn:section:end -->\n~~~\n";
+        assert!(!contains_human_owned_section(report));
+    }
+
+    #[test]
+    fn section_or_code_lines_covers_sections_and_fences_only() {
+        let content = "# Doc\n```\nx\n```\n<!-- kronn:section name=\"s\" owner=\"audit\" -->\nA\n<!-- kronn:section:end -->\nplain\n";
+        let occupied = section_or_code_lines(content);
+        // # Doc | ``` x ``` | open A close | plain | (trailing empty element)
+        assert_eq!(
+            occupied,
+            vec![false, true, true, true, true, true, true, false, false]
+        );
     }
 
     #[test]
