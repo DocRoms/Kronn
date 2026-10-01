@@ -146,7 +146,18 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
             };
             let marker = &rest[..=end];
             let raw = &rest[11..end];
-            let parts: Vec<_> = raw.split(',').map(str::trim).collect();
+            let parts: Vec<_> = raw
+                .split(',')
+                .enumerate()
+                .map(|(index, part)| {
+                    let part = part.trim();
+                    if index > 0 {
+                        part.strip_prefix("file:").map(str::trim).unwrap_or(part)
+                    } else {
+                        part
+                    }
+                })
+                .collect();
             let replacement = parts
                 .iter()
                 .map(|p| format!("[src: file: {p}]"))
@@ -281,6 +292,26 @@ mod tests {
             &snapshot(dir.path()).unwrap(),
             &blocking
         ));
+    }
+
+    #[test]
+    fn normalization_handles_repeated_file_prefixes_without_accepting_unverified_references() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("code.rs"), "first\nsecond\n").unwrap();
+        let original = "Évidence [src: file: code.rs:1, file: code.rs:2]\n";
+        assert_eq!(
+            split_verified_citations(dir.path(), original).as_deref(),
+            Some("Évidence [src: file: code.rs:1] [src: file: code.rs:2]\n")
+        );
+        for reference in [
+            "invented.rs:1",
+            "code.rs:3",
+            "code.rs:2-1",
+            "../outside.rs:1",
+        ] {
+            let text = format!("[src: file: code.rs:1, file: {reference}]\n");
+            assert!(split_verified_citations(dir.path(), &text).is_none());
+        }
     }
 
     #[test]

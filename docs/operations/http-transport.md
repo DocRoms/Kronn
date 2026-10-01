@@ -53,15 +53,21 @@ fail an otherwise valid artifact (KT-951).
 [src: file: backend/src/api/audit/validation.rs:102]
 
 Full audits check changed documents against the final documentary gate during
-each step. Comma-bundled file references are split only when every individual
-path and line resolves; human-containing documents and fenced examples are
-excluded from this automatic edit. Originals are saved by content hash under
+each step. Comma-bundled file references (including a repeated `file:` prefix)
+are split only when every individual path and line resolves; documents containing
+human-owned sections and fenced examples are excluded from this automatic edit.
+Originals are saved by content hash under
 `docs/.kronn-citation-originals/*.bak`. Remaining blockers receive at most two
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:1]
 [src: file: backend/src/api/audit/full.rs:1122]
+
+A failed provider launch finalizes the step with its error and elapsed time.
+If a corrective attempt had already consumed tokens, that usage remains in the
+persisted step and its terminal SSE event; an unmeasured launch stays unknown.
+[src: file: backend/src/api/audit/full.rs:1784]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the

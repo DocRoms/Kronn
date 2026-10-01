@@ -1787,8 +1787,24 @@ pub async fn full_audit(
                         tracker.agent_cancels.remove(&project_id);
                     }
                     progress.record_failure(step as u32);
+                    let reason = format!("Step {} ({}): {}", step, file_label, e);
+                    let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                    let run_id = audit_run_id.clone();
+                    let warning = reason.clone();
+                    let recorded_total = run_tokens.total();
+                    // A failed corrective launch must retain the completed
+                    // attempts' usage and a durable cause after SSE disconnects.
+                    if let Err(error) = db.with_conn(move |conn| {
+                        crate::db::audit_runs::finalize_audit_step(
+                            conn, &run_id, step as u32, Utc::now(), duration_ms,
+                            &previous_attempt_usage, recorded_total, false,
+                            Some(&warning), false,
+                        )
+                    }).await {
+                        tracing::error!("Failed to finalize launch error for audit step {step}: {error}");
+                    }
                     let err = serde_json::json!({
-                        "error": format!("Step {} ({}): {}", step, file_label, e),
+                        "error": reason,
                         "step": step
                     });
                     yield Event::default().event("step_error").data(err.to_string());
@@ -1798,7 +1814,7 @@ pub async fn full_audit(
                     yield Event::default().event("step_done").data(
                         serde_json::json!({
                             "step": step, "success": false, "file": file_label,
-                            "tokens": 0, "duration_ms": 0,
+                            "tokens": previous_attempt_usage.total(), "duration_ms": duration_ms,
                             "total_tokens": run_tokens.total(),
                         }).to_string()
                     );

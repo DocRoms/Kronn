@@ -378,6 +378,135 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn http_start_failure_during_documentary_retry_persists_error_and_prior_usage() {
+    use axum::response::IntoResponse;
+    let server = MockServer::start().await;
+    let requests = Arc::new(Mutex::new(0));
+    let seen = requests.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut seen = seen.lock().unwrap();
+            *seen += 1;
+            if *seen == 1 {
+                ResponseTemplate::new(200).set_body_string(sse(&[
+                    text("The documentation is unchanged."),
+                    json!({"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":7}})
+                        .to_string(),
+                ]))
+            } else {
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({"error":{"message":"provider unavailable"}}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let state = litellm_state(&server.uri()).await;
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    std::fs::create_dir_all(project.path().join("docs/tech-debt")).unwrap();
+    std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
+    std::fs::write(
+        project
+            .path()
+            .join("docs/conventions/agents-md-format-v1.md"),
+        "# Format\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("docs/AGENTS.md"),
+        format!("# Project\n{}", "Established documentation.\n".repeat(500)),
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("docs/tech-debt/TD-repair.md"),
+        "# Finding\n[src: file: invented.rs:1]\n",
+    )
+    .unwrap();
+    let total =
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let now = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(
+                conn,
+                "before-unavailable",
+                PROJECT_ID,
+                "Full",
+                "LiteLlm",
+                now,
+            )?;
+            for step in 1..=total {
+                runs::insert_audit_step_start(conn, "before-unavailable", step, "doc", now)?;
+                runs::finalize_audit_step(
+                    conn,
+                    "before-unavailable",
+                    step,
+                    now,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    true,
+                    None,
+                    false,
+                )?;
+            }
+            runs::update_last_completed_step(conn, "before-unavailable", total)?;
+            runs::mark_interrupted(conn, "before-unavailable", "documentary gate failed")
+        })
+        .await
+        .unwrap();
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.into()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::LiteLlm,
+            tier: Some(ModelTier::Reasoning),
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("before-unavailable".into()),
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+    let done = sse_events(&stream, "done").pop().expect("terminal outcome");
+    assert_eq!(done["status"], "interrupted", "{stream}");
+    assert_eq!(done["steps_to_redo"], json!([1]), "{stream}");
+    assert!(!done["discussion_id"].is_string());
+    assert_eq!(sse_events(&stream, "step_retry").len(), 1);
+    assert_eq!(sse_events(&stream, "step_error").len(), 1);
+    assert_eq!(*requests.lock().unwrap(), 2);
+    let step_done = sse_events(&stream, "step_done");
+    assert_eq!(step_done.len(), 1);
+    assert_eq!(
+        step_done[0]["tokens"], 20,
+        "usage survives a failed retry: {stream}"
+    );
+    let run_id = done["audit_run_id"].as_str().unwrap().to_owned();
+    let steps = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::list_audit_steps(conn, &run_id))
+        .await
+        .unwrap();
+    let failed = steps.iter().find(|s| s.step_index == 1).unwrap();
+    assert!(!failed.cli_success);
+    assert!(
+        failed.ended_at.is_some(),
+        "a terminal launch error is finalized"
+    );
+    assert_eq!(failed.step_tokens, Some(20));
+    assert!(failed.step_warning.as_deref().unwrap().contains("401"));
+    assert_eq!(
+        crate::api::audit::full::already_succeeded_step_indices(&steps).len(),
+        total as usize - 1
+    );
+}
+
 #[tokio::test]
 async fn a_prose_only_http_run_exits_cleanly_and_writes_nothing() {
     // The premise of the silent-success risk: a model that answers in prose
