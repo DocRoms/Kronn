@@ -555,6 +555,13 @@ pub fn reconcile_live(
     validate_runtime_target_projection(runtime_target_id, agent_type)?;
     let now = Utc::now().to_rfc3339();
     let existing = list_for_target(conn, runtime_target_id)?;
+    // A LiteLLM proxy lists a model once per deployment: keep the first, or the
+    // second insert breaks the unique key and the whole refresh rolls back.
+    let mut seen = std::collections::HashSet::new();
+    let discovered: Vec<&DiscoveredModel> = discovered
+        .iter()
+        .filter(|model| seen.insert(model.model_id.as_str()))
+        .collect();
     let discovered_ids: std::collections::HashSet<&str> =
         discovered.iter().map(|d| d.model_id.as_str()).collect();
 
@@ -1035,6 +1042,25 @@ mod tests {
         );
         assert_eq!(all[0].resolved_model.as_deref(), Some("provider/model-1"));
         assert_eq!(all[0].description.as_deref(), Some("Provider description"));
+    }
+
+    #[test]
+    fn a_model_listed_twice_by_the_provider_is_stored_once() {
+        let conn = test_conn();
+        let model = |name: &str| DiscoveredModel {
+            model_id: "gpt-shared".into(),
+            display_name: name.into(),
+            resolved_model: None,
+            description: None,
+            capabilities: vec![],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        let discovered = vec![model("first deployment"), model("second deployment")];
+        reconcile_live(&conn, "http:connection-a", &AgentType::LiteLlm, &discovered).unwrap();
+        let all = list_for_target(&conn, "http:connection-a").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].display_name, "first deployment");
     }
 
     #[test]

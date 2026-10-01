@@ -13,6 +13,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Testing a LiteLLM connection no longer fails with "Could not persist the
+  saved connection's model catalog" (KT-939). A LiteLLM proxy lists a model once
+  per deployment; the second copy broke the catalogue's unique key and the whole
+  refresh rolled back, leaving the model pickers empty. A model listed twice is
+  now stored once.
+
 - A Full audit in which a step fails no longer invalidates the whole run.
   Until now one failed step — often for an outside reason, such as the Mac going
   to sleep — left the run Interrupted with no validation discussion, even when
