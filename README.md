@@ -59,6 +59,10 @@
   and OpenCode models declared in a project show up in the model pickers. The
   Ollama card folds its download block, says when an installed model has an
   update, and offers MLX builds first on Apple Silicon.
+- **Audits and local runs that hold up:** a failed audit step no longer voids
+  the run (the steps that succeeded are validated, a resume redoes only what
+  failed), sections you own stay untouched, a local model that goes silent is
+  stopped with a clear reason, and testing a LiteLLM connection works again.
 - **Prompts that stay private:** no prompt sent to a model lists your other
   Kronn projects; only the repositories you linked to a project are named.
 - **Rooms that always open:** a CLI the bridge cannot identify no longer makes
