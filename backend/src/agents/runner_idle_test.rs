@@ -36,6 +36,9 @@ enum Generation {
     Endless,
     /// One token and a normal end.
     Quick,
+    /// Answers at once with a call to `tool`, handing control to Kronn's own
+    /// executor instead of generating further.
+    ToolCall { tool: &'static str },
 }
 
 struct SimulatedOllama {
@@ -260,6 +263,19 @@ async fn generate(
             write_token(write, "ok").await?;
             finish(write).await
         }
+        Generation::ToolCall { tool } => {
+            write.write_all(HEAD).await?;
+            write_chunk(
+                write,
+                &format!(
+                    r#"{{"message":{{"content":"","tool_calls":[{{"function":{{"name":"{tool}","arguments":{{}}}}}}]}},"done":false}}{}"#,
+                    "\n"
+                ),
+            )
+            .await?;
+            started.notify_one();
+            finish(write).await
+        }
     }
 }
 
@@ -478,6 +494,93 @@ async fn a_request_that_is_not_streamed_is_allowed_its_whole_generation() {
 
     assert_eq!(drain(&mut running).await, "tok0");
     assert!(running.child.wait().await.expect("lifeline").success());
+}
+
+// ─── native HTTP: Kronn's own tool execution is not model silence ────────────
+//
+// Review follow-up on KT-932, point 2 — confirming on the native HTTP path too
+// that a LOCAL tool Kronn runs between two model requests (a build, a slow
+// read) is not mistaken for the model going silent: nothing reads from the
+// stream while the tool executes, so there is no watchdog running to trip.
+
+/// A tool that simply takes a while, standing in for a build or a test run.
+struct SlowTool {
+    busy: Duration,
+}
+
+#[async_trait::async_trait]
+impl crate::agents::tools::ToolExecutor for SlowTool {
+    fn catalogue(&self) -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "slow_tool",
+                "description": "Takes a while, like a build or a test run.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })]
+    }
+
+    async fn execute(
+        &self,
+        call: &crate::agents::tools::ToolCall,
+    ) -> crate::agents::tools::ToolOutcome {
+        tokio::time::sleep(self.busy).await;
+        crate::agents::tools::ToolOutcome {
+            call: call.clone(),
+            content: serde_json::json!({"ok": true}),
+            ok: true,
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_local_tool_running_longer_than_the_idle_delay_is_not_mistaken_for_a_silent_model() {
+    let idle = Duration::from_millis(300);
+    let ollama = SimulatedOllama::start(vec![
+        Generation::ToolCall { tool: "slow_tool" },
+        Generation::Quick,
+    ])
+    .await;
+    let executor: std::sync::Arc<dyn crate::agents::tools::ToolExecutor> =
+        std::sync::Arc::new(SlowTool { busy: idle * 3 });
+    let mut running = start_ollama_http_with_idle(
+        &AgentType::Ollama,
+        "run the slow tool",
+        "",
+        "sim-model",
+        None,
+        Some(&ollama.base),
+        None,
+        Some(executor),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(idle),
+    )
+    .await
+    .expect("the run starts");
+
+    let text = drain(&mut running).await;
+
+    assert_eq!(
+        text, "ok",
+        "the tool's result fed back, and the model answered"
+    );
+    assert!(
+        running.child.wait().await.expect("lifeline").success(),
+        "{}",
+        stderr_of(&running)
+    );
+    assert!(
+        !stderr_of(&running).contains("stalled"),
+        "{}",
+        stderr_of(&running)
+    );
 }
 
 // ─── ACP: the agent that holds the connection (the 30/09 incident) ───────────
@@ -895,6 +998,18 @@ enum Turn {
     GoesSilent { proofs: usize },
     /// `beats` signs of life `gap` apart, then the answer and a normal end.
     Alive { beats: usize, gap: Duration },
+    /// A tool call starts, stays silent for `busy` (no ACP frame at all, as a
+    /// real tool run produces none), reaches a terminal update, then the turn
+    /// answers normally. KT-932 follow-up — `busy` outlives the model's own
+    /// delay but not the tool's own (much wider) bound.
+    ToolThenAnswer { name: &'static str, busy: Duration },
+    /// A tool call starts and never reaches a terminal update: only the
+    /// tool's own bound can end the turn, and the reason must name it.
+    ToolNeverEnds { name: &'static str },
+    /// A tool call starts, ends quickly, and then the MODEL itself goes
+    /// silent for ever: the model's own (narrower) delay must be what ends
+    /// the turn this time, not the tool bound.
+    ToolEndsThenModelGoesSilent { name: &'static str },
 }
 
 struct ScriptedAcp {
@@ -971,6 +1086,36 @@ impl crate::acp::AcpTransport for ScriptedAcp {
                     .unwrap();
                 events.send(AcpSessionEvent::Completed).await.unwrap();
                 Ok(())
+            }
+            Turn::ToolThenAnswer { name, busy } => {
+                events
+                    .send(AcpSessionEvent::ToolCall { name: name.into() })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(busy).await;
+                events.send(AcpSessionEvent::ToolCallEnded).await.unwrap();
+                events
+                    .send(AcpSessionEvent::TextDelta("the answer".into()))
+                    .await
+                    .unwrap();
+                events.send(AcpSessionEvent::Completed).await.unwrap();
+                Ok(())
+            }
+            Turn::ToolNeverEnds { name } => {
+                events
+                    .send(AcpSessionEvent::ToolCall { name: name.into() })
+                    .await
+                    .unwrap();
+                std::future::pending().await
+            }
+            Turn::ToolEndsThenModelGoesSilent { name } => {
+                events
+                    .send(AcpSessionEvent::ToolCall { name: name.into() })
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                events.send(AcpSessionEvent::ToolCallEnded).await.unwrap();
+                std::future::pending().await
             }
         }
     }
@@ -1123,4 +1268,138 @@ async fn stopping_an_acp_turn_cancels_the_session_and_shuts_the_agent_down() {
             "{stop:?}: the session was cancelled before the shutdown"
         );
     }
+}
+
+// ─── ACP: a long tool call is not mistaken for a dead model ──────────────────
+//
+// Review follow-up on KT-932 — OpenCode running `cargo test` or a 20-minute
+// build emits no ACP frame for the whole run. Judging that silence by the
+// model's own (much shorter) inactivity delay cut a healthy run. While a tool
+// call is open, the watchdog now measures silence against the tool's own,
+// much wider bound instead, and hands the clock back to the model the moment
+// a terminal update closes it.
+
+/// (a) — a tool call in progress longer than the model's own delay is not cut.
+#[tokio::test(start_paused = true)]
+async fn a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model() {
+    let model_idle = Duration::from_secs(60);
+    let (mut running, agent) = start_scripted(
+        Turn::ToolThenAnswer {
+            name: "cargo test",
+            // 5 minutes: longer than the 1-minute model delay, well inside
+            // the 8-minute tool bound it scales to.
+            busy: Duration::from_secs(5 * 60),
+        },
+        Some(model_idle),
+        None,
+    )
+    .await;
+
+    assert_eq!(drain(&mut running).await, "the answer");
+    assert!(
+        running.child.wait().await.expect("lifeline").success(),
+        "{}",
+        running.captured_stderr_flushed().await.join("\n")
+    );
+    assert!(!running
+        .captured_stderr_flushed()
+        .await
+        .join("\n")
+        .contains("stalled"));
+    assert_eq!(agent.cancelled.load(Ordering::SeqCst), 0);
+}
+
+/// (b) — once the tool call has ended, the model's own delay applies again: a
+/// model that then stays silent is still cut, with its usual (model-silence)
+/// reason, not the tool bound and not naming the finished tool.
+#[tokio::test(start_paused = true)]
+async fn the_model_delay_resumes_once_the_tool_call_has_ended() {
+    let started = tokio::time::Instant::now();
+    let (mut running, agent) = start_scripted(
+        Turn::ToolEndsThenModelGoesSilent { name: "cargo test" },
+        Some(Duration::from_secs(60)),
+        None,
+    )
+    .await;
+
+    let text = drain(&mut running).await;
+    let silence = started.elapsed();
+
+    assert!(text.is_empty());
+    // Cut on the MODEL's 60s delay, not the much wider (8 min) tool bound the
+    // 50ms-long tool call never came close to needing.
+    assert_eq!(silence, Duration::from_secs(60) + Duration::from_millis(50));
+    let status = running.child.wait().await.expect("lifeline");
+    assert!(!status.success(), "a model gone silent is a failed run");
+    let captured = running.captured_stderr_flushed().await.join("\n");
+    // The `[acp-tool]cargo test` marker line is the tool call itself being
+    // reported for display — it legitimately names the tool it ran, even
+    // though that tool finished cleanly. What must NOT name it is the stall
+    // reason line.
+    let reason = captured
+        .lines()
+        .find(|line| crate::agents::idle_watchdog::is_stall_reason(line))
+        .unwrap_or_else(|| panic!("no stall reason in: {captured}"));
+    assert!(
+        reason.contains("Agent stalled (no output for 60s)"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("OpenCode sent no data for 1 min"),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("cargo test"),
+        "the tool had already finished, the model's own stall must not blame it: {reason}"
+    );
+    assert!(
+        crate::workflows::steps::is_stall_error(reason),
+        "a step's on_timeout routing still recognises it: {reason}"
+    );
+    assert_eq!(agent.cancelled.load(Ordering::SeqCst), 1);
+}
+
+/// (c) — a tool call that never reaches a terminal update is still bounded,
+/// just by its own, much wider limit, and the failure names the tool.
+#[tokio::test(start_paused = true)]
+async fn a_tool_call_that_never_ends_is_cut_by_its_own_bound_and_names_it() {
+    let started = tokio::time::Instant::now();
+    let model_idle = Duration::from_secs(60);
+    let tool_bound = crate::agents::idle_watchdog::tool_execution_timeout(model_idle);
+    assert_eq!(
+        tool_bound,
+        Duration::from_secs(8 * 60),
+        "sanity: 8x the model delay"
+    );
+    let (mut running, agent) = start_scripted(
+        Turn::ToolNeverEnds { name: "cargo test" },
+        Some(model_idle),
+        None,
+    )
+    .await;
+
+    let text = drain(&mut running).await;
+    let silence = started.elapsed();
+
+    assert!(text.is_empty());
+    assert_eq!(
+        silence, tool_bound,
+        "the model's 60s delay never applied while the tool was open"
+    );
+    let status = running.child.wait().await.expect("lifeline");
+    assert!(!status.success(), "a hung tool call is a failed run");
+    let reason = running.captured_stderr_flushed().await.join("\n");
+    assert!(
+        reason.contains("Agent stalled (no output for 480s)"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(r#"OpenCode's "cargo test" tool call"#),
+        "the reason names the tool, not the model: {reason}"
+    );
+    assert!(
+        crate::workflows::steps::is_stall_error(&reason),
+        "a step's on_timeout routing still recognises it: {reason}"
+    );
+    assert_eq!(agent.cancelled.load(Ordering::SeqCst), 1);
 }

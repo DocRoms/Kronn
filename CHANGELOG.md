@@ -567,8 +567,13 @@ Release notes for 0.9.3 and earlier are available in the
   Ollama stop generating instead of finishing for nobody while the next request
   queues behind it: the HTTP stream is dropped, and an ACP agent is cancelled
   and shut down with its whole process group. Both are covered by tests against
-  a simulated Ollama that watches the connection. See
-  [Agent timeouts](docs/architecture/overview.md).
+  a simulated Ollama that watches the connection. A long but silent ACP tool
+  call — OpenCode running `cargo test` or a build — is not mistaken for a dead
+  model: while a tool call is open the watchdog measures silence against a
+  bound of its own, eight times the model's delay, and hands the clock back to
+  the model the instant a terminal update closes the call; a tool call that
+  never closes is still cut, by its own bound, with a reason naming the tool.
+  See [Agent timeouts](docs/architecture/overview.md).
 
 ## [0.14.1] - 2026-09-26
 

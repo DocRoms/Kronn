@@ -15,9 +15,16 @@
 //! - an ACP turn is one long `session/prompt` future fed by another task, so
 //!   [`IdleWatchdog`] carries the progress across: the producer calls
 //!   [`IdleWatchdog::beat`], the owner awaits [`IdleWatchdog::expired`].
+//!
+//! A silent model is not the only legitimate silence: an ACP agent running a
+//! tool (a build, a test run) produces no frame while the tool is working, for
+//! far longer than a model is ever allowed to stay quiet.
+//! [`IdleWatchdog::begin_tool`]/[`IdleWatchdog::end_tool`] let the owner swap
+//! in a much wider bound — [`tool_execution_timeout`] — for exactly the span a
+//! tool call is open, so the model's own delay resumes the moment it closes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
@@ -35,16 +42,43 @@ use tokio::time::Instant;
 /// `stall_timeout_secs` both become the delay of this watchdog.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// How much wider the bound on one ACP tool call is than the model's own
+/// inactivity delay, while that call is open. OpenCode (and any ACP agent)
+/// emits no frame while a tool runs — a `cargo test` or a build routinely
+/// takes 20-60 minutes — so judging it by the model's silence budget would cut
+/// a healthy run. Scaling the SAME configured delay keeps one operator
+/// setting in charge of both, and is already generous at its 15-minute floor
+/// (2h) or a workflow step's 30-minute default (4h).
+const TOOL_TIMEOUT_MULTIPLIER: u32 = 8;
+
+/// The bound on one ACP tool call in flight, derived from the model's own
+/// configured delay. See [`TOOL_TIMEOUT_MULTIPLIER`].
+pub fn tool_execution_timeout(model_limit: Duration) -> Duration {
+    model_limit.saturating_mul(TOOL_TIMEOUT_MULTIPLIER)
+}
+
 /// Leads every explicit stall reason. It is the same wording the workflow step
 /// watchdog has always used, so `is_stall_error` and a step's `on_timeout`
 /// routing keep recognising a stalled run whichever watchdog fired first.
 const STALL_PREFIX: &str = "Agent stalled (no output for";
+
+fn micros(d: Duration) -> u64 {
+    u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
+}
 
 struct Shared {
     origin: Instant,
     /// Microseconds since `origin` of the latest progress.
     last_beat_us: AtomicU64,
     beats: AtomicU64,
+    /// The limit currently in force: the model's own delay, or — while a tool
+    /// call is open — the much wider [`tool_execution_timeout`].
+    active_limit_us: AtomicU64,
+    /// Name of the tool call presently open, if any. Set by
+    /// [`IdleWatchdog::begin_tool`], cleared by [`IdleWatchdog::end_tool`];
+    /// read back so an expiry while a tool is running can name it in the
+    /// failure reason.
+    active_tool: Mutex<Option<String>>,
 }
 
 /// Progress clock shared between whoever sees the model's output and whoever
@@ -52,7 +86,9 @@ struct Shared {
 #[derive(Clone)]
 pub struct IdleWatchdog {
     shared: Arc<Shared>,
-    limit: Duration,
+    /// The model's own delay — what `active_limit_us` reverts to once a tool
+    /// call ends. Immutable: only the active limit moves.
+    model_limit: Duration,
 }
 
 impl IdleWatchdog {
@@ -64,13 +100,17 @@ impl IdleWatchdog {
                 origin: Instant::now(),
                 last_beat_us: AtomicU64::new(0),
                 beats: AtomicU64::new(0),
+                active_limit_us: AtomicU64::new(micros(limit)),
+                active_tool: Mutex::new(None),
             }),
-            limit,
+            model_limit: limit,
         }
     }
 
+    /// The limit currently in force — the model's own delay, or the wider tool
+    /// bound while [`IdleWatchdog::begin_tool`] has one open.
     pub fn limit(&self) -> Duration {
-        self.limit
+        Duration::from_micros(self.shared.active_limit_us.load(Ordering::Acquire))
     }
 
     /// Something arrived. Restarts the silence.
@@ -83,24 +123,52 @@ impl IdleWatchdog {
         self.shared.beats.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A tool call started: the model's own silence budget is suspended, and
+    /// `limit` — expected to be [`tool_execution_timeout`] of the model's own
+    /// delay — takes over until [`IdleWatchdog::end_tool`] or a fresh
+    /// [`IdleWatchdog::begin_tool`] replaces it.
+    pub fn begin_tool(&self, name: &str, limit: Duration) {
+        *self.shared.active_tool.lock().unwrap() = Some(name.to_owned());
+        self.shared
+            .active_limit_us
+            .store(micros(limit), Ordering::Release);
+    }
+
+    /// The tool call that was running reached a terminal state (success,
+    /// failure or cancellation): back to watching the model itself.
+    pub fn end_tool(&self) {
+        *self.shared.active_tool.lock().unwrap() = None;
+        self.shared
+            .active_limit_us
+            .store(micros(self.model_limit), Ordering::Release);
+    }
+
+    /// The tool call presently open, if a silence is being measured against
+    /// its bound rather than the model's own delay.
+    pub fn active_tool(&self) -> Option<String> {
+        self.shared.active_tool.lock().unwrap().clone()
+    }
+
     /// How many times progress was reported — what a stall message says the
     /// model had done before it went quiet.
     pub fn beats(&self) -> u64 {
         self.shared.beats.load(Ordering::Relaxed)
     }
 
-    /// Resolves once nothing has been reported for the full limit. Never
-    /// resolves while progress keeps coming.
+    /// Resolves once nothing has been reported for the limit presently in
+    /// force. Never resolves while progress keeps coming.
     ///
-    /// The deadline is recomputed from the latest beat after every sleep, so a
-    /// beat just before the deadline buys a whole new delay rather than being
+    /// The deadline is recomputed from the latest beat (and the limit in
+    /// force) after every sleep, so a beat — or a switch to the tool bound —
+    /// just before the deadline buys a whole new delay rather than being
     /// rounded up to two.
     pub async fn expired(&self) {
         loop {
             let last = self.shared.last_beat_us.load(Ordering::Acquire);
-            let deadline = self.shared.origin + Duration::from_micros(last) + self.limit;
+            let limit = self.limit();
+            let deadline = self.shared.origin + Duration::from_micros(last) + limit;
             tokio::time::sleep_until(deadline).await;
-            if self.shared.last_beat_us.load(Ordering::Acquire) == last {
+            if self.shared.last_beat_us.load(Ordering::Acquire) == last && self.limit() == limit {
                 return;
             }
         }
@@ -157,9 +225,25 @@ pub fn stall_reason(what: &str, limit: Duration, progress: &str) -> String {
     )
 }
 
-/// Whether `text` is a failure produced by [`stall_reason`].
+/// Whether `text` is a failure produced by [`stall_reason`] or
+/// [`tool_stall_reason`].
 pub fn is_stall_reason(text: &str) -> bool {
     text.starts_with(STALL_PREFIX)
+}
+
+/// The failure when a tool call itself runs past [`tool_execution_timeout`].
+/// Unlike [`stall_reason`] this is not an accusation of silence from the
+/// model — the agent was busy running `tool` — so the wording says that
+/// instead, and names the tool so the operator knows what to look at.
+pub fn tool_stall_reason(agent: &str, tool: &str, limit: Duration) -> String {
+    format!(
+        "{STALL_PREFIX} {}s): {agent}'s \"{tool}\" tool call ran past its {} bound without \
+         reaching a result. Kronn cancelled the generation so the model is free for the next \
+         request. If \"{tool}\" legitimately takes longer, raise the agent inactivity timeout \
+         (Config > Server, or the step's `stall_timeout_secs`): this bound scales from it.",
+        limit.as_secs(),
+        spoken(limit),
+    )
 }
 
 #[cfg(test)]
@@ -286,5 +370,101 @@ mod tests {
             "{short}"
         );
         assert!(!is_stall_reason("Agent exited with exit code 1"));
+    }
+
+    #[test]
+    fn tool_execution_timeout_scales_the_model_delay() {
+        assert_eq!(
+            tool_execution_timeout(DEFAULT_IDLE_TIMEOUT),
+            Duration::from_secs(2 * 60 * 60),
+            "a 15-minute floor buys a 2-hour tool bound"
+        );
+        assert_eq!(
+            tool_execution_timeout(Duration::from_secs(30 * 60)),
+            Duration::from_secs(4 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn tool_stall_reason_names_the_tool_and_is_recognised_as_a_stall() {
+        let reason = tool_stall_reason("OpenCode", "cargo test", Duration::from_secs(7200));
+        assert!(is_stall_reason(&reason), "{reason}");
+        assert!(reason.contains("no output for 7200s"), "{reason}");
+        assert!(
+            reason.contains(r#"OpenCode's "cargo test" tool call"#),
+            "{reason}"
+        );
+        assert!(reason.contains("120 min"), "{reason}");
+    }
+
+    /// A tool call in progress is not bound by the model's own delay: it only
+    /// expires once ITS OWN (wider) bound passes with no further beat.
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_call_in_progress_is_bound_by_its_own_wider_limit() {
+        let watchdog = IdleWatchdog::new(Duration::from_secs(60));
+        let tool_limit = tool_execution_timeout(Duration::from_secs(60));
+        watchdog.begin_tool("cargo test", tool_limit);
+        let started = Instant::now();
+
+        watchdog.expired().await;
+
+        assert_eq!(
+            started.elapsed(),
+            tool_limit,
+            "the model's 60s delay never applied"
+        );
+        assert_eq!(
+            watchdog.active_tool(),
+            Some("cargo test".to_owned()),
+            "still naming it: expiry itself does not end the tool, the caller reads this to \
+             build the reason"
+        );
+    }
+
+    /// Progress on the tool itself (another beat while it is still open) buys
+    /// the tool its own fresh window, exactly like a model's own progress.
+    #[tokio::test(start_paused = true)]
+    async fn progress_on_an_open_tool_call_restarts_its_own_window() {
+        let watchdog = IdleWatchdog::new(Duration::from_secs(60));
+        let tool_limit = Duration::from_secs(600);
+        watchdog.begin_tool("cargo test", tool_limit);
+        let started = Instant::now();
+        let producer = watchdog.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(500)).await;
+            producer.beat();
+        });
+
+        watchdog.expired().await;
+
+        assert_eq!(started.elapsed(), Duration::from_secs(500) + tool_limit);
+    }
+
+    /// Once the tool ends, the model's own (narrower) delay is back in force
+    /// immediately — a silence that would never have worried the tool bound
+    /// ends the run right on the model's schedule.
+    #[tokio::test(start_paused = true)]
+    async fn ending_a_tool_call_restores_the_models_own_limit() {
+        let watchdog = IdleWatchdog::new(Duration::from_secs(60));
+        watchdog.begin_tool("cargo test", Duration::from_secs(3_600));
+        watchdog.end_tool();
+        assert_eq!(watchdog.active_tool(), None);
+        assert_eq!(watchdog.limit(), Duration::from_secs(60));
+
+        let started = Instant::now();
+        watchdog.expired().await;
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+    }
+
+    /// A second tool call reported while the first is still open (no terminal
+    /// update observed) simply replaces it: the clock and the named tool both
+    /// move on, nothing is left pointing at the first.
+    #[tokio::test(start_paused = true)]
+    async fn beginning_a_new_tool_call_replaces_the_one_in_progress() {
+        let watchdog = IdleWatchdog::new(Duration::from_secs(60));
+        watchdog.begin_tool("first", Duration::from_secs(600));
+        watchdog.begin_tool("second", Duration::from_secs(1_200));
+        assert_eq!(watchdog.active_tool(), Some("second".to_owned()));
+        assert_eq!(watchdog.limit(), Duration::from_secs(1_200));
     }
 }

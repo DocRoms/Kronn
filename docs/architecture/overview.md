@@ -235,11 +235,19 @@ local model loaded cold); discussions pass `max(agent_stall_timeout_min, 15
 min)` and workflow steps pass their `stall_timeout_secs`, so the operator's
 existing setting is the knob. A request that is not streamed (`format` set,
 `stream: false`) answers once at the end, so it has no progress to watch and
-only its own request timeout. The delay does not cover a tool an ACP agent runs
-silently for longer than itself; raise the inactivity timeout for those.
+only its own request timeout. An ACP tool call in progress (a build, a test
+run) emits no frame for as long as it runs, well past the model's own delay;
+while one is open (`tool_call` seen, no terminal `tool_call_update` yet — status
+`completed`/`failed`/`cancelled`) the watchdog measures silence against
+`idle_watchdog::tool_execution_timeout`, 8× the model's own delay, instead, and
+hands the clock back to the model — a fresh window, not the time already spent
+— the instant a terminal update closes the call. A tool call that never closes
+is still cut, by its own (wider) bound, with a reason naming the tool instead
+of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs]
 [src: file: backend/src/agents/runner.rs]
 [src: file: backend/src/agents/runner_idle_test.rs]
+[src: file: backend/src/acp.rs]
 
 **Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
 

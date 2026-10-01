@@ -4471,8 +4471,15 @@ async fn run_acp_session(
     // KT-932 — the turn's progress clock. Every event the agent produces beats
     // it, so what ends a turn is a silence, not a long run: an agent that keeps
     // streaming is never cut however long it takes.
-    let idle = IdleWatchdog::new(idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT));
+    let model_idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
+    let idle = IdleWatchdog::new(model_idle_limit);
     let forwarder_idle = idle.clone();
+    // KT-932 follow-up — while a tool call is open, OpenCode (or any ACP
+    // agent) emits no frame at all: a `cargo test` or a build legitimately
+    // runs well past the model's own delay. Spend this much wider bound on
+    // the tool itself instead, so a long but healthy tool call is never
+    // mistaken for a dead model.
+    let tool_execution_limit = idle_watchdog::tool_execution_timeout(model_idle_limit);
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
@@ -4536,6 +4543,14 @@ async fn run_acp_session(
                             capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
                         super::activity::tool_started(activity.as_ref(), &name);
+                        // KT-932 follow-up — a tool call is open: measure
+                        // silence against ITS OWN wider bound, not the
+                        // model's, until a terminal update closes it.
+                        forwarder_idle.begin_tool(&name, tool_execution_limit);
+                    }
+                    AcpSessionEvent::ToolCallEnded => {
+                        // Back to watching the model itself.
+                        forwarder_idle.end_tool();
                     }
                     AcpSessionEvent::ToolTarget(target) => {
                         super::activity::tool_target(activity.as_ref(), target);
@@ -4592,15 +4607,21 @@ async fn run_acp_session(
                 (sent, true, false)
             }
             _ = idle.expired() => {
-                let progress = match idle.beats() {
-                    0 => "without ever sending a first token".to_owned(),
-                    beats => format!("after {beats} event(s)"),
+                // KT-932 follow-up — a tool call still open when this fires
+                // means the TOOL's own bound expired, not the model's: name
+                // it instead of accusing the model of a silence it never had.
+                let reason = match idle.active_tool() {
+                    Some(tool) => {
+                        idle_watchdog::tool_stall_reason(&event_agent_label, &tool, idle.limit())
+                    }
+                    None => {
+                        let progress = match idle.beats() {
+                            0 => "without ever sending a first token".to_owned(),
+                            beats => format!("after {beats} event(s)"),
+                        };
+                        idle_watchdog::stall_reason(&event_agent_label, idle.limit(), &progress)
+                    }
                 };
-                let reason = idle_watchdog::stall_reason(
-                    &event_agent_label,
-                    idle.limit(),
-                    &progress,
-                );
                 tracing::warn!(agent = %event_agent_label, "{reason}");
                 if let Ok(mut capture) = task_stderr.lock() {
                     capture.push(reason);
