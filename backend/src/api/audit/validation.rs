@@ -216,7 +216,21 @@ pub fn validate_step_output(
     }
 
     let ratio_pct = dst_size.saturating_mul(100) / template_size;
-    if dst_size == 0 || ratio_pct < MIN_DEST_RATIO_PCT {
+    // A project may have no documented architectural rationale. Its honest
+    // decision note can be much shorter than the template's instructions.
+    let short_decisions = target_file == "docs/decisions.md"
+        && std::fs::read_to_string(&dst_path).is_ok_and(|content| {
+            let mut body = content
+                .lines()
+                .skip_while(|line| line.trim() != "## Decisions");
+            body.next();
+            body.take_while(|line| !line.trim().starts_with("## "))
+                .any(|line| {
+                    let line = line.trim();
+                    !line.is_empty() && !line.starts_with('#') && !line.starts_with("<!--")
+                })
+        });
+    if dst_size == 0 || (ratio_pct < MIN_DEST_RATIO_PCT && !short_decisions) {
         // NO in-place repair (Codex r7/r8): the short file might be the
         // agent's only partial output OR a pre-existing user file this run
         // does not own — overwriting either destroys data, and template
@@ -963,6 +977,26 @@ mod tests {
         assert!(w.reason.contains("truncated"));
         let after = std::fs::read(project.join("docs/architecture/overview.md")).unwrap();
         assert_eq!(after.len(), 100, "the short output stays byte-intact");
+    }
+
+    #[test]
+    #[serial(kronn_templates_env)]
+    fn no_evidenced_decisions_accepts_a_short_note_but_not_an_empty_or_unfilled_section() {
+        let (_tmp, project) = fixture("docs/decisions.md", 0, 2000);
+        let path = project.join("docs/decisions.md");
+        for (content, expected) in [
+            ("# Architecture decisions\n\n## Decisions\n\nNo documented rationale was found in the reviewed sources.\n", true),
+            ("# Architecture decisions\r\n\r\n## Decisions\r\n\r\nNo documented rationale was found in the reviewed sources.\r\n", true),
+            ("# Architecture decisions\n\n## Decisions\n", false),
+            ("# Architecture decisions\n\n## Decisions\n\n## References\nDocumentation review notes.\n", false),
+            ("# Architecture decisions\n\n## Decisions\n{{DECISION_1}}\n", false),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            let (success, _) = validate_step_output(true, &project, "docs/decisions.md");
+            assert_eq!(success, expected, "{content}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+        std::env::remove_var("KRONN_TEMPLATES_DIR");
     }
 
     #[test]

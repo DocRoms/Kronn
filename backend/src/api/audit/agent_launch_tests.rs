@@ -14,6 +14,34 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[path = "coverage_repair_tests.rs"]
 mod coverage_repair_tests;
 
+fn canonical_label(step: u32) -> &'static str {
+    crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)[step as usize - 1]
+        .target_file
+}
+
+fn consolidation_response(body: &Value) -> Option<ResponseTemplate> {
+    if !body.to_string().contains("FINAL consolidation") {
+        return None;
+    }
+    let after_tool = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["role"] == "tool");
+    let frame = if after_tool {
+        text("Consolidation documented.")
+    } else {
+        tool_calls(&[(
+            "write_file",
+            json!({
+                "path":"docs/decisions.md",
+                "content":"# Architecture decisions\n\n## Decisions\n\nNo evidenced architectural rationale is recorded.\n"
+            }),
+        )])
+    };
+    Some(ResponseTemplate::new(200).set_body_string(sse(&[frame])))
+}
+
 fn sse(frames: &[String]) -> String {
     frames
         .iter()
@@ -51,6 +79,9 @@ async fn provider(first: String, then: String) -> (MockServer, Arc<Mutex<Vec<Val
         .and(path("/v1/chat/completions"))
         .respond_with(move |request: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
+            if let Some(response) = consolidation_response(&body) {
+                return response;
+            }
             let mut seen = seen.lock().unwrap();
             seen.push(body);
             let frame = if seen.len() == 1 { &first } else { &then };
@@ -294,7 +325,13 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 let now = chrono::Utc::now() - chrono::Duration::hours(1);
                 runs::insert_running(conn, "before-repair", PROJECT_ID, "Full", "LiteLlm", now)?;
                 for step in 1..=total {
-                    runs::insert_audit_step_start(conn, "before-repair", step, "doc", now)?;
+                    runs::insert_audit_step_start(
+                        conn,
+                        "before-repair",
+                        step,
+                        canonical_label(step),
+                        now,
+                    )?;
                     runs::finalize_audit_step(
                         conn,
                         "before-repair",
@@ -335,7 +372,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         );
         assert_eq!(
             done["steps_to_redo"],
-            if correct { json!([]) } else { json!([1]) },
+            if correct { json!([]) } else { json!([1, 16]) },
             "{stream}"
         );
         assert_eq!(
@@ -357,8 +394,8 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         }
         assert_eq!(
             sse_events(&stream, "step_start").len(),
-            1,
-            "only the owning recovery step reruns"
+            2,
+            "the owning step and its dependent consolidation are scheduled"
         );
         let repaired =
             std::fs::read_to_string(project.path().join("docs/tech-debt/TD-repair.md")).unwrap();
@@ -463,7 +500,13 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
                 now,
             )?;
             for step in 1..=total {
-                runs::insert_audit_step_start(conn, "before-unavailable", step, "doc", now)?;
+                runs::insert_audit_step_start(
+                    conn,
+                    "before-unavailable",
+                    step,
+                    canonical_label(step),
+                    now,
+                )?;
                 runs::finalize_audit_step(
                     conn,
                     "before-unavailable",
@@ -498,7 +541,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
     let stream = sse_body(response).await;
     let done = sse_events(&stream, "done").pop().expect("terminal outcome");
     assert_eq!(done["status"], "interrupted", "{stream}");
-    assert_eq!(done["steps_to_redo"], json!([1]), "{stream}");
+    assert_eq!(done["steps_to_redo"], json!([1, 16]), "{stream}");
     assert!(!done["discussion_id"].is_string());
     assert_eq!(
         sse_events(&stream, "step_retry").len(),
@@ -510,7 +553,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
     );
     assert_eq!(*requests.lock().unwrap(), 2);
     let step_done = sse_events(&stream, "step_done");
-    assert_eq!(step_done.len(), 1);
+    assert_eq!(step_done.len(), 2);
     assert_eq!(
         step_done[0]["tokens"], 20,
         "usage survives a failed retry: {stream}"
@@ -550,7 +593,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
     }
     assert_eq!(
         crate::api::audit::full::already_succeeded_step_indices(&steps).len(),
-        total as usize - 1
+        total as usize - 2
     );
 }
 
@@ -931,7 +974,7 @@ fn refreshable_steps() -> Vec<usize> {
 /// sub-audits for a Full audit, every refreshable section for a partial one.
 fn expected_step_count(pipeline: &str) -> usize {
     if pipeline == "full" {
-        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len()
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() - 1
     } else {
         refreshable_steps().len()
     }
@@ -1140,8 +1183,8 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             runs::insert_running(conn, "run-prev", PROJECT_ID, "Full", "ClaudeCode", started)?;
             let mut succeeded = 0;
             for step in 1..=total {
-                let label = format!("docs/step-{step}.md");
-                runs::insert_audit_step_start(conn, "run-prev", step, &label, started)?;
+                let label = canonical_label(step);
+                runs::insert_audit_step_start(conn, "run-prev", step, label, started)?;
                 let ok = step != failed_step;
                 runs::finalize_audit_step(
                     conn,
@@ -1193,9 +1236,9 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
         step_prompts, 1,
         "only step {failed_step} may reach the agent: {stream}"
     );
-    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 1);
+    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 2);
     let started = sse_events(&stream, "step_start");
-    assert_eq!(started.len(), 1, "{stream}");
+    assert_eq!(started.len(), 2, "{stream}");
     assert_eq!(started[0]["step"], failed_step);
 
     // The step failed again, yet the run is not voided: it is validated for
@@ -1204,8 +1247,8 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
         .pop()
         .expect("a terminal done event");
     assert_eq!(done["status"], "interrupted", "{done}");
-    assert_eq!(done["last_completed_step"], total - 1, "{done}");
-    assert_eq!(done["steps_to_redo"], json!([failed_step]), "{done}");
+    assert_eq!(done["last_completed_step"], total - 2, "{done}");
+    assert_eq!(done["steps_to_redo"], json!([failed_step, total]), "{done}");
     let discussion_id = done["discussion_id"]
         .as_str()
         .unwrap_or_else(|| panic!("a partial run must create its validation discussion: {stream}"))
@@ -1229,7 +1272,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
     assert_eq!(run.status, "Interrupted");
     assert_eq!(
         run.last_completed_step,
-        total - 1,
+        total - 2,
         "the progress counts every success"
     );
     assert_eq!(
@@ -1246,7 +1289,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
     // only has the failed step to run.
     let still_done = crate::api::audit::full::already_succeeded_step_indices(&resumed_steps);
     let expected: std::collections::HashSet<u32> =
-        (1..=total).filter(|step| *step != failed_step).collect();
+        (1..total).filter(|step| *step != failed_step).collect();
     assert_eq!(still_done, expected);
 }
 
@@ -1285,8 +1328,8 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
             runs::insert_running(conn, "run-prev", PROJECT_ID, "Full", "ClaudeCode", started)?;
             let mut succeeded = 0;
             for step in 1..=total {
-                let label = format!("docs/step-{step}.md");
-                runs::insert_audit_step_start(conn, "run-prev", step, &label, started)?;
+                let label = canonical_label(step);
+                runs::insert_audit_step_start(conn, "run-prev", step, label, started)?;
                 let ok = step != founding_step;
                 runs::finalize_audit_step(
                     conn,
@@ -1338,7 +1381,7 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
         step_prompts, 1,
         "only step {founding_step} may reach the agent: {stream}"
     );
-    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 1);
+    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 2);
 
     // The founding step fails again: no validation discussion is created,
     // even though 15 other steps succeeded.
@@ -1346,8 +1389,12 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
         .pop()
         .expect("a terminal done event");
     assert_eq!(done["status"], "interrupted", "{done}");
-    assert_eq!(done["last_completed_step"], total - 1, "{done}");
-    assert_eq!(done["steps_to_redo"], json!([founding_step]), "{done}");
+    assert_eq!(done["last_completed_step"], total - 2, "{done}");
+    assert_eq!(
+        done["steps_to_redo"],
+        json!([founding_step, total]),
+        "{done}"
+    );
     assert!(
         done["discussion_id"].is_null(),
         "no entry point, no validation: {done}"
@@ -1368,7 +1415,7 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
     assert_eq!(run.status, "Interrupted");
     assert_eq!(
         run.last_completed_step,
-        total - 1,
+        total - 2,
         "the progress still counts every success"
     );
     assert!(

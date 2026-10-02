@@ -322,8 +322,7 @@ pub async fn full_audit(
         // per-step skip decision so a warned step past a chain of later
         // successes still gets retried WITHOUT replaying those successes
         // (the old `step <= resume_from` contiguous check replayed them).
-        let mut already_succeeded_steps: std::collections::HashSet<u32> =
-            std::collections::HashSet::new();
+        let mut predecessor_steps = Vec::new();
         let (kind, resume_from) = if let Some(run_id) = resume_run_id_req.clone() {
             let fetched = db.with_conn({
                 let run_id = run_id.clone();
@@ -351,7 +350,7 @@ pub async fn full_audit(
             };
             match resolved {
                 Ok((plan, steps)) => {
-                    already_succeeded_steps = already_succeeded_step_indices(&steps);
+                    predecessor_steps = steps;
                     plan
                 }
                 Err(msg) => {
@@ -376,7 +375,7 @@ pub async fn full_audit(
         }
 
         // 0.9.0 — chained audit ("un seul audit qui envoie du pâté"): a Full
-        // run appends every focused sub-audit after the 9 foundation steps, so
+        // run executes eight foundation steps, all focused sub-audits, then consolidation, so
         // ONE launch covers docs + security + docker + perf + a11y + database +
         // API design + code quality, and the single validation discussion at
         // the end confirms the WHOLE TD set. Each chained step carries a
@@ -386,9 +385,8 @@ pub async fn full_audit(
         // Sub-audits remain individually launchable via `kind` for surgical
         // re-scans (the recommendations engine keeps suggesting those).
         let steps: Vec<super::AnalysisStep> = super::assemble_chained_steps(kind);
-        // Index of the first chained sub-audit step (1-based), used to inject
-        // the relevance gate into the prompt at build time.
-        let first_chained_step = super::ANALYSIS_STEPS.len() + 1;
+        // Stored file labels survive chain reordering; numeric positions do not.
+        let mut already_succeeded_steps = succeeded_steps_for_chain(&predecessor_steps, &steps);
         let total_steps = steps.len();
         // Recompute from the actual documents, including predecessors created
         // before documentary failures were persisted on their owning steps.
@@ -404,6 +402,9 @@ pub async fn full_audit(
             }
         } else { Default::default() };
         for step in documentary_recovery.keys() { already_succeeded_steps.remove(step); }
+        // A consolidation predating pending/repaired sections is stale even
+        // if its old agent finished successfully.
+        invalidate_pending_consolidation(&mut already_succeeded_steps, &steps);
         // A checkpoint beyond the pipeline is a corrupt/mismatched row, not a
         // request to skip everything — REFUSE it rather than clamp (a clamp
         // to total_steps would silently jump to validation-only on a run
@@ -1004,16 +1005,41 @@ pub async fn full_audit(
                 }
             }
 
+            if analysis_step.target_file == "docs/decisions.md" && !progress.failed_steps().is_empty() {
+                let reason = "Consolidation deferred until preceding failed steps are repaired";
+                progress.record_failure(step as u32);
+                let run_id = audit_run_id.clone();
+                let total_tokens = run_tokens.total();
+                if let Err(error) = db.with_conn(move |conn| {
+                    crate::db::audit_runs::finalize_audit_step(
+                        conn, &run_id, step as u32, Utc::now(), 0,
+                        &crate::db::audit_runs::StepTokens::UNKNOWN, total_tokens,
+                        false, Some(reason), false,
+                    )
+                }).await {
+                    tracing::error!("Failed to persist deferred consolidation: {error}");
+                }
+                yield Event::default().event("step_warning").data(serde_json::json!({
+                    "step":step,"file":file_label,"reason":reason,"repaired_from_template":false,
+                }).to_string());
+                yield Event::default().event("step_done").data(serde_json::json!({
+                    "step":step,"file":file_label,"success":false,"duration_ms":0,
+                    "tokens":null,"total_tokens":total_tokens,
+                }).to_string());
+                continue;
+            }
+
             let today = Utc::now().format("%Y-%m-%d").to_string();
             let today_compact = Utc::now().format("%Y%m%d").to_string();
             // Chained sub-audit steps get the relevance gate FIRST — a
             // dimension foreign to the project must cost one line, not a
             // full agent pass.
-            let gate = super::gate_for_step(step, first_chained_step);
+            let gate = super::gate_for_step(analysis_step, kind);
             let mut full_prompt = format!("{}\n\n{}{}", PROMPT_PREAMBLE, gate, analysis_step.prompt)
                 .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
                 .replace("today's date (YYYY-MM-DD)", &today)
                 .replace("set to today's date", &format!("set to {}", today));
+            full_prompt.push_str(super::finding_evidence_block(analysis_step));
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
@@ -2164,7 +2190,7 @@ pub async fn full_audit(
         if should_write_full_baseline(kind) && audit_fully_succeeded {
             let pp = project_path.clone();
             // Baseline the WHOLE executed chain, not just the 9 foundation
-            // steps (Codex #8): each chained sub-audit index (steps 10..16)
+            // steps (Codex #8): each chained sub-audit index (steps 9..15)
             // gets its own mapping with a stable audit_step id, so drift can
             // flag a stale sub-audit section and the partial path can refresh
             // exactly that step.
@@ -2781,6 +2807,7 @@ pub(crate) fn write_terminal_state(
 /// the step stopped before reaching its gates): `insert_audit_step_start`
 /// defaults `cli_success` to 1, so the flag alone would skip a step that never
 /// completed.
+#[cfg(test)]
 pub(crate) fn already_succeeded_step_indices(
     steps: &[crate::models::AuditRunStep],
 ) -> std::collections::HashSet<u32> {
@@ -2789,6 +2816,99 @@ pub(crate) fn already_succeeded_step_indices(
         .filter(|s| s.cli_success && s.ended_at.is_some())
         .map(|s| s.step_index)
         .collect()
+}
+
+pub(super) fn succeeded_steps_for_chain(
+    previous: &[crate::models::AuditRunStep],
+    chain: &[super::AnalysisStep],
+) -> std::collections::HashSet<u32> {
+    previous
+        .iter()
+        .filter(|s| s.cli_success && s.ended_at.is_some())
+        .filter_map(|s| {
+            chain
+                .iter()
+                .position(|target| step_file_label(target) == s.file_label)
+                .filter(|&index| {
+                    s.file_label != "docs/decisions.md" || s.step_index == index as u32 + 1
+                })
+                .map(|index| index as u32 + 1)
+        })
+        .collect()
+}
+
+pub(super) fn invalidate_pending_consolidation(
+    succeeded: &mut std::collections::HashSet<u32>,
+    chain: &[super::AnalysisStep],
+) {
+    if let Some(index) = chain
+        .iter()
+        .position(|s| s.target_file == "docs/decisions.md")
+    {
+        if (1..=chain.len() as u32)
+            .any(|step| step != index as u32 + 1 && !succeeded.contains(&step))
+        {
+            succeeded.remove(&(index as u32 + 1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod reordered_resume_tests {
+    use super::*;
+
+    fn finished(index: u32, label: &str) -> crate::models::AuditRunStep {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("s{index}"), "audit_run_id": "old", "step_index": index,
+            "file_label": label, "started_at": "2026-10-01T00:00:00Z",
+            "ended_at": "2026-10-01T00:01:00Z", "cli_success": true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn old_steps_resume_by_target_and_old_consolidation_is_replayed() {
+        let chain = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        let previous = [
+            finished(9, "docs/decisions.md"),
+            finished(10, "docs/inconsistencies-security.md"),
+            finished(16, "docs/inconsistencies-code-quality.md"),
+            finished(3, "unknown-target"),
+        ];
+        let succeeded = succeeded_steps_for_chain(&previous, &chain);
+        assert_eq!(succeeded, [9, 15].into_iter().collect());
+        assert!(
+            !succeeded.contains(&16),
+            "old consolidation preceded specialist evidence"
+        );
+    }
+
+    #[test]
+    fn pending_or_repaired_section_invalidates_consolidation_but_not_other_successes() {
+        let chain = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        let mut succeeded = (1..=chain.len() as u32).collect();
+        invalidate_pending_consolidation(&mut succeeded, &chain);
+        assert_eq!(
+            succeeded.len(),
+            16,
+            "complete new runs do not pay for another review"
+        );
+        succeeded.remove(&11);
+        invalidate_pending_consolidation(&mut succeeded, &chain);
+        assert!(!succeeded.contains(&16));
+        assert!(succeeded.contains(&15));
+        assert_eq!(succeeded.len(), 14);
+    }
+
+    #[test]
+    fn unfinished_or_failed_rows_do_not_survive_a_reorder() {
+        let chain = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        let mut failed = finished(10, "docs/inconsistencies-security.md");
+        failed.cli_success = false;
+        let mut unfinished = finished(11, "docs/inconsistencies-docker.md");
+        unfinished.ended_at = None;
+        assert!(succeeded_steps_for_chain(&[failed, unfinished], &chain).is_empty());
+    }
 }
 
 /// KT-841 — outcome of the Full pipeline's rewrite-proof gate.

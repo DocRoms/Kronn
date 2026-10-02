@@ -17,7 +17,7 @@ use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
 
-use super::{SseStream, ANALYSIS_STEPS, PROMPT_PREAMBLE};
+use super::{SseStream, PROMPT_PREAMBLE};
 
 /// GET /api/projects/:id/drift
 /// Check which docs/ sections are stale based on source file checksums.
@@ -107,13 +107,12 @@ pub async fn partial_audit(
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
 
     // Validate requested step numbers against the FULL chained pipeline
-    // (foundation 1..9 + chained sub-audits 10..16), not just the 9
+    // (foundation 1..8 + specialized 9..15 + consolidation 16), not just the 9
     // foundation steps — otherwise a drift-flagged sub-audit section (Codex
     // #8) could never be refreshed, the "Mettre à jour" button would send a
     // step the endpoint rejects.
     let chain = super::assemble_chained_steps(crate::models::AuditKind::Full);
     let redact_targets: Vec<String> = chain.iter().map(|s| s.target_file.to_string()).collect();
-    let first_chained_step = ANALYSIS_STEPS.len() + 1;
     let total_steps_available = chain.len();
     // An empty selection would run nothing and still end `done complete` — a
     // no-op masquerading as a refresh. Refuse it like the bridge does.
@@ -238,6 +237,9 @@ pub async fn partial_audit(
     // Same wiring as the Full pipeline: an HTTP agent gets file tools scoped to
     // this project (a no-op for a CLI agent).
     let agent_launcher = super::agent_launch::AuditAgentLauncher::new(&state, &agent_type).await;
+    // An old baseline may request decisions (old 9, now 16) before a
+    // specialist (old 10, now 9). Consolidate after all selected producers.
+    resolved_steps.sort_unstable();
     let requested_steps = resolved_steps;
     let total_requested = requested_steps.len();
     let audit_tracker = state.audit_tracker.clone();
@@ -446,14 +448,15 @@ pub async fn partial_audit(
 
             let today = Utc::now().format("%Y-%m-%d").to_string();
             let today_compact = Utc::now().format("%Y%m%d").to_string();
-            // Chained sub-audit steps (10..16) carry the relevance gate, same
+            // Chained sub-audit steps (9..15) carry the relevance gate, same
             // as a full chained run — a partial re-run of a sub-audit that no
             // longer applies must still write its one-line "Not applicable".
-            let gate = super::gate_for_step(step, first_chained_step);
+            let gate = super::gate_for_step(analysis_step, crate::models::AuditKind::Full);
             let mut full_prompt = format!("{}\n\n{}{}", PROMPT_PREAMBLE, gate, analysis_step.prompt)
                 .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
                 .replace("today's date (YYYY-MM-DD)", &today)
                 .replace("set to today's date", &format!("set to {}", today));
+            full_prompt.push_str(super::finding_evidence_block(analysis_step));
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));

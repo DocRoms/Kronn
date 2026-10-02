@@ -101,6 +101,7 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
                     message["content"].as_str().is_some_and(|content|
                         content.contains(crate::api::audit::PROMPT_PREAMBLE))
                 });
+                if let Some(response) = consolidation_response(&body) { return response; }
                 if !is_audit {
                     return ResponseTemplate::new(200).set_body_string(sse(&[
                         text("Validation fixture complete."),
@@ -137,7 +138,13 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
                 let now = chrono::Utc::now() - chrono::Duration::hours(1);
                 runs::insert_running(conn, "before-coverage", PROJECT_ID, "Full", "LiteLlm", now)?;
                 for step in 1..=total {
-                    runs::insert_audit_step_start(conn, "before-coverage", step, "doc", now)?;
+                    runs::insert_audit_step_start(
+                        conn,
+                        "before-coverage",
+                        step,
+                        canonical_label(step),
+                        now,
+                    )?;
                     runs::finalize_audit_step(
                         conn,
                         "before-coverage",

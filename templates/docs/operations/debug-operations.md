@@ -2,6 +2,10 @@
 
 > **TEMPLATE FILE.** If commands below contain `{{...}}`, say `NOT_FOUND` — never invent commands or ports.
 
+## Prerequisites
+
+{{PREREQUISITES}}
+
 ## Common commands
 
 <!-- Fill after audit: build, run, test, deploy commands -->
