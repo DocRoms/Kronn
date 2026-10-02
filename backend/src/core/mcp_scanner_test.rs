@@ -3211,7 +3211,14 @@ args = ["@example/old-mcp"]
                 name: "Atlassian".into(),
                 description: String::new(),
                 transport: crate::models::McpTransport::Stdio {
-                    command: "uvx".into(),
+                    // This is a sync-plan fixture, never an executed server.
+                    // Use a known existing binary on every test platform: uvx
+                    // is optional and the production filter correctly drops it
+                    // when absent, hiding the user-server assertion in CI.
+                    command: std::env::current_exe()
+                        .expect("test executable")
+                        .to_string_lossy()
+                        .into_owned(),
                     args: vec!["mcp-atlassian".into()],
                 },
                 source: crate::models::McpSource::Registry,
