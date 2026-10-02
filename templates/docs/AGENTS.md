@@ -69,6 +69,10 @@ Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](convention
 
 State the missing evidence before expanding. Never load every file or reread unchanged instructions already in context.
 
+An audit must cover its requested scope: the initial read budget limits each
+batch, not the number of source areas checked. List candidate paths first,
+inspect relevant ranges, and record unchecked areas explicitly.
+
 `docs/reports/` — [dated snapshots](reports/README.md), excluded from T0–T2 routing; read one only when a task names it.
 
 ---

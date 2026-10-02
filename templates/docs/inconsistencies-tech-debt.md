@@ -5,17 +5,10 @@
 Track-only list. Prevents AI from doing large refactors without context.
 Details in `tech-debt/TD-YYYYMMDD-slug.md` (use today's date for YYYYMMDD).
 
-**To add:** create detail file, add one-line entry below.
-
-**Detail file example** (`tech-debt/TD-20260315-hardcoded-secret.md`):
-- **ID**: TD-20260315-hardcoded-secret
-- **Area**: Backend
-- **Severity**: Critical
-- **Problem**: API key hardcoded in `src/config.rs:42`
-- **Impact**: security — key exposed in version control
-- **Where**: `src/config.rs:42`, `src/payments/client.rs:15`
-- **Suggested fix**: Move to environment variable
-- **Next step**: create ticket
+**To add:** copy [the detail template](tech-debt/TEMPLATE.md), fill and check
+its named fields, then add an actual Markdown link in the relevant index.
+Keep one ID per root cause. Do not turn a checklist suggestion into a finding
+without source evidence and a relevant counter-check.
 
 **Severity scale:**
 - **Critical** — security risk or data loss

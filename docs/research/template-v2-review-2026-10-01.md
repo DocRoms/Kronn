@@ -66,7 +66,7 @@ so old numeric positions cannot skip the wrong section. A repaired section
 invalidates the prior consolidation. Failed prerequisites defer consolidation
 without another model call; partial selections are sorted after their stored
 positions are resolved.
-[src: file: backend/src/api/audit/mod.rs:1160]
+[src: file: backend/src/api/audit/mod.rs:1121]
 [src: file: backend/src/api/audit/full.rs:1008]
 [src: file: backend/src/api/audit/full.rs:2821]
 [src: file: backend/src/api/audit/drift.rs:240]
@@ -78,7 +78,7 @@ without copying every TD into one global list. Architectural decisions have
 no minimum count; a documented rationale or human confirmation is required.
 An explicit short note with no evidenced decisions is accepted, while empty
 sections and unfilled placeholders remain failures.
-[src: file: backend/src/api/audit/mod.rs:1182]
+[src: file: backend/src/api/audit/mod.rs:1143]
 [src: file: templates/docs/decisions.md:9]
 [src: file: backend/src/api/audit/validation.rs:218]
 
@@ -99,3 +99,34 @@ Follow-up measurements and their qualification limits are tracked in
 [src: commit: 8847d7f7]
 [src: file: backend/src/api/audit/validation.rs:218]
 [src: file: backend/src/api/audit/validation.rs:983]
+
+
+## Coverage follow-up after CS2
+
+CS2 completed all 16 steps but the implementing agent's non-blind review found
+10/15 known defects (8/11 certain), versus 13/15 (10/11 certain) in both frozen
+CS1 reviews. Its observed cumulative audit usage, including cache, was 5,242,693
+tokens versus 5,153,836; maximum reported input was 66,669 versus 60,005.
+This is an adverse single-run signal, not a quality acceptance or a causal
+estimate. Frozen measurements and methodology are summarized in
+[PR #219](https://github.com/DocRoms/Kronn/pull/219).
+
+The next prompt revision separates breadth from the initial read batch:
+inspect all discovered build entry points, outbound transport, client timeouts
+and retries, cache capacity and pagination without assuming an ORM. Dependency
+absence checks include workspace tooling and dynamic loading. These are generic
+coverage rules; the benchmark's source paths and known answers are not inputs.
+[src: file: backend/src/api/audit/mod.rs:460]
+[src: file: backend/src/api/audit/mod.rs:630]
+[src: file: backend/src/api/audit/mod.rs:759]
+
+A canonical TD template is now shipped and embedded in each findings step and
+final consolidation, including when an older project lacks the template file.
+Named fields, body/history agreement and an actual index link are explicit
+output requirements. Final review requests a structural sweep and targeted
+repairs of generated documents; it is still an agent instruction, not a new
+mechanical quality gate. Prompt contract tests cannot prove model compliance;
+the same-source/model CS3 follow-up must measure it before acceptance.
+[src: file: templates/docs/tech-debt/TEMPLATE.md:1]
+[src: file: backend/src/api/audit/mod.rs:1143]
+[src: file: backend/src/api/audit/mod.rs:557]
