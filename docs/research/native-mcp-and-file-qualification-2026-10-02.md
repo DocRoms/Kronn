@@ -54,9 +54,17 @@ of uncommitted attachments. Frontend tests cover exact attachment links,
 unavailable-file reasons, relative project paths and requested lines, and local
 Markdown images. The complete frontend suite passed 5,129 tests, TypeScript 6
 and 7 checks, both linters and locale checks. The file implementation on
-`be7b0c32` passed the complete local Rust suite: 8,455 passed, 21 ignored, across
-36 reported suites, plus formatting and Clippy on all targets.
+`be7b0c32` passed the complete local Rust suite: 8,445 passed, 21 ignored, across
+34 reported suites, plus formatting and Clippy on all targets.
 [src: commit: be7b0c32]
+
+The complete local suite on `ad7b30a3`, including native trace and routing
+regressions, subsequently passed 8,453 tests with 21 ignored across 34 suites
+in 1,154.19 seconds. These counts exclude separate targeted test commands.
+The following ACP bridge and directory-failure changes passed their targeted
+regressions and all-target Clippy; the integrated revision is qualified by its
+separate CI run.
+[src: commit: ad7b30a3] [src: commit: a13c3104] [src: commit: f315643e]
 
 A subsequent error-path review removed the silent shared-temp fallback when a
 dedicated discussion directory cannot be created. The turn now fails before
