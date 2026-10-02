@@ -41,7 +41,8 @@ The operational completion improvement is observed. Overall content
 non-inferiority or superiority is **not established**. There is one sample per
 arm, template-family hints weaken blinding, and backend and templates changed
 together. The later template fixes at `19d27c6b` were not exercised by this pair.
-An HTTP/Gemini qualification on that later revision is a separate experiment.
+The [HTTP/Gemini qualification](http-audit-qualification-2026-10-02.md) on later
+revisions is a separate experiment.
 [src: commit: 19d27c6b]
 
 The original keyword-based recall underestimated both outputs. Mechanical
