@@ -2249,8 +2249,48 @@ async fn make_agent_stream_inner(
     // Without a project the agent used to run in the shared system temp dir,
     // where its files could not be told apart from anything else on the machine.
     if !tool_free_judge && workspace_path.is_none() && project_path.is_empty() {
-        workspace_path = runner::discussion_scratch_dir(&discussion_id)
-            .map(|dir| dir.to_string_lossy().into_owned());
+        match runner::discussion_scratch_dir(&discussion_id) {
+            Ok(dir) => workspace_path = Some(dir.to_string_lossy().into_owned()),
+            Err(error) => {
+                let content = if disc.language == "fr" {
+                    format!("Impossible de préparer le dossier de cette discussion : {error}")
+                } else {
+                    format!("Unable to prepare this discussion's working directory: {error}")
+                };
+                let mut message = crate::api::orchestration::orchestrator_message(
+                    Uuid::new_v4().to_string(),
+                    content.clone(),
+                );
+                message.role = MessageRole::System;
+                message.reply_to_message_id = dispatch_trigger_message_id.clone();
+                let did = discussion_id.clone();
+                let job = dispatch_job_id.clone();
+                if let Err(db_error) = state
+                    .db
+                    .with_conn(move |conn| {
+                        persist_agent_start_error(
+                            conn,
+                            &did,
+                            &message,
+                            job.as_deref(),
+                            tracked_dispatch,
+                        )
+                    })
+                    .await
+                {
+                    tracing::error!("Failed to persist discussion directory error: {db_error}");
+                }
+                finish_tracked_preflight(&mut completion_tx, &content);
+                let stream: SseStream = Box::pin(futures::stream::once(async move {
+                    Ok::<_, Infallible>(
+                        Event::default()
+                            .event("error")
+                            .data(serde_json::json!({"error": content}).to_string()),
+                    )
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        }
     }
 
     // Validation discussions are a second agent boundary over the audit
@@ -5458,6 +5498,59 @@ mod agent_lifecycle_tests {
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn an_unavailable_discussion_directory_stops_before_the_agent_and_persists_the_error() {
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO discussions (id, title, agent, language, created_at, updated_at, awaiting_agent)
+                VALUES ('invalid/directory', 'directory fixture', 'Codex', 'en', datetime('now'), datetime('now'), 1)", [])?;
+            Ok(())
+        }).await.unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response = super::make_agent_stream_inner(
+            state,
+            "invalid/directory".into(),
+            None,
+            None,
+            None,
+            None,
+            Some(tx),
+        )
+        .await
+        .into_response();
+        assert!(matches!(
+            rx.await.unwrap(),
+            AgentExecutionOutcome::PreflightFailed { .. }
+        ));
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Unable to prepare"));
+        db.with_read_conn(|conn| {
+            let messages = crate::db::discussions::list_messages(conn, "invalid/directory")?;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, MessageRole::System);
+            assert!(messages[0].content.contains("Invalid discussion id"));
+            let awaiting: bool = conn.query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'invalid/directory'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert!(!awaiting);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn missing_sdk_auth_is_an_actionable_system_message_not_an_agent_reply() {

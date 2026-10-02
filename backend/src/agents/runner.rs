@@ -10591,23 +10591,25 @@ fn claude_project_slug(work_dir: &Path) -> String {
 
 /// Working directory of a discussion without a project: one folder per
 /// discussion under `~/.kronn/discussions`, outside Kronn's data dir.
-pub fn discussion_scratch_dir(discussion_id: &str) -> Option<PathBuf> {
-    let home = directories::BaseDirs::new()?;
+pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
+    let home = directories::BaseDirs::new()
+        .ok_or_else(|| "The user home directory is unavailable".to_string())?;
     discussion_scratch_dir_under(home.home_dir(), discussion_id)
 }
 
-fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Option<PathBuf> {
+fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
     // The id becomes a path segment: anything but a plain id could escape it.
     if discussion_id.is_empty()
         || !discussion_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
-        return None;
+        return Err("Invalid discussion id for its working directory".into());
     }
     let dir = home.join(".kronn").join("discussions").join(discussion_id);
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Cannot create the discussion working directory: {error}"))?;
+    Ok(dir)
 }
 
 /// The directory an agent will actually run in.

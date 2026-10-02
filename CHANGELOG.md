@@ -358,7 +358,9 @@ Release notes for 0.9.3 and earlier are available in the
   link. Project-relative paths open the project viewer at the requested line;
   attached Markdown images render inline. A discussion without a project runs its agent in its own
   folder (`~/.kronn/discussions/<id>`) instead of the system's shared temp
-  folder. This working directory and the attachment filters do not sandbox
+  folder. If that folder cannot be prepared, the turn stops with a visible
+  error instead of falling back to shared temporary files. This working
+  directory and the attachment filters do not sandbox
   the CLI's filesystem access.
 
 - HTTP audits can write more than twelve findings and their index within a

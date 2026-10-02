@@ -8195,10 +8195,23 @@ Suite de la réponse.";
 
         for unsafe_id in ["", "..", "../escape", "a/b", "a\\b", "id with space"] {
             assert!(
-                super::super::discussion_scratch_dir_under(home.path(), unsafe_id).is_none(),
+                super::super::discussion_scratch_dir_under(home.path(), unsafe_id).is_err(),
                 "{unsafe_id:?} must not become a path segment"
             );
         }
+    }
+
+    #[test]
+    fn discussion_directory_creation_failure_never_returns_a_shared_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".kronn"),
+            "a file blocks directory creation",
+        )
+        .unwrap();
+        let error = super::super::discussion_scratch_dir_under(home.path(), "test-discussion")
+            .expect_err("creation failure must stop the launch, not select the system temp dir");
+        assert!(error.contains("Cannot create the discussion working directory"));
     }
 
     #[test]
