@@ -2314,7 +2314,10 @@ mod prompt_tests {
         );
         assert!(
             body.to_lowercase().contains("never force-translate")
-                || body.to_lowercase().contains("never translate"),
+                || body.to_lowercase().contains("never translate")
+                || body
+                    .to_lowercase()
+                    .contains("preserve every existing document in its current language"),
             "template must state that an existing non-English doc is kept as-is, not translated"
         );
         // The step-1 prompt (docs/AGENTS.md is its target_file) must cite
