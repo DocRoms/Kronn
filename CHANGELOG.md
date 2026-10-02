@@ -331,6 +331,15 @@ Release notes for 0.9.3 and earlier are available in the
   Kronn's tools, and nothing else, explicitly allowed (Claude:
   `--allowedTools=mcp__kronn-internal`; Copilot: `--allow-tool=kronn-internal`).
   Full access and task workers keep their current permissions.
+  Native MCP posts no longer start an extra answer from their own discussion
+  agent merely because the CLI supplies a runtime session id. Joined peers
+  and explicitly addressed responders keep their routing.
+
+- Native tool history now keeps reported names, redacted argument excerpts
+  and observed completion/error status, correlating updates by call id.
+  Repeated calls remain distinct; missing metadata is shown as unknown.
+  Command output, MCP results and patch bodies are not copied into the trace
+  (KT-953).
 
 - A link an agent writes to a file on its machine now leads somewhere
   (KT-954). Agents often hand over a file by its path

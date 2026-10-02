@@ -4625,6 +4625,11 @@ async fn run_acp_session(
                     AcpSessionEvent::ToolTarget(target) => {
                         super::activity::tool_target(activity.as_ref(), target);
                     }
+                    AcpSessionEvent::ToolTrace(trace) => {
+                        if let Ok(mut capture) = forwarder_stderr.lock() {
+                            capture.push(trace.marker());
+                        }
+                    }
                     AcpSessionEvent::Usage {
                         input_tokens,
                         output_tokens,

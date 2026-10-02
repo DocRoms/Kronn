@@ -474,6 +474,8 @@ pub enum AcpSessionEvent {
     ToolCallEnded,
     /// The informative input of the latest `ToolCall`, once that input is complete.
     ToolTarget(String),
+    /// Correlated tool metadata for the durable transcript, redacted and bounded.
+    ToolTrace(crate::agents::tool_trace::ToolTraceUpdate),
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -1197,6 +1199,9 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                             .unwrap_or("tool")
                             .to_owned(),
                     });
+                }
+                if let Some(trace) = crate::agents::tool_trace::from_acp(update) {
+                    events.push(AcpSessionEvent::ToolTrace(trace));
                 }
             }
             if let Some(usage) = update.get("usage") {
@@ -2405,6 +2410,12 @@ mod tests {
                 AcpSessionEvent::ToolCall {
                     name: "read_file".into()
                 },
+                AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                    id: "call-1".into(),
+                    name: Some("read_file".into()),
+                    input: None,
+                    status: None,
+                }),
                 AcpSessionEvent::TextDelta("Bonjour 🦀".into()),
                 AcpSessionEvent::Usage {
                     input_tokens: 30,
@@ -2427,7 +2438,19 @@ mod tests {
                 }}})],
                 "s1",
             );
-            assert_eq!(events, vec![AcpSessionEvent::ToolCallEnded], "{status}");
+            assert_eq!(
+                events,
+                vec![
+                    AcpSessionEvent::ToolCallEnded,
+                    AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                        id: "call-1".into(),
+                        name: None,
+                        input: None,
+                        status: Some(status.into()),
+                    }),
+                ],
+                "{status}"
+            );
         }
 
         for status in ["pending", "in_progress"] {
@@ -2440,9 +2463,17 @@ mod tests {
             );
             assert_eq!(
                 events,
-                vec![AcpSessionEvent::ToolCall {
-                    name: "read_file".into()
-                }],
+                vec![
+                    AcpSessionEvent::ToolCall {
+                        name: "read_file".into()
+                    },
+                    AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                        id: "call-1".into(),
+                        name: Some("read_file".into()),
+                        input: None,
+                        status: Some("in_progress".into()),
+                    }),
+                ],
                 "{status} is still the tool call in progress, not its end"
             );
         }
@@ -2457,9 +2488,17 @@ mod tests {
         );
         assert_eq!(
             events,
-            vec![AcpSessionEvent::ToolCall {
-                name: "cargo test".into()
-            }]
+            vec![
+                AcpSessionEvent::ToolCall {
+                    name: "cargo test".into()
+                },
+                AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                    id: "call-1".into(),
+                    name: Some("cargo test".into()),
+                    input: None,
+                    status: None,
+                }),
+            ]
         );
     }
 

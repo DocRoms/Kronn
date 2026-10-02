@@ -730,29 +730,11 @@ pub(super) enum ToolRecord {
     Native(String),
 }
 
-/// Format a finished tool call into its transcript record. kronn-internal
-/// calls get pretty-printed args (`disc_get_message(4)`) ; native calls get
-/// their raw input truncated to ~120 chars to keep the banner compact.
-/// Moves the tool calls an ACP runtime reported into the transcript's tool
-/// lists.
-///
-/// ACP has no stdout event stream, so its runtime reports each call into the
-/// run's stderr capture, one name per line. Until 0.13.0 it forwarded them on
-/// the channel carrying the reply instead, which glued
-/// `[ClaudeCode tool: ToolSearch]` into the middle of the agent's sentences and
-/// left the group under the message empty — the calls were both in the wrong
-/// place and missing from the right one.
-///
-/// Classified through the same `classify_tool_call` the CLI path uses, so
-/// kronn-internal and agent-native keep splitting visually. ACP reports a name
-/// without arguments, hence the empty input.
-/// A line the ACP forwarder wrote to reach [`lift_acp_tool_calls`].
-///
-/// The marker is a wire detail between the two, so it must not escape to a
-/// surface a human reads. The transcript consumes it; the live log panel skips
-/// it. One predicate for both, so the two halves cannot drift apart again.
+/// Internal metadata lines carried by the runner's stderr capture. Both the
+/// legacy name-only marker and correlated trace updates belong in the tool
+/// banners, never in answer text or the live log panel.
 pub(super) fn is_acp_tool_marker(line: &str) -> bool {
-    line.starts_with(runner::ACP_TOOL_MARKER)
+    line.starts_with(runner::ACP_TOOL_MARKER) || line.starts_with(crate::agents::tool_trace::MARKER)
 }
 
 /// Whether a captured stderr line belongs in the live log panel.
@@ -763,35 +745,74 @@ pub(super) fn forwards_to_log_panel(trimmed: &str) -> bool {
     !trimmed.is_empty() && !is_acp_tool_marker(trimmed)
 }
 
+/// Merge observed native tool metadata into the transcript buckets. Partial
+/// updates correlate by call id; missing arguments/status stay explicitly
+/// unknown. Detailed records replace legacy entries for the same tool name.
 pub(super) fn lift_acp_tool_calls(
     stderr_lines: &[String],
     kronn_tool_calls: &mut Vec<String>,
     native_tool_calls: &mut Vec<String>,
 ) {
+    let traces = crate::agents::tool_trace::collect(stderr_lines);
+    let names: std::collections::BTreeSet<&str> = traces
+        .iter()
+        .filter_map(|trace| trace.name.as_deref())
+        .collect();
+    // The stream's lifecycle events may already have added a name-only entry.
+    // Replace those with correlated records, preserving repeated calls by ID.
+    kronn_tool_calls.retain(|record| {
+        !names.iter().any(|name| {
+            name.strip_prefix("mcp__kronn-internal__")
+                .is_some_and(|name| record.starts_with(&format!("[kronn-internal: {name}(")))
+        })
+    });
+    native_tool_calls.retain(|record| {
+        !names
+            .iter()
+            .any(|name| record.starts_with(&format!("[agent-native: {name}(")))
+    });
     for name in stderr_lines
         .iter()
         .filter_map(|line| line.strip_prefix(runner::ACP_TOOL_MARKER))
         .map(str::trim)
         .filter(|name| !name.is_empty())
+        .filter(|name| !names.contains(name))
     {
         match classify_tool_call(name, "") {
             ToolRecord::Kronn(record) => kronn_tool_calls.push(record),
             ToolRecord::Native(record) => native_tool_calls.push(record),
         }
     }
+    for trace in traces {
+        let name = trace.name.as_deref().unwrap_or("unreported_tool");
+        let state = trace.status.as_deref().unwrap_or("unknown");
+        let args = trace.input.as_deref().unwrap_or("arguments not reported");
+        let (bucket, name) = match name.strip_prefix("mcp__kronn-internal__") {
+            Some(name) => (&mut *kronn_tool_calls, format!("kronn-internal: {name}")),
+            None => (&mut *native_tool_calls, format!("agent-native: {name}")),
+        };
+        bucket.push(format!("[{name}(status={state}; {args})]"));
+    }
 }
 
 pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
+    let input = crate::agents::tool_trace::safe_input(input);
     if let Some(name) = tool.strip_prefix("mcp__kronn-internal__") {
-        let pretty_args = pretty_kronn_args(name, input);
-        ToolRecord::Kronn(format!("[kronn-internal: {}({})]", name, pretty_args))
+        let pretty_args = pretty_kronn_args(name, &input);
+        ToolRecord::Kronn(format!(
+            "[kronn-internal: {}(status=unknown; {})]",
+            name, pretty_args
+        ))
     } else {
         let args = if input.is_empty() {
-            String::new()
+            "arguments not reported".to_string()
         } else {
-            truncate_tool_args(input, 120)
+            truncate_tool_args(&input, 120)
         };
-        ToolRecord::Native(format!("[agent-native: {}({})]", tool, args))
+        ToolRecord::Native(format!(
+            "[agent-native: {}(status=unknown; {})]",
+            tool, args
+        ))
     }
 }
 
@@ -3307,6 +3328,7 @@ async fn make_agent_stream_inner(
                 // disappears when the stream ends, leaving no trace for
                 // post-hoc debug. Persisting them keeps the audit trail.
                 let mut native_tool_calls: Vec<String> = Vec::new();
+                let mut direct_tool_traces: Vec<String> = Vec::new();
                 let stall_timeout_min = {
                     let cfg = state.config.read().await;
                     if cfg.server.agent_stall_timeout_min > 0 {
@@ -3490,6 +3512,11 @@ async fn make_agent_stream_inner(
                     let client_gone = tx.is_closed();
 
                     if is_stream_json {
+                        direct_tool_traces.extend(
+                            crate::agents::tool_trace::from_claude_line(&line)
+                                .into_iter()
+                                .map(|trace| trace.marker()),
+                        );
                         match runner::parse_claude_stream_line(&line) {
                             runner::StreamJsonEvent::Text(text) => {
                                 // Loop-repeat detection — see constants above.
@@ -3794,7 +3821,8 @@ async fn make_agent_stream_inner(
                     full_response = "Validation bloquée : la suppression des secrets dans les artefacts d’audit a échoué après l’exécution de l’agent. Aucun signal de validation n’a été accepté.".to_string();
                 }
 
-                let stderr_lines = process.captured_stderr_flushed().await;
+                let mut stderr_lines = process.captured_stderr_flushed().await;
+                stderr_lines.extend(direct_tool_traces);
                 // `ollama_tokens:prompt:eval` is an internal accounting marker the
                 // token parser reads out of stderr. It has no meaning for a reader,
                 // and it leaked verbatim into the failure bubble (seen in the room:
@@ -5659,12 +5687,12 @@ mod agent_lifecycle_tests {
 
         assert_eq!(
             native,
-            vec!["[agent-native: ToolSearch()]".to_string()],
+            vec!["[agent-native: ToolSearch(status=unknown; arguments not reported)]".to_string()],
             "an agent's own tool is native"
         );
         assert_eq!(
             kronn,
-            vec!["[kronn-internal: disc_append()]".to_string()],
+            vec!["[kronn-internal: disc_append(status=unknown; )]".to_string()],
             "and Kronn's own stays in its bucket, as on the CLI path"
         );
     }
@@ -5679,6 +5707,56 @@ mod agent_lifecycle_tests {
         let mut native = Vec::new();
         lift_acp_tool_calls(&[emitted], &mut kronn, &mut native);
         assert_eq!(native.len(), 1, "the emitted shape must be recognised");
+    }
+
+    #[test]
+    fn detailed_tool_calls_replace_empty_markers_and_preserve_distinct_invocations() {
+        use crate::agents::tool_trace::{from_acp, from_codex};
+        let first = from_codex(&serde_json::json!({
+            "id":"mcp-1", "type":"mcp_tool_call", "server":"kronn-internal", "tool":"disc_append",
+            "arguments":{"content":"hello", "api_key":"fixture-private"}, "status":"completed",
+        }))
+        .unwrap();
+        let native = from_acp(&serde_json::json!({
+            "toolCallId":"bash-1", "title":"Bash", "rawInput":{"command":"echo first"}, "status":"completed",
+        })).unwrap();
+        let repeated = from_acp(&serde_json::json!({
+            "toolCallId":"bash-2", "title":"Bash", "rawInput":{"command":"echo second"}, "status":"failed",
+        })).unwrap();
+        let lines = [
+            format!(
+                "{}mcp__kronn-internal__disc_append",
+                crate::agents::runner::ACP_TOOL_MARKER
+            ),
+            first.marker(),
+            native.marker(),
+            repeated.marker(),
+            format!("{}Bash", crate::agents::runner::ACP_TOOL_MARKER),
+        ];
+        let mut kronn = vec!["[kronn-internal: disc_append()]".to_string()];
+        let mut native = vec!["[agent-native: Bash()]".to_string()];
+        lift_acp_tool_calls(&lines, &mut kronn, &mut native);
+        assert_eq!(kronn.len(), 1);
+        assert_eq!(native.len(), 2, "same tool name is not the same invocation");
+        assert!(kronn[0].starts_with("[kronn-internal: disc_append(status=completed;"));
+        assert!(kronn[0].contains("hello"));
+        assert!(!kronn[0].contains("fixture-private"));
+        assert!(native[0].contains("echo first"));
+        assert!(native[1].contains("status=failed"));
+        assert!(native[1].contains("echo second"));
+        assert!(lines.iter().all(|line| !forwards_to_log_panel(line)));
+    }
+
+    #[test]
+    fn legacy_tool_arguments_are_redacted_before_the_display_excerpt() {
+        let super::ToolRecord::Native(record) = super::classify_tool_call(
+            "Bash",
+            r#"{"command":"APP_SECRET=fixture-private echo ok"}"#,
+        ) else {
+            panic!("expected native tool");
+        };
+        assert!(!record.contains("fixture-private"));
+        assert!(record.contains("REDACTED"));
     }
 
     #[test]
@@ -7405,10 +7483,13 @@ mod stream_helpers_tests {
     }
 
     #[test]
-    fn native_tool_with_empty_input_has_empty_args() {
+    fn native_tool_with_missing_metadata_reports_it_as_unknown() {
         let r = classify_tool_call("Bash", "");
         match r {
-            ToolRecord::Native(s) => assert_eq!(s, "[agent-native: Bash()]"),
+            ToolRecord::Native(s) => assert_eq!(
+                s,
+                "[agent-native: Bash(status=unknown; arguments not reported)]"
+            ),
             ToolRecord::Kronn(_) => panic!("Bash is native"),
         }
     }
