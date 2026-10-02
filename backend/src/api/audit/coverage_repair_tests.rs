@@ -56,7 +56,7 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
         let _restore = TemplatesEnv(std::env::var_os("KRONN_TEMPLATES_DIR"));
         std::env::set_var("KRONN_TEMPLATES_DIR", templates.path());
         let project = tempfile::tempdir().unwrap();
-        let initialized = std::process::Command::new("git")
+        let initialized = crate::core::cmd::sync_cmd("git")
             .args(["init", "--quiet"])
             .current_dir(project.path())
             .output()
@@ -95,6 +95,17 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
         Mock::given(method("POST")).and(path("/v1/chat/completions"))
             .respond_with(move |request: &wiremock::Request| {
                 let body: Value = serde_json::from_slice(&request.body).unwrap();
+                // Full audit starts a detached validation discussion. Its calls
+                // must neither mutate the fixture nor count as audit retries.
+                let is_audit = body["messages"].as_array().unwrap().iter().any(|message| {
+                    message["content"].as_str().is_some_and(|content|
+                        content.contains(crate::api::audit::PROMPT_PREAMBLE))
+                });
+                if !is_audit {
+                    return ResponseTemplate::new(200).set_body_string(sse(&[
+                        text("Validation fixture complete."),
+                    ]));
+                }
                 let after_tool = body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool");
                 seen.lock().unwrap().push(body);
                 if after_tool && scenario == 2 {
