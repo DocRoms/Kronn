@@ -48,3 +48,43 @@ Any subsequent A/B comparison should identify the exact template revisions,
 models, tasks and delivered context for both arms. Assess rule compliance and
 task correctness alongside cost; a shorter context alone does not establish
 that the revised template works better.
+
+## Follow-up implementation — 2026-10-02
+
+The design target is reliable audits with inexpensive models and limited
+context. Routing remains explicit, but a link no longer instructs the agent to
+load every target. Known paths are accessible directly after the entry rules;
+three files/sections is an initial search budget, not a reason to stop checking
+evidence. Stack/source inventories live in `repo-map.md`; prerequisites and
+operational commands live in `operations/debug-operations.md`.
+[src: file: templates/docs/AGENTS.md:40]
+[src: file: templates/docs/operations/debug-operations.md:5]
+
+Full audits now execute eight foundation steps, seven specialized analyses,
+and then the consolidation. Stored resume rows are matched by target document,
+so old numeric positions cannot skip the wrong section. A repaired section
+invalidates the prior consolidation. Failed prerequisites defer consolidation
+without another model call; partial selections are sorted after their stored
+positions are resolved.
+[src: file: backend/src/api/audit/mod.rs:1160]
+[src: file: backend/src/api/audit/full.rs:1008]
+[src: file: backend/src/api/audit/full.rs:2821]
+[src: file: backend/src/api/audit/drift.rs:240]
+
+Every findings step receives the same applicability, counter-check and
+verification contract. A citation's existence does not establish the defect.
+The final review reconciles domain summaries and links specialized indexes
+without copying every TD into one global list. Architectural decisions have
+no minimum count; a documented rationale or human confirmation is required.
+An explicit short note with no evidenced decisions is accepted, while empty
+sections and unfilled placeholders remain failures.
+[src: file: backend/src/api/audit/mod.rs:1182]
+[src: file: templates/docs/decisions.md:9]
+[src: file: backend/src/api/audit/validation.rs:218]
+
+These are implementation contracts, not a measured model-quality gain.
+The follow-up Sonnet benchmark uses the same reference source and the exact
+model observed in CS1. It must report audit/retry usage separately from the
+validation discussion and distinguish byte-volume proxies from actual model
+tokens. The historical blind judgments remain frozen; the follow-up is not
+another blind judgment or a qualification of every small-context model.

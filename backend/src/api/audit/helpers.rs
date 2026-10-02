@@ -450,7 +450,7 @@ fn validation_card_protocol(language: &str, has_issue_tracker_mcp: bool) -> Stri
 **You are a documentation auditor, not a code fixer. Modify only `docs/`.**
 
 ## Phase 1 — Auto-fix
-Read source code to verify the documentation, then fix only inferable documentation gaps and stale facts.
+Start from RUN SCOPE, current domain summaries and unresolved markers. Verify disputed or unsupported claims against the relevant source, then fix documentation gaps and stale facts. Do not reread all docs or historical TDs. Verified in source does not exempt a claim from a targeted counter-check. Unknown intent remains unknown.
 
 ## Phase 2 — Critical and High TD cards
 Read only the TD detail files named in RUN SCOPE. In one response, emit one closed `kronn-question` card for every Critical or High TD. Use `task_ref:"audit-td:<TD-ID>"`, a stable key, and exactly these option IDs: `confirm`, `reject`, `accept_decision`, `defer`. Labels must explain: confirm the finding, reject it, accept it as an intentional decision, or defer it.
@@ -474,7 +474,7 @@ When every phase and every card is complete, end with the exact phrase `KRONN:VA
 **Eres auditor de documentacion, no corrector de codigo. Modifica solo `docs/`.**
 
 ## Fase 1 — Auto-correccion
-Lee el codigo para verificar la documentacion y corrige solo lagunas documentales inferibles y datos obsoletos.
+Parte de RUN SCOPE, los resumenes actuales y los marcadores pendientes. Contrasta afirmaciones dudosas con el codigo pertinente y corrige los datos obsoletos. No releas todos los documentos ni TD historicos. Verified in source no sustituye la comprobacion. Una intencion desconocida sigue desconocida.
 
 ## Fase 2 — Tarjetas TD Critical y High
 Lee solo los detalles TD de RUN SCOPE. En una respuesta, emite una tarjeta cerrada `kronn-question` por cada TD Critical o High. Usa `task_ref:"audit-td:<TD-ID>"`, una clave estable y exactamente estos IDs: `confirm`, `reject`, `accept_decision`, `defer`.
@@ -498,7 +498,7 @@ Cuando todas las fases y tarjetas esten completas, termina exactamente con `KRON
 **Tu es un auditeur de documentation, pas un correcteur de code. Modifie uniquement `docs/`.**
 
 ## Phase 1 — Auto-correction
-Lis le code pour verifier la documentation, puis corrige uniquement les lacunes documentaires inferables et les faits obsoletes.
+Pars de RUN SCOPE, des syntheses actuelles et des marqueurs non resolus. Verifie les affirmations douteuses dans le code pertinent, puis corrige les lacunes documentaires et les faits obsoletes. Ne relis pas toute la documentation ni les TD historiques. Verified in source ne dispense pas de contre-verification ciblee. Une intention inconnue reste inconnue.
 
 ## Phase 2 — Cartes TD Critical et High
 Lis uniquement les fiches TD nommees dans RUN SCOPE. Dans une seule reponse, emets une carte fermee `kronn-question` pour chaque TD Critical ou High. Utilise `task_ref:"audit-td:<TD-ID>"`, une cle stable et exactement ces IDs : `confirm`, `reject`, `accept_decision`, `defer`.

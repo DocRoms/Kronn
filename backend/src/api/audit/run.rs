@@ -171,8 +171,10 @@ impl ResumableAudit {
     fn new(run: crate::models::AuditRun, steps: &[crate::models::AuditRunStep]) -> Self {
         let steps_to_redo = match crate::models::AuditKind::from_label(&run.kind) {
             Some(kind) => {
-                let done = super::full::already_succeeded_step_indices(steps);
-                let total = super::assemble_chained_steps(kind).len() as u32;
+                let chain = super::assemble_chained_steps(kind);
+                let mut done = super::full::succeeded_steps_for_chain(steps, &chain);
+                super::full::invalidate_pending_consolidation(&mut done, &chain);
+                let total = chain.len() as u32;
                 (1..=total).filter(|step| !done.contains(step)).collect()
             }
             None => Vec::new(),
@@ -186,8 +188,9 @@ mod resumable_tests {
     use super::ResumableAudit;
 
     fn step(index: u32, ok: bool) -> crate::models::AuditRunStep {
+        let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
         serde_json::from_value(serde_json::json!({
-            "audit_run_id": "r", "step_index": index, "file_label": "x",
+            "audit_run_id": "r", "step_index": index, "file_label": chain[index as usize - 1].target_file,
             "started_at": "2026-10-01T00:00:00Z", "ended_at": "2026-10-01T00:00:01Z",
             "cli_success": ok,
         }))
@@ -224,5 +227,18 @@ mod resumable_tests {
         assert!(ResumableAudit::new(run("Nonsense"), &[])
             .steps_to_redo
             .is_empty());
+    }
+
+    #[test]
+    fn resume_preview_uses_the_same_target_mapping_and_consolidation_dependency_as_execution() {
+        let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+        let mut steps: Vec<_> = (1..=16).map(|i| step(i, true)).collect();
+        steps[8].file_label = "docs/decisions.md".into();
+        for old_index in 9..16 {
+            steps[old_index].file_label = chain[old_index - 1].target_file.into();
+        }
+        steps[9].cli_success = false;
+        let resumable = ResumableAudit::new(run("Full"), &steps);
+        assert_eq!(resumable.steps_to_redo, vec![9, 16]);
     }
 }

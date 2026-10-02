@@ -21,7 +21,7 @@ publishing private source or generated project documentation.
 | Pipeline outcome | Interrupted by documentary check | Completed |
 | Validation discussion created | No | Yes |
 | Duration | 888.804 s | 802.350 s |
-| Recorded tokens | Unknown | 98,542 |
+| Recorded input + output, excluding Anthropic cache | Unknown | 98,542 |
 | Debt files assessed | 35 | 37 |
 | Known defects found, both judges | 13/15 | 13/15 |
 | Certain defects found, both judges | 10/11 | 10/11 |
@@ -29,6 +29,21 @@ publishing private source or generated project documentation.
 | Actionability at least 3/4, judges 1 / 2 | 30 / 34 of 35 | 28 / 36 of 37 |
 | Concrete file citations with valid full ranges | 317/320 | 295/295 |
 | Central index direct links to debt files | 7/35 | 6/37 |
+
+Supplementary measurements on 2026-10-02 do not change the frozen judgments:
+all 35 older TDs and all 37 newer TDs have a link from at least one general or
+specialized index. Direct central-index coverage alone therefore understates
+discoverability. A small domain router is sufficient; agents need not load
+every linked document.
+
+The newer run's persisted counters are 262 uncached input tokens, 98,280 output
+tokens, 4,529,551 cache-read input tokens and 525,743 cache-write input tokens.
+Anthropic reports these input categories separately: the cumulative total is
+5,153,836 tokens including cache, not 98,542. This is cumulative usage across
+calls, not one context window or a monetary-cost estimate. Future comparisons
+must retain the separate categories and include retries and validation usage.
+The original older run still has missing telemetry.
+[src: file: backend/src/agents/runner_test.rs:811]
 
 Both outputs miss the same certain credential finding. Each also misses one
 different uncertain defect. Both contain material factual errors and stale
