@@ -11,7 +11,7 @@ establish operating-system isolation of Kronn's database or credentials.
 |---|---|---|
 | Codex 0.159.3 | `ad7b30a3` | Real `disc_get_message` and `disc_append` succeeded with `full_access=false`, then `true`. |
 | OpenCode 1.18.33 | `a13c3104` | Both calls succeeded in a projectless discussion with `full_access=false`. |
-| Claude Code 2.1.285 | `ad7b30a3` | Provider session quota stopped the turn before MCP qualification; the CLI announced a reset at 05:20 Europe/Paris. |
+| Claude Code 2.1.285 | `0dcadaf5` | Both calls succeeded with `full_access=false` after the announced quota reset. |
 | Copilot CLI 1.0.80 | `ad7b30a3` | Provider refused the feature because enterprise/organization policy was required, before MCP qualification. |
 | Gemini CLI | — | No installed `gemini` executable was available for this qualification. The successful HTTP Gemini audit is a different transport. |
 
@@ -36,6 +36,14 @@ the runtime, keeps project declarations from replacing or duplicating it, and
 registers it separately. The new real ACP `session/new` contained
 `kronn-internal`, followed by completed read and write tool updates.
 [src: commit: a13c3104]
+
+Claude Code initially exhausted its provider session quota on `ad7b30a3`.
+A fresh isolated backend on `0dcadaf5`, after the announced reset, completed
+both calls in 11.67 seconds without full access. The database contains the
+exact MCP-posted sentinel, named completed read/write traces with observed
+arguments, and exactly one completed dispatch job with one attempt. The backend
+was stopped and its evidence frozen after the case.
+[src: commit: 0dcadaf5]
 
 ## Files and browser behavior
 
@@ -97,8 +105,8 @@ The dedicated discussion folder and automatic-attachment filters are not a
 filesystem sandbox. KT-953's separate criterion preventing a CLI from reading
 Kronn's data directory is still unresolved. The release-room arbitration key
 `release-0142-native-data-isolation` was pending when this report was written;
-this report does not waive that criterion or close KT-953. Claude, Copilot and
-Gemini CLI also remain unqualified for the reasons above.
+this report does not waive that criterion or close KT-953. Copilot and Gemini CLI
+also remain unqualified for the reasons above.
 
 Private canary reports, SSE, database copies and protocol captures remain under
 `kronn-ab-bench/native-cli-20261002-traces-r1/` and
@@ -106,5 +114,8 @@ Private canary reports, SSE, database copies and protocol captures remain under
 SHA-256 values are respectively
 `bb9ef7340e3ff381492c6d6c1456a96a8db678ce3d4a423c642437b779660109`
 and `61869f432fb0891c41f8c39b74be7436d4943b99f3c4177488e8996838d6b085`.
+The final Claude evidence is in
+`kronn-ab-bench/native-claude-20261002-final-r1/`, with binary SHA-256
+`8d7f3ad104f244ea1a9bb79c9dcff025eed72ad9fb6274dbd07d7ac0cba5dd22`.
 Failed pre-fix and provider-limited canaries are retained separately. Test
 backends were stopped after their cases; the user's backend was not stopped.
