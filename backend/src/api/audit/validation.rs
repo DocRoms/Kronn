@@ -220,13 +220,14 @@ pub fn validate_step_output(
     // decision note can be much shorter than the template's instructions.
     let short_decisions = target_file == "docs/decisions.md"
         && std::fs::read_to_string(&dst_path).is_ok_and(|content| {
-            content
-                .split_once("## Decisions\n")
-                .is_some_and(|(_, body)| {
-                    body.lines().any(|line| {
-                        let line = line.trim();
-                        !line.is_empty() && !line.starts_with('#') && !line.starts_with("<!--")
-                    })
+            let mut body = content
+                .lines()
+                .skip_while(|line| line.trim() != "## Decisions");
+            body.next();
+            body.take_while(|line| !line.trim().starts_with("## "))
+                .any(|line| {
+                    let line = line.trim();
+                    !line.is_empty() && !line.starts_with('#') && !line.starts_with("<!--")
                 })
         });
     if dst_size == 0 || (ratio_pct < MIN_DEST_RATIO_PCT && !short_decisions) {
@@ -985,7 +986,9 @@ mod tests {
         let path = project.join("docs/decisions.md");
         for (content, expected) in [
             ("# Architecture decisions\n\n## Decisions\n\nNo documented rationale was found in the reviewed sources.\n", true),
+            ("# Architecture decisions\r\n\r\n## Decisions\r\n\r\nNo documented rationale was found in the reviewed sources.\r\n", true),
             ("# Architecture decisions\n\n## Decisions\n", false),
+            ("# Architecture decisions\n\n## Decisions\n\n## References\nDocumentation review notes.\n", false),
             ("# Architecture decisions\n\n## Decisions\n{{DECISION_1}}\n", false),
         ] {
             std::fs::write(&path, content).unwrap();

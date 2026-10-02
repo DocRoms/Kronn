@@ -88,3 +88,14 @@ model observed in CS1. It must report audit/retry usage separately from the
 validation discussion and distinguish byte-volume proxies from actual model
 tokens. The historical blind judgments remain frozen; the follow-up is not
 another blind judgment or a qualification of every small-context model.
+
+The follow-up runtime and templates are frozen at `8847d7f7`. A subsequent
+validator correction accepts Windows line endings in a short decision note
+and refuses an empty Decisions section followed by content in another section.
+Its regression failed before the correction; all 30 validator tests pass after
+it. This parser correction is tested separately from the frozen Sonnet run.
+Follow-up measurements and their qualification limits are tracked in
+[PR #219](https://github.com/DocRoms/Kronn/pull/219).
+[src: commit: 8847d7f7]
+[src: file: backend/src/api/audit/validation.rs:218]
+[src: file: backend/src/api/audit/validation.rs:983]
