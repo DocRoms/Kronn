@@ -64,6 +64,15 @@ total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:1]
 [src: file: backend/src/api/audit/full.rs:1122]
 
+An incomplete dimension-coverage matrix also receives targeted feedback in a
+Full audit after the agent exits successfully. This shares the same three-attempt
+budget as documentary correction; it does not add another retry budget. Resume
+recomputes the matrix failure from the current index before its first attempt.
+Invalid tables remain blocking, provider errors do not trigger this correction,
+and existing TD files and human sections remain protected (KT-956).
+[src: file: backend/src/api/audit/validation.rs:95]
+[src: file: backend/src/api/audit/full.rs:1143]
+
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.

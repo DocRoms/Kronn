@@ -90,6 +90,31 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
+const COVERAGE_WARNING_PREFIX: &str = "dimension coverage incomplete";
+
+/// Recompute the coverage failure from the current index, including on resume.
+/// This is feedback for the agent, never a relaxation or an in-place repair.
+pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
+    if target_file != "docs/inconsistencies-tech-debt.md" {
+        return None;
+    }
+    let (_, warning) = validate_step_output(true, project_path, target_file);
+    let reason = warning?.reason;
+    // Missing/truncated output or an unfilled template still needs the full
+    // step prompt; a matrix-only instruction would leave its index unfinished.
+    if !reason.starts_with(COVERAGE_WARNING_PREFIX) {
+        return None;
+    }
+    Some(format!(
+        "## Coverage matrix — targeted correction required\n\n\
+         Read `{target_file}` and correct this current failure: {reason}.\n\n\
+         Keep all ten dimension rows and THREE cells per row: Dimension | Outcome | Evidence / reason. \
+         An N/A outcome must also have a nonempty evidence/reason cell supported by the actual repository. \
+         Preserve the existing TD detail files, index entries and human-owned sections. \
+         Correct this matrix only; do not repeat the entire audit or invent supporting evidence.\n"
+    ))
+}
+
 /// Retain safe provider and tool-budget causes alongside the artifact failure.
 /// A recovered ceiling or negotiated provider fallback does not fail a good step.
 pub(crate) fn with_http_diagnostics(
@@ -265,7 +290,7 @@ pub fn validate_step_output(
                     false,
                     Some(StepValidationWarning {
                         reason: format!(
-                            "dimension coverage incomplete in `{}`: {} (Step 8 will be re-run)",
+                            "{COVERAGE_WARNING_PREFIX} in `{}`: {} (Step 8 will be re-run)",
                             target_file, reason
                         ),
                         repaired: false,
@@ -783,6 +808,56 @@ mod tests {
     #[test]
     fn coverage_matrix_valid_passes() {
         assert!(validate_dimension_coverage(&valid_coverage_matrix()).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn coverage_feedback_rechecks_the_index_without_modifying_it() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        let project = project.as_path();
+        assert!(coverage_repair_feedback(project, target).is_none());
+        let malformed = valid_coverage_matrix().replace(
+            "| Accessibility | N/A: no web surface | CLI binary only |",
+            "| Accessibility | N/A: no web surface |",
+        );
+        std::fs::write(project.join(target), &malformed).unwrap();
+        let feedback = coverage_repair_feedback(project, target).unwrap();
+        assert!(
+            feedback.contains("Accessibility")
+                && feedback.contains("evidence/reason cell is empty")
+        );
+        assert!(feedback.contains("THREE cells") && feedback.contains("human-owned"));
+        assert_eq!(
+            std::fs::read_to_string(project.join(target)).unwrap(),
+            malformed
+        );
+        assert!(coverage_repair_feedback(project, "docs/AGENTS.md").is_none());
+        std::fs::write(
+            project.join(target),
+            format!("{malformed}\n{{{{PROJECT_NAME}}}}\n"),
+        )
+        .unwrap();
+        assert!(
+            coverage_repair_feedback(project, target).is_none(),
+            "an unfilled template needs the whole step, not only its matrix"
+        );
+        std::fs::write(project.join(target), valid_coverage_matrix()).unwrap();
+        assert!(
+            coverage_repair_feedback(project, target).is_none(),
+            "a corrected index must not carry stale feedback"
+        );
     }
 
     #[test]

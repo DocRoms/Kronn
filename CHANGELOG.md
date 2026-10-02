@@ -334,6 +334,12 @@ Release notes for 0.9.3 and earlier are available in the
   failure does not automatically retry the request or replay tool effects
   (KT-955).
 
+- A Full audit gives the model the exact error when its dimension-coverage
+  table is incomplete, using the existing limit of two corrective attempts.
+  Resume recomputes that feedback from the saved index. The table must still
+  pass every check; provider failures do not trigger this correction, and
+  earlier TD files and human-owned sections are preserved (KT-956).
+
 - HTTP audits and discussions can read fresh repository content after writing
   it. Previously only orchestration workers invalidated cached observations;
   an audit could receive a pre-edit file or lose its reader as a repeated call.

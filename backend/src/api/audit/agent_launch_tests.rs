@@ -10,6 +10,10 @@ use std::sync::{Arc, Mutex};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[cfg(unix)]
+#[path = "coverage_repair_tests.rs"]
+mod coverage_repair_tests;
+
 fn sse(frames: &[String]) -> String {
     frames
         .iter()

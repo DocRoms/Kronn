@@ -1139,6 +1139,11 @@ pub async fn full_audit(
             let mut attempt: usize = 0;
             let mut citation_feedback = (!recovery_targets.is_empty())
                 .then(|| super::document_repair::feedback(&recovery_targets));
+            if resume_run_id_req.is_some() && documentary_snapshot.is_some() {
+                if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
+                    citation_feedback.get_or_insert_with(String::new).push_str(&feedback);
+                }
+            }
             let mut previous_attempt_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
             'attempts: loop {
             attempt += 1;
@@ -1482,6 +1487,23 @@ pub async fn full_audit(
                         &project_path,
                         analysis_step.target_file,
                     );
+
+                    // A model can finish normally with an incomplete coverage
+                    // table. Give that exact failure back within the existing
+                    // Full-audit attempt budget, never after a provider failure
+                    // or an ownership violation and never by accepting bad data.
+                    if cli_success && !success && ownership_warning.is_none()
+                        && documentary_snapshot.is_some() && attempt < max_attempts
+                    {
+                        if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
+                            yield Event::default().event("step_retry").data(serde_json::json!({
+                                "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                "reason":"dimension_coverage","diagnostic":warning.as_ref().map(|w| &w.reason),
+                            }).to_string());
+                            citation_feedback = Some(feedback);
+                            continue 'attempts;
+                        }
+                    }
 
                     if let Some(ownership_warning) = ownership_warning {
                         success = false;
