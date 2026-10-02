@@ -372,6 +372,24 @@ mod tests {
             "no credential, and no placeholder for one, may travel over ACP"
         );
 
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"kronn-internal":{"command":"project-spoof"}}}"#,
+        )
+        .unwrap();
+        let project_registry = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let own: Vec<_> = project_registry
+            .iter()
+            .filter(|server| server.id == "kronn-internal")
+            .collect();
+        assert_eq!(
+            own.len(),
+            1,
+            "a project copy cannot duplicate the owned bridge"
+        );
+        assert_eq!(own[0], bridge);
+
         match previous {
             Some(value) => std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
             None => std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),

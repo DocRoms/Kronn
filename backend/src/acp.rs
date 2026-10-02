@@ -1223,22 +1223,54 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
         .collect()
 }
 
+/// Kronn's bridge is supplied by the runtime, independently of the project
+/// registry. Reconstruct its command instead of trusting a reserved-name
+/// candidate, and keep ordinary project servers under the broker's checks.
+fn native_session_mcp_servers(
+    broker: &AcpPermissionBroker,
+    candidates: Vec<AcpMcpServer>,
+    internal: Option<crate::agents::runner::InternalMcpCommand>,
+) -> Vec<AcpMcpServer> {
+    let requested_internal = candidates
+        .iter()
+        .any(|server| server.id == "kronn-internal");
+    let mut servers = broker.authorize_mcp_servers(
+        candidates
+            .into_iter()
+            .filter(|server| server.id != "kronn-internal")
+            .collect(),
+    );
+    if let Some(launch) = internal.filter(|_| requested_internal) {
+        let bridge = AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: launch.command,
+            args: launch.args,
+            allowed_tools: Vec::new(),
+        };
+        broker.register_trusted_mcp_server(&bridge);
+        servers.insert(0, bridge);
+    }
+    servers
+}
+
 #[async_trait]
 impl AcpTransport for AcpJsonRpcTransport {
     async fn initialize(
         &self,
         request: AcpInitialize,
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
-        let servers: Vec<Value> = self
-            .broker
-            .authorize_mcp_servers(request.mcp_servers)
-            .into_iter()
-            .map(|server| {
-                json!({
-                    "name": server.id, "command": server.command, "args": server.args, "env": [],
-                })
+        let servers: Vec<Value> = native_session_mcp_servers(
+            &self.broker,
+            request.mcp_servers,
+            crate::agents::runner::disc_introspection_mcp_command(),
+        )
+        .into_iter()
+        .map(|server| {
+            json!({
+                "name": server.id, "command": server.command, "args": server.args, "env": [],
             })
-            .collect();
+        })
+        .collect();
         let result = self
             .request(
                 "initialize",
@@ -1593,6 +1625,39 @@ mod tests {
     // Only the Unix liveness fixtures read from a socket.
     #[cfg(unix)]
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn native_mcp_registry_keeps_the_owned_bridge_without_trusting_projectless_candidates() {
+        let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "discussion"));
+        let declared = |id: &str| AcpMcpServer {
+            id: id.into(),
+            command: "untrusted".into(),
+            args: vec!["--token=fixture".into()],
+            allowed_tools: Vec::new(),
+        };
+        let launch = || crate::agents::runner::InternalMcpCommand {
+            command: "owned-kronn-mcp".into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        let servers = native_session_mcp_servers(
+            &broker,
+            vec![declared("kronn-internal"), declared("other-project")],
+            Some(launch()),
+        );
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, "kronn-internal");
+        assert_eq!(servers[0].command, "owned-kronn-mcp");
+        assert!(servers[0].args.is_empty());
+        assert!(
+            native_session_mcp_servers(&broker, vec![declared("kronn-internal")], None).is_empty(),
+            "a missing owned bridge cannot fall back to the candidate command"
+        );
+        assert!(
+            native_session_mcp_servers(&broker, vec![], Some(launch())).is_empty(),
+            "catalogue probes that do not request MCP must remain tool-free"
+        );
+    }
 
     struct FakeTransport;
 

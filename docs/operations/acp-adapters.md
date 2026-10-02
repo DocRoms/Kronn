@@ -122,6 +122,17 @@ guarantee that arbitrary user content is secret-free.
 [src: file: backend/src/agents/tool_trace.rs:1]
 [src: file: backend/src/api/discussions/streaming.rs:750]
 
+Native ACP sessions receive Kronn's bridge even when no project is attached.
+The runtime reconstructs the reserved `kronn-internal` entry from its own
+bridge resolver; a project declaration cannot replace or duplicate it. This
+entry bypasses the project registry filter, while other MCP servers remain
+subject to that filter. A permission request for a runtime-registered Kronn
+tool may read or write with `full_access=false`, but must still identify the
+bound protocol session and an authorized server/tool. Missing or ambiguous
+identity remains refused; registration does not grant filesystem access.
+[src: file: backend/src/acp.rs:1227]
+[src: file: backend/src/acp/permission_broker.rs:350]
+
 A native agent's `disc_append` can carry its runtime session id without having
 joined the room as a CLI peer. Such a post does not implicitly queue another
 answer from the discussion's principal. An actual joined CLI may still hand

@@ -18,6 +18,7 @@ use super::secret_files::is_secret_file;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// JSON-RPC 2.0 reserves -32000..-32099 for implementation-defined server
@@ -102,6 +103,7 @@ pub struct AcpPermissionBroker {
     scope: Option<AcpSessionScope>,
     protocol_session_id: Mutex<Option<String>>,
     authorized_tools: Mutex<BTreeMap<String, BTreeSet<String>>>,
+    trusted_internal_mcp: AtomicBool,
     audit_log: Mutex<Vec<AcpAuditEntry>>,
 }
 
@@ -112,6 +114,7 @@ impl AcpPermissionBroker {
             scope: None,
             protocol_session_id: Mutex::new(None),
             authorized_tools: Mutex::new(BTreeMap::new()),
+            trusted_internal_mcp: AtomicBool::new(false),
             audit_log: Mutex::new(Vec::new()),
         }
     }
@@ -126,6 +129,7 @@ impl AcpPermissionBroker {
             scope: Some(scope),
             protocol_session_id: Mutex::new(None),
             authorized_tools: Mutex::new(BTreeMap::new()),
+            trusted_internal_mcp: AtomicBool::new(false),
             audit_log: Mutex::new(Vec::new()),
         }
     }
@@ -287,6 +291,9 @@ impl AcpPermissionBroker {
 
     pub fn register_trusted_mcp_server(&self, server: &super::AcpMcpServer) {
         self.register_authorized_servers(std::slice::from_ref(server));
+        if server.id == "kronn-internal" {
+            self.trusted_internal_mcp.store(true, Ordering::Relaxed);
+        }
     }
 
     fn register_authorized_servers(&self, servers: &[super::AcpMcpServer]) {
@@ -347,8 +354,13 @@ impl AcpPermissionBroker {
         // Scope trumps `full_access`: it broadens operations inside the bound
         // project/server only. A missing location and missing server/tool
         // identity is unverifiable and therefore denied.
-        let allow =
-            session_matches && resource_scoped && !secret_target && (self.full_access || safe_kind);
+        let trusted_internal_call = server.as_deref() == Some("kronn-internal")
+            && tool_scoped
+            && self.trusted_internal_mcp.load(Ordering::Relaxed);
+        let allow = session_matches
+            && resource_scoped
+            && !secret_target
+            && (self.full_access || safe_kind || trusted_internal_call);
         let options = params
             .get("options")
             .and_then(Value::as_array)
@@ -896,6 +908,46 @@ mod tests {
         assert_eq!(allowed.server.as_deref(), Some("kronn-internal"));
         assert_eq!(allowed.tool.as_deref(), Some("disc_get"));
         assert!(!allowed.reason.contains("rawInput"));
+    }
+
+    #[test]
+    fn only_the_runtime_registered_kronn_bridge_can_write_without_full_access() {
+        let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "room"));
+        broker.bind_protocol_session("s1").unwrap();
+        let server = crate::acp::AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: "owned-bridge".into(),
+            args: vec![],
+            allowed_tools: vec!["disc_append".into()],
+        };
+        let mut request = permission_request(Some("other"));
+        request["toolCall"]["rawInput"] = json!({"server":"kronn-internal", "tool":"disc_append"});
+        broker.register_authorized_servers(std::slice::from_ref(&server));
+        assert_eq!(
+            broker.decide_tool_call_permission("session/request_permission", &request)["outcome"]
+                ["optionId"],
+            "reject-once",
+            "a project declaration does not confer runtime trust"
+        );
+        broker.register_trusted_mcp_server(&server);
+        assert_eq!(
+            broker.decide_tool_call_permission("session/request_permission", &request)["outcome"]
+                ["optionId"],
+            "allow-once"
+        );
+        for (session, server, tool) in [
+            ("other", "kronn-internal", "disc_append"),
+            ("s1", "another-server", "disc_append"),
+            ("s1", "kronn-internal", "disc_delete"),
+        ] {
+            request["sessionId"] = json!(session);
+            request["toolCall"]["rawInput"] = json!({"server":server, "tool":tool});
+            assert_eq!(
+                broker.decide_tool_call_permission("session/request_permission", &request)
+                    ["outcome"]["optionId"],
+                "reject-once"
+            );
+        }
     }
 
     #[test]

@@ -4799,7 +4799,7 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
     // because Kronn spawns the ACP process itself (`spawn_native`), so nothing
     // sensitive passes through the protocol.
     let mut servers: Vec<crate::acp::AcpMcpServer> = Vec::new();
-    if let Some(launch) = disc_introspection_mcp_command_for_shared_config() {
+    if let Some(launch) = disc_introspection_mcp_command() {
         servers.push(crate::acp::AcpMcpServer {
             id: "kronn-internal".to_string(),
             command: launch.command,
@@ -4817,6 +4817,9 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
+            if id == "kronn-internal" {
+                return None;
+            }
             let command = entry.command.clone()?;
             // Fail closed: a credential in `env` OR embedded directly in
             // `args` (`["--token", "secret"]`) drops the whole server rather

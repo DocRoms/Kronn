@@ -334,6 +334,9 @@ Release notes for 0.9.3 and earlier are available in the
   Native MCP posts no longer start an extra answer from their own discussion
   agent merely because the CLI supplies a runtime session id. Joined peers
   and explicitly addressed responders keep their routing.
+  Native ACP sessions also receive the owned Kronn bridge without a project;
+  the project-server filter no longer removes it. Its scoped tool permissions
+  cover reads and writes without requiring full access.
 
 - Native tool history now keeps reported names, redacted argument excerpts
   and observed completion/error status, correlating updates by call id.
