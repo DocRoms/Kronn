@@ -61,10 +61,21 @@ and 7 checks, both linters and locale checks. The file implementation on
 The complete local suite on `ad7b30a3`, including native trace and routing
 regressions, subsequently passed 8,453 tests with 21 ignored across 34 suites
 in 1,154.19 seconds. These counts exclude separate targeted test commands.
-The following ACP bridge and directory-failure changes passed their targeted
-regressions and all-target Clippy; the integrated revision is qualified by its
-separate CI run.
+The integrated revision `5f462a15`, including the ACP bridge and directory-failure
+changes, passed 8,457 local Rust tests with 21 ignored across 34 suites in
+1,003.96 seconds, plus formatting and all-target Clippy.
 [src: commit: ad7b30a3] [src: commit: a13c3104] [src: commit: f315643e]
+[src: commit: 5f462a15]
+
+The first integrated Linux CI exposed a test-fixture dependency: the Codex
+approval test used the optional `uvx` command, which the production availability
+filter correctly omitted when absent. The fixture now uses the existing test
+executable without executing it. All 95 MCP scanner tests and all-target Clippy
+passed after that correction. The same CI's shell job stopped progressing during
+the warm-backend test; the complete local shell suite passed 313 tests and an
+isolated Linux reproduction passed the affected test 20 times. The cause of that
+single CI stall was not reproduced; a fresh CI run is still required.
+[src: commit: 4dc0de94]
 
 A subsequent error-path review removed the silent shared-temp fallback when a
 dedicated discussion directory cannot be created. The turn now fails before
