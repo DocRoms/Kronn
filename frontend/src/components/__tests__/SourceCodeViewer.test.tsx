@@ -156,6 +156,32 @@ describe('SourceCodeViewer', () => {
     expect(await screen.findByText(/services:/)).toBeInTheDocument();
   });
 
+  it('lands a deep link on its line: scrolled into view and marked', async () => {
+    mockDirectories(() => [
+      { path: 'compose.yaml', name: 'compose.yaml', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockResolvedValue({
+      path: 'compose.yaml',
+      content: 'services:\n  web:\n    image: nginx',
+    });
+    const original = Element.prototype.scrollIntoView;
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      const { container } = render(
+        <SourceCodeViewer projectId="project-1" initialPath="compose.yaml" initialLine={3} />,
+      );
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-line="3"]')?.classList.contains('source-line--target')).toBe(true);
+      });
+      expect(container.querySelectorAll('.source-line--target')).toHaveLength(1);
+      expect(scrolled).toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it('renders an uppercase HTML file in an isolated preview and restores its source', async () => {
     mockDirectories(() => [
       { path: 'site/INDEX.HTM', name: 'INDEX.HTM', is_dir: false },

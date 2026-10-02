@@ -73,6 +73,21 @@ describe('MessageAttachments', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('opens a requested asset from another message without a local thumbnail grid', async () => {
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['gif'], { type: 'image/gif' }));
+    const shared = mkFile({ id: 'shared', filename: 'loop.gif', mime_type: 'image/gif', message_id: 'another-message' });
+    const { rerender } = render(
+      <MessageAttachments files={[]} carouselScope={[shared]} discussionId="d1" t={t} openRequest={{ assetId: 'shared', nonce: 1 }} />,
+    );
+    const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
+    await waitFor(() => expect(within(dialog).getByRole('img', { name: 'loop.gif' })).toHaveAttribute('src', 'blob:fake-url'));
+    expect(discussionsApi.contextFileBlob).toHaveBeenCalledWith('d1', 'shared');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    rerender(<MessageAttachments files={[]} carouselScope={[shared]} discussionId="d1" t={t} openRequest={{ assetId: 'shared', nonce: 2 }} />);
+    expect(screen.getByRole('dialog')).toHaveAttribute('data-asset-id', 'shared');
+  });
+
   it('fetches an image as a blob and renders it as a thumbnail', async () => {
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['x'], { type: 'image/png' }));
     render(<MessageAttachments files={[mkFile()]} discussionId="d1" t={t} />);

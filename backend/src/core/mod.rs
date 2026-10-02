@@ -38,6 +38,7 @@ pub mod legacy_docs;
 pub mod log_buffer;
 pub mod mcp_scanner;
 pub mod media_probe;
+pub mod message_file_links;
 pub mod model_catalog;
 pub mod native_files;
 pub mod net_expose;

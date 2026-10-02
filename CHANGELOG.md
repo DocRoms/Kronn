@@ -13,18 +13,6 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
-- Codex, launched by Kronn in a discussion or a room, can use Kronn's own
-  tools again (KT-953). Kronn starts Codex non-interactively, so a tool left on
-  "ask" was refused ("MCP tool call requires approval, but approval policy is
-  never"): Codex could not read a message, post one, attach a file, generate a
-  media or create a task — even with full access. The Kronn entry Kronn writes
-  into `~/.codex/config.toml` now approves Kronn's tools, and only them; your
-  other MCP servers keep Codex's own setting. Claude Code and Copilot CLI
-  without full access hit the same wall for a fresh install: they now get
-  Kronn's tools, and nothing else, explicitly allowed (Claude:
-  `--allowedTools=mcp__kronn-internal`; Copilot: `--allow-tool=kronn-internal`).
-  Full access and task workers keep their current permissions.
-
 - Testing a LiteLLM connection no longer fails with "Could not persist the
   saved connection's model catalog" (KT-939). A LiteLLM proxy lists a model once
   per deployment; the second copy broke the catalogue's unique key and the whole
@@ -330,6 +318,36 @@ Release notes for 0.9.3 and earlier are available in the
   answers, byte for byte, nor in what is masked (KT-915).
 
 ### Fixed
+
+- Codex, launched by Kronn in a discussion or a room, can use Kronn's own
+  tools again (KT-953). Kronn starts Codex non-interactively, so a tool left on
+  "ask" was refused ("MCP tool call requires approval, but approval policy is
+  never"): Codex could not read a message, post one, attach a file, generate a
+  media or create a task — even with full access. Kronn now approves its own
+  tools, and only them, in the configuration it hands Codex at launch (so it
+  no longer depends on the sync of `~/.codex/config.toml`) and in the Kronn
+  entry of that file; your other MCP servers keep Codex's own setting. Claude Code and Copilot CLI
+  without full access hit the same wall for a fresh install: they now get
+  Kronn's tools, and nothing else, explicitly allowed (Claude:
+  `--allowedTools=mcp__kronn-internal`; Copilot: `--allow-tool=kronn-internal`).
+  Full access and task workers keep their current permissions.
+
+- A link an agent writes to a file on its machine now leads somewhere
+  (KT-954). Agents often hand over a file by its path
+  (`[the GIF](/private/var/…/loop.gif)`); the link resolved against Kronn's own
+  address and opened nothing. When the agent's message is saved, Kronn now
+  attaches the files it links that sit in the agent's own folder or in the
+  project. Known credential filenames and directories (including `.env`,
+  private keys and `.ssh`) and Kronn's data directory are excluded; each
+  message can add at most eight files and read 64 MiB in total. Persisted links
+  identify the exact attachment, including when two files share a name. Images,
+  videos and text open in the attachment viewer; other files download under
+  their original names. Unavailable paths show a reason instead of a dead
+  link. Project-relative paths open the project viewer at the requested line;
+  attached Markdown images render inline. A discussion without a project runs its agent in its own
+  folder (`~/.kronn/discussions/<id>`) instead of the system's shared temp
+  folder. This working directory and the attachment filters do not sandbox
+  the CLI's filesystem access.
 
 - HTTP audits can write more than twelve findings and their index within a
   dedicated bounded budget. A missing artifact after a tool ceiling now keeps

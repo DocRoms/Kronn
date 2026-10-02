@@ -2225,6 +2225,13 @@ async fn make_agent_stream_inner(
         }
     }
 
+    // Without a project the agent used to run in the shared system temp dir,
+    // where its files could not be told apart from anything else on the machine.
+    if !tool_free_judge && workspace_path.is_none() && project_path.is_empty() {
+        workspace_path = runner::discussion_scratch_dir(&discussion_id)
+            .map(|dir| dir.to_string_lossy().into_owned());
+    }
+
     // Validation discussions are a second agent boundary over the audit
     // artifacts. Detect them through the durable run link, never a mutable or
     // localized title, and sanitize before prompt construction or spawn.
@@ -4193,7 +4200,7 @@ async fn make_agent_stream_inner(
                 } else {
                     Vec::new()
                 };
-                let agent_msg = DiscussionMessage {
+                let mut agent_msg = DiscussionMessage {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
@@ -4222,6 +4229,22 @@ async fn make_agent_stream_inner(
                     reply_to_message_id: dispatch_trigger_message_id.clone(),
                 };
 
+                let linked_files_changed = if let Some(content) =
+                    crate::api::discussions::context::attach_files_linked_in_message(
+                        &state,
+                        &disc_id,
+                        &agent_msg.id,
+                        &agent_msg.content,
+                        workspace_path.as_deref(),
+                        &project_path,
+                    )
+                    .await
+                {
+                    agent_msg.content = content;
+                    true
+                } else {
+                    false
+                };
                 let did = disc_id.clone();
                 let msg = agent_msg.clone();
                 let source_agent = agent_type.clone();
@@ -4301,14 +4324,28 @@ async fn make_agent_stream_inner(
                             );
                             state.agent_dispatch_notify.notify_one();
                         }
+                        if linked_files_changed {
+                            let _ = state.ws_broadcast.send(
+                                crate::models::WsMessage::ContextFilesChanged {
+                                    discussion_id: disc_id.clone(),
+                                    message_id: agent_msg.id.clone(),
+                                },
+                            );
+                        }
+                        // Publish the persisted body before its attachments.
+                        crate::api::federation::federate_message(&state, &disc_id, &agent_msg)
+                            .await;
                     }
-                    Err(e) => tracing::error!("Failed to save agent message: {e}"),
+                    Err(e) => {
+                        tracing::error!("Failed to save agent message: {e}");
+                        crate::api::discussions::context::discard_uncommitted_message_files(
+                            &state,
+                            &disc_id,
+                            &agent_msg.id,
+                        )
+                        .await;
+                    }
                 }
-                // F1 — federate the native-runner reply to peers of a shared
-                // disc. Previously ONLY MCP `disc_append` + UI `send_message`
-                // federated, so a reply produced by Kronn's own runner was
-                // invisible to the other instance. No-op for a local disc.
-                crate::api::federation::federate_message(&state, &disc_id, &agent_msg).await;
 
                 // 0.8.8 PR-B — enforce-mode P3 fail-fast (non-destructive). The
                 // agent message above is kept (with its red pill); when it
