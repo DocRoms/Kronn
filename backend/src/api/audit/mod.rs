@@ -117,26 +117,29 @@ Rules: Write new content in the documentation language declared by `docs/AGENTS.
 - Never force-translate an existing `docs/` file into another language — a doc already written in a different language stays as-is; the docs/tickets language parameter only governs NEW content.\n\
 - Plain facts in docs/ files — no opinions, debate or trade-off analysis. One exception: `Suggested direction` in TD detail files (and index remediation lines) may carry a one-line, non-binding fix hint.\n\
 - Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
+- After mandatory entry, read relevant functions/sections and caller context. Batch independent searches; reuse unchanged evidence and domain indexes. Expand whenever needed: do not truncate a necessary check or skip a checklist family for tokens; there is no fixed reading budget. Report gaps.\n\
+- For repeated implementations, check representative cases and differences; state the sampled scope. Batch related writes; verify with an error-only summary instead of echoing file bodies. Preserve material limitations.\n\
+- Trace referenced scripts before claiming tools unused. Distinguish declared commands from executed checks. Avoid all/none claims from samples or behavior inferred from one option.\n\
 - Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.\n\
 \n\
 ## MARKER DISCIPLINE (critical — avoid marker overuse)\n\
 \n\
-Three marker types exist. Each has a STRICT semantic — using the wrong one creates noise the user has to triage later.\n\
+Use each marker only for its stated purpose.\n\
 \n\
 1. **`<!-- TODO: verify -->`** — RESERVED for facts you literally could not check.\n\
    Examples: file lives outside the repo (linked_repos), tool requires credentials not provided, sandbox blocks the read.\n\
    **DO NOT use** when you DID verify (via Glob/Read/ls) — write the conclusion directly:\n\
    - WRONG: `phpstan.neon.dist <!-- TODO: verify — file not present at project root -->`\n\
    - RIGHT: `phpstan.neon.dist (not present at project root)`\n\
-   If you Globed for a config and found nothing, that IS the verified answer — don't add a TODO marker.\n\
+   An absence established by search needs no TODO marker.\n\
 \n\
 2. **`<!-- TODO: ask user -->`** — for facts that require a HUMAN DECISION, not a verification you could do yourself.\n\
-   Examples: \"is this rule aspirational or enforced?\", \"which domain is canonical?\", \"is this port intentional or vestigial?\".\n\
+   Example: \"which domain is canonical?\".\n\
    The Phase 2 validation discussion will ask the user these specific questions.\n\
 \n\
 3. **`<!-- TODO: unknown -->`** — placeholder when a previous validation pass left a question unanswered. Rare. Don't introduce new ones; only preserve existing.\n\
 \n\
-**Default behaviour**: if you can verify, verify and write the result. Markers are escape hatches, not opt-out tokens. A doc with 25 `TODO: verify` markers from a non-interactive audit usually means the agent gave up on verification — try harder.\n\
+**Default**: verify what you can and write the result; markers never replace available checks.\n\
 \n\
 This is an autonomous (non-interactive) pass. Do NOT ask questions inline — use the marker discipline above and move on.";
 
@@ -2317,13 +2320,6 @@ mod prompt_tests {
 
         for (link_target, must_exist_at) in [
             ("workflow/README.md", "templates/docs/workflow/README.md"),
-            ("workflow/commits.md", "templates/docs/workflow/commits.md"),
-            (
-                "workflow/pull-requests.md",
-                "templates/docs/workflow/pull-requests.md",
-            ),
-            ("workflow/tickets.md", "templates/docs/workflow/tickets.md"),
-            ("workflow/ci-cd.md", "templates/docs/workflow/ci-cd.md"),
             ("environments.md", "templates/docs/environments.md"),
             ("examples/README.md", "templates/docs/examples/README.md"),
             ("reports/README.md", "templates/docs/reports/README.md"),
@@ -2335,6 +2331,20 @@ mod prompt_tests {
             assert!(
                 workspace_root.join(must_exist_at).is_file(),
                 "`{must_exist_at}` must exist on disk"
+            );
+        }
+        // Workflow details remain reachable through the directory index;
+        // loading every detail link into the mandatory entry is unnecessary.
+        let workflow = workspace_root.join("templates/docs/workflow");
+        let index = std::fs::read_to_string(workflow.join("README.md")).unwrap();
+        for page in ["commits.md", "pull-requests.md", "tickets.md", "ci-cd.md"] {
+            assert!(
+                index.contains(&format!("({page})")),
+                "missing route: {page}"
+            );
+            assert!(
+                workflow.join(page).is_file(),
+                "missing workflow page: {page}"
             );
         }
         // Reports are explicitly excluded from the tiered routing

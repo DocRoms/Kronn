@@ -75,3 +75,20 @@ fn final_review_checks_written_artifacts_instead_of_trusting_coverage_claims() {
         .prompt
         .contains("inspection candidates, not an acceptance threshold"));
 }
+
+#[test]
+fn efficient_reading_never_caps_necessary_evidence_checks() {
+    for requirement in [
+        "Expand whenever needed",
+        "no fixed reading budget",
+        "Batch independent searches",
+        "do not truncate a necessary check",
+        "sampled scope",
+        "error-only summary",
+    ] {
+        assert!(PROMPT_PREAMBLE.contains(requirement), "{requirement}");
+    }
+    let schema = include_str!("../../../../templates/docs/tech-debt/TEMPLATE.md");
+    assert!(schema.contains("[src: file: {{SOURCE_PATH}}:{{SOURCE_LINE}}]"));
+    assert!(schema.contains("necessary evidence or counter-evidence"));
+}

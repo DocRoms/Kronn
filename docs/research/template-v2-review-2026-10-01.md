@@ -130,3 +130,20 @@ the same-source/model CS3 follow-up must measure it before acceptance.
 [src: file: templates/docs/tech-debt/TEMPLATE.md:1]
 [src: file: backend/src/api/audit/mod.rs:1143]
 [src: file: backend/src/api/audit/mod.rs:557]
+
+
+CS3 restores all 13 known defects found in CS1 (10/11 certain) in the same
+non-blind review, with 34/34 linked TDs and no schema errors in the structural
+check. However, cumulative reported audit usage reaches 9,306,996 tokens,
+including cache, and peak input reaches 126,798 tokens. The code-quality step
+retrieved 169,816 characters in 38 tool results, including whole source files.
+These measurements do not establish suitability for a small context window;
+the extra evidence checks must be assessed for usefulness, not cost alone.
+The next prompt revision requests relevant function/section reads and batched
+queries, explicit TD citation grammar, and error-only artifact verification.
+Following the user clarification, evidence quality takes precedence over token
+savings: no fixed reading or TD word cap may truncate a necessary check. These
+are prompt requirements, not a runtime context limit; CS4 must measure actual
+compliance and retain the same defect-coverage criteria. CS3 remains frozen at `33e5a850`.
+[src: commit: 33e5a850]
+Results and evidence limits: [PR #219](https://github.com/DocRoms/Kronn/pull/219).

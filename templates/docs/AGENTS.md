@@ -43,29 +43,22 @@ Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](convention
 
 | Task | Files |
 |------|-------|
-| [ex: "Backend API changes"] {{TASK_1}} | [repo-map](repo-map.md), [coding-rules](coding-rules.md) |
-| [ex: "Fix a test"] {{TASK_2}} | [testing-quality](testing-quality.md) |
-| [ex: "New feature"] {{TASK_3}} | [architecture/overview](architecture/overview.md), [repo-map](repo-map.md) |
-| [ex: "Debug / deploy"] {{TASK_4}} | [operations/debug-operations](operations/debug-operations.md) |
+| {{TASK_1}} | [repo-map](repo-map.md), [coding-rules](coding-rules.md) |
+| {{TASK_2}} | [testing-quality](testing-quality.md) |
+| {{TASK_3}} | [architecture/overview](architecture/overview.md), [repo-map](repo-map.md) |
+| {{TASK_4}} | [operations/debug-operations](operations/debug-operations.md) |
 
 **T2 — Search:** open known paths directly; otherwise search `docs/`. Start with at most 3 relevant files/sections; expand when evidence requires it.
 
 | Need | File |
 |------|------|
-| Repo structure | [repo-map](repo-map.md) |
-| Testing | [testing-quality](testing-quality.md) |
-| Coding rules | [coding-rules](coding-rules.md) |
 | Known issues | [inconsistencies-tech-debt](inconsistencies-tech-debt.md) or a known TD directly |
 | Known domain | Find `inconsistencies-<domain>.md` (security, api, etc.); open directly if present |
 | Architecture decisions | [decisions](decisions.md) |
 | Glossary | [glossary](glossary.md) |
 | Workflow overview | [workflow/](workflow/README.md) |
-| Commit conventions | [workflow/commits](workflow/commits.md) |
-| Pull request conventions | [workflow/pull-requests](workflow/pull-requests.md) |
-| Ticket/tracker conventions | [workflow/tickets](workflow/tickets.md) |
-| CI/CD pipeline | [workflow/ci-cd](workflow/ci-cd.md) |
 | Environments (staging, prod, …) | [environments](environments.md) |
-| Worked examples | [examples/](examples/README.md) |
+| Examples | [examples/](examples/README.md) |
 
 State the missing evidence before expanding. Never load every file or reread unchanged instructions already in context.
 
@@ -137,7 +130,7 @@ New code placement: see [repo-map](repo-map.md).
 - Use [repo-map](repo-map.md) for file placement.
 - Large refactor needed → add entry to [inconsistencies-tech-debt](inconsistencies-tech-debt.md).
 - Update the relevant document after learning something non-obvious; keep one canonical home per fact.
-- `docs/AGENTS.md` sections use `owner="audit"` or `owner="human"` (legacy `curated="human"` remains protected). Never rewrite a human-owned section in a full or partial audit; re-audits put the proposed change in a dated diff under `docs/reports/`.
+- Preserve `owner="human"` sections and legacy `curated="human"` sections. Full/partial re-audits propose changes in dated `docs/reports/` diffs; `owner="audit"` marks audit-owned sections.
 
 ---
 

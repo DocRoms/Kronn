@@ -20,7 +20,7 @@ metadata:
 
 ## Problem (fact)
 
-{{OBSERVED_DEFECT_AND_SOURCE_CITATION}}
+{{OBSERVED_DEFECT}} [src: file: {{SOURCE_PATH}}:{{SOURCE_LINE}}]
 
 ## Impact
 
@@ -28,7 +28,7 @@ metadata:
 
 ## Where (pointers)
 
-{{SOURCE_PATHS_WITH_LINE_CITATIONS}}
+{{RELEVANT_SOURCE_CONTEXT}} [src: file: {{SOURCE_PATH}}:{{SOURCE_LINE}}]
 
 ## Applicability and counter-check
 
@@ -48,6 +48,9 @@ metadata:
 
 <!-- Copy to a TD-YYYYMMDD-slug.md file and fill every field using named
 fields, not a positional shell function. Keep this reusable template unchanged.
+Keep each section concise; include all necessary evidence or counter-evidence,
+conditions and limitations without an arbitrary word cap.
+Use structured [src: file: path:line] citations with real paths and exact lines.
 Severity: Critical/High/Medium/Low. Effort: S/M/L/XL (never a status).
 New audit status: Inferred, or Verified in source only after the evidence and
 counter-check establish the stated defect. Mirror it in audit_history.
