@@ -7432,6 +7432,7 @@ async fn send_http_agent_request(
                 // would only buy another one for the same dead connection. The
                 // dropped future closes it, which is what frees the model.
                 Err(_) => {
+                    super::http_diagnostics::record_failure(stderr, None);
                     return Err(HttpProviderFailure {
                         status: None,
                         detail: idle_watchdog::stall_reason(
@@ -7446,7 +7447,10 @@ async fn send_http_agent_request(
             None => request.send().await,
         };
         match sent {
-            Ok(response) if response.status().is_success() => return Ok((response, attempt)),
+            Ok(response) if response.status().is_success() => {
+                super::http_diagnostics::clear_failure(stderr);
+                return Ok((response, attempt));
+            }
             Ok(response) => {
                 let status = response.status();
                 let detail = response.text().await.unwrap_or_default();
@@ -7469,6 +7473,7 @@ async fn send_http_agent_request(
                     attempt += 1;
                     continue;
                 }
+                super::http_diagnostics::record_failure(stderr, Some(status));
                 return Err(HttpProviderFailure {
                     status: Some(status),
                     detail,
@@ -7492,6 +7497,7 @@ async fn send_http_agent_request(
                     attempt += 1;
                     continue;
                 }
+                super::http_diagnostics::record_failure(stderr, None);
                 return Err(HttpProviderFailure {
                     status: None,
                     detail,
@@ -10457,7 +10463,7 @@ async fn start_ollama_http_with_idle(
                         )
                     } else {
                         format!(
-                            "{backend} error {status} on tool round-trip {turn}. The provider accepted the initial tool declaration but rejected the follow-up; verify that this route/model supports native tool calling. Automatic retry was skipped because a tool had already executed. Provider response: {}",
+                            "{backend} error {status} on tool round-trip {turn}. Automatic retry was skipped because a tool had already executed. Provider response: {}",
                             provider_body.trim()
                         )
                     };

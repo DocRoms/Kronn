@@ -1488,7 +1488,7 @@ pub async fn full_audit(
                         warning = Some(ownership_warning);
                     }
 
-                    warning = super::validation::with_tool_ceiling_warning(
+                    warning = super::validation::with_http_diagnostics(
                         success, warning, &process.captured_stderr(),
                     );
 

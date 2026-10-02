@@ -381,6 +381,17 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
 #[cfg(unix)]
 #[tokio::test]
 async fn http_start_failure_during_documentary_retry_persists_error_and_prior_usage() {
+    assert_http_failure_is_persisted(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn http_failure_after_write_persists_status_and_preserves_partial_files_without_replay() {
+    assert_http_failure_is_persisted(true).await;
+}
+
+#[cfg(unix)]
+async fn assert_http_failure_is_persisted(after_write: bool) {
     use axum::response::IntoResponse;
     let server = MockServer::start().await;
     let requests = Arc::new(Mutex::new(0));
@@ -392,13 +403,20 @@ async fn http_start_failure_during_documentary_retry_persists_error_and_prior_us
             *seen += 1;
             if *seen == 1 {
                 ResponseTemplate::new(200).set_body_string(sse(&[
-                    text("The documentation is unchanged."),
+                    if after_write {
+                        tool_calls(&[("write_file", json!({
+                            "path":"docs/tech-debt/TD-partial.md",
+                            "content":"# Partial finding\nWork completed before the provider failure.\n",
+                        }))])
+                    } else {
+                        text("The documentation is unchanged.")
+                    },
                     json!({"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":7}})
                         .to_string(),
                 ]))
             } else {
-                ResponseTemplate::new(401)
-                    .set_body_json(json!({"error":{"message":"provider unavailable"}}))
+                ResponseTemplate::new(if after_write { 429 } else { 401 })
+                    .set_body_json(json!({"error":{"message":"provider unavailable: private-provider-body"}}))
             }
         })
         .mount(&server)
@@ -478,8 +496,14 @@ async fn http_start_failure_during_documentary_retry_persists_error_and_prior_us
     assert_eq!(done["status"], "interrupted", "{stream}");
     assert_eq!(done["steps_to_redo"], json!([1]), "{stream}");
     assert!(!done["discussion_id"].is_string());
-    assert_eq!(sse_events(&stream, "step_retry").len(), 1);
-    assert_eq!(sse_events(&stream, "step_error").len(), 1);
+    assert_eq!(
+        sse_events(&stream, "step_retry").len(),
+        usize::from(!after_write)
+    );
+    assert_eq!(
+        sse_events(&stream, "step_error").len(),
+        usize::from(!after_write)
+    );
     assert_eq!(*requests.lock().unwrap(), 2);
     let step_done = sse_events(&stream, "step_done");
     assert_eq!(step_done.len(), 1);
@@ -500,7 +524,26 @@ async fn http_start_failure_during_documentary_retry_persists_error_and_prior_us
         "a terminal launch error is finalized"
     );
     assert_eq!(failed.step_tokens, Some(20));
-    assert!(failed.step_warning.as_deref().unwrap().contains("401"));
+    let warning = failed.step_warning.as_deref().unwrap();
+    assert!(
+        warning.contains(if after_write { "429" } else { "401" }),
+        "{warning}"
+    );
+    if after_write {
+        assert!(
+            warning.contains("rate limit") && warning.contains("Partial files are preserved"),
+            "{warning}"
+        );
+        assert!(!warning.contains("private-provider-body"));
+        let warnings = sse_events(&stream, "step_warning");
+        assert!(warnings
+            .iter()
+            .any(|w| w["reason"].as_str().is_some_and(|r| r.contains("429"))));
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("docs/tech-debt/TD-partial.md")).unwrap(),
+            "# Partial finding\nWork completed before the provider failure.\n"
+        );
+    }
     assert_eq!(
         crate::api::audit::full::already_succeeded_step_indices(&steps).len(),
         total as usize - 1

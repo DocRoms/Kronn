@@ -705,7 +705,7 @@ pub async fn partial_audit(
                     if ownership_error.is_some() {
                         success = false;
                     }
-                    let validation_warning = super::validation::with_tool_ceiling_warning(
+                    let validation_warning = super::validation::with_http_diagnostics(
                         success, validation_warning, &process.captured_stderr(),
                     );
                     if let Some(w) = validation_warning {

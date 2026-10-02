@@ -5604,7 +5604,7 @@ mod tests {
                     .as_array()
                     .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
                 if after_tool {
-                    ResponseTemplate::new(503).set_body_string("temporarily unavailable")
+                    ResponseTemplate::new(429).set_body_string("quota exhausted; private-provider-body")
                 } else {
                     ResponseTemplate::new(200).set_body_string(sse(&[
                         r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"write-1","function":{"name":"write_file","arguments":"{}"}}]}}]}"#,
@@ -5655,6 +5655,27 @@ mod tests {
                 .any(|line| line.starts_with("[provider-retry:")),
             "no retry trace should exist after an external effect"
         );
+        let trace = process.captured_stderr();
+        assert!(
+            !trace
+                .iter()
+                .any(|line| line
+                    .contains("verify that this route/model supports native tool calling")),
+            "a 429 is not evidence of unsupported tools: {trace:?}"
+        );
+        let warning = crate::api::audit::validation::with_http_diagnostics(
+            false,
+            Some(crate::api::audit::validation::StepValidationWarning {
+                reason: "Expected audit index is incomplete".into(),
+                repaired: false,
+            }),
+            &trace,
+        )
+        .expect("the audit retains its provider failure");
+        assert!(warning.reason.contains("429"), "{}", warning.reason);
+        assert!(warning.reason.contains("rate limit"), "{}", warning.reason);
+        assert!(warning.reason.contains("index is incomplete"));
+        assert!(!warning.reason.contains("private-provider-body"));
     }
 
     /// KT-942 — the exact text observed in production, and the failures that

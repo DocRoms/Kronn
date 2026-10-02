@@ -69,6 +69,16 @@ If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
 [src: file: backend/src/api/audit/full.rs:1784]
 
+A provider error during a step also survives in its persisted warning and SSE
+recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
+evidence that tool calling is unsupported. Only typed status metadata enters
+this diagnostic; provider response bodies and endpoint URLs are excluded.
+Partial files remain in place. This failure does not automatically retry the
+request after tool execution or replay that effect (KT-955).
+[src: file: backend/src/agents/http_diagnostics.rs:1]
+[src: file: backend/src/api/audit/validation.rs:95]
+[src: file: backend/src/agents/runner.rs:10430]
+
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
 actual files, including runs made before this fix. Auxiliary documents with no

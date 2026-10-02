@@ -90,9 +90,9 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
-/// Preserve the artifact failure and explain the HTTP ceiling that preceded it.
-/// Reaching a search ceiling alone does not invalidate a complete artifact.
-pub(crate) fn with_tool_ceiling_warning(
+/// Retain safe provider and tool-budget causes alongside the artifact failure.
+/// A recovered ceiling or negotiated provider fallback does not fail a good step.
+pub(crate) fn with_http_diagnostics(
     success: bool,
     warning: Option<StepValidationWarning>,
     stderr: &[String],
@@ -100,27 +100,34 @@ pub(crate) fn with_tool_ceiling_warning(
     if success {
         return warning;
     }
-    let Some(report) = crate::agents::runner::parse_ceiling_report(stderr) else {
+    let mut causes = Vec::new();
+    if let Some(summary) = crate::agents::http_diagnostics::failure_summary(stderr) {
+        causes.push(summary);
+    }
+    if let Some(report) = crate::agents::runner::parse_ceiling_report(stderr) {
+        let mut limits: Vec<_> = report
+            .tools
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{}: {} calls ({} refused)",
+                    hit.tool, hit.limit, hit.refused
+                )
+            })
+            .collect();
+        if let Some(rounds) = report.rounds {
+            limits.push(format!("{rounds} tool rounds"));
+        }
+        causes.push(format!("HTTP tool budget reached: {}", limits.join(", ")));
+    }
+    if causes.is_empty() {
         return warning;
-    };
-    let mut limits: Vec<_> = report
-        .tools
-        .iter()
-        .map(|hit| {
-            format!(
-                "{}: {} calls ({} refused)",
-                hit.tool, hit.limit, hit.refused
-            )
-        })
-        .collect();
-    if let Some(rounds) = report.rounds {
-        limits.push(format!("{rounds} tool rounds"));
     }
     let reason = warning
         .map(|w| w.reason)
         .unwrap_or_else(|| "Agent did not complete the audit step".into());
     Some(StepValidationWarning {
-        reason: format!("{reason}. HTTP tool budget reached: {}. Partial files are preserved; resume this step to finish the missing output.", limits.join(", ")),
+        reason: format!("{reason}. {}. Partial files are preserved; resume this step to finish the missing output.", causes.join(". ")),
         repaired: false,
     })
 }
@@ -1114,7 +1121,7 @@ mod tests {
             serde_json::json!({"version":1,"tools":[{"tool":"write_file","limit":64,
                 "refused":1,"refused_calls":["sensitive output must not be copied"]}]})
         )];
-        let warning = with_tool_ceiling_warning(
+        let warning = with_http_diagnostics(
             false,
             Some(StepValidationWarning {
                 reason: "docs/index.md is missing or empty".into(),
@@ -1127,7 +1134,7 @@ mod tests {
         assert!(warning.reason.contains("write_file: 64 calls"));
         assert!(warning.reason.contains("resume this step"));
         assert!(!warning.reason.contains("sensitive output"));
-        assert!(with_tool_ceiling_warning(true, None, &trace).is_none());
-        assert!(with_tool_ceiling_warning(false, None, &[]).is_none());
+        assert!(with_http_diagnostics(true, None, &trace).is_none());
+        assert!(with_http_diagnostics(false, None, &[]).is_none());
     }
 }

@@ -327,6 +327,13 @@ Release notes for 0.9.3 and earlier are available in the
   failed the final gate; invented paths and invalid lines still prevent
   validation, and human sections remain protected (KT-952).
 
+- An HTTP audit interrupted by a provider error now keeps that cause in the
+  step recap alongside any missing-output warning. A 429 identifies a rate
+  limit or exhausted quota and no longer suggests incompatible tools. Provider
+  bodies stay out of this diagnostic and partial files are preserved. This
+  failure does not automatically retry the request or replay tool effects
+  (KT-955).
+
 - HTTP audits and discussions can read fresh repository content after writing
   it. Previously only orchestration workers invalidated cached observations;
   an audit could receive a pre-edit file or lose its reader as a repeated call.
