@@ -2377,6 +2377,38 @@ pub(crate) fn codex_kronn_internal_env_override() -> String {
     )
 }
 
+/// Kronn's own server for a Codex discussion run, complete and approved, so the
+/// run does not depend on the global config sync (KT-953). Dotted keys merge
+/// with the user's config instead of replacing their other servers.
+pub(crate) fn codex_discussion_mcp_overrides() -> Vec<String> {
+    render_codex_discussion_mcp_overrides(disc_introspection_mcp_command())
+}
+
+fn render_codex_discussion_mcp_overrides(launch: Option<InternalMcpCommand>) -> Vec<String> {
+    const KEY: &str = "mcp_servers.kronn-internal";
+    // Without its command a key alone is an entry with no transport, and Codex
+    // then rejects the whole configuration.
+    let Some(launch) = launch else {
+        return Vec::new();
+    };
+    let (Ok(command), Ok(args)) = (
+        serde_json::to_string(&launch.command),
+        serde_json::to_string(&launch.args),
+    ) else {
+        return Vec::new();
+    };
+    let values = vec![
+        codex_kronn_internal_env_override(),
+        format!("{KEY}.command={command}"),
+        format!("{KEY}.args={args}"),
+        format!("{KEY}.default_tools_approval_mode=\"approve\""),
+    ];
+    values
+        .into_iter()
+        .flat_map(|value| ["-c".to_string(), value])
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct AcpSessionStore {
     db: Arc<crate::db::Database>,
@@ -10549,6 +10581,27 @@ fn claude_project_slug(work_dir: &Path) -> String {
         .collect()
 }
 
+/// Working directory of a discussion without a project: one folder per
+/// discussion under `~/.kronn/discussions`, outside Kronn's data dir.
+pub fn discussion_scratch_dir(discussion_id: &str) -> Option<PathBuf> {
+    let home = directories::BaseDirs::new()?;
+    discussion_scratch_dir_under(home.home_dir(), discussion_id)
+}
+
+fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Option<PathBuf> {
+    // The id becomes a path segment: anything but a plain id could escape it.
+    if discussion_id.is_empty()
+        || !discussion_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return None;
+    }
+    let dir = home.join(".kronn").join("discussions").join(discussion_id);
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 /// The directory an agent will actually run in.
 ///
 /// Public because a resumable session is scoped to this exact path: the caller
@@ -11286,15 +11339,17 @@ fn agent_command_with_task_worker_policy(
             // children. Pin the same narrow allowlist per invocation so the
             // current discussion/task capability cannot depend on a later
             // global config sync and concurrent workers stay isolated.
-            args.push("-c".into());
-            args.push(if task_worker {
+            if task_worker {
                 // `start_agent_with_config` validates availability before this
                 // builder is reached. The fallback keeps direct unit calls
                 // deterministic without ever broadening the worker surface.
-                codex_task_worker_mcp_override().unwrap_or_else(|| "mcp_servers={}".into())
+                args.push("-c".into());
+                args.push(
+                    codex_task_worker_mcp_override().unwrap_or_else(|| "mcp_servers={}".into()),
+                );
             } else {
-                codex_kronn_internal_env_override()
-            });
+                args.extend(codex_discussion_mcp_overrides());
+            }
             // KT-646 — official per-run TOML override for reasoning effort
             // (https://learn.chatgpt.com/docs/config-file/config-reference,
             // https://learn.chatgpt.com/docs/developer-commands?surface=cli).

@@ -197,8 +197,10 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
     let args_json = serde_json::to_string(&launch.args).ok()?;
     let env_vars_json =
         serde_json::to_string(crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
+    // `codex exec` cannot ask: a Kronn tool left on `prompt` is refused (KT-953).
+    // Project servers keep Codex's default.
     entries.push_str(&format!(
-        "\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30}}"
+        "\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30,default_tools_approval_mode=\"approve\"}}"
     ));
     Some(format!("mcp_servers={{{entries}}}"))
 }
@@ -987,6 +989,14 @@ exec sleep 30"#,
                 crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS
             );
             assert!(internal.get("env").is_none());
+            assert_eq!(
+                internal["default_tools_approval_mode"].as_str(),
+                Some("approve"),
+                "`codex exec` cannot ask, so Kronn's own tools must be pre-approved"
+            );
+            assert!(servers["project-safe"]
+                .get("default_tools_approval_mode")
+                .is_none());
         }
     }
 
