@@ -9,7 +9,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{AgentType, LivePageDatasetKind, LivePageWriteOperation, ModelTier, PromptVariable};
+use super::{
+    AgentType, CatalogPreflightWarning, LivePageDatasetKind, LivePageWriteOperation, ModelTier,
+    PromptVariable,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1444,10 +1447,16 @@ pub struct WorkflowAgentAttempt {
     pub agent: AgentType,
     pub tier: ModelTier,
     pub connection_id: Option<String>,
-    /// Explicit model override, before resolving connection/tier defaults.
+    /// Model requested at preflight after resolving any connection or tier
+    /// default, before a catalogue fallback is applied.
     pub requested_model: Option<String>,
     /// Model resolved at the actual launch boundary. Not provider observation.
     pub resolved_model: Option<String>,
+    /// Non-blocking catalogue fallback applied before this attempt. Absent
+    /// when the requested model was still available or catalogue state did not
+    /// require a replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_warning: Option<CatalogPreflightWarning>,
     /// Whether the transport applied that selection. None means unknown or no
     /// selection; native ACP can explicitly retain its default (false).
     pub model_applied: Option<bool>,

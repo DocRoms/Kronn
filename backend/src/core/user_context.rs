@@ -133,7 +133,7 @@ pub fn build_memory_prelude_prompt() -> String {
      `architecture/`, `conventions/`, `gotchas/`, `operations/`, `people/`).\n\
      Use one short file per topic. Prefer markdown links `[name](path.md)` for\n\
      cross-refs to other docs files (Obsidian-friendly graph view).\n\n\
-     Do NOT edit `docs/AGENTS.md` (curated by the audit workflow).\n\
+     Never edit `owner=\"human\"` sections of `docs/AGENTS.md`.\n\
      Do NOT write secrets — Kronn rejects writes\n\
      that match `.env`, `.pem`, `.ssh/`, or token shapes (sk-, ghp_, AKIA, JWT).\n\n\
      Some projects still use the legacy `ai/` folder instead of `docs/` —\n\
@@ -308,18 +308,26 @@ mod tests {
     }
 
     #[test]
-    fn memory_prelude_forbids_writing_to_curated_areas() {
+    fn memory_prelude_explains_owner_based_editing_of_agents_md() {
         // 0.8.3 — `docs/templates/exchanges.md` was an obsolete artifact
         // from the pre-Kronn era when agents had to coordinate via
         // a shared markdown file. The discussion system (and the
         // 0.8.4 cross-agent memory MCP) supersedes it entirely, so
         // the dedicated `docs/templates/` folder + its mention here
-        // were removed. Only `docs/AGENTS.md` remains as the curated
-        // off-limits target.
+        // were removed.
+        // Ownership is per section: human-owned sections stay off-limits.
         let prelude = build_memory_prelude_prompt();
         assert!(
             prelude.contains("docs/AGENTS.md"),
-            "must explicitly forbid editing docs/AGENTS.md"
+            "must still mention docs/AGENTS.md so agents know it's special-cased"
+        );
+        assert!(
+            prelude.contains("owner=\"human\""),
+            "must name the owner=\"human\" ownership marker"
+        );
+        assert!(
+            !prelude.contains("Do NOT edit `docs/AGENTS.md`"),
+            "the old blanket ban must be gone — ownership is per-section now"
         );
         assert!(
             !prelude.contains("docs/templates/"),

@@ -1,13 +1,19 @@
-import { useMemo, useState } from 'react';
-import { Check, Download, Globe2, KeyRound, LockKeyhole, Upload, X } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
+import { Check, Download, KeyRound, LockKeyhole, Upload, X } from 'lucide-react';
 import { mcps as mcpsApi } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
 import { useT } from '../lib/I18nContext';
 import { useToast } from '../hooks/useToast';
 import { userError } from '../lib/userError';
+import { pluginKind } from '../lib/pluginKind';
+import { PluginScopeEditor } from './plugins/PluginScopeEditor';
+import { hasAgentScope } from './plugins/mcpPageHelpers';
 import type {
+  HostSyncMode,
+  ImportedPluginConfig,
   ImportPluginBundleReport,
   McpConfigDisplay,
+  McpDefinition,
   PluginBundlePreview,
   Project,
 } from '../types/generated';
@@ -15,6 +21,7 @@ import type {
 interface PluginPortabilityModalProps {
   mode: 'export' | 'import';
   configs: McpConfigDisplay[];
+  registry: McpDefinition[];
   projects: Project[];
   onClose: () => void;
   onImported: () => void;
@@ -30,6 +37,7 @@ interface BundleHeader {
 export function PluginPortabilityModal({
   mode,
   configs,
+  registry,
   projects,
   onClose,
   onImported,
@@ -47,10 +55,45 @@ export function PluginPortabilityModal({
   const [importHeader, setImportHeader] = useState<BundleHeader | null>(null);
   const [importFilename, setImportFilename] = useState('');
   const [report, setReport] = useState<ImportPluginBundleReport | null>(null);
-  const [importScopes, setImportScopes] = useState<Record<string, {
+  type ImportScope = {
     global: boolean;
+    includeGeneral: boolean;
     projectIds: string[];
-  }>>({});
+    hostSync: HostSyncMode;
+  };
+  const [importScopes, setImportScopes] = useState<Record<string, ImportScope>>({});
+  const closingRef = useRef(false);
+
+  // Keep the displayed defaults deterministic while the parent refreshes its
+  // overview: the scope shown to the operator must not change underneath
+  // them. All projects is the documented import default; General and local-CLI
+  // sync remain explicit opt-ins on this machine.
+  const scopeFor = (item: ImportedPluginConfig): ImportScope => {
+    const edited = importScopes[item.config_id];
+    if (edited) return edited;
+    return { global: true, includeGeneral: false, projectIds: [], hostSync: 'None' };
+  };
+
+  const definitionFor = (item: ImportedPluginConfig) => registry.find(definition => definition.id === item.server_id);
+  const supportsHostSync = (item: ImportedPluginConfig) => {
+    const definition = definitionFor(item);
+    return !!definition && pluginKind(definition) !== 'api';
+  };
+
+  const applyScopes = async (scopes: Record<string, ImportScope>) => {
+    if (!report) return;
+    for (const item of report.imported_configs) {
+      const scope = scopes[item.config_id] ?? scopeFor(item);
+      await mcpsApi.updateConfig(item.config_id, {
+        is_global: scope.global,
+        include_general: scope.includeGeneral,
+        host_sync: supportsHostSync(item) ? scope.hostSync : 'None',
+      });
+      await mcpsApi.setConfigProjects(item.config_id, {
+        project_ids: scope.projectIds,
+      });
+    }
+  };
 
   const orderedConfigs = useMemo(
     () => [...configs].sort((left, right) => left.label.localeCompare(right.label)),
@@ -137,7 +180,7 @@ export function PluginPortabilityModal({
       setReport(nextReport);
       setImportScopes(Object.fromEntries(nextReport.imported_configs.map(item => [
         item.config_id,
-        { global: true, projectIds: [] },
+        { global: true, includeGeneral: false, projectIds: [], hostSync: 'None' },
       ])));
       onImported();
       toast(
@@ -156,8 +199,8 @@ export function PluginPortabilityModal({
   const saveImportScopes = async () => {
     if (!report || busy) return;
     const missingScope = report.imported_configs.some(item => {
-      const scope = importScopes[item.config_id];
-      return scope && !scope.global && scope.projectIds.length === 0;
+      const scope = scopeFor(item);
+      return !hasAgentScope(scope.global, scope.includeGeneral, scope.projectIds);
     });
     if (missingScope) {
       setError(t('mcp.portability.scopeRequired'));
@@ -166,13 +209,7 @@ export function PluginPortabilityModal({
     setBusy(true);
     setError(null);
     try {
-      for (const item of report.imported_configs) {
-        const scope = importScopes[item.config_id] ?? { global: true, projectIds: [] };
-        await mcpsApi.updateConfig(item.config_id, { is_global: scope.global });
-        await mcpsApi.setConfigProjects(item.config_id, {
-          project_ids: scope.global ? [] : scope.projectIds,
-        });
-      }
+      await applyScopes(importScopes);
       onImported();
       toast(t('mcp.portability.scopeSaved'), 'success');
       onClose();
@@ -181,6 +218,45 @@ export function PluginPortabilityModal({
     } finally {
       setBusy(false);
     }
+  };
+
+  // KT-831 (reliquat KT-352) — a bundle import closed (X / backdrop) before
+  // "Appliquer la portée" used to leave every imported config exactly as
+  // the backend created it: unscoped, non-global, no projects. Any item
+  // whose inherited `includeGeneral` is also false becomes invisible to
+  // every agent with no further signal. Closing now applies whatever was
+  // on screen (all projects pre-checked by default, matching what the operator
+  // saw) instead of silently discarding it — not a hidden broadening:
+  // it's exactly the state already displayed.
+  const handleClose = async () => {
+    if (busy || closingRef.current) return;
+    if (report && report.imported_configs.length > 0) {
+      const missingScope = report.imported_configs.some(item => {
+        const scope = scopeFor(item);
+        return !hasAgentScope(scope.global, scope.includeGeneral, scope.projectIds);
+      });
+      if (missingScope) {
+        setError(t('mcp.portability.scopeRequired'));
+        return;
+      }
+      closingRef.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        await applyScopes(Object.fromEntries(
+          report.imported_configs.map(item => [item.config_id, scopeFor(item)]),
+        ));
+        onImported();
+      } catch (caught) {
+        console.warn('Failed to apply the default scope on close:', caught);
+        setError(userError(caught));
+        return;
+      } finally {
+        setBusy(false);
+        closingRef.current = false;
+      }
+    }
+    onClose();
   };
 
   const exportDisabled = !preview
@@ -196,7 +272,7 @@ export function PluginPortabilityModal({
       className="mcp-export-modal-backdrop"
       role="presentation"
       onMouseDown={event => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) void handleClose();
       }}
     >
       <section
@@ -216,7 +292,8 @@ export function PluginPortabilityModal({
           <button
             type="button"
             className="mcp-icon-btn"
-            onClick={onClose}
+            onClick={() => void handleClose()}
+            disabled={busy}
             aria-label={t('common.close')}
           >
             <X size={14} />
@@ -405,10 +482,12 @@ export function PluginPortabilityModal({
                         <span role="columnheader">{t('mcp.portability.projectsColumn')}</span>
                       </div>
                       {report.imported_configs.map(item => {
-                        const scope = importScopes[item.config_id] ?? {
-                          global: true,
-                          projectIds: [],
-                        };
+                        const scope = scopeFor(item);
+                        const definition = definitionFor(item);
+                        const setScope = (next: ImportScope) => setImportScopes(previous => ({
+                          ...previous,
+                          [item.config_id]: next,
+                        }));
                         return (
                           <div className="mcp-portability-scope-row" role="row" key={item.config_id}>
                             <span role="cell" className="mcp-portability-scope-plugin">
@@ -416,45 +495,29 @@ export function PluginPortabilityModal({
                               <small>{item.server_name}</small>
                             </span>
                             <span role="cell" className="mcp-portability-scope-choices">
-                              <label className="mcp-portability-global-choice">
-                                <input
-                                  type="checkbox"
-                                  checked={scope.global}
-                                  onChange={event => setImportScopes(previous => ({
-                                    ...previous,
-                                    [item.config_id]: {
-                                      global: event.target.checked,
-                                      projectIds: event.target.checked ? [] : scope.projectIds,
-                                    },
-                                  }))}
-                                />
-                                <Globe2 size={13} /> {t('mcp.portability.global')}
-                              </label>
-                              {!scope.global && (
-                                <div className="mcp-portability-project-choices">
-                                  {projects.map(project => (
-                                    <label key={project.id}>
-                                      <input
-                                        type="checkbox"
-                                        checked={scope.projectIds.includes(project.id)}
-                                        onChange={event => setImportScopes(previous => ({
-                                          ...previous,
-                                          [item.config_id]: {
-                                            global: false,
-                                            projectIds: event.target.checked
-                                              ? [...scope.projectIds, project.id]
-                                              : scope.projectIds.filter(id => id !== project.id),
-                                          },
-                                        }))}
-                                      />
-                                      {project.name}
-                                    </label>
-                                  ))}
-                                  {projects.length === 0 && (
-                                    <small>{t('mcp.portability.noProjects')}</small>
-                                  )}
-                                </div>
-                              )}
+                              <PluginScopeEditor
+                                t={t}
+                                projects={projects}
+                                isGlobal={scope.global}
+                                onToggleGlobal={() => setScope({
+                                  ...scope,
+                                  global: !scope.global,
+                                })}
+                                includeGeneral={scope.includeGeneral}
+                                onToggleGeneral={() => setScope({ ...scope, includeGeneral: !scope.includeGeneral })}
+                                projectIds={scope.projectIds}
+                                onToggleProject={(projectId, isLinked) => setScope({
+                                  ...scope,
+                                  projectIds: isLinked
+                                    ? scope.projectIds.filter(id => id !== projectId)
+                                    : [...scope.projectIds, projectId],
+                                })}
+                                supportsHostSync={!!definition && pluginKind(definition) !== 'api'}
+                                hostSync={scope.hostSync}
+                                onSetHostSync={(hostSync) => setScope({ ...scope, hostSync })}
+                                hostSyncNote={definition && pluginKind(definition) === 'hybrid' ? 'hybrid' : undefined}
+                                testIdPrefix={`mcp-import-scope-${item.config_id}`}
+                              />
                             </span>
                           </div>
                         );

@@ -52,7 +52,7 @@ import uuid
 
 MAX_DISC_APPEND_ATTACHMENTS = 8
 MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
-BRIDGE_TOOL_SURFACE_VERSION = "0.3.9"
+BRIDGE_TOOL_SURFACE_VERSION = "0.3.10"
 
 
 class BridgeStaleError(RuntimeError):
@@ -1006,9 +1006,9 @@ TOOLS = [
     {
         "name": "task_exec_accept_worker_offer",
         "description": (
-            "Attach THIS joined CLI to a task worker offer using only its opaque "
-            "offer_id. The backend verifies the exact session and success rebinds "
-            "this bridge to the child room. See "
+            "Accept THIS CLI's worker offer by opaque offer_id. Grants "
+            "execution-scoped authority, preserves its principal room, and returns "
+            "the worker instructions. See "
             "tool_manual({tool: \"task_exec_accept_worker_offer\"})."
         ),
         "inputSchema": {
@@ -1031,8 +1031,8 @@ TOOLS = [
             "verifies you are the execution's EXACT worker (a different session is "
             "refused). On success the manifest is persisted, the execution flips to "
             "AwaitingReview, and a review request wakes the principal in the parent "
-            "room — call this BEFORE announcing 'ready for review'. This does not "
-            "move your session; you stay in the sub-discussion. A malformed manifest "
+            "room — call this BEFORE announcing 'ready for review'. Your session "
+            "remains in its principal room throughout. A malformed manifest "
             "is refused, not silently accepted."
         ),
         "inputSchema": {
@@ -1469,14 +1469,16 @@ TOOLS = [
     {
         "name": "page_list",
         "description": (
-            "List every Live Page in Kronn as a compact discovery view: id, "
+            "List Live Pages (all, or one project's with `project_id`): id, "
             "title, slug, project_id, data_revision, updated_at and "
-            "last_published_at. Call this before authoring a PublishPageData "
-            "step: Pages are shared destinations and several workflows may "
-            "publish into the same Page. Reuse a matching page_id instead of "
-            "creating a duplicate."
+            "last_published_at. Before authoring a PublishPageData step, "
+            "reuse a matching page_id: several workflows may publish into "
+            "the same Page."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+        },
     },
     {
         "name": "page_get",
@@ -2679,12 +2681,8 @@ TOOLS = [
     {
         "name": "audit_launch",
         "description": (
-            "Launch a `full` or `partial` project audit and return immediately. This is "
-            "NOT detached: closing/reloading this MCP interrupts its SSE-driven run. Check "
-            "`audit_status`; only interrupted full/specialized runs resume with "
-            "`resume_run_id`, while partial requires 1-based `steps` and is relaunched. "
-            "One audit per project. Run `audit_prepare` first. Lifecycle, briefing and "
-            "validation-discussion rules: `tool_manual({tool: \"audit_launch\"})`."
+            "Launch a detached audit; only a backend restart interrupts it, "
+            "then `audit_status` reports any `resume_run_id`."
         ),
         "inputSchema": {
             "type": "object",
@@ -6091,19 +6089,11 @@ def call_task_exec_reassign(args):
 
 def call_task_exec_accept_worker_offer(args):
     """Accept a task-execution worker control offer targeted at THIS session and
-    attach to its sub-discussion (KT-328 tranche 2). The caller passes ONLY the
-    opaque `offer_id`; both identities are DERIVED by this bridge, and the
-    backend verifies that the live session is the exact target before moving
-    its separate durable room binding.
-
-    On success the backend moves this session origin -> child (durable source
-    binding + `discussion_sessions` membership), posts the work brief in the child,
-    and flips the execution to `Working`. This tool then does the LOCAL half of the
-    move (DoD-3): follow the session into the child so subsequent calls and
-    `disc_wait_for_peer` operate there, and rewrite the durable resume credential to
-    the child so an MCP reload re-attaches. The session row is re-homed WITHOUT
-    rotating its resume credential, so the `resume_token` we already hold still
-    resolves to the session in the child — we reuse it rather than mint a new one."""
+    grant it an execution-scoped worker role. The caller passes ONLY the opaque
+    `offer_id`; both identities are DERIVED by this bridge. The backend verifies
+    the exact live session and its reload-stable principal-room binding without
+    moving either one. The child remains the task/evidence room, while the response
+    carries the work instructions directly to this CLI."""
     _require_fresh_bridge("task_exec_accept_worker_offer")
     offer_id = (args.get("offer_id") or "").strip()
     if not offer_id:
@@ -6111,8 +6101,8 @@ def call_task_exec_accept_worker_offer(args):
     # Offer acceptance crosses two deliberately distinct identity domains.
     # `source_session_id` identifies the active `discussion_sessions` row and
     # must match the exact target PK. `source_binding_session_id` identifies
-    # the reload-stable `disc_source_history` binding that follows that row to
-    # the child. Collapsing them made a real resumed CLI impossible to accept:
+    # the reload-stable `disc_source_history` binding that must remain on the
+    # principal room. Collapsing them made a real resumed CLI impossible to accept:
     # its active identity is `adhoc-*`, while its durable binding is `cli-*`.
     # Both values are bridge-derived and absent from the MCP input schema.
     source_agent, source_session_id = _task_exec_identity(
@@ -6124,9 +6114,10 @@ def call_task_exec_accept_worker_offer(args):
             "task_exec_accept_worker_offer: no durable room identity for this bridge — "
             "join the origin room (disc_join) before accepting an offer"
         )
-    prior_binding = _read_binding()
+    principal_disc_id = _disc_id()
     # `_unwrap` raises on a refused offer, preserving the backend's opaque message
-    # ("not found or not addressed to this session") so no rebind happens on refusal.
+    # ("not found or not addressed to this session"). Acceptance never rewrites the
+    # bridge's current room, read cursor, or durable resume credential.
     result = _unwrap(_http("POST", "/api/orchestration/accept-offer", {
         "offer_id": offer_id,
         "source_agent": source_agent,
@@ -6139,45 +6130,9 @@ def call_task_exec_accept_worker_offer(args):
     if not child_disc_id:
         raise RuntimeError(
             "task_exec_accept_worker_offer: backend accepted but returned no child "
-            "discussion to attach to"
+            "task discussion"
         )
-    # ── Local rebind — follow the server-side move into the child room. ──
-    _set_current_disc_id(child_disc_id)
-    # Seed the child cursor at -1 so the work brief (just posted there, targeted at
-    # this session) is delivered on the next wait rather than skipped.
-    _set_read_cursor(child_disc_id, -1)
-    resume_token = (
-        prior_binding.get("resume_token") if isinstance(prior_binding, dict) else None
-    )
-    if resume_token:
-        same_child_handoff = (
-            isinstance(prior_binding, dict)
-            and prior_binding.get("disc_id") == child_disc_id
-            and prior_binding.get("return_disc_id")
-        )
-        origin_disc_id = (
-            prior_binding.get("return_disc_id") if same_child_handoff
-            else prior_binding.get("disc_id") if isinstance(prior_binding, dict)
-            else None
-        )
-        origin_cursor = (
-            prior_binding.get("return_read_sort_order") if same_child_handoff else None
-        )
-        if origin_cursor is None:
-            origin_cursor = _read_cursor(origin_disc_id) if origin_disc_id else None
-        if origin_cursor is None and isinstance(prior_binding, dict):
-            origin_cursor = prior_binding.get("last_read_sort_order")
-        _write_binding(
-            child_disc_id,
-            resume_token,
-            agent_type=source_agent,
-            last_read_sort_order=_read_cursor(child_disc_id),
-            return_disc_id=(
-                origin_disc_id
-            ),
-            return_read_sort_order=origin_cursor,
-        )
-    result["local_rebound_to"] = child_disc_id
+    result["local_room_preserved"] = principal_disc_id
     return result
 
 
@@ -6189,7 +6144,7 @@ def call_task_exec_deliver(args):
     execution's EXACT worker (a different session is refused). On success the
     manifest is persisted, the execution flips to `AwaitingReview`, and a review
     request is posted to the principal in the parent room. This does NOT move your
-    session — you stay in the sub-discussion. A refused delivery surfaces an opaque
+    session — it remains in the principal room. A refused delivery surfaces an opaque
     reason (not found / not addressed to you) or a specific state (not deliverable,
     invalid manifest). A spawned host worker passes only the semantic projection;
     Kronn derives the execution/task/Git/DoD mechanics from its runner capability."""
@@ -7591,9 +7546,13 @@ def call_qe_list(_args):
     ]
 
 
-def call_page_list(_args):
+def call_page_list(args):
     """Compact Page discovery for workflow composition."""
-    data = _unwrap(_http("GET", "/api/pages")) or []
+    project_id = args.get("project_id")
+    path = "/api/pages"
+    if project_id:
+        path += "?" + urllib.parse.urlencode({"project_id": project_id})
+    data = _unwrap(_http("GET", path)) or []
     return [
         {
             "id": page.get("id"),
@@ -9141,13 +9100,8 @@ def call_workflow_step_schema(_args):
 
 
 # ─── Audit tools (0.8.12 PR A) ─────────────────────────────────────────────
-#
-# The backend audit endpoints are SSE-DRIVEN: the audit only advances while
-# a client reads the stream (there is no detached server-side spawn). The
-# bridge therefore consumes the stream in a daemon thread and the launch
-# tool returns immediately with a correlation — the documented trade-off is
-# that the audit dies with this bridge process (MCP reload = interruption;
-# the run is then observable via audit_status and resumable).
+# Audit runs are backend-owned; this bridge only consumes their SSE updates.
+# A backend restart may interrupt a run, and `audit_status` reports recovery state.
 
 _AUDIT_LOCK = threading.Lock()
 # project_id -> mutable entry shared between the launcher and its reader
@@ -9609,6 +9563,12 @@ TOOL_MANUALS = {
         "(<=1000). Optional: context (<=4000), task_ref, multiple (default false), "
         "0-8 options with unique id, label (<=250), description (<=1000). "
         "Free text is always allowed. Recommendations never select or approve. "
+        "A question authored by a workflow Agent step may add optional resume "
+        '`{"workflow_id":"<workflow id>","variables":{"name":"value"}}`; '
+        "answering or declining starts that workflow once, while commenting does not. "
+        "Resume accepts at most 16 variables; workflow_id is 1-128 characters, variable "
+        "names are 1-64 ASCII letters/digits/-_., and values are control-free strings "
+        "of at most 8000 characters. "
         "Same key in a room keeps ONE immutable card; reuse it on retry. "
         "Read pending cards before asking; pass key to recover a prior answer "
         "after reconnect or handoff. After disc_append, read back this exact key "
@@ -9732,10 +9692,11 @@ TOOL_MANUALS = {
     ),
     "task_exec_accept_worker_offer": (
         "Pass only the opaque `offer_id` from the control message. The backend "
-        "derives identity from this bridge's durable session and refuses another "
-        "session even when it uses the same provider. Success moves the session "
-        "into the child discussion, exposes the work brief and rebinds subsequent "
-        "calls and `disc_wait_for_peer`. Refusals distinguish expired/already "
+        "derives the exact live session plus its reload-stable principal-room binding "
+        "and refuses another session even when it uses the same provider. Success "
+        "grants that `(execution, session)` the worker role, returns the work "
+        "instructions, and leaves subsequent calls and `disc_wait_for_peer` in the "
+        "principal room. Refusals distinguish expired/already "
         "accepted state from an offer that is absent or not addressed to you."
     ),
     "disc_append": (
@@ -9966,9 +9927,10 @@ TOOL_MANUALS = {
     ),
     "audit_launch": (
         "Call `audit_prepare` first and read its briefing status. A full audit runs the complete "
-        "pipeline; a partial audit requires explicit 1-based step indices. The bridge consumes "
-        "the SSE in a background thread, but the execution remains owned by this MCP process: "
-        "closing or reloading it interrupts the run. Only one audit may run per project.\n\n"
+        "pipeline; a partial audit requires explicit 1-based step indices. Every audit runs "
+        "detached on the backend: this bridge only subscribes to its SSE, so closing or "
+        "reloading this MCP does not interrupt it; only a backend restart does. Only one audit "
+        "may run per project.\n\n"
         "Observe durable truth with `audit_status`. An interrupted full or specialized run may "
         "resume by its reported `resume_run_id`; an interrupted partial is relaunched for its "
         "stale scope. Successful full audits and fully successful partial audits create a "
@@ -10203,7 +10165,7 @@ def call_audit_launch(args):
         if existing and existing["state"] in ("launching", "running"):
             raise RuntimeError(
                 f"audit_launch: an audit for {project_id} is already being "
-                "driven by THIS bridge — one at a time. audit_status to watch it."
+                "tracked by this bridge — one at a time. audit_status to watch it."
             )
         entry = {
             "project_id": project_id,
@@ -10274,22 +10236,17 @@ def call_audit_launch(args):
         briefing = _briefing_state(project if isinstance(project, dict) else {})
     except Exception:
         pass
+    lifecycle_warning = (
+        "This audit runs detached; only a backend restart interrupts it. "
+        "Check audit_status for progress and any resume_run_id."
+    )
     out = {
             "launched": True,
             "project_id": project_id,
             "mode": mode,
             "started_at": entry.get("started_at", started_at),
             "total_steps": entry.get("total_steps"),
-            "lifecycle_warning": (
-                "This audit lives only as long as THIS MCP session: a reload "
-                "or CLI exit interrupts it mid-flight. The run_id and the "
-                "validation discussion_id (full, and fully-successful "
-                "partial — scoped to the refreshed sections) become "
-                "available via audit_status once done. An interrupted full/"
-                "specialized run shows under audit_status.resumable; an "
-                "interrupted PARTIAL does not — relaunch it on its "
-                "still-stale scope."
-            ),
+            "lifecycle_warning": lifecycle_warning,
         }
     if briefing and not briefing.get("present"):
         out["briefing_warning"] = briefing["hint"]
@@ -10667,22 +10624,13 @@ def _send(payload):
 
 def _schedule_bridge_reload():
     """Preflight and schedule at most one self-reexec for this loaded process."""
-    if _BRIDGE_RELOAD_STATE["status"] not in ("idle", "deferred_active_audit"):
+    if _BRIDGE_RELOAD_STATE["status"] != "idle":
         return dict(_BRIDGE_RELOAD_STATE)
     if getattr(sys, "frozen", False) or os.name == "nt":
         _BRIDGE_RELOAD_STATE.update(
             status="failed",
             error="This bridge runtime cannot reload a script in place. "
                   "Restart the MCP connection after updating Kronn.",
-        )
-        return dict(_BRIDGE_RELOAD_STATE)
-    with _AUDIT_LOCK:
-        active_audits = sorted(project_id for project_id, entry in _AUDIT_STREAMS.items()
-                               if entry.get("state") in ("launching", "running"))
-    if active_audits:
-        _BRIDGE_RELOAD_STATE.update(
-            status="deferred_active_audit",
-            error="active audit SSE stream(s): " + ", ".join(active_audits),
         )
         return dict(_BRIDGE_RELOAD_STATE)
     global _BRIDGE_ARTIFACT_FD
@@ -10876,7 +10824,7 @@ def _close_inherited_reload_artifact():
 
 def _bridge_stale_result(rid, tool_name, message):
     reload_state = _schedule_bridge_reload()
-    failed = reload_state["status"] in ("failed", "deferred_active_audit")
+    failed = reload_state["status"] == "failed"
     payload = {
         "error_code": "bridge_stale",
         "tool": tool_name,
@@ -10888,9 +10836,6 @@ def _bridge_stale_result(rid, tool_name, message):
             "max_attempts": 1,
         },
         "action": (
-            "Wait for the active audit to finish (or stop it explicitly), then retry; "
-            "the bridge will reload without interrupting its SSE stream."
-            if reload_state["status"] == "deferred_active_audit" else
             "Reconnect the Kronn MCP manually once, recover with task_exec_status, "
             "then retry once with the same idempotency key."
             if failed else

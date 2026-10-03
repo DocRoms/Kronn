@@ -71,6 +71,9 @@ fn load_detail(
     };
     let active_agent_dispatches =
         crate::db::agent_dispatch::list_active_for_discussion(conn, &id, &discussion.agent)?;
+    let active_workflow_steps =
+        crate::db::workflow_step_rooms::list_active_for_discussion(conn, &id)?;
+    let workflow_step_authors = crate::db::workflow_step_rooms::message_authors(conn, &id)?;
     let partial_response =
         crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
     let message_targets = crate::db::discussions::list_discussion_message_targets(conn, &id)?;
@@ -96,6 +99,8 @@ fn load_detail(
     Ok(Some(crate::models::DiscussionDetail {
         discussion,
         active_agent_dispatches,
+        active_workflow_steps,
+        workflow_step_authors,
         message_targets,
         partial_response,
         default_targets,
@@ -289,6 +294,20 @@ pub async fn create(
             Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
             Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
         };
+        let approval_prompt = qp.clone();
+        if let Err(error) = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                    conn,
+                    &approval_prompt,
+                )
+                .map_err(anyhow::Error::msg)
+            })
+            .await
+        {
+            return Json(ApiResponse::err(format!("preflight_failed:{error}")));
+        }
         let (secret, retention_days) = {
             let config = state.config.read().await;
             let Some(secret) = config.encryption_secret.clone() else {

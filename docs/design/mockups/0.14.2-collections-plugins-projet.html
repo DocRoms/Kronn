@@ -1,0 +1,725 @@
+<title>Maquette Plugins Kronn</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Page chrome (outside the mock) follows the viewer theme. */
+:root { --page-bg: #eef0f3; --page-ink: #1a1d23; --page-muted: #51596b; --page-rule: #d5d9e0; --page-surface: #ffffff; --page-accent: #0f766e; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --page-bg: #0d0717; --page-ink: #e8eaed; --page-muted: rgba(255,255,255,.66); --page-rule: rgba(255,255,255,.12); --page-surface: #1a0c2c; --page-accent: #c8ff00; color-scheme: dark; }
+}
+:root[data-theme="dark"] { --page-bg: #0d0717; --page-ink: #e8eaed; --page-muted: rgba(255,255,255,.66); --page-rule: rgba(255,255,255,.12); --page-surface: #1a0c2c; --page-accent: #c8ff00; color-scheme: dark; }
+
+/* Kronn themes — values from frontend/src/styles/tokens.css */
+.kr {
+  --kr-bg-base: #140822; --kr-bg-raised: #1a0c2c; --kr-bg-surface: #1f1140; --kr-bg-elevated: #2b1958; --kr-bg-input: #321c66;
+  --kr-bg-hover: rgba(255,255,255,.04); --kr-bg-selected: rgba(255,255,255,.10);
+  --kr-accent: #c8ff00; --kr-accent-fill: #c8ff00; --kr-accent-text: rgba(200,255,0,.6); --kr-text-on-accent: #111; --kr-accent-soft: rgba(200,255,0,.12);
+  --kr-text-primary: #e8eaed; --kr-text-muted: rgba(255,255,255,.70); --kr-text-dim: rgba(255,255,255,.58);
+  --kr-border: rgba(255,255,255,.08); --kr-border-ghost: rgba(255,255,255,.04); --kr-border-medium: rgba(255,255,255,.14);
+  --kr-success: #34d399; --kr-warning: #ffc800; --kr-error: #ff48b9; --kr-info: #60a5fa;
+  --kr-success-soft: rgba(52,211,153,.14); --kr-warning-soft: rgba(255,200,0,.14); --kr-error-soft: rgba(255,72,185,.14); --kr-info-soft: rgba(96,165,250,.14);
+  color-scheme: dark;
+}
+.kr[data-kr="light"] {
+  --kr-bg-base: #f6f7f9; --kr-bg-raised: #eceef2; --kr-bg-surface: #ffffff; --kr-bg-elevated: #ffffff; --kr-bg-input: #ffffff;
+  --kr-bg-hover: rgba(26,29,35,.04); --kr-bg-selected: rgba(15,118,110,.10);
+  --kr-accent: #0f766e; --kr-accent-fill: #14b8a6; --kr-accent-text: #0f766e; --kr-text-on-accent: #0a0a0a; --kr-accent-soft: rgba(15,118,110,.10);
+  --kr-text-primary: #1a1d23; --kr-text-muted: #51596b; --kr-text-dim: #6b7385;
+  --kr-border: rgba(26,29,35,.10); --kr-border-ghost: rgba(26,29,35,.06); --kr-border-medium: rgba(26,29,35,.16);
+  --kr-success: #15803d; --kr-warning: #b45309; --kr-error: #b91c1c; --kr-info: #1d4ed8;
+  --kr-success-soft: rgba(21,128,61,.10); --kr-warning-soft: rgba(180,83,9,.10); --kr-error-soft: rgba(185,28,28,.10); --kr-info-soft: rgba(29,78,216,.10);
+  color-scheme: light;
+}
+.kr[data-kr="euronews"] {
+  --kr-bg-base: #f5f8fd; --kr-bg-raised: #e8f0fb; --kr-bg-surface: #ffffff; --kr-bg-elevated: #ffffff; --kr-bg-input: #ffffff;
+  --kr-bg-hover: rgba(10,20,32,.04); --kr-bg-selected: rgba(1,114,240,.10);
+  --kr-accent: #0172f0; --kr-accent-fill: #0172f0; --kr-accent-text: #0172f0; --kr-text-on-accent: #ffffff; --kr-accent-soft: rgba(1,114,240,.10);
+  --kr-text-primary: #0a1420; --kr-text-muted: #566880; --kr-text-dim: #6a7c94;
+  --kr-border: rgba(10,20,32,.11); --kr-border-ghost: rgba(10,20,32,.06); --kr-border-medium: rgba(10,20,32,.15);
+  --kr-success: #0a8f4a; --kr-warning: #c2410c; --kr-error: #d11f3c; --kr-info: #0172f0;
+  --kr-success-soft: rgba(10,143,74,.10); --kr-warning-soft: rgba(194,65,12,.10); --kr-error-soft: rgba(209,31,60,.10); --kr-info-soft: rgba(1,114,240,.10);
+  color-scheme: light;
+}
+.kr[data-kr="gotham"] {
+  --kr-bg-base: #0a0d14; --kr-bg-raised: #111621; --kr-bg-surface: #171e2a; --kr-bg-elevated: #1f2838; --kr-bg-input: #141a26;
+  --kr-bg-hover: rgba(255,212,0,.04); --kr-bg-selected: rgba(255,212,0,.10);
+  --kr-accent: #ffd400; --kr-accent-fill: #ffe45c; --kr-accent-text: rgba(255,212,0,.75); --kr-text-on-accent: #0a0d14; --kr-accent-soft: rgba(255,212,0,.10);
+  --kr-text-primary: #e8ebf0; --kr-text-muted: rgba(232,235,240,.66); --kr-text-dim: rgba(232,235,240,.55);
+  --kr-border: rgba(255,212,0,.10); --kr-border-ghost: rgba(255,212,0,.06); --kr-border-medium: rgba(255,212,0,.16);
+  --kr-success: #34d399; --kr-warning: #ffd400; --kr-error: #ff4d6a; --kr-info: #60a5fa;
+  --kr-success-soft: rgba(52,211,153,.14); --kr-warning-soft: rgba(255,212,0,.14); --kr-error-soft: rgba(255,77,106,.14); --kr-info-soft: rgba(96,165,250,.14);
+  color-scheme: dark;
+}
+.kr[data-kr="matrix"] {
+  --kr-bg-base: #050805; --kr-bg-raised: #0a100a; --kr-bg-surface: #0e140e; --kr-bg-elevated: #121a12; --kr-bg-input: #0c120c;
+  --kr-bg-hover: rgba(0,255,65,.05); --kr-bg-selected: rgba(0,255,65,.10);
+  --kr-accent: #00ff41; --kr-accent-fill: #00ff41; --kr-accent-text: rgba(0,255,65,.75); --kr-text-on-accent: #000; --kr-accent-soft: rgba(0,255,65,.10);
+  --kr-text-primary: #39ff14; --kr-text-muted: rgba(57,255,20,.66); --kr-text-dim: rgba(57,255,20,.55);
+  --kr-border: rgba(0,255,65,.12); --kr-border-ghost: rgba(0,255,65,.07); --kr-border-medium: rgba(0,255,65,.20);
+  --kr-success: #00ff41; --kr-warning: #ffcc00; --kr-error: #ff3860; --kr-info: #00ffd5;
+  --kr-success-soft: rgba(0,255,65,.12); --kr-warning-soft: rgba(255,204,0,.14); --kr-error-soft: rgba(255,56,96,.14); --kr-info-soft: rgba(0,255,213,.12);
+  color-scheme: dark;
+}
+.kr[data-kr="sakura"] {
+  --kr-bg-base: #fff5fa; --kr-bg-raised: #ffe8f2; --kr-bg-surface: #ffffff; --kr-bg-elevated: #ffffff; --kr-bg-input: #ffffff;
+  --kr-bg-hover: rgba(190,24,93,.04); --kr-bg-selected: rgba(190,24,93,.10);
+  --kr-accent: #be185d; --kr-accent-fill: #ec4899; --kr-accent-text: #be185d; --kr-text-on-accent: #ffffff; --kr-accent-soft: rgba(190,24,93,.10);
+  --kr-text-primary: #3b0a3b; --kr-text-muted: #8a4f8a; --kr-text-dim: #9a5f9a;
+  --kr-border: rgba(190,24,93,.13); --kr-border-ghost: rgba(190,24,93,.07); --kr-border-medium: rgba(190,24,93,.18);
+  --kr-success: #16a34a; --kr-warning: #c2410c; --kr-error: #be123c; --kr-info: #7c3aed;
+  --kr-success-soft: rgba(22,163,74,.10); --kr-warning-soft: rgba(194,65,12,.10); --kr-error-soft: rgba(190,18,60,.10); --kr-info-soft: rgba(124,58,237,.10);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page-bg); color: var(--page-ink); font: 400 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+button, select, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--kr-accent, var(--page-accent)); outline-offset: 2px; border-radius: 4px; }
+.mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; font-size: .88em; }
+svg { flex: none; }
+
+/* Control bar */
+.controls { padding-inline: 16px; padding-block: 14px 12px; display: grid; gap: 10px; border-bottom: 1px solid var(--page-rule); background: var(--page-surface); }
+.controls-top { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
+.controls h1 { font-size: 16px; margin: 0; font-weight: 700; }
+.controls h1 small { font-weight: 500; color: var(--page-muted); margin-left: 6px; font-size: 13px; }
+.ctl-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ctl-label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--page-muted); font-weight: 600; }
+.seg { display: inline-flex; border: 1px solid var(--page-rule); border-radius: 8px; overflow: hidden; flex-wrap: wrap; }
+.seg button { border: 0; background: transparent; padding: 6px 12px; font-size: 13px; color: var(--page-muted); }
+.seg button[aria-pressed="true"] { background: var(--page-ink); color: var(--page-bg); font-weight: 600; }
+.ctl-select { border: 1px solid var(--page-rule); background: var(--page-surface); border-radius: 8px; padding: 6px 10px; }
+.intent { font-size: 13px; color: var(--page-muted); max-width: 95ch; margin: 0; }
+.intent b { color: var(--page-ink); }
+.rules { font-size: 13px; color: var(--page-muted); }
+.rules summary { cursor: pointer; font-weight: 600; color: var(--page-ink); }
+.rules ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; max-width: 100ch; }
+.rules b { color: var(--page-ink); }
+
+/* Mock frame */
+.stage { padding: 16px; }
+.kr { background: var(--kr-bg-base); color: var(--kr-text-primary); border-radius: 12px; border: 1px solid var(--kr-border); overflow: hidden; display: grid; grid-template-columns: 56px 1fr; min-height: 740px; font-family: Inter, system-ui, sans-serif; }
+.nav { background: var(--kr-bg-raised); border-right: 1px solid var(--kr-border); display: flex; flex-direction: column; align-items: center; gap: 6px; padding-block: 12px; }
+.nav .logo { width: 28px; height: 28px; border-radius: 8px; background: var(--kr-accent-fill); color: var(--kr-text-on-accent); display: grid; place-items: center; font-weight: 800; font-size: 13px; margin-bottom: 8px; }
+.nav button { width: 40px; height: 40px; border-radius: 10px; border: 0; background: transparent; color: var(--kr-text-dim); display: grid; place-items: center; }
+.nav button[aria-current="page"] { background: var(--kr-accent-soft); color: var(--kr-accent); }
+.nav svg { width: 20px; height: 20px; }
+.main { min-width: 0; display: flex; flex-direction: column; }
+.screen-tabs { display: flex; gap: 4px; padding: 10px 16px 0; border-bottom: 1px solid var(--kr-border); background: var(--kr-bg-raised); overflow-x: auto; }
+.screen-tabs button { border: 0; background: transparent; padding: 8px 12px; border-bottom: 2px solid transparent; color: var(--kr-text-muted); font-weight: 500; white-space: nowrap; }
+.screen-tabs button[aria-selected="true"] { color: var(--kr-text-primary); border-bottom-color: var(--kr-accent); }
+.content { min-width: 0; flex: 1; display: flex; }
+
+/* Collection shell: sidebar (Discussions pattern) + main pane */
+.shell { display: grid; grid-template-columns: 280px 1fr; flex: 1; min-width: 0; }
+.side { background: var(--kr-bg-raised); border-right: 1px solid var(--kr-border); min-width: 0; display: flex; flex-direction: column; }
+.side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px 8px; }
+.side-head b { font-size: 14px; }
+.side-search { margin: 0 12px 6px; border: 1px solid var(--kr-border-medium); background: var(--kr-bg-input); border-radius: 8px; padding: 6px 10px; color: var(--kr-text-primary); }
+.side-search::placeholder { color: var(--kr-text-dim); }
+.side-scroll { overflow: auto; padding-bottom: 12px; }
+/* .disc-group-btn */
+.grp { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--kr-accent-text); padding: 12px 14px 6px; border: 0; border-top: 1px solid var(--kr-border-ghost); display: flex; align-items: center; gap: 6px; width: 100%; background: none; text-align: left; }
+.grp.no-border { border-top: 0; }
+.grp .count { margin-left: auto; font-weight: 400; color: var(--kr-text-dim); }
+.unseen { background: var(--kr-error); color: #fff; font-size: 9px; font-weight: 800; border-radius: 6px; padding: 1px 5px; min-width: 14px; text-align: center; }
+.unseen.warn { background: var(--kr-warning); color: #111; }
+.chev { transition: transform .15s; }
+.chev[data-open="true"] { transform: rotate(90deg); }
+/* .disc-org-header */
+.org { display: flex; align-items: center; gap: 6px; padding: 6px 12px; width: 100%; background: none; border: 0; border-top: 1px solid var(--kr-border-ghost); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; text-align: left; }
+.org .count { margin-left: auto; font-weight: 400; }
+.tree { padding: 0 4px 6px; }
+.projline { display: flex; align-items: center; gap: 2px; }
+.projline .icon-btn { padding: 6px 2px 6px 6px; }
+.proj { font-size: 12px; font-weight: 600; padding: 7px 10px; border: 0; background: none; width: 100%; display: flex; gap: 6px; align-items: center; text-align: left; color: var(--kr-text-muted); border-radius: 6px; }
+.proj .count { margin-left: auto; font-weight: 400; color: var(--kr-text-dim); }
+.proj:hover { background: var(--kr-bg-hover); }
+.proj[aria-current="true"] { background: var(--kr-bg-selected); color: var(--kr-text-primary); }
+.row { display: flex; gap: 8px; align-items: center; width: 100%; border: 0; background: none; text-align: left; padding: 6px 10px 6px 28px; border-radius: 6px; font-size: 13px; color: var(--kr-text-primary); }
+.row:hover { background: var(--kr-bg-hover); }
+.row[aria-current="true"] { background: var(--kr-bg-selected); }
+.row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .meta { font-size: 11px; color: var(--kr-text-dim); white-space: nowrap; }
+.pane { min-width: 0; padding: 16px; overflow: auto; }
+
+/* Atoms */
+.page-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; }
+.page-head h2 { margin: 0; font-size: 18px; font-weight: 700; }
+.page-head p { margin: 2px 0 0; color: var(--kr-text-muted); font-size: 13px; }
+.btn { border: 1px solid var(--kr-border-medium); background: var(--kr-bg-surface); color: var(--kr-text-primary); border-radius: 8px; padding: 6px 12px; font-weight: 500; font-size: 13px; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.btn:hover { background: var(--kr-bg-hover); }
+.btn.primary { background: var(--kr-accent-fill); color: var(--kr-text-on-accent); border-color: transparent; font-weight: 600; }
+.btn.danger { color: var(--kr-error); border-color: var(--kr-error); background: transparent; }
+.btn.danger.solid { background: var(--kr-error); color: #fff; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--kr-text-muted); }
+.btn.sm { padding: 3px 8px; font-size: 12px; }
+.icon-btn { border: 0; background: none; color: var(--kr-text-dim); padding: 4px; border-radius: 6px; display: inline-grid; place-items: center; }
+.icon-btn:hover { background: var(--kr-bg-hover); color: var(--kr-text-primary); }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--kr-border-medium); color: var(--kr-text-muted); white-space: nowrap; }
+.chip.acc-mcp { color: var(--kr-info); border-color: currentColor; }
+.chip.acc-api { color: var(--kr-accent); border-color: currentColor; }
+.chip.acc-cli { color: var(--kr-warning); border-color: currentColor; }
+.chip.pref { background: var(--kr-accent-soft); }
+.health { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.h-ok .dot, .dot.h-ok { background: var(--kr-success); } .h-ok { color: var(--kr-success); }
+.h-warn .dot, .dot.h-warn { background: var(--kr-warning); } .h-warn { color: var(--kr-warning); }
+.h-err .dot, .dot.h-err { background: var(--kr-error); } .h-err { color: var(--kr-error); }
+.h-idle .dot, .dot.h-idle { background: var(--kr-text-dim); }
+.dim { color: var(--kr-text-dim); font-size: 12px; }
+.muted { color: var(--kr-text-muted); }
+.note { padding: 10px 12px; border-radius: 8px; background: var(--kr-info-soft); font-size: 13px; }
+.note.warn { background: var(--kr-warning-soft); }
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* Plugins C: summary + lanes + side sheet */
+.summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--kr-text-muted); margin: 4px 0 14px; }
+.summary b { color: var(--kr-text-primary); font-variant-numeric: tabular-nums; }
+.lanes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.lane { background: var(--kr-bg-surface); border: 1px solid var(--kr-border); border-radius: 10px; padding: 12px; display: grid; gap: 8px; }
+.lane-head { display: grid; gap: 2px; }
+.lane-head h3 { margin: 0; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.lane-head p { margin: 0; font-size: 12px; color: var(--kr-text-dim); }
+.pcard { border: 1px solid var(--kr-border); background: var(--kr-bg-base); border-radius: 8px; padding: 10px; text-align: left; display: grid; gap: 4px; width: 100%; }
+.pcard:hover { border-color: var(--kr-border-medium); }
+.pcard[aria-pressed="true"] { border-color: var(--kr-accent); box-shadow: inset 0 0 0 1px var(--kr-accent); }
+.pcard .top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.pcard .n { font-weight: 600; }
+.pcard .sub { font-size: 12px; color: var(--kr-text-dim); }
+.lane-empty { font-size: 12px; color: var(--kr-text-dim); padding: 6px 2px; }
+.with-sheet { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 12px; align-items: start; }
+
+.detail { background: var(--kr-bg-surface); border: 1px solid var(--kr-border); border-radius: 10px; display: flex; flex-direction: column; min-width: 0; position: sticky; top: 0; }
+.detail-head { padding: 12px 14px 0; display: grid; gap: 6px; }
+.detail-head .row1 { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.detail-head h3 { margin: 0; font-size: 16px; }
+.detail-tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 1px solid var(--kr-border); overflow-x: auto; }
+.detail-tabs button { border: 0; background: transparent; padding: 7px 10px; border-bottom: 2px solid transparent; color: var(--kr-text-muted); font-size: 13px; white-space: nowrap; }
+.detail-tabs button[aria-selected="true"] { color: var(--kr-text-primary); border-bottom-color: var(--kr-accent); font-weight: 600; }
+.detail-body { padding: 14px; display: grid; gap: 14px; }
+.block { display: grid; gap: 8px; }
+.block h4 { margin: 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--kr-text-dim); font-weight: 600; }
+.access-row { display: grid; grid-template-columns: 56px 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--kr-border); border-radius: 8px; background: var(--kr-bg-base); }
+.access-row .what { min-width: 0; display: grid; gap: 2px; }
+.opt { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; font-size: 13px; }
+.opt input { margin-top: 3px; accent-color: var(--kr-accent-fill); }
+.opt small { display: block; color: var(--kr-text-dim); }
+.proj-list { display: grid; gap: 0 12px; padding-left: 24px; }
+.toggle-row { display: flex; gap: 10px; align-items: center; justify-content: space-between; font-size: 13px; }
+.switch { position: relative; width: 38px; height: 22px; border-radius: 999px; border: 0; background: var(--kr-border-medium); flex: none; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left .15s; }
+.switch[aria-checked="true"] { background: var(--kr-accent-fill); }
+.switch[aria-checked="true"]::after { left: 19px; }
+.files { display: grid; gap: 4px; padding: 8px 10px; border-radius: 8px; background: var(--kr-bg-base); border: 1px dashed var(--kr-border-medium); }
+.files div { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.kv { display: grid; grid-template-columns: minmax(96px, auto) 1fr; gap: 6px 12px; font-size: 13px; margin: 0; }
+.kv dt { color: var(--kr-text-dim); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.secret { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--kr-border); border-radius: 8px; font-size: 13px; }
+.secret code { flex: 1 1 auto; }
+.st { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.st-none { background: var(--kr-bg-hover); color: var(--kr-text-muted); border: 1px solid var(--kr-border-medium); }
+.st-ok { background: var(--kr-success-soft); color: var(--kr-success); }
+.st-file { background: var(--kr-info-soft); color: var(--kr-info); }
+.st-db { background: var(--kr-warning-soft); color: var(--kr-warning); }
+.st-conflict { background: var(--kr-error-soft); color: var(--kr-error); }
+.danger-zone { border: 1px solid var(--kr-error); border-radius: 8px; padding: 12px; display: grid; gap: 8px; }
+.danger-zone p { margin: 0; font-size: 13px; }
+.confirm-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.rescan { border: 1px solid var(--kr-accent); background: var(--kr-accent-soft); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; display: grid; gap: 8px; font-size: 13px; }
+.rescan ul { margin: 0; padding-left: 18px; }
+
+/* Project card tab */
+.pcard-shell { background: var(--kr-bg-surface); border: 1px solid var(--kr-border); border-radius: 12px; overflow: hidden; }
+.pcard-top { padding: 14px 16px; display: flex; gap: 12px; justify-content: space-between; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--kr-border); }
+.pcard-top h2 { margin: 0; font-size: 17px; display: flex; align-items: center; gap: 8px; }
+.pcard-tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--kr-border); overflow-x: auto; background: var(--kr-bg-raised); }
+.pcard-tabs span { padding: 9px 10px; font-size: 13px; color: var(--kr-text-muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+.pcard-tabs span.on { color: var(--kr-text-primary); border-bottom-color: var(--kr-accent); font-weight: 600; }
+.pcard-body { padding: 14px 16px 16px; display: grid; gap: 12px; }
+.banner { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--kr-border); background: var(--kr-bg-base); font-size: 13px; }
+.res-group h3 { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--kr-text-dim); margin: 0 0 6px; font-weight: 600; }
+.res-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 9px 12px; border: 1px solid var(--kr-border); border-radius: 8px; background: var(--kr-bg-base); margin-bottom: 4px; font-size: 13px; }
+.res-row .n { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.res-row .k { font-size: 11px; color: var(--kr-text-dim); display: block; font-weight: 500; }
+.lvl { font-size: 11px; color: var(--kr-text-dim); white-space: nowrap; }
+.buckets { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.bucket { border: 1px solid var(--kr-border); border-radius: 10px; background: var(--kr-bg-base); padding: 10px; display: grid; gap: 6px; align-content: start; }
+.bucket h3 { margin: 0; font-size: 13px; display: flex; gap: 6px; align-items: center; }
+.bucket .item { display: flex; justify-content: space-between; gap: 8px; align-items: center; font-size: 13px; padding: 6px 8px; border-radius: 6px; background: var(--kr-bg-surface); border: 1px solid var(--kr-border); }
+.bucket .item span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.repo { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.tree-view { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; background: var(--kr-bg-base); border: 1px solid var(--kr-border); border-radius: 10px; padding: 12px; line-height: 1.9; overflow-x: auto; white-space: pre; }
+.tree-view .add { color: var(--kr-success); } .tree-view .mod { color: var(--kr-warning); } .tree-view .cf { color: var(--kr-error); } .tree-view .gh { color: var(--kr-text-dim); }
+.pick-list { display: grid; gap: 4px; align-content: start; }
+.pick { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 7px 10px; border: 1px solid var(--kr-border); border-radius: 8px; background: var(--kr-bg-base); font-size: 13px; }
+.pick label { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.pick input { accent-color: var(--kr-accent-fill); }
+
+/* Automations / Artifacts pane */
+.run-list { display: grid; gap: 4px; }
+.run { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--kr-border); border-radius: 8px; background: var(--kr-bg-surface); font-size: 13px; }
+.preview { border: 1px solid var(--kr-border); border-radius: 10px; background: var(--kr-bg-surface); min-height: 260px; display: grid; place-items: center; color: var(--kr-text-dim); font-size: 13px; }
+.kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; width: min(420px, 90%); }
+.kpis div { border: 1px solid var(--kr-border); border-radius: 8px; padding: 10px; background: var(--kr-bg-base); display: grid; gap: 2px; text-align: left; }
+.kpis b { font-size: 20px; color: var(--kr-text-primary); font-variant-numeric: tabular-nums; }
+
+.toast { position: fixed; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); background: var(--page-ink); color: var(--page-bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.25); max-width: calc(100% - 32px); }
+
+@media (max-width: 1100px) { .with-sheet { grid-template-columns: 1fr; } .detail { position: static; } }
+@media (max-width: 900px) { .lanes { grid-template-columns: 1fr; } .repo { grid-template-columns: 1fr; } }
+@media (max-width: 720px) {
+  .shell { grid-template-columns: 1fr; }
+  .side { border-right: 0; border-bottom: 1px solid var(--kr-border); max-height: 320px; }
+}
+@media (max-width: 620px) {
+  .stage { padding: 8px 0; }
+  .kr { grid-template-columns: 1fr; border-radius: 0; border-inline: 0; }
+  .nav { display: none; }
+  .pane { padding: 12px 16px; }
+  .res-row { grid-template-columns: 1fr auto; }
+  .access-row { grid-template-columns: 1fr auto; }
+  .access-row > :first-child { grid-column: 1 / -1; }
+  .kpis { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { .switch::after, .chev { transition: none; } }
+</style>
+
+<header class="controls">
+  <div class="controls-top">
+    <h1>Maquette v2 : Plugins, ressources projet, regroupements <small>0.14.2 · KT-821 et KT-535</small></h1>
+    <div class="ctl-group">
+      <span class="ctl-label" id="lbl-variant" hidden>Variante</span>
+      <div class="seg" role="group" aria-labelledby="lbl-variant" id="variant-seg" hidden></div>
+      <label class="ctl-label" for="theme-select">Thème Kronn</label>
+      <select class="ctl-select" id="theme-select">
+        <option value="dark">Sombre (défaut)</option>
+        <option value="light">Clair</option>
+        <option value="euronews">Euronews</option>
+        <option value="gotham">Gotham</option>
+        <option value="matrix">Matrix</option>
+        <option value="sakura">Sakura</option>
+      </select>
+    </div>
+  </div>
+  <p class="intent" id="intent"></p>
+  <details class="rules">
+    <summary>Règles communes à toutes les pages de collection</summary>
+    <ul>
+      <li><b>Même sidebar que Discussions</b> : Favoris, Récents, puis Projets (Sans projet, organisation, projet), en-têtes repliables avec compteur, repli mémorisé.</li>
+      <li><b>Même geste</b> : clic sur un élément, son détail s’ouvre à droite, et Échap le ferme.</li>
+      <li><b>Mêmes signaux</b> : pastille de santé ou d’état devant chaque ligne, pastille numérotée sur le projet quand quelque chose demande une action.</li>
+      <li><b>Même vocabulaire</b> : « Sans projet » partout, « Publier dans le dépôt », « Tester ».</li>
+      <li><b>Même fiche</b> : onglets en haut, zone danger en bas de l’onglet Avancé, et « Annuler » ne ferme jamais la fiche.</li>
+    </ul>
+  </details>
+</header>
+
+<div class="stage">
+  <div class="kr" id="kr" data-kr="dark">
+    <nav class="nav" aria-label="Navigation Kronn (maquette)">
+      <div class="logo" aria-hidden="true">K</div>
+      <button type="button" title="Discussions" aria-label="Discussions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H8l-4 4z"/></svg></button>
+      <button type="button" title="Projets" aria-label="Projets" data-nav="project"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h7l2 2h9v10H3z"/></svg></button>
+      <button type="button" title="Automatisation" aria-label="Automatisation" data-nav="automations"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 6H14a4 4 0 0 1 4 4v5.5"/></svg></button>
+      <button type="button" title="Artifacts" aria-label="Artifacts" data-nav="artifacts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16M9 9v11"/></svg></button>
+      <button type="button" title="Plugins" aria-label="Plugins" data-nav="plugins"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3v4M15 3v4M6 7h12v5a6 6 0 0 1-12 0zM12 18v3"/></svg></button>
+    </nav>
+    <div class="main">
+      <div class="screen-tabs" role="tablist" aria-label="Écrans de la maquette" id="screen-tabs"></div>
+      <div class="content" id="content"></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(() => {
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('kr-maquette2-' + k); return v == null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem('kr-maquette2-' + k, v); } catch { /* storage unavailable */ } },
+  };
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const toast = msg => { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, 2600); };
+
+  const I = {
+    chev: '<svg class="chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 6l6 6-6 6"/></svg>',
+    folder: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h7l2 2h9v10H3z"/></svg>',
+    msg: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>',
+    star: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg>',
+    clock: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    grid: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/></svg>',
+    close: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  };
+
+  // Example data (not live values). Orgs follow getProjectGroup(): repo_url owner, else "Local".
+  const PROJECTS = [
+    { id: 'front_euronews', org: 'euronews' }, { id: 'front-apollo', org: 'euronews' }, { id: 'front-africanews', org: 'euronews' },
+    { id: 'Kronn', org: 'kronn-ai' }, { id: 'docroms-web', org: 'Local' },
+  ];
+  const orgColor = org => org === 'Local' ? 'var(--kr-text-dim)' : `hsl(${[...org].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0)}, 50%, 60%)`;
+  const CLI_FILES = [['~/.claude.json', 'Claude Code'], ['~/.codex/config.toml', 'Codex'], ['~/.gemini/settings.json', 'Gemini CLI'], ['~/.vibe/mcp.json', 'Vibe']];
+
+  const plugins = [
+    { id: 'github', name: 'GitHub', desc: 'Issues, pull requests, dépôts', acc: ['mcp', 'api'], pref: 'api', scope: { mode: 'all', projects: [] }, host: true,
+      cred: { mcp: 'stored', api: 'stored' }, keys: ['GITHUB_PERSONAL_ACCESS_TOKEN'],
+      health: { mcp: ['ok', 'il y a 4 min', 'Serveur démarré · 38 outils'], api: ['ok', 'il y a 4 min', 'GET /user → 200'] } },
+    { id: 'atlassian', name: 'Atlassian', desc: 'Jira EW, Confluence SD', acc: ['mcp', 'api'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'front-apollo', 'front-africanews'] }, host: true,
+      cred: { mcp: 'stored', api: 'stored' }, keys: ['ATLASSIAN_EMAIL', 'ATLASSIAN_API_TOKEN'],
+      health: { mcp: ['ok', 'il y a 12 min', 'Serveur démarré · 24 outils'], api: ['warn', 'jamais testé', 'Accès API jamais testé'] } },
+    { id: 'fastly', name: 'Fastly', desc: 'Services, purge, logs CDN', acc: ['api', 'mcp', 'cli'], pref: 'cli', scope: { mode: 'projects', projects: ['front_euronews', 'front-africanews'] }, host: false,
+      cred: { api: 'cli_token', mcp: 'cli_token', cli: 'host' }, keys: [], cliBin: 'fastly ≥ 10.0', cliAuth: 'fastly whoami', tokenCmd: 'fastly profile token',
+      health: { cli: ['err', 'il y a 1 h', 'Pas de profil actif : lancez « fastly profile create »'], api: ['ok', 'il y a 1 h', 'GET /service → 200'], mcp: ['warn', 'test > 7 j', 'Dernier test le 18/09'] } },
+    { id: 'gitlab', name: 'GitLab', desc: 'Merge requests, pipelines', acc: ['cli'], pref: 'cli', scope: { mode: 'projects', projects: ['docroms-web'] }, host: false,
+      cred: { cli: 'host' }, keys: [], cliBin: 'glab ≥ 1.40', cliAuth: 'glab auth status',
+      health: { cli: ['ok', 'il y a 20 min', 'glab 1.46.1 · connecté à gitlab.com'] } },
+    { id: 'm365', name: 'Microsoft 365', desc: 'Outlook, Teams, SharePoint', acc: ['api'], pref: 'api', scope: { mode: 'general', projects: [] }, host: false,
+      cred: { api: 'cli_token' }, keys: [], tokenCmd: 'az account get-access-token',
+      health: { api: ['warn', 'il y a 2 j', 'Jeton CLI expiré : relancez « az login »'] } },
+    { id: 'chartbeat', name: 'Chartbeat', desc: 'Audience temps réel', acc: ['api'], pref: 'api', scope: { mode: 'projects', projects: ['front_euronews'] }, host: false,
+      cred: { api: 'stored' }, keys: ['CHARTBEAT_API_KEY'], missing: ['CHARTBEAT_API_KEY'],
+      health: { api: ['err', 'il y a 3 min', 'Secret manquant : CHARTBEAT_API_KEY'] } },
+    { id: 'context7', name: 'context7', desc: 'Doc à jour des bibliothèques', acc: ['mcp'], pref: 'mcp', scope: { mode: 'all', projects: [] }, host: true,
+      cred: { mcp: 'none' }, keys: [], health: { mcp: ['ok', 'il y a 1 h', 'Serveur démarré · 2 outils'] } },
+    { id: 'cloudwatch', name: 'AWS CloudWatch', desc: 'Logs et métriques', acc: ['mcp'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'front-apollo'] }, host: false,
+      cred: { mcp: 'stored' }, keys: ['AWS_PROFILE', 'AWS_REGION'], health: { mcp: ['warn', 'test > 7 j', 'Dernier test le 16/09'] } },
+    { id: 'playwright', name: 'Playwright', desc: 'Navigateur piloté pour la recette', acc: ['mcp'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'Kronn'] }, host: true,
+      cred: { mcp: 'none' }, keys: [], health: { mcp: ['ok', 'il y a 35 min', 'Serveur démarré · 21 outils'] } },
+  ];
+  const ACC = { mcp: 'MCP', api: 'API', cli: 'CLI' };
+  const ACC_EX = { mcp: 'Kronn écrit la config dans les CLIs de l’agent', api: 'Kronn appelle le service lui-même', cli: 'Binaire sur la machine, avec sa propre connexion' };
+  const HL = { ok: 'OK', warn: 'À vérifier', err: 'En erreur', idle: 'Jamais lancé' };
+  const rank = { ok: 0, warn: 1, err: 2 };
+  const worst = p => Object.values(p.health).reduce((w, h) => rank[h[0]] > rank[w] ? h[0] : w, 'ok');
+  const visibleTo = (p, proj) => proj === '__all__' || p.scope.mode === 'all' || (proj === '__none__' ? p.scope.mode === 'general' : p.scope.projects.includes(proj));
+  const hb = h => `<span class="health h-${h}"><span class="dot" aria-hidden="true"></span>${HL[h]}</span>`;
+  const chips = p => p.acc.map(a => `<span class="chip acc-${a}${a === p.pref ? ' pref' : ''}" title="${esc(ACC_EX[a])}${a === p.pref ? ' · utilisé par l’agent' : ''}">${ACC[a]}${a === p.pref ? ' ★' : ''}</span>`).join('');
+
+  const state = {
+    theme: store.get('theme', 'dark'),
+    screen: store.get('screen', 'plugins'),
+    projVariant: store.get('projVariant', '1'),
+    pProject: 'front_euronews', sel: null, tab: 'etat', confirmDelete: false, rescan: false, q: '',
+    collapsed: new Set(JSON.parse(store.get('collapsed', '[]'))),
+    wfSel: 'autoCode · phase 1 (triage)|front_euronews', artSel: 'Santé du dépôt|front_euronews', resProject: 'front_euronews',
+    picked: new Set(),
+  };
+  const saveCollapsed = () => store.set('collapsed', JSON.stringify([...state.collapsed]));
+
+  /* ── Sidebar builder (DiscussionSidebar pattern) ─────────────────────── */
+  // sections: [{key, icon, label, rows:[{id,label,meta,dot}]}]; tree: {none:[rows], byProject:{id:[rows]}}
+  function sidebar({ title, action, sections = [], tree, current, projCurrent, onlyProjects = false, badge }) {
+    const grpBtn = (key, icon, label, count, extra = '', noBorder = false) => {
+      const open = !state.collapsed.has(key);
+      return `<button type="button" class="grp${noBorder ? ' no-border' : ''}" data-toggle="${esc(key)}" aria-expanded="${open}">
+        ${I.chev.replace('class="chev"', `class="chev" data-open="${open}"`)}${icon}<span>${esc(label)}</span><span class="count">${count}</span>${extra}</button>`;
+    };
+    const rowsHTML = (rows, key) => state.collapsed.has(key) ? '' : rows.map(r => `<button type="button" class="row" data-pick="${esc(r.id)}" aria-current="${r.id === current}">
+        ${r.dot ? `<span class="dot h-${r.dot}" aria-hidden="true"></span>` : ''}<span class="t">${esc(r.label)}</span>${r.meta ? `<span class="meta">${esc(r.meta)}</span>` : ''}</button>`).join('');
+    let html = `<aside class="side" aria-label="${esc(title)}"><div class="side-head"><b>${esc(title)}</b>${action || ''}</div>
+      <input class="side-search" type="search" id="side-q" placeholder="Rechercher…" value="${esc(state.q)}" aria-label="Rechercher"><div class="side-scroll">`;
+    sections.forEach((s, i) => { html += `<div>${grpBtn(s.key, s.icon, s.label, s.rows.length, '', i === 0)}${rowsHTML(s.rows, s.key)}</div>`; });
+    // Projects tree
+    const pk = 'projects';
+    const total = (tree.none || []).length + Object.values(tree.byProject).reduce((n, r) => n + r.length, 0);
+    html += `<div>${grpBtn(pk, I.folder, 'Projets', onlyProjects ? PROJECTS.length + 1 : total, '', sections.length === 0)}`;
+    if (!state.collapsed.has(pk)) {
+      html += '<div class="tree">';
+      const projRow = (id, label, icon, count, key) => {
+        if (onlyProjects) {
+          const b = badge ? badge(id) : '';
+          const open = !state.collapsed.has(key);
+          const rows = plugins.filter(x => visibleTo(x, id) && (!state.q || x.name.toLowerCase().includes(state.q.toLowerCase())));
+          return `<div class="projline"><button type="button" class="icon-btn" data-toggle="${esc(key)}" aria-expanded="${open}" aria-label="Déplier ${esc(label)}">${I.chev.replace('class="chev"', `class="chev" data-open="${open}"`)}</button>
+            <button type="button" class="proj" data-proj="${esc(id)}" aria-current="${projCurrent === id && !state.sel}">${icon} ${esc(label)}<span class="count">${count}</span>${b}</button></div>
+            ${open ? rows.map(x => `<button type="button" class="row" data-selp="${esc(x.id)}|${esc(id)}" aria-current="${state.sel === x.id && projCurrent === id}"><span class="dot h-${worst(x)}" aria-hidden="true"></span><span class="t">${esc(x.name)}</span><span class="meta">${x.acc.map(a => ACC[a]).join(' · ')}</span></button>`).join('') : ''}`;
+        }
+        const open = !state.collapsed.has(key);
+        return `<button type="button" class="grp" style="border-top:0;padding:8px 10px 4px" data-toggle="${esc(key)}" aria-expanded="${open}">
+          ${I.chev.replace('class="chev"', `class="chev" data-open="${open}"`)}${icon}<span>${esc(label)}</span><span class="count">${count}</span></button>`;
+      };
+      if (onlyProjects) html += `<button type="button" class="proj" data-proj="__all__" aria-current="${projCurrent === '__all__'}">${I.grid} Tous les plugins<span class="count">${plugins.length}</span></button>`;
+      const none = tree.none || [];
+      if (onlyProjects || none.length) {
+        html += projRow('__none__', 'Sans projet', I.msg, onlyProjects ? plugins.filter(p => visibleTo(p, '__none__')).length : none.length, 'p::__none__');
+        if (!onlyProjects) html += rowsHTML(none, 'p::__none__');
+      }
+      const orgs = [...new Set(PROJECTS.map(p => p.org))].sort((a, b) => a === 'Local' ? 1 : b === 'Local' ? -1 : a.localeCompare(b));
+      orgs.forEach(org => {
+        const projs = PROJECTS.filter(p => p.org === org && (onlyProjects || (tree.byProject[p.id] || []).length));
+        if (!projs.length) return;
+        const ok = 'org::' + org; const open = !state.collapsed.has(ok);
+        const cnt = projs.reduce((n, p) => n + (onlyProjects ? plugins.filter(x => visibleTo(x, p.id)).length : (tree.byProject[p.id] || []).length), 0);
+        html += `<button type="button" class="org" style="color:${orgColor(org)}" data-toggle="${esc(ok)}" aria-expanded="${open}">
+          ${I.chev.replace('class="chev"', `class="chev" data-open="${open}"`)}${esc(org)}<span class="count">${cnt}</span></button>`;
+        if (open) projs.forEach(p => {
+          const rows = tree.byProject[p.id] || [];
+          html += projRow(p.id, p.id, I.folder, onlyProjects ? plugins.filter(x => visibleTo(x, p.id)).length : rows.length, 'p::' + p.id);
+          if (!onlyProjects) html += rowsHTML(rows, 'p::' + p.id);
+        });
+      });
+      html += '</div>';
+    }
+    html += '</div></div></aside>';
+    return html;
+  }
+
+  /* ── Plugins (variant C, validated) ─────────────────────────────────── */
+  function pluginsScreen() {
+    const proj = state.pProject;
+    const q = state.q.toLowerCase();
+    const seen = plugins.filter(p => visibleTo(p, proj) && (!q || (p.name + ' ' + p.desc).toLowerCase().includes(q)));
+    const errBadge = id => {
+      const list = plugins.filter(p => visibleTo(p, id));
+      const e = list.filter(p => worst(p) === 'err').length, w = list.filter(p => worst(p) === 'warn').length;
+      return e ? `<span class="unseen" title="${e} en erreur">${e}</span>` : w ? `<span class="unseen warn" title="${w} à vérifier">${w}</span>` : '';
+    };
+    const pRow = x => ({ id: 'plugin::' + x.id, label: x.name, dot: worst(x), meta: x.acc.map(a => ACC[a]).join(' · ') });
+    const side = sidebar({ title: 'Plugins', action: '<button class="btn sm primary" type="button">+ Ajouter</button>',
+      sections: [
+        { key: 'pl::fav', icon: I.star, label: 'Favoris', rows: ['github', 'atlassian'].map(id => pRow(plugins.find(x => x.id === id))).filter(r => r.label) },
+        { key: 'pl::recent', icon: I.clock, label: 'Testés récemment', rows: plugins.filter(x => Object.values(x.health).some(h => /min|instant/.test(h[1]))).slice(0, 3).map(pRow) },
+      ],
+      tree: { byProject: {} }, onlyProjects: true, projCurrent: proj, badge: errBadge, current: state.sel ? 'plugin::' + state.sel : null });
+    const label = proj === '__all__' ? 'tous les projets' : proj === '__none__' ? 'les discussions sans projet' : proj;
+    const inLane = a => seen.filter(p => a === 'cli' ? p.acc.includes('cli') : p.acc.includes(a) && (p.pref !== 'cli' || a !== 'mcp' ? true : true));
+    const lane = (a, title, sub) => {
+      const items = inLane(a);
+      return `<div class="lane"><div class="lane-head"><h3><span class="chip acc-${a}">${ACC[a]}</span>${title}</h3><p>${sub}</p></div>
+        ${items.map(p => { const h = p.health[a]; return `<button type="button" class="pcard" data-sel="${p.id}" aria-pressed="${state.sel === p.id}">
+          <span class="top"><span class="n">${esc(p.name)}${p.pref === a && p.acc.length > 1 ? ' <span class="chip pref" title="Accès utilisé par l’agent">★ utilisé</span>' : ''}</span>${hb(h[0])}</span>
+          <span class="sub">${esc(h[2])}</span></button>`; }).join('') || '<div class="lane-empty">Aucun plugin de ce type pour ce périmètre.</div>'}</div>`;
+    };
+    const counts = { err: seen.filter(p => worst(p) === 'err').length, warn: seen.filter(p => worst(p) === 'warn').length };
+    const sel = plugins.find(p => p.id === state.sel && seen.includes(p));
+    const mcpN = seen.filter(p => p.acc.includes('mcp')).length;
+    const hostN = seen.filter(p => p.acc.includes('mcp') && p.host).length;
+    const main = `<div class="pane">
+      <div class="page-head"><div><h2>Ce que reçoivent les agents de ${esc(label)}</h2>
+        <div class="summary"><span><b>${seen.length}</b> plugins</span><span><b>${mcpN}</b> serveurs MCP chargés au démarrage</span><span><b>${hostN}</b> aussi dans tes CLIs locaux</span>
+        ${counts.err ? `<span class="h-err"><b style="color:inherit">${counts.err}</b> en erreur</span>` : ''}${counts.warn ? `<span class="h-warn"><b style="color:inherit">${counts.warn}</b> à vérifier</span>` : ''}</div></div>
+        <div class="toolbar"><button class="btn" type="button" id="test-all">Tester ${proj === '__all__' ? 'tout' : 'ce projet'}</button><button class="btn" type="button" id="rescan-btn">Rescanner les .mcp.json…</button></div>
+      </div>
+      ${state.rescan ? `<div class="rescan" role="region" aria-label="Aperçu du rescan"><b>Aperçu du rescan des .mcp.json de 5 projets</b>
+        <ul><li>1 config créée : <span class="mono">sentry</span> trouvé dans front-apollo/.mcp.json (non exposé aux CLIs locaux)</li><li>2 configs fusionnées : GitHub (front-africanews), Playwright (Kronn)</li><li>4 fichiers .mcp.json réécrits</li></ul>
+        <div class="confirm-row"><button class="btn primary" type="button" id="rescan-ok">Appliquer</button><button class="btn" type="button" id="rescan-cancel">Annuler</button></div></div>` : ''}
+      <div class="${sel ? 'with-sheet' : ''}">
+        <div class="lanes">
+          ${lane('mcp', 'Chargés dans l’agent', 'Serveurs MCP écrits dans la config de l’agent')}
+          ${lane('api', 'Appelés par Kronn', 'Kronn fait l’appel avec les identifiants')}
+          ${lane('cli', 'CLIs sur la machine', 'Binaire et connexion propres à la machine')}
+        </div>
+        ${sel ? detailHTML(sel) : ''}
+      </div></div>`;
+    return `<div class="shell">${side}${main}</div>`;
+  }
+
+  function detailHTML(p) {
+    const tabs = [['etat', 'État'], ['acces', 'Accès'], ['ident', 'Identifiants'], ['avance', 'Avancé']];
+    return `<section class="detail" aria-label="Fiche ${esc(p.name)}">
+      <div class="detail-head"><div class="row1"><h3>${esc(p.name)}</h3><button class="icon-btn" type="button" data-close aria-label="Fermer la fiche">${I.close}</button></div>
+        <div class="dim">${esc(p.desc)}</div><div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">${chips(p)} ${hb(worst(p))}</div></div>
+      <div class="detail-tabs" role="tablist" aria-label="Sections de la fiche">${tabs.map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" aria-selected="${state.tab === k}">${l}</button>`).join('')}</div>
+      <div class="detail-body">${tabBody(p)}</div></section>`;
+  }
+  function tabBody(p) {
+    if (state.tab === 'etat') return `<div class="block"><h4>Santé par accès</h4>${p.acc.map(a => { const h = p.health[a]; return `<div class="access-row"><span class="chip acc-${a}">${ACC[a]}</span>
+        <div class="what">${hb(h[0])}<span class="dim">${esc(h[2])}</span></div><div style="display:grid;justify-items:end;gap:4px"><span class="dim">${esc(h[1])}</span><button class="btn sm" type="button" data-test="${a}">Tester</button></div></div>`; }).join('')}</div>
+      ${p.id === 'fastly' ? '<div class="note warn">Le registre Kronn a une version plus récente de ce plugin (2 endpoints ajoutés). <button class="btn ghost sm" type="button">Voir</button></div>' : ''}
+      <div class="dim">Chaque test est conservé et horodaté ; le détail est dans le journal des appels.</div>`;
+    if (state.tab === 'acces') {
+      const mcp = p.acc.includes('mcp');
+      return `<div class="block"><h4>Visible par les agents Kronn</h4>
+        ${[['all', 'Tous les projets', 'Et les discussions sans projet'], ['general', 'Discussions sans projet seulement', 'Aucun projet ne le reçoit'], ['projects', 'Projets choisis', 'Seuls les agents de ces projets le reçoivent']].map(([m, l, s]) => `<label class="opt"><input type="radio" name="scope-${p.id}" data-scope="${m}" ${p.scope.mode === m ? 'checked' : ''}><span>${l}<small>${s}</small></span></label>`).join('')}
+        ${p.scope.mode === 'projects' ? `<div class="proj-list">${PROJECTS.map(pr => `<label class="opt"><input type="checkbox" data-sproj="${esc(pr.id)}" ${p.scope.projects.includes(pr.id) ? 'checked' : ''}><span>${esc(pr.id)}</span></label>`).join('')}</div>` : ''}</div>
+      ${mcp ? `<div class="block"><h4>Aussi dans mes CLIs locaux</h4><div class="toggle-row"><span>Écrire ce serveur MCP dans les CLIs de cette machine</span><button type="button" class="switch" role="switch" aria-checked="${p.host}" aria-label="Aussi dans mes CLIs locaux" data-host></button></div>
+        ${p.host ? `<div class="files">${CLI_FILES.map(([f, c]) => `<div><code class="mono">${f}</code><span class="dim">${c}</span></div>`).join('')}</div>` : '<div class="dim">Les CLIs lancés hors de Kronn ne verront pas ce serveur.</div>'}</div>` : ''}
+      ${p.acc.includes('cli') ? `<div class="block"><h4>Prérequis CLI sur la machine</h4><dl class="kv"><dt>Binaire</dt><dd><code class="mono">${esc(p.cliBin)}</code></dd><dt>Vérification</dt><dd><code class="mono">${esc(p.cliAuth)}</code></dd></dl><div class="dim">Aucun token dans Kronn : le CLI utilise sa propre connexion.</div></div>` : ''}
+      ${p.acc.length > 1 ? `<div class="block"><h4>Accès utilisé par l’agent</h4><select class="side-search" style="margin:0" data-pref aria-label="Accès utilisé par l’agent">${p.acc.map(a => `<option value="${a}" ${a === p.pref ? 'selected' : ''}>${ACC[a]} · ${ACC_EX[a]}</option>`).join('')}</select></div>` : ''}`;
+    }
+    if (state.tab === 'ident') return p.acc.map(a => {
+      const src = p.cred[a]; let body;
+      if (src === 'stored') body = p.keys.map(k => `<div class="secret"><code class="mono">${esc(k)}</code>${(p.missing || []).includes(k) ? '<span class="st st-conflict">manquant</span>' : '<span class="dim">••••••••</span>'}<button class="btn sm" type="button">${(p.missing || []).includes(k) ? 'Renseigner' : 'Modifier'}</button></div>`).join('') + `<div class="dim">Chiffré dans Kronn.${a === 'mcp' && p.acc.includes('api') ? ' L’accès API réutilise ces identifiants.' : ''}</div>`;
+      else if (src === 'cli_token') body = `<div class="note">Aucun token stocké. Kronn obtient un jeton à chaque appel avec <code class="mono">${esc(p.tokenCmd)}</code>.</div>`;
+      else if (src === 'host') body = `<div class="note">Connexion propre au CLI, gérée sur la machine, vérifiée par <code class="mono">${esc(p.cliAuth)}</code>.</div>`;
+      else body = '<div class="dim">Aucun identifiant nécessaire.</div>';
+      return `<div class="block"><h4>${ACC[a]}</h4>${body}</div>`;
+    }).join('');
+    return `<div class="block"><h4>Contexte pour l’agent</h4><div class="dim">Consignes lues par l’agent avant d’utiliser ce plugin, projet par projet.</div><div><button class="btn sm" type="button">Modifier le contexte</button></div></div>
+      <div class="block"><h4>Partager</h4><div class="confirm-row"><button class="btn sm" type="button">Exporter (bundle)</button><span class="dim">Sans secrets ; portée et CLIs locaux se choisissent à l’import.</span></div></div>
+      <div class="danger-zone"><h4 style="margin:0;color:var(--kr-error)">Zone danger</h4>
+      ${state.confirmDelete ? `<p>Supprimer <b>${esc(p.name)}</b> ? Il disparaîtra ${p.scope.mode === 'all' ? 'de tous les projets' : p.scope.mode === 'general' ? 'des discussions sans projet' : `de ${p.scope.projects.length} projet(s)`}${p.host ? ' et des CLIs locaux' : ''}.</p>
+        <div class="confirm-row"><button class="btn danger solid" type="button" data-del-ok>Supprimer définitivement</button><button class="btn" type="button" data-del-cancel>Annuler</button></div>`
+        : '<p>Retire la config de Kronn et de tous les projets.</p><div><button class="btn danger" type="button" data-del>Supprimer ce plugin…</button></div>'}</div>`;
+  }
+
+  /* ── Project card tab (3 variants) ──────────────────────────────────── */
+  const RES = {
+    front_euronews: { published: true, items: [
+      ['Workflow', 'autoCode · phase 1 (triage)', 'N2', 'db'], ['Workflow', 'autoCode · phase 2 (implémentation)', 'N2', 'ok'], ['Workflow', 'Revue de PR v3', 'N2', 'ok'],
+      ['Prompt', 'Rédiger un ticket Jira EW', 'N1', 'none'], ['Prompt', 'Expliquer une TD', 'N1', 'file'],
+      ['Commande', 'make iso-lint', 'N1', 'ok'], ['Commande', 'make iso-test', 'N1', 'ok'],
+      ['Appel API', 'Chartbeat · top pages', 'N2', 'none'],
+      ['Artifact', 'Santé du dépôt', 'N2', 'none'], ['Artifact', 'Tableau autoCode', 'N2', 'conflict'] ] },
+    'front-apollo': { published: false, items: [['Workflow', 'autoCode · phase 1 (triage)', 'N2', 'none'], ['Commande', 'make lint', 'N1', 'none'], ['Artifact', 'Santé du dépôt', 'N2', 'none']] },
+    'front-africanews': { published: false, items: [['Workflow', 'Revue de PR v3', 'N2', 'none']] },
+    Kronn: { published: false, items: [['Workflow', 'Nightly qualification', 'N2', 'none'], ['Commande', 'make check', 'N1', 'none']] },
+    'docroms-web': { published: false, items: [] },
+  };
+  const ST = { none: ['Non publié', 'st-none', 'Publier'], ok: ['À jour', 'st-ok', ''], file: ['Modifié dans le dépôt', 'st-file', 'Importer'], db: ['Modifié dans Kronn', 'st-db', 'Publier la mise à jour'], conflict: ['Conflit', 'st-conflict', 'Comparer'] };
+  const LVL = { N1: 'Utilisable sans Kronn', N2: 'Kronn requis' };
+  const DIR = { Workflow: 'workflows', Prompt: 'prompts', Commande: 'quick-execs', 'Appel API': 'quick-apis', Artifact: 'artifacts' };
+  const slug = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+  function projectScreen() {
+    const proj = state.resProject; const data = RES[proj];
+    const nPub = data.items.filter(i => i[3] !== 'none').length;
+    const banner = data.published
+      ? `<div class="banner"><span><code class="mono">kronn/</code> · ${nPub} ressources publiées · <code class="mono">INDEX.md</code> à jour</span><span class="dim">Les agents sans Kronn le trouvent depuis docs/AGENTS.md</span></div>`
+      : `<div class="banner"><span><code class="mono">kronn/</code> n’existe pas encore dans ce dépôt. Il sera créé à la première publication.</span></div>`;
+    const action = st => ST[st][2] ? `<button class="btn sm${st === 'conflict' ? ' danger' : ''}" type="button" data-res="${esc(ST[st][2])}">${ST[st][2]}</button>` : '<span></span>';
+    let body;
+    if (!data.items.length) body = '<p class="dim">Aucune automatisation, aucun prompt, aucune commande ni artifact lié à ce projet.</p>';
+    else if (state.projVariant === '1') {
+      const types = [...new Set(data.items.map(i => i[0]))];
+      body = types.map(ty => { const rows = data.items.filter(i => i[0] === ty); return `<div class="res-group"><h3>${ty}s · ${rows.length}</h3>${rows.map(([, n, l, st]) => `<div class="res-row"><span class="n">${esc(n)}</span><span class="lvl">${LVL[l]}</span><span class="st ${ST[st][1]}">${ST[st][0]}</span>${action(st)}</div>`).join('')}</div>`; }).join('');
+    } else if (state.projVariant === '2') {
+      const bk = [['conflict', 'Conflits à résoudre'], ['file', 'À importer (dépôt plus récent)'], ['db', 'À publier (Kronn plus récent)'], ['none', 'Pas encore dans le dépôt'], ['ok', 'À jour']];
+      body = `<div class="buckets">${bk.map(([st, label]) => { const rows = data.items.filter(i => i[3] === st); if (!rows.length) return ''; return `<div class="bucket"><h3><span class="st ${ST[st][1]}">${rows.length}</span>${label}</h3>
+        ${rows.map(([ty, n]) => `<div class="item"><span>${esc(n)}<span class="k" style="display:block;font-size:11px;color:var(--kr-text-dim)">${ty}</span></span>${action(st)}</div>`).join('')}</div>`; }).join('')}</div>`;
+    } else {
+      const lines = data.items.map(([ty, n, , st]) => {
+        const path = `${DIR[ty]}/${slug(n)}${ty === 'Artifact' ? '/' : ty === 'Prompt' ? '.md' : '.yaml'}`;
+        const cls = st === 'none' ? (state.picked.has(n) ? 'add' : 'gh') : st === 'conflict' ? 'cf' : st === 'ok' ? '' : 'mod';
+        const mark = st === 'none' ? (state.picked.has(n) ? '+ ' : '  ') : st === 'conflict' ? '! ' : st === 'ok' ? '  ' : '~ ';
+        return `<span class="${cls}">${mark}    ${esc(path)}</span>`;
+      });
+      body = `<div class="repo"><div class="pick-list"><h3 style="margin:0 0 4px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--kr-text-dim)">Choisir ce qui va dans le dépôt</h3>
+        ${data.items.map(([ty, n, l, st]) => `<div class="pick"><label><input type="checkbox" data-pickres="${esc(n)}" ${st !== 'none' || state.picked.has(n) ? 'checked' : ''} ${st !== 'none' ? 'disabled' : ''}><span>${esc(n)} <span class="dim">· ${ty} · ${LVL[l]}</span></span></label><span class="st ${ST[st][1]}">${ST[st][0]}</span></div>`).join('')}
+        <div class="confirm-row" style="margin-top:6px"><button class="btn primary" type="button" id="publish-picked" ${state.picked.size ? '' : 'disabled'}>Publier ${state.picked.size || ''} ressource${state.picked.size > 1 ? 's' : ''}</button><span class="dim">Crée une branche et un commit signé</span></div></div>
+        <div><h3 style="margin:0 0 4px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--kr-text-dim)">Aperçu du dépôt</h3>
+        <div class="tree-view"><span class="${data.published ? '' : (state.picked.size ? 'add' : 'gh')}">${data.published ? '  ' : state.picked.size ? '+ ' : '  '}kronn/</span>
+<span class="${data.published ? '' : (state.picked.size ? 'add' : 'gh')}">${data.published || !state.picked.size ? '  ' : '+ '}    INDEX.md · kronn.toml · kronn.lock</span>
+${lines.join('\n')}
+<span class="${data.published ? '' : (state.picked.size ? 'add' : 'gh')}">${data.published || !state.picked.size ? '  ' : '+ '}.agents/skills/kronn/SKILL.md</span>
+<span class="gh">  docs/AGENTS.md  (ligne « Ressources Kronn »)</span></div>
+        <div class="dim" style="margin-top:6px"><span style="color:var(--kr-success)">+</span> ajouté · <span style="color:var(--kr-warning)">~</span> modifié · <span style="color:var(--kr-error)">!</span> conflit · grisé : pas dans le dépôt</div></div></div>`;
+    }
+    return `<div class="pane" style="flex:1"><div class="pcard-shell">
+      <div class="pcard-top"><h2>${I.folder} <select class="side-search" style="margin:0;font-weight:700" id="res-project" aria-label="Projet">${PROJECTS.map(p => `<option ${p.id === proj ? 'selected' : ''}>${esc(p.id)}</option>`).join('')}</select></h2><span class="dim">Carte projet · ProjectCard.tsx</span></div>
+      <div class="pcard-tabs"><span>Aperçu</span><span>Code</span><span>Git</span><span>Docker</span><span>Tâches</span><span class="on">Automatisations &amp; Artifacts</span><span>Doc IA</span></div>
+      <div class="pcard-body">${banner}${body}</div></div></div>`;
+  }
+
+  /* ── Automations & Artifacts (Discussions sidebar pattern) ───────────── */
+  const WF = {
+    __none__: [['Brief du matin', 'ok', '07:30'], ['Résumé Teams hebdo', 'idle', 'lun.']],
+    front_euronews: [['autoCode · phase 1 (triage)', 'ok', 'il y a 12 min'], ['autoCode · phase 2 (implémentation)', 'warn', 'il y a 1 h'], ['autoCode · phase 3 (PR)', 'ok', 'il y a 2 h'], ['Revue de PR v3', 'ok', 'il y a 3 h'], ['Veille Dependabot', 'err', 'hier']],
+    'front-apollo': [['autoCode · phase 1 (triage)', 'ok', 'il y a 40 min'], ['Audit de doc hebdomadaire', 'idle', 'ven.']],
+    'front-africanews': [['Revue de PR v3', 'ok', 'hier']],
+    Kronn: [['Nightly qualification', 'ok', '03:00'], ['Veille des tickets KT', 'ok', 'il y a 5 min']],
+  };
+  const ART = {
+    __none__: [['Brief du matin', 'ok', 'auj.']],
+    front_euronews: [['Santé du dépôt', 'ok', 'il y a 1 h'], ['Tableau autoCode', 'ok', 'il y a 12 min'], ['Audience Chartbeat', 'warn', 'hier']],
+    'front-apollo': [['Santé du dépôt', 'idle', '—']],
+    Kronn: [['Campagne 0.14.2', 'ok', 'il y a 20 min']],
+  };
+  function groupedScreen(kind) {
+    const DATA = kind === 'wf' ? WF : ART;
+    const selKey = kind === 'wf' ? 'wfSel' : 'artSel';
+    const q = state.q.toLowerCase();
+    const toRows = (arr, proj) => (arr || []).filter(([n]) => !q || n.toLowerCase().includes(q)).map(([n, s, m]) => ({ id: `${n}|${proj}`, label: n, dot: s, meta: m }));
+    const byProject = {}; PROJECTS.forEach(p => { byProject[p.id] = toRows(DATA[p.id], p.id); });
+    const all = Object.entries(DATA).flatMap(([proj, arr]) => toRows(arr, proj));
+    const sections = [
+      { key: kind + '::fav', icon: I.star, label: 'Favoris', rows: all.slice(0, 2) },
+      { key: kind + '::recent', icon: I.clock, label: 'Récents', rows: all.filter(r => /min|h$|il y a/.test(r.meta)).slice(0, 3) },
+    ];
+    const side = sidebar({ title: kind === 'wf' ? 'Automatisations' : 'Artifacts', action: `<button class="btn sm primary" type="button">+ ${kind === 'wf' ? 'Nouvelle' : 'Nouvel'}</button>`,
+      sections, tree: { none: toRows(DATA.__none__, '__none__'), byProject }, current: state[selKey] });
+    const [name, proj] = state[selKey].split('|');
+    const projLabel = proj === '__none__' ? 'Sans projet' : proj;
+    const main = kind === 'wf'
+      ? `<div class="pane"><div class="page-head"><div><h2>${esc(name)}</h2><p>${esc(projLabel)} · déclencheur tracker · 6 étapes</p></div><div class="toolbar"><button class="btn" type="button">Modifier</button><button class="btn primary" type="button">Lancer</button></div></div>
+          <div class="run-list">${[['ok', 'Run #218', 'EW-7641 · 6/6 étapes', 'il y a 12 min'], ['warn', 'Run #217', 'EW-7633 · en attente de validation', 'il y a 1 h'], ['ok', 'Run #216', 'EW-7612 · 6/6 étapes', 'hier']].map(([s, r, d, t]) => `<div class="run"><span class="dot h-${s}"></span><span><b>${r}</b> <span class="dim">${d}</span></span><span class="dim">${t}</span><button class="btn sm" type="button">Ouvrir</button></div>`).join('')}</div>
+          <p class="dim" style="margin-top:12px">Le panneau de droite reste celui d’aujourd’hui ; seule la sidebar change (regroupement par projet comme Discussions).</p></div>`
+      : `<div class="pane"><div class="page-head"><div><h2>${esc(name)}</h2><p>${esc(projLabel)} · mis à jour par un workflow</p></div><div class="toolbar"><button class="btn" type="button">Exporter</button><button class="btn primary" type="button">Ouvrir en plein écran</button></div></div>
+          <div class="preview"><div class="kpis"><div><span class="dim">Score</span><b>82</b></div><div><span class="dim">TD ouvertes</span><b>14</b></div><div><span class="dim">Sections périmées</span><b>3</b></div></div></div>
+          <p class="dim" style="margin-top:12px">Aperçu de l’artifact ; seule la sidebar change (regroupement par projet comme Discussions).</p></div>`;
+    return `<div class="shell">${side}${main}</div>`;
+  }
+
+  /* ── Render ─────────────────────────────────────────────────────────── */
+  const SCREENS = [['plugins', 'Plugins'], ['project', 'Carte projet · Automatisations & Artifacts'], ['automations', 'Automatisation'], ['artifacts', 'Artifacts']];
+  const INTENT = {
+    plugins: '<b>Plugins : variante C retenue.</b> La sidebar reprend le regroupement de Discussions (Sans projet, puis organisation, puis projet), avec le nombre de plugins et une pastille pour les erreurs ; chaque projet se déplie sur ses plugins, comme les discussions. Clic sur un projet : la vue par accès ; clic sur un plugin : sa fiche. À droite, ce que reçoivent les agents du projet, rangé par accès ; la fiche s’ouvre sur le côté.',
+    project: { 1: '<b>Onglet projet, variante 1 · Par type.</b> Workflows, prompts, commandes, appels API, artifacts ; chaque ligne dit si elle marche sans Kronn et où elle en est avec le dépôt.',
+               2: '<b>Onglet projet, variante 2 · Par action à faire.</b> Conflits, puis à importer, à publier, pas encore dans le dépôt, à jour. On traite d’abord ce qui demande une action.',
+               3: '<b>Onglet projet, variante 3 · Vue dépôt.</b> On coche ce qui va dans Git et on voit l’arborescence kronn/ telle qu’elle sera écrite, avant de publier.' },
+    automations: '<b>Automatisation.</b> Sidebar calquée sur Discussions : Favoris, Récents, puis Projets (Sans projet, organisation, projet) avec repli mémorisé. Le panneau de droite ne change pas.',
+    artifacts: '<b>Artifacts.</b> Même sidebar que Discussions et Automatisation ; le panneau de droite reste l’aperçu actuel.',
+  };
+  function render() {
+    const seg = $('#variant-seg'), lbl = $('#lbl-variant');
+    const showVar = state.screen === 'project';
+    seg.hidden = !showVar; lbl.hidden = !showVar;
+    seg.innerHTML = [['1', '1 · Par type'], ['2', '2 · Par action'], ['3', '3 · Vue dépôt']].map(([k, l]) => `<button type="button" data-pv="${k}" aria-pressed="${state.projVariant === k}">${l}</button>`).join('');
+    $('#intent').innerHTML = state.screen === 'project' ? INTENT.project[state.projVariant] : INTENT[state.screen];
+    $('#theme-select').value = state.theme; $('#kr').dataset.kr = state.theme;
+    $('#screen-tabs').innerHTML = SCREENS.map(([k, l]) => `<button type="button" role="tab" data-screen="${k}" aria-selected="${state.screen === k}">${l}</button>`).join('');
+    document.querySelectorAll('.nav [data-nav]').forEach(b => b.setAttribute('aria-current', b.dataset.nav === state.screen ? 'page' : 'false'));
+    $('#content').innerHTML = state.screen === 'plugins' ? pluginsScreen() : state.screen === 'project' ? projectScreen() : groupedScreen(state.screen === 'automations' ? 'wf' : 'art');
+  }
+
+  document.addEventListener('click', e => {
+    const t = e.target.closest('button'); if (!t) return;
+    const d = t.dataset; const p = plugins.find(x => x.id === state.sel);
+    if (d.screen || d.nav) { state.screen = d.screen || d.nav; store.set('screen', state.screen); state.q = ''; }
+    else if (d.pv) { state.projVariant = d.pv; store.set('projVariant', d.pv); }
+    else if (d.toggle) { state.collapsed.has(d.toggle) ? state.collapsed.delete(d.toggle) : state.collapsed.add(d.toggle); saveCollapsed(); }
+    else if (d.proj) { state.pProject = d.proj; state.sel = null; }
+    else if (d.sel) { state.sel = state.sel === d.sel ? null : d.sel; state.tab = 'etat'; state.confirmDelete = false; }
+    else if (d.close !== undefined) { state.sel = null; }
+    else if (d.tab) { state.tab = d.tab; state.confirmDelete = false; }
+    else if (d.selp) { const [pid, pr] = d.selp.split('|'); state.sel = pid; state.pProject = pr; state.tab = 'etat'; state.confirmDelete = false; }
+    else if (d.pick && d.pick.startsWith('plugin::')) { state.sel = d.pick.slice(8); state.pProject = '__all__'; state.tab = 'etat'; state.confirmDelete = false; }
+    else if (d.pick) { state[state.screen === 'automations' ? 'wfSel' : 'artSel'] = d.pick; }
+    else if (d.host !== undefined && p) { p.host = !p.host; toast(p.host ? `${p.name} sera écrit dans tes CLIs locaux` : `${p.name} retiré de tes CLIs locaux`); }
+    else if (d.test && p) { p.health[d.test][1] = 'à l’instant'; toast(`Test ${ACC[d.test]} de ${p.name} relancé`); }
+    else if (d.del !== undefined) state.confirmDelete = true;
+    else if (d.delCancel !== undefined) state.confirmDelete = false;
+    else if (d.delOk !== undefined && p) { plugins.splice(plugins.indexOf(p), 1); state.sel = null; state.confirmDelete = false; toast(`${p.name} supprimé (maquette)`); }
+    else if (d.res) { toast(`${d.res} : action simulée`); return; }
+    else if (t.id === 'test-all') { plugins.filter(x => visibleTo(x, state.pProject)).forEach(x => Object.values(x.health).forEach(h => { h[1] = 'à l’instant'; })); toast('Tests relancés'); }
+    else if (t.id === 'rescan-btn') state.rescan = !state.rescan;
+    else if (t.id === 'rescan-ok') { state.rescan = false; toast('Rescan appliqué : 1 créée, 2 fusionnées, 4 fichiers réécrits'); }
+    else if (t.id === 'rescan-cancel') state.rescan = false;
+    else if (t.id === 'publish-picked') { toast(`${state.picked.size} ressource(s) publiée(s) sur une branche (simulé)`); state.picked.clear(); }
+    else return;
+    render();
+  });
+  document.addEventListener('change', e => {
+    const t = e.target; const p = plugins.find(x => x.id === state.sel);
+    if (t.id === 'theme-select') { state.theme = t.value; store.set('theme', t.value); }
+    else if (t.id === 'res-project') { state.resProject = t.value; state.picked.clear(); }
+    else if (t.dataset.scope && p) { p.scope.mode = t.dataset.scope; if (t.dataset.scope === 'projects' && !p.scope.projects.length) p.scope.projects = [PROJECTS[0].id]; }
+    else if (t.dataset.sproj && p) { const x = t.dataset.sproj; p.scope.projects = t.checked ? [...p.scope.projects, x] : p.scope.projects.filter(y => y !== x); }
+    else if (t.hasAttribute('data-pref') && p) p.pref = t.value;
+    else if (t.dataset.pickres) { t.checked ? state.picked.add(t.dataset.pickres) : state.picked.delete(t.dataset.pickres); }
+    else return;
+    render();
+  });
+  document.addEventListener('input', e => {
+    if (e.target.id !== 'side-q') return;
+    state.q = e.target.value; const pos = e.target.selectionStart; render();
+    const q = $('#side-q'); if (q) { q.focus(); q.setSelectionRange(pos, pos); }
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && state.sel) { state.sel = null; render(); } });
+  render();
+})();
+</script>

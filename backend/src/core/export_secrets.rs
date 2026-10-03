@@ -283,6 +283,15 @@ fn redact_steps<'a>(
         if let Some(body) = step.api_body.as_mut() {
             scope.json("api_body".into(), None, body);
         }
+        if let Some(config) = step.notify_config.as_mut() {
+            scope.mask(&mut config.url, "notify_config.url".into());
+            let mut headers = Some(std::mem::take(&mut config.headers));
+            scope.headers("notify_config.headers", &mut headers);
+            config.headers = headers.unwrap_or_default();
+        }
+        if let Some(url) = step.gate_notify_url.as_mut() {
+            scope.mask(url, "gate_notify_url".into());
+        }
     }
 }
 

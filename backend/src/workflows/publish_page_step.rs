@@ -278,6 +278,7 @@ mod tests {
                     connection_id: None,
                     requested_model: None,
                     resolved_model: Some("claude-sonnet-4-6".into()),
+                    preflight_warning: None,
                     model_applied: None,
                     observed_models: vec![],
                     format_fallback: false,

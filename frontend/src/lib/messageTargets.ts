@@ -93,6 +93,10 @@ export function composerMentions(
   // is absent (older payload), never guessing a different number.
   const positionalFallback = new Map<AgentType, number>();
   for (const participant of participants) {
+    // A workflow step is a Kronn-owned discussion agent, not a terminal the
+    // human joined. Its question replies route through exact provenance; it
+    // must never acquire an `@agent-cli-N` identity in the composer.
+    if (participant.workflow_step) continue;
     const type = agentByWireName.get(participant.agent_type);
     if (!type) continue;
     const canonical = AGENT_MENTIONS.find(mention => mention.type === type);

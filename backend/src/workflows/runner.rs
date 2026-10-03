@@ -579,6 +579,17 @@ async fn execute_run_with_notify_policy(
     inherited_workspace: Option<String>,
     notify_security_policy: NotifySecurityPolicy,
 ) -> Result<()> {
+    let approval_workflow = workflow.clone();
+    state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_workflow_execution_approved(
+                conn,
+                &approval_workflow,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await?;
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
     // SSE is an optional live projection, never part of the execution
@@ -631,6 +642,12 @@ async fn execute_run_with_notify_policy(
     // to status = Cancelled. The CancelGuard auto-cleans on scope exit.
     let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, run.id.clone());
     let cancel_token = cancel_guard.token.clone();
+
+    // ADR-005 slice 1 (KT-847) — skills/directives/profiles this run
+    // resolves stay pinned to what it first loaded for the whole call.
+    // Released when this call returns (completion, Gate pause, error or cancel).
+    let _resource_snapshot_guard =
+        crate::core::resource_snapshot::RunSnapshotGuard::new(run.id.clone());
 
     // Update run status to Running. `false` = the Cancelled-stickiness guard
     // blocked the write: the user cancelled in the window between our caller
@@ -1156,7 +1173,7 @@ async fn execute_run_with_notify_policy(
                     crate::db::model_catalog::http_runtime_target_id(&connection.id)
                 });
                 let model = step_model_override(step, connection.as_ref());
-                if let Some(failure) = crate::core::model_catalog::preflight_check(
+                if let Err(failure) = crate::core::model_catalog::preflight_resolve(
                     &state.db,
                     runtime_target_id.as_deref(),
                     step.agent.clone(),
@@ -1782,6 +1799,7 @@ async fn execute_run_with_notify_policy(
                             native_tools,
                             Some(&state.db),
                             step_room.as_ref().map(|room| room.context()),
+                            Some(&run.id),
                         )
                         .await;
                         if let Some(room) = step_room {
@@ -2835,6 +2853,7 @@ async fn execute_run_with_notify_policy(
                                 native_tools,
                                 Some(&state.db),
                                 step_room.as_ref().map(|room| room.context()),
+                                Some(&run.id),
                             )
                             .await;
                             if let Some(room) = step_room {

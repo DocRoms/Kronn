@@ -41,7 +41,16 @@ pub async fn hydrate_step_from_quick_prompt(
 
     let qp_lookup = qp_id.clone();
     let qp = match db
-        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .with_read_conn(move |conn| {
+            let prompt = crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)?;
+            if let Some(prompt) = &prompt {
+                crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                    conn, prompt,
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
+            Ok(prompt)
+        })
         .await
     {
         Ok(Some(q)) => q,
@@ -51,7 +60,7 @@ pub async fn hydrate_step_from_quick_prompt(
                 qp_id
             ));
         }
-        Err(e) => return Err(format!("DB error loading QuickPrompt: {}", e)),
+        Err(e) => return Err(format!("QuickPrompt preflight failed: {}", e)),
     };
 
     // `prompt_template` : un step a TOUJOURS un prompt_template (String,

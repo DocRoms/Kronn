@@ -1514,6 +1514,13 @@ fn ensure_redirectors(project_path: &str) {
     if !docs_dir.is_dir() {
         return;
     }
+    // KT-841 — a redirector's whole purpose is to point at the canonical
+    // entry file (`docs/AGENTS.md`, or the legacy `ai/index.md`); posting
+    // one before that file exists (bootstrap-only `docs/` skeleton, audit
+    // never ran) is a dead link, not a redirect. Wait for the real target.
+    if !crate::core::scanner::detect_docs_entry(project_dir).is_file() {
+        return;
+    }
 
     let template_dir = std::env::var("KRONN_TEMPLATES_DIR")
         .map(std::path::PathBuf::from)

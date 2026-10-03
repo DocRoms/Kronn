@@ -60,9 +60,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # ceiling lowered.
 # KT-796: `workflow_create_draft` names TriggerWorkflow and separates the step
 # types with commas (a `·` costs 6 B on the wire); ceiling lowered by the 49 B.
+# KT-837: worker-offer room semantics moved to the on-demand manual; ceiling
+# lowered by the resulting 25 B.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
-CATALOGUE_MAX_BYTES = 86_538
+CATALOGUE_MAX_BYTES = 86_142
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

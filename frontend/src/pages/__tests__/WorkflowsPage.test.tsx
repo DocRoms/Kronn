@@ -229,6 +229,12 @@ describe('WorkflowsPage', () => {
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Narrow report' })).toBeInTheDocument();
     fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Narrow report' }));
     expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'true');
+    // Selecting a row on a narrow viewport auto-collapses the list, same as
+    // Discussions — the row's detail is what the user asked to see next.
+    expect(screen.queryByRole('complementary', { name: 'Automatisation' })).toBeNull();
+    const rail = screen.getByRole('button', { name: 'Ouvrir la liste' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    fireEvent.click(rail);
     expect(openAutomationActions()).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Fermer la liste' }));
     expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
@@ -308,6 +314,9 @@ describe('WorkflowsPage', () => {
       'automation-kind-quick-prompt',
       'automation-kind-quick-exec',
     ]);
+    const projectsSection = sidebar.querySelector('.disc-sidebar-projects') as HTMLElement;
+    expect(within(projectsSection).getByRole('button', { name: /Sans projet/ })).toBeInTheDocument();
+    expect(within(projectsSection).getByRole('button', { name: /^Alpha 1$/ })).toBeInTheDocument();
 
     fireEvent.change(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' }), {
       target: { value: 'Alpha' },
@@ -356,6 +365,7 @@ describe('WorkflowsPage', () => {
     expect(detailPane).toBeInTheDocument();
     expect(detailPane.querySelector('.wf-detail-header')).toHaveClass('collection-detail-header');
     expect(document.querySelector('.automation-page-header')).toBeNull();
+
   });
 
   it('keeps arrow-key navigation on grouped Automation rows rendered by CollectionShell', async () => {
@@ -429,23 +439,23 @@ describe('WorkflowsPage', () => {
 
     const first = await wrap(<WorkflowsPage projects={[]} />);
     const firstSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    const workflowSection = firstSidebar.querySelector('[data-tour-id="automation-kind-workflow"]') as HTMLButtonElement;
-    fireEvent.click(workflowSection);
-    expect(workflowSection).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(within(firstSidebar).getByRole('button', { name: 'Ouvrir Persistent CLI' }));
+    expect(await screen.findByRole('heading', { name: 'Persistent CLI' })).toBeInTheDocument();
+
+    const projectsSection = within(firstSidebar).getByRole('button', { name: /Projets/ });
+    fireEvent.click(projectsSection);
+    expect(projectsSection).toHaveAttribute('aria-expanded', 'false');
 
     const search = within(firstSidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' });
     fireEvent.change(search, { target: { value: 'Persistent' } });
-    expect(workflowSection).toHaveAttribute('aria-expanded', 'true');
+    expect(projectsSection).toHaveAttribute('aria-expanded', 'true');
     fireEvent.change(search, { target: { value: '' } });
-    expect(workflowSection).toHaveAttribute('aria-expanded', 'false');
-
-    fireEvent.click(within(firstSidebar).getByRole('button', { name: 'Ouvrir Persistent CLI' }));
-    expect(await screen.findByRole('heading', { name: 'Persistent CLI' })).toBeInTheDocument();
+    expect(projectsSection).toHaveAttribute('aria-expanded', 'false');
     first.unmount();
 
     await wrap(<WorkflowsPage projects={[]} />);
     const restoredSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    expect(restoredSidebar.querySelector('[data-tour-id="automation-kind-workflow"]'))
+    expect(within(restoredSidebar).getByRole('button', { name: /Projets/ }))
       .toHaveAttribute('aria-expanded', 'false');
     expect(await screen.findByRole('heading', { name: 'Persistent CLI' })).toBeInTheDocument();
   });
@@ -685,15 +695,19 @@ describe('WorkflowsPage', () => {
     ]);
 
     await wrap(
-      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+      <WorkflowsPage
+        projects={[{ id: 'p1', name: 'Proj' } as never]}
+        installedAgentTypes={['ClaudeCode']}
+        agentAccess={fullConfig}
+      />
     );
 
-    // The pinned workflow appears in the unified sidebar's Favorites +
-    // Workflows sections and in the legacy card list's Favorites + project
-    // groups. The ordinary workflow appears once in each regular list.
+    // The pinned workflow appears in sidebar Favorites + Projects and in the
+    // unchanged viewer's Favorites + project group. The ordinary workflow
+    // appears in sidebar Recents + Projects and the viewer's project group.
     expect(screen.getAllByText('Favoris')).toHaveLength(2);
     expect(screen.getAllByText('Pinned WF')).toHaveLength(4);
-    expect(screen.getAllByText('Regular WF')).toHaveLength(2);
+    expect(screen.getAllByText('Regular WF')).toHaveLength(3);
   });
 
   it('keeps workflow favorites rendered in the unified sidebar while a detail is selected', async () => {
@@ -822,7 +836,7 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    await waitFor(() => expect(screen.getAllByText('Ticket → PR')).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByText('Ticket → PR')).toHaveLength(3));
     // i18n: 'wf.needsConfig' = '{0} à configurer' → "3 à configurer"
     expect(screen.getByText('3 à configurer')).toBeDefined();
   });
@@ -845,7 +859,7 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    await waitFor(() => expect(screen.getAllByText('Clean WF')).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByText('Clean WF')).toHaveLength(3));
     expect(screen.queryByText(/à configurer/)).toBeNull();
   });
 
@@ -1137,6 +1151,7 @@ describe('WorkflowsPage', () => {
     mockWorkflowsApi.list.mockResolvedValue([summary]);
     mockWorkflowsApi.delete.mockClear();
     mockWorkflowsApi.delete.mockResolvedValue(undefined);
+    vi.stubGlobal('confirm', vi.fn(() => true));
 
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
@@ -1173,6 +1188,7 @@ describe('WorkflowsPage', () => {
     mockWorkflowsApi.list.mockResolvedValue([summary]);
     mockWorkflowsApi.delete.mockClear();
     mockWorkflowsApi.delete.mockResolvedValue(undefined);
+    vi.stubGlobal('confirm', vi.fn(() => true));
 
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />

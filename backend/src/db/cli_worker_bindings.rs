@@ -82,7 +82,7 @@ pub(crate) fn return_to_origin(
     expected_agent: Option<&str>,
     origin: &str,
     child: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let active: Option<(String, String, String)> = conn
         .query_row(
             "SELECT agent_type, session_id, disc_id FROM discussion_sessions WHERE id = ?1",
@@ -125,7 +125,7 @@ pub(crate) fn return_to_origin(
             session_pk,
             "CLI worker return has no retained source identity"
         );
-        return Ok(());
+        return Ok(false);
     };
     if expected_agent.is_some_and(|expected| expected != source_agent)
         || active
@@ -137,9 +137,11 @@ pub(crate) fn return_to_origin(
 
     let current =
         super::disc_source::find_disc_by_source_session(conn, &source_agent, &source_session_id)?;
+    let mut moved = false;
     match current.as_deref() {
         Some(room) if room == child => {
             super::disc_source::bind_to_source(conn, origin, &source_agent, &source_session_id)?;
+            moved = true;
         }
         Some(room) if room == origin => {}
         Some(room) => {
@@ -178,10 +180,11 @@ pub(crate) fn return_to_origin(
             );
         }
     }
-    if active.is_some() {
+    if active.as_ref().is_some_and(|(_, _, room)| room == child) {
         super::discussion_sessions::move_session_to_discussion(conn, session_pk, origin)?;
+        moved = true;
     }
-    Ok(())
+    Ok(moved)
 }
 
 /// Resume only an exact CLI session whose orchestrator-recorded execution has

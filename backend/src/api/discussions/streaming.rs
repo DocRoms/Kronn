@@ -2762,7 +2762,7 @@ async fn make_agent_stream_inner(
     // default). Reused by the terminal message, the mid-stream checkpoint, and
     // the spawn-error provenance so all three agree. `None` = provider-default
     // run with no --model flag.
-    let attempted_model = runner::effective_model_flag(
+    let requested_model = runner::effective_model_flag(
         disc_model.as_deref(),
         &agent_type,
         disc_tier,
@@ -2772,7 +2772,7 @@ async fn make_agent_stream_inner(
     let (qp_reasoning_effort, qp_max_tokens) = if tier_override.is_none() {
         let did = discussion_id.clone();
         let agent = agent_type.clone();
-        let model = attempted_model.clone();
+        let model = requested_model.clone();
         let connection_id = external_connection.as_ref().map(|c| c.id.clone());
         match state
             .db
@@ -2827,7 +2827,7 @@ async fn make_agent_stream_inner(
     let runtime_target_id = external_connection
         .as_ref()
         .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
-    if let Some(failure) = crate::core::model_catalog::preflight_check(
+    let preflight = match crate::core::model_catalog::preflight_resolve(
         &state.db,
         runtime_target_id.as_deref(),
         agent_type.clone(),
@@ -2837,19 +2837,30 @@ async fn make_agent_stream_inner(
     )
     .await
     {
-        let payload = serde_json::json!({
-            "error": "model_catalog_preflight_failed",
-            "preflight_failure": failure,
-        });
-        finish_tracked_preflight(
-            &mut completion_tx,
-            "model catalogue preflight refused this model",
-        );
-        let stream: SseStream = Box::pin(futures::stream::once(async move {
-            Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
-        }));
-        return Sse::new(prepend_initial_event(stream, initial_event.take()));
-    }
+        Ok(resolution) => resolution,
+        Err(failure) => {
+            let payload = serde_json::json!({
+                "error": "model_catalog_preflight_failed",
+                "preflight_failure": failure,
+            });
+            finish_tracked_preflight(
+                &mut completion_tx,
+                "model catalogue preflight refused this model",
+            );
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
+            }));
+            return Sse::new(prepend_initial_event(stream, initial_event.take()));
+        }
+    };
+    let disc_model = preflight.effective_model;
+    let attempted_model = disc_model.clone();
+    let catalog_warning_notice = preflight.warning.map(|warning| {
+        format!(
+            "⚠️ **Model catalogue fallback** — requested `{}`; using `{}` because the requested model disappeared.",
+            warning.requested_model, warning.effective_model
+        )
+    });
 
     let disc_id = discussion_id.clone();
     let disc_project_id = disc.project_id.clone();
@@ -2968,6 +2979,13 @@ async fn make_agent_stream_inner(
                 auth_mode: auth_mode_str.clone(),
             })
             .await;
+        if let Some(notice) = catalog_warning_notice.as_ref() {
+            let _ = tx
+                .send(AgentStreamEvent::Chunk {
+                    data: serde_json::json!({ "text": format!("{notice}\n\n") }),
+                })
+                .await;
+        }
 
         let mut tracked_execution_succeeded = false;
         // KT-405 — cloned out of the lock (never held across an await), so
@@ -3051,7 +3069,10 @@ async fn make_agent_stream_inner(
                 let _runtime_guard = dispatch_job_id.as_ref().map(|job_id| {
                     crate::AgentRuntimeGuard::insert(&state.agent_runtime_registry, job_id.clone())
                 });
-                let mut full_response = String::new();
+                let mut full_response = catalog_warning_notice
+                    .as_ref()
+                    .map(|notice| format!("{notice}\n\n"))
+                    .unwrap_or_default();
                 let mut stream_json_tokens: u64 = 0;
                 let mut stream_json_cost: Option<f64> = None;
                 let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;

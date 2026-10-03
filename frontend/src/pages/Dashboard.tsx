@@ -220,6 +220,18 @@ export function Dashboard({ onReset }: DashboardProps) {
   }, [page]);
 
   useEffect(() => {
+    const followDiscussionLink = () => {
+      const discussionId = standaloneDiscussionId(window.location.hash);
+      if (!discussionId) return;
+      setOpenDiscussionId(discussionId);
+      setActiveDiscussionId(discussionId);
+      setPage('discussions');
+    };
+    window.addEventListener('hashchange', followDiscussionLink);
+    return () => window.removeEventListener('hashchange', followDiscussionLink);
+  }, []);
+
+  useEffect(() => {
     if (pagesCapability && !pagesCapability.activated && page === 'pages') {
       setPage('projects');
     }
@@ -1414,6 +1426,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               }}
               onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
               onNavigatePage={(pageId) => { setOpenPageId(pageId); setPage('pages'); }}
+              onNavigateMcp={() => setPage('mcps')}
               onBatchLaunched={(discIds, batchRunId, mode = 'batch') => {
                 // Mark every batch-child disc as sending so the sidebar
                 // spinner lights up for all of them in parallel, not just
@@ -1455,6 +1468,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           <ErrorBoundary mode="zone" label={t('nav.pages')}>
             <Suspense fallback={<PageFallback />}>
               <PagesPage
+                projects={projects}
                 initialSelectedPageId={openPageId}
                 onInitialSelectionConsumed={() => setOpenPageId(null)}
                 onNavigateWorkflow={(workflowId, runId) => {
@@ -1533,7 +1547,10 @@ export function Dashboard({ onReset }: DashboardProps) {
             markAllDiscussionsSeen={markAllDiscussionsSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
             initialActiveDiscussionId={openDiscussionId ?? deepLinkedDiscussionId ?? restorableDiscussionId}
-            initialMessageId={deepLinkedDiscussionId && !openDiscussionId ? standaloneDiscussionMessageId(window.location.hash) : null}
+            initialMessageId={deepLinkedDiscussionId
+              && (!openDiscussionId || openDiscussionId === deepLinkedDiscussionId)
+              ? standaloneDiscussionMessageId(window.location.hash)
+              : null}
             lastSeenMsgCount={lastSeenMsgCount}
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}

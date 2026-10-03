@@ -208,6 +208,14 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       addFolder: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),
+      repositoryResources: resolve({
+        kronn_exists: false,
+        skills_present: [],
+        skills_available: [],
+        resources: [],
+      }),
+      linkedReposCandidates: resolve([]),
+      setLinkedRepos: resolve(true),
       dockerStatus: resolve({
         compose_present: false,
         compose_file: null,
@@ -364,7 +372,6 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       updateConfig: resolve({}),
       updateCustomSpec: resolve({ server: {}, orphan_env_keys: [] }),
       cleanupOrphanEnv: resolve({ configs_updated: 0, total_keys_removed: 0 }),
-      exportFileUrl: vi.fn((...args: unknown[]) => `/api/mcps/custom/${args[0] as string}/export-file`),
       importPluginFile: resolve({}),
       deleteConfig: resolve(undefined),
       link: resolve(undefined),

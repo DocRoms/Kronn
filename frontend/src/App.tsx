@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { setup as setupApi, config as configApi, health as healthApi } from './lib/api';
-import { RETRY_DELAY, STATUS_TIMEOUT_MS, withTimeout } from './lib/appBoot';
+import {
+  RETRY_DELAY,
+  STATUS_TIMEOUT_MS,
+  cacheSetupStatus,
+  clearCachedSetupStatus,
+  readCachedSetupStatus,
+  withTimeout,
+} from './lib/appBoot';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
@@ -17,18 +24,27 @@ const StandaloneLivePageMosaic = lazy(() => import('./pages/StandaloneLivePageMo
 const StandaloneDiscussionMosaic = lazy(() => import('./pages/StandaloneDiscussionMosaic').then(m => ({ default: m.StandaloneDiscussionMosaic })));
 
 export function App() {
-  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(readCachedSetupStatus);
+  const setupStatusRef = useRef<SetupStatus | null>(setupStatus);
+  const [loading, setLoading] = useState(setupStatus === null);
   const [apiError, setApiError] = useState(false);
   // Under Docker, agent installs land in the container (not the host) → the
   // wizard disables Install and points to the host `kronn` CLI. Default false
   // (native/Tauri) until health resolves; a failed probe leaves it false.
   const [inDocker, setInDocker] = useState(false);
   const retries = useRef(0);
+  const [, setRouteRevision] = useState(0);
+
+  const applySetupStatus = useCallback((status: SetupStatus) => {
+    setupStatusRef.current = status;
+    cacheSetupStatus(status);
+    setSetupStatus(status);
+    setLoading(false);
+  }, []);
 
   const fetchStatus = useCallback(function fetchSetupStatus(resetRetries = false) {
     if (resetRetries) retries.current = 0;
-    setLoading(true);
+    if (!setupStatusRef.current) setLoading(true);
     setApiError(false);
     // CRITICAL: time out the request. `getStatus` can HANG (not reject) when
     // the backend is slow — e.g. agent detection contends under concurrent-
@@ -38,14 +54,19 @@ export function App() {
     withTimeout(setupApi.getStatus(), STATUS_TIMEOUT_MS)
       .then((status) => {
         retries.current = 0;
-        setSetupStatus(status);
-        setLoading(false);
+        applySetupStatus(status);
       })
       .catch(() => {
         // Auto-retry up to 5 times with 2s delay (backend may still be starting)
         if (retries.current < 5) {
           retries.current += 1;
           setTimeout(fetchSetupStatus, RETRY_DELAY);
+          return;
+        }
+        // A returning tab can keep rendering the last known setup state while
+        // the backend recovers. The successful refresh will replace it later.
+        if (setupStatusRef.current) {
+          setLoading(false);
           return;
         }
         // Retries exhausted. Distinguish "backend slow" from "backend down":
@@ -56,7 +77,7 @@ export function App() {
         withTimeout(configApi.getLanguage(), 4000)
           .then(() => {
             console.warn('setup/status timed out but backend is reachable — proceeding optimistically.');
-            setSetupStatus({
+            const optimisticStatus: SetupStatus = {
               is_first_run: false,
               current_step: 'Complete',
               agents_detected: [],
@@ -64,9 +85,11 @@ export function App() {
               scan_paths_explored: [],
               repos_detected: [],
               default_scan_path: null,
-            });
-            setApiError(false);
+            };
+            setupStatusRef.current = optimisticStatus;
+            setSetupStatus(optimisticStatus);
             setLoading(false);
+            setApiError(false);
           })
           .catch(() => {
             setSetupStatus(null);
@@ -74,10 +97,19 @@ export function App() {
             setLoading(false);
           });
       });
-  }, []);
+  }, [applySetupStatus]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
   useEffect(() => { healthApi.get().then(h => setInDocker(h.in_docker)).catch(() => {}); }, []);
+  useEffect(() => {
+    const updateRoute = () => setRouteRevision(revision => revision + 1);
+    window.addEventListener('hashchange', updateRoute);
+    window.addEventListener('popstate', updateRoute);
+    return () => {
+      window.removeEventListener('hashchange', updateRoute);
+      window.removeEventListener('popstate', updateRoute);
+    };
+  }, []);
 
   // Intercept external link clicks in Tauri desktop only.
   // Tauri webview doesn't handle target="_blank" — we call /api/open-url
@@ -128,7 +160,7 @@ export function App() {
             inDocker={inDocker}
             onComplete={() => {
               // Re-fetch status to get fresh state with is_first_run=false
-              setupApi.getStatus().then(setSetupStatus).catch(e => console.warn('Setup status refresh failed:', e));
+              setupApi.getStatus().then(applySetupStatus).catch(e => console.warn('Setup status refresh failed:', e));
             }}
           />
         </Suspense>
@@ -179,12 +211,14 @@ export function App() {
         <UpdateBanner />
         <BackendStatus />
         <Dashboard onReset={() => {
-        setupApi.reset().then(() => {
-          setSetupStatus(null);
-          setLoading(true);
-          setupApi.getStatus().then(setSetupStatus).finally(() => setLoading(false));
-        }).catch(e => console.warn('Setup reset failed:', e));
-      }} />
+          clearCachedSetupStatus();
+          setupStatusRef.current = null;
+          setupApi.reset().then(() => {
+            setSetupStatus(null);
+            setLoading(true);
+            setupApi.getStatus().then(applySetupStatus).finally(() => setLoading(false));
+          }).catch(e => console.warn('Setup reset failed:', e));
+        }} />
       </Suspense>
     </ErrorBoundary>
   );

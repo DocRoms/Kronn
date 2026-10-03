@@ -37,6 +37,16 @@ required; choices, context, recommendations, multiple selection and task
 reference are optional. Free-text answers are always available. A recommendation
 is not a preselected answer or consent.
 
+A question authored by a workflow Agent step may also declare
+`"resume":{"workflow_id":"<workflow id>","variables":{"name":"value"}}`.
+Answering or declining such a question starts that workflow once; commenting
+does not resolve the question and does not start it. The declaration accepts at
+most 16 variables. Workflow ids are non-empty and at most 128 characters;
+variable names are 1–64 ASCII letters, digits, `_`, `-`, or `.`, and each value
+is a control-free string of at most 8,000 characters.
+`[src: file: backend/src/db/discussion_questions.rs:231]`
+`[src: file: backend/src/api/discussion_questions.rs:64]`
+
 Pause execution, delegation and completion of the affected lot until the human
 answers. Continue unrelated tasks and keep listening with `disc_wait_for_peer`.
 This is a scoped agent protocol, not a global scheduler stop: `task_ref` does not
@@ -550,20 +560,34 @@ the only target.
 `[src: file: backend/src/api_tests.rs]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
-two deliberately distinct identity domains (KT-421). The live
+two deliberately distinct identity domains. The live
 `(source_agent, source_session_id)` pair — the same one every other lifecycle
 tool sends — proves the caller is the exact `discussion_sessions` row the
 offer targets; it rotates across an MCP reload (`adhoc-*`). A separate
 `source_binding_session_id` names the reload-stable `disc_source_history`
-binding that actually moves the session origin -> child; it stays `cli-*`
-even after the live identity above has rotated. Collapsing the two, as an
-earlier revision did, makes a resumed CLI's own offer permanently
-unacceptable: its active identity no longer matches the durable one the
-accept step used to reuse for both checks. Both values are derived by the
-trusted bridge from its own state and are absent from the tool's input
-schema — the model supplies only `offer_id`; there is no fallback to
-agent-type/alias matching or any other permissive resolution if either is
-missing.
+binding of the principal room; it stays `cli-*` even after the live identity
+above has rotated. Acceptance validates both identities but moves neither the
+live membership nor the durable binding. Instead, the execution's pinned CLI
+session id carries the worker role, the child remains the durable task/evidence
+room, and the accept result returns the worker instructions directly. This lets
+a CLI principal continue receiving its principal-room turns and remain a party
+to the other executions it coordinates while it works on the accepted execution.
+Both identity values are derived by the trusted bridge and absent from the tool's
+input schema — the model supplies only `offer_id`; there is no fallback to
+agent-type/alias matching or any other permissive resolution if either is missing.
+[src: file: backend/src/api/orchestration.rs:3789-3948]
+[src: file: backend/scripts/disc-introspection-mcp.py:6091-6137]
+
+`task_exec_deliver` does not perform a room return: the execution transitions to
+`AwaitingReview` while the CLI is already in its principal room. The legacy
+terminal return remains only as compatibility for executions accepted by older
+bridges that physically moved a session into a child room.
+[src: file: backend/src/api/orchestration.rs:4160]
+[src: file: backend/src/db/orchestration.rs:4017]
+
+Collapsing the live and reload-stable identities, as an earlier revision did,
+makes a resumed CLI's own offer permanently unacceptable: its active identity no
+longer matches the durable one the accept step used to reuse for both checks.
 An old bridge that has not reloaded this contract sends only the legacy pair
 and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong

@@ -277,18 +277,53 @@ pub fn get_profile(id: &str) -> Option<AgentProfile> {
     list_all_profiles().into_iter().find(|p| p.id == id)
 }
 
+// ─── Run snapshot (ADR-005 slice 1) ─────────────────────────────────────────
+
+static PROFILE_SNAPSHOTS: crate::core::resource_snapshot::RunSnapshotCache<AgentProfile> =
+    crate::core::resource_snapshot::RunSnapshotCache::new();
+
+/// Resolve a profile like `get_profile`, but pin its content to `run_id`:
+/// an edit or deletion made while this run is still executing doesn't
+/// change what this run already loaded.
+pub fn get_profile_snapshot(run_id: &str, id: &str) -> Option<AgentProfile> {
+    PROFILE_SNAPSHOTS.get_or_resolve(run_id, id, || get_profile(id))
+}
+
+/// Drop every profile snapshot pinned to `run_id`. Call once that run has
+/// finished so its resources don't stay pinned in memory.
+pub fn release_profiles_snapshot(run_id: &str) {
+    PROFILE_SNAPSHOTS.release(run_id);
+}
+
 /// Build the persona prompt text for multiple profiles.
 /// When multiple profiles are selected, adds a collaborative instruction.
 pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
     if profile_ids.is_empty() {
         return String::new();
     }
+    render_profiles_prompt(&resolve_profiles(profile_ids))
+}
 
-    let profiles: Vec<AgentProfile> = profile_ids
+/// Same as `build_profiles_prompt`, resolved through the run snapshot cache.
+pub fn build_profiles_prompt_for_run(run_id: &str, profile_ids: &[String]) -> String {
+    if profile_ids.is_empty() {
+        return String::new();
+    }
+    render_profiles_prompt(&resolve_profiles_for_run(run_id, profile_ids))
+}
+
+fn resolve_profiles(profile_ids: &[String]) -> Vec<AgentProfile> {
+    profile_ids.iter().filter_map(|id| get_profile(id)).collect()
+}
+
+fn resolve_profiles_for_run(run_id: &str, profile_ids: &[String]) -> Vec<AgentProfile> {
+    profile_ids
         .iter()
-        .filter_map(|id| get_profile(id))
-        .collect();
+        .filter_map(|id| get_profile_snapshot(run_id, id))
+        .collect()
+}
 
+fn render_profiles_prompt(profiles: &[AgentProfile]) -> String {
     if profiles.is_empty() {
         return String::new();
     }
@@ -327,7 +362,7 @@ pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
     prompt.push_str("- The synthesis is NOT in a blockquote.\n\n");
 
     prompt.push_str("--- Active Profiles ---\n\n");
-    for p in &profiles {
+    for p in profiles {
         prompt.push_str(&format!(
             "FirstName: {}\nAvatar: {}\nRole: {}\n{}\n\n",
             p.persona_name, p.avatar, p.role, p.persona_prompt
@@ -343,18 +378,25 @@ pub fn build_profiles_prompt_compact(profile_ids: &[String]) -> String {
     if profile_ids.is_empty() {
         return String::new();
     }
+    render_profiles_prompt_compact(&resolve_profiles(profile_ids))
+}
 
-    let profiles: Vec<AgentProfile> = profile_ids
-        .iter()
-        .filter_map(|id| get_profile(id))
-        .collect();
+/// Same as `build_profiles_prompt_compact`, resolved through the run
+/// snapshot cache.
+pub fn build_profiles_prompt_compact_for_run(run_id: &str, profile_ids: &[String]) -> String {
+    if profile_ids.is_empty() {
+        return String::new();
+    }
+    render_profiles_prompt_compact(&resolve_profiles_for_run(run_id, profile_ids))
+}
 
+fn render_profiles_prompt_compact(profiles: &[AgentProfile]) -> String {
     if profiles.is_empty() {
         return String::new();
     }
 
     let mut prompt = String::from("=== Profiles ===\n");
-    for p in &profiles {
+    for p in profiles {
         prompt.push_str(&format!(
             "[{} {} | {} | {}]\n",
             p.avatar,
@@ -397,21 +439,22 @@ pub struct CustomProfileData<'a> {
     pub default_engine: Option<&'a str>,
 }
 
-/// Save a custom profile to disk. Returns the generated ID.
-pub fn save_custom_profile(data: &CustomProfileData) -> Result<String, String> {
-    let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create profiles dir: {}", e))?;
-
-    let slug: String = data
-        .name
-        .to_lowercase()
+/// Slugify a profile's display name. Kept distinct from
+/// `core::native_files::slug` (no hyphen-collapsing) — this predates that
+/// helper and existing custom profile filenames already depend on it.
+fn profile_slug(name: &str) -> String {
+    name.to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .trim_matches('-')
-        .to_string();
+        .to_string()
+}
 
-    let id = format!("custom-{}", slug);
+/// Render a custom profile's Markdown+frontmatter file content. Shared by
+/// create and update so renaming only changes the `name:` line, never the
+/// file this is written to.
+fn render_profile_markdown(data: &CustomProfileData) -> String {
     let cat_str = match data.category {
         ProfileCategory::Technical => "technical",
         ProfileCategory::Business => "business",
@@ -429,15 +472,67 @@ pub fn save_custom_profile(data: &CustomProfileData) -> Result<String, String> {
         data.persona_name.to_string()
     };
 
-    let file_content = format!(
+    format!(
         "---\nname: {}\npersona_name: {}\nrole: {}\navatar: {}\ncolor: \"{}\"\ncategory: {}\nbuiltin: false\n{}---\n{}",
         data.name, pn, data.role, data.avatar, data.color, cat_str, engine_line, data.persona_prompt
-    );
+    )
+}
+
+/// Find a filename stem for `name` that no existing custom profile file
+/// already uses. Two names that produce the same slug get distinct files
+/// instead of one silently overwriting the other.
+fn unique_profile_slug(dir: &std::path::Path, name: &str) -> String {
+    let base = profile_slug(name);
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+    while dir.join(format!("{}.md", candidate)).exists() {
+        candidate = format!("{}-{}", base, suffix);
+        suffix += 1;
+    }
+    candidate
+}
+
+/// Save a new custom profile to disk. Returns the generated, stable ID.
+pub fn save_custom_profile(data: &CustomProfileData) -> Result<String, String> {
+    let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create profiles dir: {}", e))?;
+
+    let slug = unique_profile_slug(&dir, data.name);
+    let id = format!("custom-{}", slug);
+    let file_content = render_profile_markdown(data);
 
     let path = dir.join(format!("{}.md", slug));
-    std::fs::write(&path, file_content).map_err(|e| format!("Cannot write profile: {}", e))?;
+    crate::core::mcp_scanner::atomic_write(&path, &file_content)
+        .map_err(|e| format!("Cannot write profile: {}", e))?;
 
     Ok(id)
+}
+
+/// Update a custom profile IN PLACE and atomically: same file, same id,
+/// even when `data.name` changes. Unlike `save_custom_profile`, the file
+/// is located from the EXISTING id — the slug is never recomputed from
+/// the new name.
+pub fn update_custom_profile(id: &str, data: &CustomProfileData) -> Result<String, String> {
+    let slug = id
+        .strip_prefix("custom-")
+        .ok_or("Cannot modify builtin profiles")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid profile id '{}'", id));
+    }
+    let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
+    let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid profile id '{}'", id));
+    }
+    if !path.exists() {
+        return Err(format!("Profile '{}' not found", id));
+    }
+
+    let file_content = render_profile_markdown(data);
+    crate::core::mcp_scanner::atomic_write(&path, &file_content)
+        .map_err(|e| format!("Cannot write profile: {}", e))?;
+
+    Ok(id.to_string())
 }
 
 /// Delete a custom profile from disk.
@@ -446,8 +541,14 @@ pub fn delete_custom_profile(id: &str) -> Result<bool, String> {
         return Err("Cannot delete builtin profiles".into());
     }
     let slug = id.strip_prefix("custom-").unwrap();
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid profile id '{}'", id));
+    }
     let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
     let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid profile id '{}'", id));
+    }
 
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Cannot delete profile: {}", e))?;
@@ -460,6 +561,179 @@ pub fn delete_custom_profile(id: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// `KRONN_DATA_DIR` is a process-wide env var (see `core::config`).
+    /// Tests that write custom profiles to disk run serialized against a
+    /// unique tempdir so parallel tests never share or race a directory.
+    fn scratch_config_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "kronn-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn sample_profile_data<'a>(name: &'a str, prompt: &'a str) -> CustomProfileData<'a> {
+        CustomProfileData {
+            name,
+            persona_name: "",
+            role: "Tester",
+            avatar: "🧪",
+            color: "#123456",
+            category: &ProfileCategory::Meta,
+            persona_prompt: prompt,
+            default_engine: None,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_preserves_the_original_id_and_is_atomic() {
+        let dir = scratch_config_dir("profiles-update");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let id = save_custom_profile(&sample_profile_data("Original Name", "prompt v1")).unwrap();
+
+        let updated_id =
+            update_custom_profile(&id, &sample_profile_data("Renamed", "prompt v2")).unwrap();
+        assert_eq!(updated_id, id, "renaming must keep the same id");
+
+        let profile = get_profile(&id).expect("profile must still resolve under the original id");
+        assert_eq!(profile.name, "Renamed");
+        assert_eq!(profile.persona_prompt, "prompt v2");
+
+        let files: Vec<_> = std::fs::read_dir(dir.join("profiles"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files.len(), 1, "expected exactly one file, got {:?}", files);
+        assert!(
+            !files[0].contains(".tmp"),
+            "no leftover temp file: {:?}",
+            files
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_of_unknown_id_is_rejected() {
+        let dir = scratch_config_dir("profiles-update-missing");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let result = update_custom_profile(
+            "custom-does-not-exist",
+            &sample_profile_data("Name", "prompt"),
+        );
+        assert!(result.is_err());
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn colliding_slugs_do_not_overwrite_each_other() {
+        let dir = scratch_config_dir("profiles-collision");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let first = save_custom_profile(&sample_profile_data("Foo Bar", "prompt A")).unwrap();
+        let second = save_custom_profile(&sample_profile_data("foo-bar", "prompt B")).unwrap();
+
+        assert_ne!(first, second, "colliding names must get distinct ids");
+        assert_eq!(get_profile(&first).unwrap().persona_prompt, "prompt A");
+        assert_eq!(get_profile(&second).unwrap().persona_prompt, "prompt B");
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_and_delete_reject_a_path_traversal_id() {
+        let dir = scratch_config_dir("profiles-traversal");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        // Lives one level above the profiles/ dir the traversal id targets.
+        let sentinel = dir.join("sentinel.md");
+        std::fs::write(&sentinel, "untouched").unwrap();
+        let traversal_id = "custom-../sentinel";
+
+        assert!(
+            update_custom_profile(traversal_id, &sample_profile_data("Name", "prompt")).is_err(),
+            "a path traversal id must be rejected on update"
+        );
+        assert!(
+            delete_custom_profile(traversal_id).is_err(),
+            "a path traversal id must be rejected on delete"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "untouched",
+            "a file outside the profiles dir must never be touched"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn run_snapshot_keeps_the_loaded_version_even_after_a_change_or_deletion() {
+        let dir = scratch_config_dir("profiles-snapshot");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let id =
+            save_custom_profile(&sample_profile_data("Snapshot Profile", "prompt v1")).unwrap();
+
+        let run_id = format!("run-kt847-{}", std::process::id());
+        let loaded = get_profile_snapshot(&run_id, &id).expect("must resolve on first load");
+        assert_eq!(loaded.persona_prompt, "prompt v1");
+
+        update_custom_profile(&id, &sample_profile_data("Snapshot Profile", "prompt v2")).unwrap();
+
+        let still_loaded =
+            get_profile_snapshot(&run_id, &id).expect("must keep the pinned version");
+        assert_eq!(still_loaded.persona_prompt, "prompt v1");
+
+        delete_custom_profile(&id).unwrap();
+        let after_delete =
+            get_profile_snapshot(&run_id, &id).expect("must keep the pinned version after delete");
+        assert_eq!(after_delete.persona_prompt, "prompt v1");
+
+        let other_run = get_profile_snapshot("run-other-kt847", &id);
+        assert!(other_run.is_none());
+
+        release_profiles_snapshot(&run_id);
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
 
     #[test]
     fn parse_builtin_profiles() {

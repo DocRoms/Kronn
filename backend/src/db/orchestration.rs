@@ -2388,8 +2388,8 @@ pub struct CliProvisioningCheckpoint<'a> {
     pub brief: &'a DiscussionMessage,
     /// The exact `Cli` worker target the brief is addressed to.
     pub target: &'a MessageTarget,
-    /// The durable "session attached to execution X, child room Y" notice for the
-    /// ORIGIN room — the session just left it, so this must never be silent (DoD-6).
+    /// The durable "session accepted execution X for child room Y" notice for the
+    /// origin room. The session stays in that room while the worker grant is active.
     pub attach_notice: &'a DiscussionMessage,
     pub actor: &'a OrchestrationActor,
 }
@@ -2418,10 +2418,11 @@ pub enum CliCheckpointOutcome {
 /// The final anti-race checkpoint of a CLI-worker handshake (KT-328 tranche 2). In ONE
 /// SQLite transaction it (1) resumes the durable hold `Blocked → Provisioning` (the
 /// park set `blocked_from = Provisioning`, so it clears back exactly there — ADR §3),
-/// (2) posts the work brief into the CHILD with the exact `Cli` target and ZERO
-/// dispatch, (3) CAS `Provisioning → Working`, (4) CAS the task `Todo → InProgress` as
-/// the sole anti-race authority, (5) settles the offer `accepting → accepted`, and (6)
-/// posts the durable attach notice into the ORIGIN room. Nothing is visible until
+/// (2) posts the durable work brief into the CHILD with the exact `Cli` target and ZERO
+/// dispatch while the accepting API returns its content directly, (3) CAS
+/// `Provisioning → Working`, (4) CAS the task `Todo → InProgress` as the sole anti-race
+/// authority, (5) settles the offer `accepting → accepted`, and (6) posts the durable
+/// activation notice into the ORIGIN room. Nothing is visible until
 /// `commit`; any refusal or raced move rolls the ENTIRE commit back (the `Transaction`
 /// drops un-committed). Idempotent: an already-`accepted` offer short-circuits to
 /// `AlreadyCommitted` before touching anything, and the brief/notice ids are
@@ -2461,8 +2462,9 @@ pub fn commit_cli_provisioning_checkpoint(
         return Ok(CliCheckpointOutcome::ExecutionRaced);
     }
 
-    // (2) Work brief into the CHILD: exact Cli target, ZERO dispatch (no native spawn;
-    // the joined worker is woken via wait_for_peer — KT-330).
+    // (2) Durable work brief into the CHILD: exact Cli target, ZERO dispatch. The
+    // accepting API returns the same content directly because the joined session keeps
+    // polling its principal room rather than transferring into this child.
     let targets = [input.target.clone()];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         &tx,
@@ -2507,8 +2509,8 @@ pub fn commit_cli_provisioning_checkpoint(
         return Ok(CliCheckpointOutcome::ExecutionRaced);
     }
 
-    // (6) Durable attach notice in the ORIGIN room (no target, no dispatch → visible
-    // timeline entry, no spawn) — the session just left origin, never silently (DoD-6).
+    // (6) Durable activation notice in the ORIGIN room (no target, no dispatch → visible
+    // timeline entry, no spawn). The session remains in this room.
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         &tx,
         input.origin_discussion_id,
@@ -2904,9 +2906,9 @@ pub struct EscalationDelivery<'a> {
 /// (KT-319 tranche 3b, DoD-9). The offer id is minted server-side FIRST so the pre-built
 /// `control_message` embeds the exact id; the checkpoint opens the offer with that id and
 /// posts the message inside ONE tx, so the message body and the offer row can never
-/// disagree. `sub_discussion_id` is BOTH the offer origin and child — the worker is
-/// already in the sub-discussion (it never left during the review), so it is re-offered
-/// and woken in place, and the accept routes to the rework checkpoint (no session move).
+/// disagree. New execution-scoped CLI workers remain in `origin_discussion_id`, while
+/// `child_discussion_id` remains the durable task/evidence room. Legacy workers already
+/// moved into the child may still use the same id for both fields.
 pub struct ReworkReoffer<'a> {
     /// Pre-generated opaque offer id (embedded in `control_message`).
     pub offer_id: &'a str,
@@ -2914,10 +2916,12 @@ pub struct ReworkReoffer<'a> {
     pub new_attempt_no: u32,
     /// The worker session the re-offer targets (this execution's exact CLI worker).
     pub target_cli_session_id: i64,
-    /// The worker's sub-discussion — offer origin AND child (re-offered in place).
-    pub sub_discussion_id: &'a str,
+    /// The room that still owns the worker session and receives its control offer.
+    pub origin_discussion_id: &'a str,
+    /// The execution's durable task/evidence room.
+    pub child_discussion_id: &'a str,
     /// Pre-built control-offer message (deterministic id per `(exec, new_attempt)`, embeds
-    /// `offer_id`), posted to the worker in the child with ZERO dispatch.
+    /// `offer_id`), posted to the worker in its owning room with ZERO dispatch.
     pub control_message: &'a DiscussionMessage,
     /// The exact `Cli` target the control offer is addressed to.
     pub control_target: &'a MessageTarget,
@@ -3232,15 +3236,15 @@ pub fn commit_review_checkpoint(
                 // re-offer can only `Opened` — never `SessionCommittedElsewhere` onto itself.
                 crate::db::worker_offers::cancel_live_offers_for_execution(&tx, input.exec_id)?;
                 // Open the re-offer with the pre-minted id the control message already embeds,
-                // targeting the worker's session; origin == child == the sub-discussion (the
-                // worker never left, so it is re-offered + woken in place).
+                // targeting the exact worker session. Its owning principal room receives the
+                // control turn while the child remains the execution's task/evidence room.
                 let new_offer = crate::db::worker_offers::NewWorkerOffer {
                     id: Some(re.offer_id),
                     task_execution_id: input.exec_id,
                     attempt_no: re.new_attempt_no,
                     target_cli_session_id: re.target_cli_session_id,
-                    origin_discussion_id: re.sub_discussion_id,
-                    child_discussion_id: re.sub_discussion_id,
+                    origin_discussion_id: re.origin_discussion_id,
+                    child_discussion_id: re.child_discussion_id,
                     expires_at: None,
                     offer_message_id: None,
                     reason: None,
@@ -3253,7 +3257,7 @@ pub fn commit_review_checkpoint(
                             let targets = [re.control_target.clone()];
                             crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
                                     &tx,
-                                    re.sub_discussion_id,
+                                    re.origin_discussion_id,
                                     re.control_message,
                                     &targets,
                                     &[],
@@ -4009,11 +4013,10 @@ fn notify_principal_of_terminal(
     Ok(())
 }
 
-/// KT-320 DoD-9 — a joined CLI worker physically leaves the origin room while
-/// it works in the child. Every terminal transition returns that exact session
-/// to the origin and leaves a durable trace in BOTH rooms, in the same savepoint
-/// as the terminal CAS. Native agents have no movable source binding, so this is
-/// deliberately CLI-only.
+/// Compatibility return for CLI workers accepted by older bridges, which physically
+/// moved the session into the child. New execution-scoped grants already leave the
+/// session in its origin; in that case this is a validated no-op and emits no false
+/// "returned" trace. Native agents have no movable source binding.
 fn return_cli_worker_to_origin(
     conn: &Connection,
     exec_id: &str,
@@ -4043,7 +4046,7 @@ fn return_cli_worker_to_origin(
         return Ok(());
     }
 
-    crate::db::cli_worker_bindings::return_to_origin(
+    let moved = crate::db::cli_worker_bindings::return_to_origin(
         conn,
         exec_id,
         session_pk,
@@ -4051,6 +4054,9 @@ fn return_cli_worker_to_origin(
         &origin,
         &child,
     )?;
+    if !moved {
+        return Ok(());
+    }
 
     let worker = worker_agent.unwrap_or_else(|| "CLI worker".to_string());
     let terminal = terminal.as_str();
@@ -5042,6 +5048,7 @@ fn restore_reassigned_cli_worker_to_origin(
         &execution.parent_discussion_id,
         child,
     )
+    .map(|_| ())
 }
 
 pub fn reassign_execution_worker(

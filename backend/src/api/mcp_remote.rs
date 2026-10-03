@@ -439,6 +439,20 @@ pub async fn qp_run(
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    let approval_prompt = qp.clone();
+    if let Err(error) = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn,
+                &approval_prompt,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+    {
+        return Json(ApiResponse::err(format!("preflight_failed:{error}")));
+    }
 
     let launch = req.launch.clone().unwrap_or_default();
     let target_project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
@@ -703,6 +717,20 @@ pub async fn qp_batch_run(
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    let approval_prompt = qp.clone();
+    if let Err(error) = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn,
+                &approval_prompt,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+    {
+        return Json(ApiResponse::err(format!("preflight_failed:{error}")));
+    }
 
     let (secret, retention_days) = {
         let config = state.config.read().await;

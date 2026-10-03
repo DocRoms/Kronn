@@ -463,6 +463,107 @@ pub fn find_config_for_server(
         .map(|c| c.id))
 }
 
+// ─── Probe results (KT-829) ──────────────────────────────────────────────────
+
+/// Serialize `ProbeDiagnosticCode` → SQL TEXT. Stable wire format independent
+/// of serde so a future enum rename doesn't break stored rows.
+pub(crate) fn probe_code_to_str(code: ProbeDiagnosticCode) -> &'static str {
+    match code {
+        ProbeDiagnosticCode::Ok => "ok",
+        ProbeDiagnosticCode::Unauthorized => "unauthorized",
+        ProbeDiagnosticCode::Forbidden => "forbidden",
+        ProbeDiagnosticCode::NotFound => "not_found",
+        ProbeDiagnosticCode::InvalidHeader => "invalid_header",
+        ProbeDiagnosticCode::UnexpectedOutput => "unexpected_output",
+        ProbeDiagnosticCode::Network => "network",
+        ProbeDiagnosticCode::CliMissing => "cli_missing",
+        ProbeDiagnosticCode::CliVersionTooOld => "cli_version_too_old",
+        ProbeDiagnosticCode::CliNotAuthenticated => "cli_not_authenticated",
+        ProbeDiagnosticCode::Other => "other",
+    }
+}
+
+/// Parse SQL TEXT → `ProbeDiagnosticCode`. Unknown values fall back to
+/// `Other` — safer than failing a whole config list over one stale row.
+pub(crate) fn parse_probe_code(value: &str) -> ProbeDiagnosticCode {
+    match value {
+        "ok" => ProbeDiagnosticCode::Ok,
+        "unauthorized" => ProbeDiagnosticCode::Unauthorized,
+        "forbidden" => ProbeDiagnosticCode::Forbidden,
+        "not_found" => ProbeDiagnosticCode::NotFound,
+        "invalid_header" => ProbeDiagnosticCode::InvalidHeader,
+        "unexpected_output" => ProbeDiagnosticCode::UnexpectedOutput,
+        "network" => ProbeDiagnosticCode::Network,
+        "cli_missing" => ProbeDiagnosticCode::CliMissing,
+        "cli_version_too_old" => ProbeDiagnosticCode::CliVersionTooOld,
+        "cli_not_authenticated" => ProbeDiagnosticCode::CliNotAuthenticated,
+        _ => ProbeDiagnosticCode::Other,
+    }
+}
+
+/// Persist (overwrite) the last probe result for one config's access
+/// (`"api"` / `"mcp"` / `"cli"`).
+pub fn upsert_probe_result(
+    conn: &Connection,
+    config_id: &str,
+    access: &str,
+    ok: bool,
+    code: ProbeDiagnosticCode,
+    summary: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mcp_probe_results (config_id, access, ok, code, summary, tested_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(config_id, access) DO UPDATE SET
+           ok = excluded.ok,
+           code = excluded.code,
+           summary = excluded.summary,
+           tested_at = excluded.tested_at",
+        params![
+            config_id,
+            access,
+            ok as i32,
+            probe_code_to_str(code),
+            summary,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Every config's last probe results, keyed by `config_id`. Loaded once and
+/// reused across every row in `list_configs_display` to avoid a query per
+/// config.
+fn list_last_probes(conn: &Connection) -> Result<HashMap<String, Vec<McpLastProbe>>> {
+    let mut stmt = conn.prepare(
+        "SELECT config_id, access, ok, code, summary, tested_at FROM mcp_probe_results",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let config_id: String = row.get(0)?;
+        let access: String = row.get(1)?;
+        let ok: i32 = row.get(2)?;
+        let code: String = row.get(3)?;
+        let summary: String = row.get(4)?;
+        let tested_at: String = row.get(5)?;
+        Ok((
+            config_id,
+            McpLastProbe {
+                access,
+                ok: ok != 0,
+                code: parse_probe_code(&code),
+                summary,
+                tested_at,
+            },
+        ))
+    })?;
+    let mut by_config: HashMap<String, Vec<McpLastProbe>> = HashMap::new();
+    for row in rows {
+        let (config_id, probe) = row?;
+        by_config.entry(config_id).or_default().push(probe);
+    }
+    Ok(by_config)
+}
+
 // ─── Display helpers ─────────────────────────────────────────────────────────
 
 /// Build McpConfigDisplay list with masked secrets and server names.
@@ -472,6 +573,7 @@ pub fn list_configs_display(
     secret: Option<&str>,
 ) -> Result<Vec<McpConfigDisplay>> {
     let configs = list_configs(conn)?;
+    let mut last_probes = list_last_probes(conn)?;
     let preferences = list_config_preferences(conn)?;
     let servers = list_servers(conn)?;
     let registry = crate::core::registry::builtin_registry();
@@ -517,6 +619,24 @@ pub fn list_configs_display(
                 }
             } else {
                 false
+            };
+
+            let (interfaces, effective_kind, credential_source) = match server_map.get(&c.server_id)
+            {
+                Some(server) => (
+                    crate::core::registry::available_plugin_interfaces(server),
+                    crate::core::registry::effective_plugin_kind(server),
+                    crate::core::registry::credential_source(server),
+                ),
+                // Orphaned config (server row missing): no capability to
+                // offer, badge falls back to the same default the frontend
+                // used when it couldn't resolve a registry descriptor.
+                None => (Vec::new(), PluginKind::default(), CredentialSource::default()),
+            };
+            let effective_preferred_interface = if interfaces.contains(&preferred_interface) {
+                preferred_interface
+            } else {
+                interfaces.first().copied().unwrap_or_default()
             };
 
             let registry_drift = server_map.get(&c.server_id).and_then(|server| {
@@ -579,6 +699,8 @@ pub fn list_configs_display(
                 }
             });
 
+            let config_last_probes = last_probes.remove(&c.id).unwrap_or_default();
+
             McpConfigDisplay {
                 id: c.id,
                 server_id: c.server_id.clone(),
@@ -599,6 +721,12 @@ pub fn list_configs_display(
                 host_sync: c.host_sync,
                 preferred_interface,
                 registry_drift,
+                interfaces,
+                effective_kind,
+                effective_preferred_interface,
+                credential_source,
+                merged_into_existing: None,
+                last_probes: config_last_probes,
             }
         })
         .collect())
@@ -967,6 +1095,129 @@ mod tests {
             !disp[0].secrets_broken,
             "no active key → do not false-flag broken"
         );
+    }
+
+    // ── KT-829: last probe result, persisted per (config, access) ────────
+
+    #[test]
+    fn upsert_probe_result_is_read_back_by_list_configs_display() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("srv-probe")).unwrap();
+        let cfg = crate::models::McpConfig {
+            id: "cfg-probe".into(),
+            server_id: "srv-probe".into(),
+            label: "L".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            config_hash: "h-probe".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+            include_general: true,
+        };
+        insert_config(&conn, &cfg).unwrap();
+
+        upsert_probe_result(
+            &conn,
+            "cfg-probe",
+            "api",
+            true,
+            ProbeDiagnosticCode::Ok,
+            "GET /me authenticated successfully",
+        )
+        .unwrap();
+        upsert_probe_result(
+            &conn,
+            "cfg-probe",
+            "cli",
+            false,
+            ProbeDiagnosticCode::CliNotAuthenticated,
+            "`glab auth status` did not confirm an active session",
+        )
+        .unwrap();
+
+        let display = list_configs_display(&conn, None).unwrap();
+        let mut probes = display[0].last_probes.clone();
+        probes.sort_by(|a, b| a.access.cmp(&b.access));
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0].access, "api");
+        assert!(probes[0].ok);
+        assert_eq!(probes[0].code, ProbeDiagnosticCode::Ok);
+        assert_eq!(probes[1].access, "cli");
+        assert!(!probes[1].ok);
+        assert_eq!(probes[1].code, ProbeDiagnosticCode::CliNotAuthenticated);
+    }
+
+    #[test]
+    fn upsert_probe_result_overwrites_the_previous_result_for_the_same_access() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("srv-probe-2")).unwrap();
+        let cfg = crate::models::McpConfig {
+            id: "cfg-probe-2".into(),
+            server_id: "srv-probe-2".into(),
+            label: "L".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            config_hash: "h-probe-2".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+            include_general: true,
+        };
+        insert_config(&conn, &cfg).unwrap();
+
+        upsert_probe_result(
+            &conn,
+            "cfg-probe-2",
+            "api",
+            false,
+            ProbeDiagnosticCode::Unauthorized,
+            "first attempt",
+        )
+        .unwrap();
+        upsert_probe_result(
+            &conn,
+            "cfg-probe-2",
+            "api",
+            true,
+            ProbeDiagnosticCode::Ok,
+            "second attempt",
+        )
+        .unwrap();
+
+        let display = list_configs_display(&conn, None).unwrap();
+        assert_eq!(
+            display[0].last_probes.len(),
+            1,
+            "a re-test overwrites the row, it does not accumulate history"
+        );
+        assert!(display[0].last_probes[0].ok);
+        assert_eq!(display[0].last_probes[0].summary, "second attempt");
+    }
+
+    #[test]
+    fn list_configs_display_has_no_probes_for_a_never_tested_config() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("srv-untested")).unwrap();
+        let cfg = crate::models::McpConfig {
+            id: "cfg-untested".into(),
+            server_id: "srv-untested".into(),
+            label: "L".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            config_hash: "h-untested".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+            include_general: true,
+        };
+        insert_config(&conn, &cfg).unwrap();
+
+        let display = list_configs_display(&conn, None).unwrap();
+        assert!(display[0].last_probes.is_empty());
     }
 
     #[test]

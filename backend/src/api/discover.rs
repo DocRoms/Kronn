@@ -367,7 +367,7 @@ fn gitlab_host_from_process_env() -> Option<String> {
 }
 
 /// Normalize a repo URL for comparison (strip .git suffix, lowercase, strip protocol prefix)
-fn normalize_repo_url(url: &str) -> String {
+pub(crate) fn normalize_repo_url(url: &str) -> String {
     url.to_lowercase()
         .trim_end_matches('/')
         .trim_end_matches(".git")

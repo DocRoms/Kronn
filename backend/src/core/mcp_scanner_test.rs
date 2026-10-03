@@ -786,11 +786,44 @@ command = "manual-command"
     #[test]
     #[serial]
     #[serial(kronn_templates_env)]
+    fn ensure_redirectors_skips_when_the_entry_file_does_not_exist_yet() {
+        // KT-841 — a bootstrap-only `docs/` skeleton (audit never ran, or
+        // still mid-Step-1) has no `docs/AGENTS.md` yet. Posting a redirector
+        // that points at it would be a dead link, not a redirect: no file
+        // must be created until the real target exists.
+        let tmp = setup_tmp("redir-no-target");
+        std::fs::create_dir_all(tmp.join("docs")).unwrap();
+        // docs/ exists but docs/AGENTS.md does NOT.
+
+        let tpl = std::env::temp_dir().join("kronn-test-templates-no-target");
+        let _ = std::fs::remove_dir_all(&tpl);
+        std::fs::create_dir_all(&tpl).unwrap();
+        std::fs::write(tpl.join("AGENTS.md"), "Read docs/AGENTS.md").unwrap();
+        std::fs::write(tpl.join("CLAUDE.md"), "Read docs/AGENTS.md").unwrap();
+
+        std::env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
+        super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
+
+        assert!(
+            !tmp.join("AGENTS.md").exists(),
+            "no redirector must be posted before docs/AGENTS.md exists"
+        );
+        assert!(!tmp.join("CLAUDE.md").exists());
+
+        cleanup(&tmp);
+        let _ = std::fs::remove_dir_all(&tpl);
+    }
+
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
     fn ensure_redirectors_without_agent_signals_creates_only_shared_entry() {
         let tmp = setup_tmp("redir-create");
         // A docs directory makes the project eligible, but is not itself an
-        // agent-specific signal.
+        // agent-specific signal. `docs/AGENTS.md` must exist (KT-841): it's
+        // the redirector's actual target — the audit already ran.
         std::fs::create_dir_all(tmp.join("docs")).unwrap();
+        std::fs::write(tmp.join("docs/AGENTS.md"), "# Entry point").unwrap();
 
         // Create a minimal templates dir with redirectors
         let tpl = std::env::temp_dir().join("kronn-test-templates-redir");
@@ -834,6 +867,8 @@ command = "manual-command"
     fn ensure_redirectors_does_not_overwrite_existing() {
         let tmp = setup_tmp("redir-no-overwrite");
         std::fs::create_dir_all(tmp.join("docs")).unwrap();
+        // KT-841 — the redirector's target must exist for it to be posted.
+        std::fs::write(tmp.join("docs/AGENTS.md"), "# Entry point").unwrap();
 
         // Pre-create a CLAUDE.md with custom content
         std::fs::write(tmp.join("CLAUDE.md"), "Custom content").unwrap();

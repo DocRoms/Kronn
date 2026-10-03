@@ -21,7 +21,8 @@ const COLUMNS: &str =
     "id, runtime_target_id, agent_type, model_id, display_name, display_alias, provenance, \
     availability, unavailable_reason, unavailable_detail, capabilities_json, \
     reasoning_modes_json, default_reasoning_mode, tier_assignment, cost_hint, privacy_note, \
-    manual_origin, first_seen_at, last_seen_at, last_checked_at, created_at, updated_at";
+    manual_origin, first_seen_at, last_seen_at, last_checked_at, created_at, updated_at, \
+    resolved_model, description";
 
 pub fn canonical_id(runtime_target_id: &str, model_id: &str) -> String {
     let payload = format!("{runtime_target_id}\0{model_id}");
@@ -235,6 +236,8 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
         agent_type: parse_agent_type(&row.get::<_, String>(2)?)?,
         model_id: row.get(3)?,
         display_name: row.get(4)?,
+        resolved_model: row.get(22)?,
+        description: row.get(23)?,
         display_alias: row.get(5)?,
         provenance: parse_provenance(&row.get::<_, String>(6)?),
         availability: if row.get::<_, String>(7)? == "available" {
@@ -332,7 +335,7 @@ pub fn create_manual(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10)"
+             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10,NULL,NULL)"
         ),
         params![
             id,
@@ -489,6 +492,8 @@ pub fn resolve_tier_entry(
 pub struct DiscoveredModel {
     pub model_id: String,
     pub display_name: String,
+    pub resolved_model: Option<String>,
+    pub description: Option<String>,
     pub capabilities: Vec<String>,
     pub reasoning_modes: Vec<String>,
     pub default_reasoning_mode: Option<String>,
@@ -568,7 +573,8 @@ pub fn reconcile_live(
                      availability = 'available', unavailable_reason = NULL, \
                      unavailable_detail = NULL, capabilities_json = ?3, \
                      reasoning_modes_json = ?4, default_reasoning_mode = ?5, \
-                     last_seen_at = ?6, last_checked_at = ?6, updated_at = ?6 WHERE id = ?7",
+                     last_seen_at = ?6, last_checked_at = ?6, updated_at = ?6, \
+                     resolved_model = ?8, description = ?9 WHERE id = ?7",
                     params![
                         model.display_name,
                         promoted_alias,
@@ -577,6 +583,8 @@ pub fn reconcile_live(
                         model.default_reasoning_mode,
                         now,
                         id,
+                        model.resolved_model,
+                        model.description,
                     ],
                 )?;
             }
@@ -586,7 +594,7 @@ pub fn reconcile_live(
                 conn.execute(
                     &format!(
                         "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9)"
+                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9,?12,?13)"
                     ),
                     params![
                         id,
@@ -600,6 +608,8 @@ pub fn reconcile_live(
                         now,
                         cost_hint.map(format_cost_hint),
                         privacy_note,
+                        model.resolved_model,
+                        model.description,
                     ],
                 )?;
             }
@@ -842,7 +852,7 @@ pub fn insert_migrated_seed_for_target(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9)"
+             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9,NULL,NULL)"
         ),
         params![
             id,
@@ -977,6 +987,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "shared-model".into(),
                 display_name: "Provider Name".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec!["chat".into(), "tools".into()],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1007,6 +1019,8 @@ mod tests {
         let discovered = vec![DiscoveredModel {
             model_id: "m1".into(),
             display_name: "M1".into(),
+            resolved_model: Some("provider/model-1".into()),
+            description: Some("Provider description".into()),
             capabilities: vec![],
             reasoning_modes: vec![],
             default_reasoning_mode: None,
@@ -1019,6 +1033,8 @@ mod tests {
             1,
             "replaying the same snapshot must not duplicate rows"
         );
+        assert_eq!(all[0].resolved_model.as_deref(), Some("provider/model-1"));
+        assert_eq!(all[0].description.as_deref(), Some("Provider description"));
     }
 
     #[test]
@@ -1031,6 +1047,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "m1".into(),
                 display_name: "M1".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1057,6 +1075,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "m1".into(),
                 display_name: "M1".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1117,6 +1137,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "m1".into(),
                 display_name: "M1".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1184,6 +1206,8 @@ mod tests {
             agent_type: AgentType::LiteLlm,
             model_id: model_id.into(),
             display_name: model_id.into(),
+            resolved_model: None,
+            description: None,
             display_alias: None,
             provenance: ModelProvenance::Manual,
             availability: ModelAvailability::Available,
@@ -1274,6 +1298,8 @@ mod tests {
                 DiscoveredModel {
                     model_id: "opencode/big-pickle".into(),
                     display_name: "Big Pickle".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1281,6 +1307,8 @@ mod tests {
                 DiscoveredModel {
                     model_id: "anthropic/claude-sonnet-5".into(),
                     display_name: "Claude Sonnet 5".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1312,6 +1340,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "opencode/big-pickle".into(),
                 display_name: "Big Pickle".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1341,6 +1371,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "opencode/big-pickle".into(),
                 display_name: "Big Pickle".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,

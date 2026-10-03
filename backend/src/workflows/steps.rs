@@ -175,6 +175,12 @@ pub async fn execute_step(
     catalog_db: Option<&crate::db::Database>,
     // KT-793 — the step's room capability; only its own agent attempts carry it.
     room: Option<&runner::WorkflowStepBridgeContext>,
+    // ADR-005 slice 1 (KT-847) — `Some(WorkflowRun.id)` pins the
+    // skills/directives/profiles every agent spawn in this call resolves,
+    // so a later step of the SAME run isn't affected by an edit or
+    // deletion made mid-run (see `RunSnapshotCache`). `None` for ad-hoc,
+    // non-persisted invocations (e.g. the workflow "Test step" preview).
+    run_id: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -306,38 +312,28 @@ pub async fn execute_step(
             };
         }
     };
-    let runtime_target_id = resolved_connection
-        .as_ref()
-        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
-    let tier = step
-        .agent_settings
-        .as_ref()
-        .and_then(|settings| settings.tier)
-        .unwrap_or_default();
     let model_override = step_model_override(step, resolved_connection.as_ref());
 
     // Authoritative check immediately before the first possible provider
     // dispatch. Initial workflow-wide validation remains in the runner, but
-    // availability can change while earlier steps execute.
-    if let Some(database) = catalog_db {
-        if let Some(failure) = crate::core::model_catalog::preflight_check(
-            database,
-            runtime_target_id.as_deref(),
-            step.agent.clone(),
-            tier,
-            model_override.as_deref(),
-            model_tiers,
-        )
-        .await
-        {
+    // availability can change while earlier steps execute. The returned
+    // effective model is the only value allowed to reach the transport.
+    let preflight = match preflight_workflow_launch(
+        catalog_db,
+        step,
+        resolved_connection.as_ref(),
+        model_override.as_deref(),
+        model_tiers,
+    )
+    .await
+    {
+        Ok(resolution) => resolution,
+        Err(error) => {
             return StepOutcome {
                 result: StepResult {
                     step_name: step.name.clone(),
                     status: RunStatus::Failed,
-                    output: format!(
-                        "preflight_failed:{}",
-                        serde_json::to_string(&failure).unwrap_or_default()
-                    ),
+                    output: error.to_string(),
                     tokens_used: Some(0),
                     duration_ms: start.elapsed().as_millis() as u64,
                     started_at: None,
@@ -345,7 +341,7 @@ pub async fn execute_step(
                     envelope_detected: None,
                     step_kind: Some("preflight_failed".into()),
                     step_agent: Some(step.agent.clone()),
-                    step_model: failure.model_id,
+                    step_model: model_override,
                     step_api_plugin_slug: None,
                     step_api_endpoint_path: None,
                     is_rollback: false,
@@ -359,7 +355,10 @@ pub async fn execute_step(
                 condition_action: None,
             };
         }
-    }
+    };
+    let requested_model = preflight.requested_model;
+    let effective_model = preflight.effective_model;
+    let preflight_warning = preflight.warning;
 
     // Resolve the step's named external connection once, outside the retry
     // loop. Without this a step pointed at a `Custom` connection failed every
@@ -404,11 +403,14 @@ pub async fn execute_step(
             progress_tx.as_ref(),
             activity,
             external_http.as_ref(),
-            model_override.as_deref(),
+            requested_model.as_deref(),
+            effective_model.as_deref(),
+            preflight_warning.as_ref(),
             &mut provenance,
             WorkflowAgentAttemptRole::Initial,
             attempt + 1,
             room,
+            run_id,
         )
         .await
         {
@@ -471,7 +473,7 @@ pub async fn execute_step(
                         );
                         let mut final_validation_error: Option<String> = validation_error.clone();
                         let mut repair_valid = false;
-                        if let Err(error) = preflight_workflow_launch(
+                        let repair_preflight = match preflight_workflow_launch(
                             catalog_db,
                             step,
                             resolved_connection.as_ref(),
@@ -480,14 +482,17 @@ pub async fn execute_step(
                         )
                         .await
                         {
-                            tracing::warn!(
-                                "Step '{}': repair preflight failed: {}",
-                                step.name,
-                                error
-                            );
-                            last_error = error.to_string();
-                            continue;
-                        }
+                            Ok(resolution) => resolution,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "Step '{}': repair preflight failed: {}",
+                                    step.name,
+                                    error
+                                );
+                                last_error = error.to_string();
+                                continue;
+                            }
+                        };
                         let repair_res = run_agent_with_timeout(
                             step,
                             project_path,
@@ -502,11 +507,14 @@ pub async fn execute_step(
                             None,
                             activity,
                             external_http.as_ref(),
-                            model_override.as_deref(),
+                            repair_preflight.requested_model.as_deref(),
+                            repair_preflight.effective_model.as_deref(),
+                            repair_preflight.warning.as_ref(),
                             &mut provenance,
                             WorkflowAgentAttemptRole::Repair,
                             attempt + 1,
                             room,
+                            run_id,
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -574,7 +582,7 @@ pub async fn execute_step(
                             );
                             let escalated = escalation_step(step);
                             let escalated_model = step_model_override(&escalated, None);
-                            if let Err(error) = preflight_workflow_launch(
+                            let escalation_preflight = match preflight_workflow_launch(
                                 catalog_db,
                                 &escalated,
                                 None,
@@ -583,14 +591,17 @@ pub async fn execute_step(
                             )
                             .await
                             {
-                                tracing::warn!(
-                                    target: "kronn::ollama::escalation",
-                                    step = %step.name,
-                                    error = %error,
-                                    "escalation catalog preflight refused dispatch"
-                                );
-                                continue;
-                            }
+                                Ok(resolution) => resolution,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: "kronn::ollama::escalation",
+                                        step = %step.name,
+                                        error = %error,
+                                        "escalation catalog preflight refused dispatch"
+                                    );
+                                    continue;
+                                }
+                            };
                             let esc_res = run_agent_with_timeout(
                                 &escalated,
                                 project_path,
@@ -605,11 +616,14 @@ pub async fn execute_step(
                                 None,
                                 activity,
                                 None,
-                                escalated_model.as_deref(),
+                                escalation_preflight.requested_model.as_deref(),
+                                escalation_preflight.effective_model.as_deref(),
+                                escalation_preflight.warning.as_ref(),
                                 &mut provenance,
                                 WorkflowAgentAttemptRole::Escalation,
                                 attempt + 1,
                                 room,
+                                run_id,
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -719,6 +733,7 @@ pub async fn execute_step(
                         catalog_db,
                         &mut provenance,
                         attempt + 1,
+                        run_id,
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls, selected_attempt)) => {
                             total_tokens = add_tokens(total_tokens, debate_tokens);
@@ -1045,9 +1060,22 @@ async fn preflight_workflow_launch(
     connection: Option<&ExternalApiConnection>,
     effective_model: Option<&str>,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
-) -> Result<()> {
+) -> Result<CatalogPreflightResolution> {
     let Some(database) = catalog_db else {
-        return Ok(());
+        let model = runner::effective_model_flag(
+            effective_model,
+            &step.agent,
+            step.agent_settings
+                .as_ref()
+                .and_then(|settings| settings.tier)
+                .unwrap_or_default(),
+            model_tiers,
+        );
+        return Ok(CatalogPreflightResolution {
+            requested_model: model.clone(),
+            effective_model: model,
+            warning: None,
+        });
     };
     let runtime_target_id = connection
         .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
@@ -1056,7 +1084,7 @@ async fn preflight_workflow_launch(
         .as_ref()
         .and_then(|settings| settings.tier)
         .unwrap_or_default();
-    if let Some(failure) = crate::core::model_catalog::preflight_check(
+    crate::core::model_catalog::preflight_resolve(
         database,
         runtime_target_id.as_deref(),
         step.agent.clone(),
@@ -1065,13 +1093,12 @@ async fn preflight_workflow_launch(
         model_tiers,
     )
     .await
-    {
-        anyhow::bail!(
+    .map_err(|failure| {
+        anyhow::anyhow!(
             "model_catalog_preflight_failed:{}",
             serde_json::to_string(&failure).unwrap_or_default()
-        );
-    }
-    Ok(())
+        )
+    })
 }
 
 /// Run an agent with optional stall timeout.
@@ -1094,11 +1121,15 @@ async fn run_agent_with_timeout(
     progress_tx: Option<&ProgressSender>,
     activity: Option<&AgentActivitySink>,
     external_http: Option<&runner::ExternalHttpRuntime>,
+    requested_model: Option<&str>,
     effective_model: Option<&str>,
+    preflight_warning: Option<&CatalogPreflightWarning>,
     provenance: &mut WorkflowAgentProvenance,
     role: WorkflowAgentAttemptRole,
     retry: u32,
     room: Option<&runner::WorkflowStepBridgeContext>,
+    // See `execute_step`'s `run_id` doc — forwarded unchanged.
+    run_id: Option<&str>,
 ) -> Result<AgentOutput> {
     let started_at = chrono::Utc::now();
     let started = Instant::now();
@@ -1157,6 +1188,7 @@ async fn run_agent_with_timeout(
             // shared by every OpenAI-compatible connection, so without this the
             // runner refuses the spawn outright.
             external_http,
+            run_snapshot_id: run_id,
             tools: native_tools,
             // The bridge's discussion is the room the capability names.
             discussion_id: room.map(|room| room.discussion_id.as_str()),
@@ -1199,11 +1231,9 @@ async fn run_agent_with_timeout(
             .agent_settings
             .as_ref()
             .and_then(|settings| settings.connection_id.clone()),
-        requested_model: step
-            .agent_settings
-            .as_ref()
-            .and_then(|settings| settings.model.clone()),
+        requested_model: requested_model.map(str::to_string),
         resolved_model: runtime.resolved_model,
+        preflight_warning: preflight_warning.cloned(),
         model_applied: runtime.model_applied,
         observed_models: runtime.observed_models,
         format_fallback: runtime.format_fallback,
@@ -1532,6 +1562,8 @@ async fn run_multi_agent_debate(
     catalog_db: Option<&crate::db::Database>,
     provenance: &mut WorkflowAgentProvenance,
     retry: u32,
+    // See `execute_step`'s `run_id` doc — forwarded unchanged.
+    run_id: Option<&str>,
 ) -> Result<(String, Option<u64>, Vec<NativeToolCallLog>, Option<u32>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
@@ -1599,7 +1631,7 @@ async fn run_multi_agent_debate(
         let reviewer_connection = reviewer_shares_the_step_connection
             .then_some(author_connection)
             .flatten();
-        preflight_workflow_launch(
+        let reviewer_preflight = preflight_workflow_launch(
             catalog_db,
             &reviewer_step,
             reviewer_connection,
@@ -1626,11 +1658,14 @@ async fn run_multi_agent_debate(
             reviewer_shares_the_step_connection
                 .then_some(external_http)
                 .flatten(),
-            reviewer_model.as_deref(),
+            reviewer_preflight.requested_model.as_deref(),
+            reviewer_preflight.effective_model.as_deref(),
+            reviewer_preflight.warning.as_ref(),
             provenance,
             WorkflowAgentAttemptRole::Review,
             retry,
             None,
+            run_id,
         )
         .await?;
         tokens = add_tokens(tokens, rev.tokens_used);
@@ -1668,7 +1703,7 @@ async fn run_multi_agent_debate(
              You are the PLAN AUTHOR ({author:?}). Address the reviewer's critique above: revise your plan/output accordingly. Re-emit your COMPLETE updated output in the SAME format you used originally. If you have addressed everything and now agree the result is ready, additionally end with a line containing exactly [CONSENSUS: APPROVED].{addendum}",
             transcript = transcript, author = step.agent, addendum = envelope_addendum
         );
-        preflight_workflow_launch(
+        let author_preflight = preflight_workflow_launch(
             catalog_db,
             &author_step,
             author_connection,
@@ -1690,11 +1725,14 @@ async fn run_multi_agent_debate(
             progress_tx,
             activity,
             external_http,
-            author_model,
+            author_preflight.requested_model.as_deref(),
+            author_preflight.effective_model.as_deref(),
+            author_preflight.warning.as_ref(),
             provenance,
             WorkflowAgentAttemptRole::Author,
             retry,
             None,
+            run_id,
         )
         .await?;
         tokens = add_tokens(tokens, auth.tokens_used);
@@ -2979,6 +3017,8 @@ mod http_native_tool_step_tests {
                 &[crate::db::model_catalog::DiscoveredModel {
                     model_id: model.clone(),
                     display_name: model,
+                    resolved_model: None,
+                    description: None,
                     capabilities,
                     reasoning_modes: Vec::new(),
                     default_reasoning_mode: None,
@@ -3035,6 +3075,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3092,6 +3133,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3108,7 +3150,10 @@ mod http_native_tool_step_tests {
             provenance.attempts[0].resolved_model.as_deref(),
             Some("model-b")
         );
-        assert!(provenance.attempts[0].requested_model.is_none());
+        assert_eq!(
+            provenance.attempts[0].requested_model.as_deref(),
+            Some("model-b")
+        );
         assert!(
             provenance.attempts[0].observed_models.is_empty(),
             "provider did not report a model"
@@ -3117,6 +3162,123 @@ mod http_native_tool_step_tests {
         let requests = provider_b.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert!(String::from_utf8_lossy(&requests[0].body).contains("\"model\":\"model-b\""));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disappeared_model_dispatches_same_target_replacement_and_records_both_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = dir.path().join("argv.txt");
+        let fixture_body = [
+            format!(
+                "cat >/dev/null\nprintf '%s\\n' \"$*\" > '{}'\n",
+                argv.display()
+            ),
+            r#"
+printf '%s\n' '{"type":"assistant","message":{"model":"provider/canonical","content":[]}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"replacement used"}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":2}}'
+"#
+            .to_owned(),
+        ]
+        .concat();
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &fixture_body);
+        let project = dir.path().to_string_lossy().into_owned();
+        let work_dir = runner::resolve_agent_work_dir(Some(&project), &project).unwrap();
+        let _route = runner::test_acp_routes::route(
+            &work_dir,
+            Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                fixture.to_string_lossy(),
+                Some("current-alias".into()),
+                false,
+            )),
+        );
+
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
+        db.with_conn(move |conn| {
+            let retired = crate::db::model_catalog::DiscoveredModel {
+                model_id: "retired-alias".into(),
+                display_name: "Retired alias".into(),
+                resolved_model: Some("provider/canonical".into()),
+                description: None,
+                capabilities: vec!["chat".into()],
+                reasoning_modes: Vec::new(),
+                default_reasoning_mode: None,
+            };
+            let current = crate::db::model_catalog::DiscoveredModel {
+                model_id: "current-alias".into(),
+                display_name: "Current alias".into(),
+                resolved_model: Some("provider/canonical".into()),
+                description: None,
+                capabilities: vec!["chat".into()],
+                reasoning_modes: Vec::new(),
+                default_reasoning_mode: None,
+            };
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[retired, current.clone()],
+            )?;
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[current],
+            )
+        })
+        .await
+        .unwrap();
+        let step = WorkflowStep {
+            name: "fallback".into(),
+            step_type: StepType::Agent,
+            agent: AgentType::ClaudeCode,
+            prompt_template: "Use the selected model".into(),
+            agent_settings: Some(AgentSettings {
+                model: Some("retired-alias".into()),
+                tier: Some(ModelTier::Reasoning),
+                reasoning_effort: None,
+                max_tokens: None,
+                connection_id: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let outcome = execute_step(
+            &step,
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&db),
+            None,
+            Some("test-run"),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("replacement used"));
+        let attempt = &outcome.result.agent_provenance.as_ref().unwrap().attempts[0];
+        assert_eq!(attempt.requested_model.as_deref(), Some("retired-alias"));
+        assert_eq!(attempt.resolved_model.as_deref(), Some("current-alias"));
+        let warning = attempt
+            .preflight_warning
+            .as_ref()
+            .expect("the automatic replacement must be visible in provenance");
+        assert_eq!(warning.requested_model, "retired-alias");
+        assert_eq!(warning.effective_model, "current-alias");
+        assert_eq!(warning.reason, ModelUnavailableReason::Disappeared);
+        let args = std::fs::read_to_string(argv).unwrap();
+        assert!(args.contains("--model current-alias"), "argv: {args}");
+        assert!(!args.contains("retired-alias"), "argv: {args}");
     }
 
     #[tokio::test]
@@ -3146,6 +3308,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3198,6 +3361,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3279,6 +3443,7 @@ mod http_native_tool_step_tests {
             Some(tools),
             None,
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3370,6 +3535,7 @@ mod http_native_tool_step_tests {
             Some(tools),
             None,
             None,
+            Some("test-run"),
         )
         .await;
         match previous_host {

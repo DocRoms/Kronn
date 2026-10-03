@@ -442,6 +442,8 @@ async fn bounded_body_and_schema_errors_preserve_last_known_catalogue_without_ec
             &[store::DiscoveredModel {
                 model_id: "last-good:1".into(),
                 display_name: "Last good".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec!["chat".into()],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -551,6 +553,8 @@ async fn inventory_failure_is_compatible_only_after_its_diagnostic_was_saved() {
             &[store::DiscoveredModel {
                 model_id: "preserved:1".into(),
                 display_name: "Preserved".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec!["chat".into()],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,

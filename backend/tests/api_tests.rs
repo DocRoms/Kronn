@@ -2444,7 +2444,7 @@ async fn artifact_import_rollback_leaves_no_origin_mapping_or_partial_resource()
         .db
         .with_conn(|conn| {
             assert_eq!(
-                conn.query_row("SELECT COUNT(*) FROM artifact_import_origins", [], |r| r
+                conn.query_row("SELECT COUNT(*) FROM resource_identities", [], |r| r
                     .get::<_, i64>(0))?,
                 0
             );
@@ -2557,6 +2557,350 @@ async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_ide
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn artifact_import_identities_are_scoped_per_project_and_deduplicated_on_reimport() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let content = serde_json::to_string(&exported["data"]).unwrap();
+    let state = test_state();
+    let now = chrono::Utc::now();
+    for id in ["project-a", "project-b"] {
+        let project = kronn::models::Project {
+            id: id.into(),
+            name: id.into(),
+            path: format!("/tmp/kronn-test-{id}"),
+            repo_url: None,
+            token_override: None,
+            ai_config: kronn::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: kronn::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .db
+            .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+    }
+    let app = build_router_with_auth(state.clone(), false);
+    for project_id in ["project-a", "project-a", "project-b"] {
+        let (_, preview) = post_json(
+            app.clone(),
+            "/api/pages/import/preview",
+            serde_json::json!({
+                "content":content,"project_id":project_id,"approved_quick_exec_ids":["qe-portable"]
+            }),
+        )
+        .await;
+        assert_eq!(preview["data"]["can_import"], true, "{preview}");
+        let (_, imported) = post_json(
+            app.clone(),
+            "/api/pages/import",
+            serde_json::json!({
+                "content":content,"project_id":project_id,"approved_quick_exec_ids":["qe-portable"],
+                "preview_digest":preview["data"]["digest"]
+            }),
+        )
+        .await;
+        assert_eq!(imported["success"], true, "{imported}");
+    }
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                kronn::db::quick_prompts::list_quick_prompts(conn)?.len(),
+                2,
+                "one copy per distinct project; reimporting the same project must reuse it"
+            );
+            let identities: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM resource_identities WHERE kind = 'quick_prompt'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                identities, 2,
+                "one identity row per project — reimporting project-a must update it, not add a row"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn artifact_import_reuses_a_pre_migration_global_identity_when_importing_into_a_project() {
+    // Migration 196 placed every identity recorded before this table existed
+    // into the global scope (project_key = ""). Importing the same slug into
+    // a project whose repo_url is known must still find that row — first the
+    // project scope, then the global one — and reuse it, not create a copy.
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let content = serde_json::to_string(&exported["data"]).unwrap();
+
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "proj-repo".into(),
+        name: "proj-repo".into(),
+        path: "/tmp/kronn-test-proj-repo".into(),
+        repo_url: Some("https://github.com/acme/demo.git".into()),
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    // A quick_prompt already imported previously (e.g. with no project), and
+    // the identity row a pre-slice-3 import — or this table's own migration —
+    // left in the global scope.
+    let existing_quick_prompt = kronn::models::QuickPrompt {
+        id: "existing-qp".into(),
+        pinned: false,
+        name: "Portable analysis".into(),
+        icon: "✨".into(),
+        prompt_template: "Analyse the collected data".into(),
+        variables: vec![],
+        agent: kronn::models::AgentType::ClaudeCode,
+        connection_id: None,
+        project_id: Some("proj-repo".into()),
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: kronn::models::ModelTier::Default,
+        agent_settings: None,
+        description: "Bundled prompt".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::quick_prompts::insert_quick_prompt(conn, &existing_quick_prompt)?;
+            kronn::db::resource_identities::upsert(conn, "", "quick_prompt", "qp-portable", "existing-qp")
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({
+            "content":content,"project_id":"proj-repo","approved_quick_exec_ids":["qe-portable"]
+        }),
+    )
+    .await;
+    assert_eq!(preview["data"]["can_import"], true, "{preview}");
+    let entries = preview["data"]["entries"].as_array().unwrap();
+    let qp_entry = entries
+        .iter()
+        .find(|entry| entry["kind"] == "quick_prompt")
+        .unwrap();
+    assert_eq!(qp_entry["disposition"], "reuse", "{qp_entry}");
+    assert_eq!(
+        qp_entry["existing_id"], "existing-qp",
+        "the global-scope identity left by the migration must be proposed as the candidate: {qp_entry}"
+    );
+
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/pages/import",
+        serde_json::json!({
+            "content":content,"project_id":"proj-repo","approved_quick_exec_ids":["qe-portable"],
+            "preview_digest":preview["data"]["digest"]
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                kronn::db::quick_prompts::list_quick_prompts(conn)?.len(),
+                1,
+                "reusing the existing resource must not create a duplicate copy"
+            );
+            let identities: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM resource_identities WHERE kind = 'quick_prompt'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                identities, 1,
+                "reuse must not add a second identity row next to the global one"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn artifact_import_resolves_workflow_skill_profile_directive_ids_and_warns_on_the_rest() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut bundle = exported["data"].clone();
+    bundle["referenced_workflows"][0]["steps"][0]["skill_ids"] =
+        serde_json::json!(["rust", "custom-does-not-exist"]);
+    bundle["referenced_workflows"][0]["steps"][0]["profile_ids"] =
+        serde_json::json!(["architect", "does-not-exist-profile"]);
+    bundle["referenced_workflows"][0]["steps"][0]["directive_ids"] =
+        serde_json::json!(["token-saver", "does-not-exist-directive"]);
+    // A real registry slug, so a local config for it can be inserted below —
+    // the fixture's own placeholder ("chartbeat") isn't a registered server.
+    bundle["referenced_quick_apis"][0]["api_plugin_slug"] = serde_json::json!("api-chartbeat");
+    let content = bundle.to_string();
+    let state = test_state();
+    // A local, globally-scoped config for the same plugin as the bundled
+    // Quick API's dangling `api_config_id` — exercising the same
+    // `rebind_quick_api_config` the legacy workflow-import endpoint already
+    // reuses for this exact case (ADR-005 slice 3).
+    state
+        .db
+        .with_conn(|conn| {
+            let definition = kronn::core::registry::builtin_registry()
+                .into_iter()
+                .find(|definition| definition.id == "api-chartbeat")
+                .unwrap();
+            kronn::db::mcps::upsert_server(
+                conn,
+                &kronn::models::McpServer {
+                    id: definition.id.clone(),
+                    name: definition.name,
+                    description: definition.description,
+                    transport: definition.transport,
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: definition.api_spec,
+                },
+            )?;
+            kronn::db::mcps::insert_config(
+                conn,
+                &kronn::models::McpConfig {
+                    id: "local-chartbeat-config".into(),
+                    server_id: "api-chartbeat".into(),
+                    label: "Chartbeat".into(),
+                    env_keys: vec![],
+                    env_encrypted: String::new(),
+                    args_override: None,
+                    is_global: true,
+                    include_general: false,
+                    config_hash: "hash".into(),
+                    project_ids: vec![],
+                    host_sync: kronn::models::HostSyncMode::None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["can_import"], true,
+        "a missing instance-bound requirement must not block the import: {preview}"
+    );
+    let warnings = preview["data"]["warnings"].as_array().unwrap();
+    for (kind, id) in [
+        ("skill", "custom-does-not-exist"),
+        ("profile", "does-not-exist-profile"),
+        ("directive", "does-not-exist-directive"),
+    ] {
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w["kind"] == kind && w["id"] == id),
+            "missing {kind} {id} must be signalled clearly: {warnings:?}"
+        );
+    }
+    let (_, imported) = post_json(
+        app,
+        "/api/pages/import",
+        serde_json::json!({
+            "content":content,"approved_quick_exec_ids":["qe-portable"],
+            "preview_digest":preview["data"]["digest"]
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    state
+        .db
+        .with_conn(|conn| {
+            let workflows = kronn::db::workflows::list_workflows(conn)?;
+            let copy = workflows
+                .iter()
+                .find(|w| w.id != "workflow-portable")
+                .unwrap();
+            let step = &copy.steps[0];
+            assert_eq!(
+                step.skill_ids,
+                vec!["rust".to_string()],
+                "the resolvable skill is kept, the dangling one is dropped, not silently kept"
+            );
+            assert_eq!(step.profile_ids, vec!["architect".to_string()]);
+            assert_eq!(step.directive_ids, vec!["token-saver".to_string()]);
+            let apis = kronn::db::quick_apis::list_quick_apis(conn)?;
+            let copied_api = apis.iter().find(|a| a.id != "qa-portable").unwrap();
+            assert_eq!(
+                copied_api.api_config_id, "local-chartbeat-config",
+                "a dangling api_config_id must be rebound to the local config for the same plugin"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2771,6 +3115,677 @@ async fn transform_data_preview_uses_runtime_recipe() {
     assert_eq!(body["data"]["error"], Value::Null);
     assert_eq!(body["data"]["value"]["summary"]["requests"], 42.0);
     assert_eq!(body["data"]["value"]["summary"]["errors"], 5.0);
+}
+
+#[tokio::test]
+async fn live_page_list_filters_by_project_without_changing_the_unfiltered_contract() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, name) in [("page-project-a", "Project A"), ("page-project-b", "Project B")] {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![id, name, format!("/tmp/{id}"), now],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    for (title, project_id) in [
+        ("Project A report", Some("page-project-a")),
+        ("Project B report", Some("page-project-b")),
+        ("General report", None),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/pages",
+            serde_json::json!({
+                "title": title,
+                "html": format!("<h1>{title}</h1>"),
+                "datasets": [],
+                "project_id": project_id,
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+    }
+
+    let (status, filtered) = get_json(app.clone(), "/api/pages?project_id=page-project-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered["success"], true, "{filtered}");
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["data"][0]["title"], "Project A report");
+
+    let (_, unfiltered) = get_json(app, "/api/pages").await;
+    assert_eq!(unfiltered["data"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn project_repository_resources_lists_project_artifacts_without_publishing_them() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["repository-project", "Repository project", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Project health",
+            "html": "<h1>Health</h1>",
+            "datasets": [],
+            "project_id": "repository-project",
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+
+    let (status, response) =
+        get_json(app, "/api/projects/repository-project/repository-resources").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["kronn_exists"], false);
+    let resources = response["data"]["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["kind"], "artifact");
+    assert_eq!(resources[0]["status"], "not_published");
+    assert_eq!(
+        resources[0]["repository_paths"],
+        serde_json::json!([
+            "kronn/artifacts/project-health/artifact.yaml",
+            "kronn/artifacts/project-health/index.html",
+        ]),
+    );
+}
+
+#[tokio::test]
+async fn repository_resource_publish_align_import_and_hash_approval_round_trip() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![
+                        "portable-project",
+                        "Portable project",
+                        project_path,
+                        now.to_rfc3339(),
+                    ],
+                )?;
+                kronn::db::quick_execs::insert_quick_exec(
+                    conn,
+                    &kronn::models::QuickExec {
+                        id: "qe-portable".into(),
+                        name: "Deploy".into(),
+                        icon: "terminal".into(),
+                        description: String::new(),
+                        project_id: Some("portable-project".into()),
+                        command: "deploy".into(),
+                        args: vec!["--token".into(), "literal-secret-value".into()],
+                        timeout_secs: 30,
+                        output_format: Default::default(),
+                        variables: Vec::new(),
+                        pinned: false,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, before) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(before["data"]["kronn_exists"], false);
+    assert!(!project_directory.path().join("kronn").exists());
+
+    let (_, published) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/publish",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "id": "qe-portable",
+            "overwrite_repository_changes": false,
+        }),
+    )
+    .await;
+    assert_eq!(published["success"], true, "{published}");
+    let resource_path = project_directory
+        .path()
+        .join("kronn/quick-execs/deploy.yaml");
+    let published_text = std::fs::read_to_string(&resource_path).unwrap();
+    assert!(!published_text.contains("literal-secret-value"));
+    assert!(published_text.contains("secret://KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
+    let config_text = std::fs::read_to_string(project_directory.path().join("kronn/kronn.toml"))
+        .unwrap();
+    assert!(config_text.contains("KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
+    assert!(!config_text.contains("literal-secret-value"));
+    for relative in [
+        "kronn/kronn.lock",
+        "kronn/kronn.toml",
+        "kronn/INDEX.md",
+        ".agents/skills/kronn/SKILL.md",
+        "docs/AGENTS.md",
+    ] {
+        assert!(
+            project_directory.path().join(relative).is_file(),
+            "{relative}"
+        );
+    }
+
+    let (_, aligned) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(aligned["data"]["resources"][0]["status"], "up_to_date");
+
+    std::fs::write(&resource_path, format!("{published_text}\n")).unwrap();
+    let (_, repository_changed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(
+        repository_changed["data"]["resources"][0]["status"],
+        "repository_modified"
+    );
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
+            item.description = "Kronn edit".into();
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, conflict) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(conflict["data"]["resources"][0]["status"], "conflict");
+    assert!(conflict["data"]["resources"][0]["diff"]
+        .as_str()
+        .unwrap()
+        .contains("--- repository"));
+
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/import",
+        serde_json::json!({ "kind": "quick_exec", "slug": "deploy" }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let (_, awaiting) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(awaiting["data"]["resources"][0]["status"], "up_to_date");
+    assert_eq!(awaiting["data"]["resources"][0]["approval_required"], true);
+
+    let (_, blocked) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(blocked["data"]["success"], false, "{blocked}");
+    assert!(blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+
+    let (_, approved) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/approve",
+        serde_json::json!({ "kind": "quick_exec", "id": "qe-portable" }),
+    )
+    .await;
+    assert_eq!(approved["success"], true, "{approved}");
+    assert_eq!(approved["data"]["approved"], true);
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item = kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?
+                .expect("quick exec");
+            item.args.push("--dry-run".into());
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, changed_hash_blocked) = post_json(
+        app,
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(changed_hash_blocked["data"]["success"], false);
+    assert!(changed_hash_blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+}
+
+#[tokio::test]
+async fn imported_quick_prompt_and_api_execution_require_current_hash_approval() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let now = chrono::Utc::now();
+    let imported_prompt = kronn::models::QuickPrompt {
+        id: "qp-repository-import".into(),
+        name: "Repository prompt".into(),
+        icon: "prompt".into(),
+        prompt_template: "Review this repository".into(),
+        variables: Vec::new(),
+        agent: kronn::models::AgentType::ClaudeCode,
+        connection_id: None,
+        project_id: None,
+        skill_ids: Vec::new(),
+        profile_ids: Vec::new(),
+        directive_ids: Vec::new(),
+        tier: kronn::models::ModelTier::default(),
+        agent_settings: None,
+        description: String::new(),
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let mut local_prompt = imported_prompt.clone();
+    local_prompt.id = "qp-local".into();
+    local_prompt.name = "Local prompt".into();
+    let imported_api = kronn::models::QuickApi {
+        id: "qa-repository-import".into(),
+        name: "Repository API".into(),
+        icon: "api".into(),
+        description: String::new(),
+        project_id: None,
+        api_plugin_slug: "missing-test-plugin".into(),
+        api_config_id: "missing-test-config".into(),
+        api_endpoint_path: "/imported".into(),
+        api_method: Some("GET".into()),
+        api_query: None,
+        api_path_params: None,
+        api_headers: None,
+        api_body: None,
+        api_extract: None,
+        api_pagination: None,
+        api_timeout_ms: None,
+        api_max_retries: None,
+        variables: Vec::new(),
+        profile_ids: Vec::new(),
+        directive_ids: Vec::new(),
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let mut local_api = imported_api.clone();
+    local_api.id = "qa-local".into();
+    local_api.name = "Local API".into();
+
+    state
+        .db
+        .with_conn({
+            let imported_prompt = imported_prompt.clone();
+            let local_prompt = local_prompt.clone();
+            let imported_api = imported_api.clone();
+            let local_api = local_api.clone();
+            move |conn| {
+                kronn::db::quick_prompts::insert_quick_prompt(conn, &imported_prompt)?;
+                kronn::db::quick_prompts::insert_quick_prompt(conn, &local_prompt)?;
+                kronn::db::quick_apis::insert_quick_api(conn, &imported_api)?;
+                kronn::db::quick_apis::insert_quick_api(conn, &local_api)?;
+                kronn::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repository-test",
+                    "quick_prompt",
+                    "repository-prompt",
+                    &imported_prompt.id,
+                    "repository-hash",
+                    "database-hash",
+                    &now.to_rfc3339(),
+                    true,
+                )?;
+                kronn::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repository-test",
+                    "quick_api",
+                    "repository-api",
+                    &imported_api.id,
+                    "repository-hash",
+                    "database-hash",
+                    &now.to_rfc3339(),
+                    true,
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, blocked_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(blocked_prompt["success"], false, "{blocked_prompt}");
+    assert!(blocked_prompt["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let (_, blocked_prompt_batch) = post_json(
+        app.clone(),
+        "/api/mcp/qp-batch-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "items": [{"vars": {}}]}),
+    )
+    .await;
+    assert_eq!(blocked_prompt_batch["success"], false);
+    assert!(blocked_prompt_batch["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+    let (_, blocked_ui_prompt_batch) = post_json(
+        app.clone(),
+        "/api/quick-prompts/qp-repository-import/batch",
+        serde_json::json!({
+            "items": [{"title": "Blocked", "variables": {}}],
+            "batch_name": "Blocked repository prompt",
+        }),
+    )
+    .await;
+    assert_eq!(blocked_ui_prompt_batch["success"], false);
+    assert!(blocked_ui_prompt_batch["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+
+    let (_, blocked_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(blocked_api["data"]["success"], false, "{blocked_api}");
+    assert!(blocked_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let blocked_api_run_id = blocked_api["data"]["run_id"].as_str().unwrap().to_string();
+    let blocked_status = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &blocked_api_run_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        blocked_status.status,
+        kronn::models::SharedRunStatus::PreflightFailed
+    ));
+    let (_, blocked_api_batch) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/batch",
+        serde_json::json!({"items": ["one"]}),
+    )
+    .await;
+    assert!(blocked_api_batch["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+
+    state
+        .db
+        .with_conn({
+            let imported_prompt = imported_prompt.clone();
+            let imported_api = imported_api.clone();
+            move |conn| {
+                let prompt = kronn::core::repository_resources::render_quick_prompt(
+                    &imported_prompt,
+                    "repository-prompt",
+                )
+                .map_err(anyhow::Error::msg)?;
+                kronn::db::repository_resources::approve(
+                    conn,
+                    "repository-test",
+                    "quick_prompt",
+                    "repository-prompt",
+                    &kronn::core::repository_resources::approval_hash(&prompt.document),
+                )?;
+                let api = kronn::core::repository_resources::render_quick_api(
+                    &imported_api,
+                    "repository-api",
+                )
+                .map_err(anyhow::Error::msg)?;
+                kronn::db::repository_resources::approve(
+                    conn,
+                    "repository-test",
+                    "quick_api",
+                    "repository-api",
+                    &kronn::core::repository_resources::approval_hash(&api.document),
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let (_, approved_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(approved_prompt["success"], true, "{approved_prompt}");
+    let (_, approved_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(approved_api["success"], true, "{approved_api}");
+    assert!(approved_api["data"]["run_id"].is_string());
+    assert!(!approved_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let approved_api_run_id = approved_api["data"]["run_id"].as_str().unwrap().to_string();
+    let approved_status = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &approved_api_run_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(
+        approved_status.status,
+        kronn::models::SharedRunStatus::PreflightFailed
+    ));
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut prompt =
+                kronn::db::quick_prompts::get_quick_prompt(conn, "qp-repository-import")?.unwrap();
+            prompt.prompt_template = "Changed after approval".into();
+            prompt.updated_at = chrono::Utc::now();
+            kronn::db::quick_prompts::update_quick_prompt(conn, &prompt)?;
+            let mut api =
+                kronn::db::quick_apis::get_quick_api(conn, "qa-repository-import")?.unwrap();
+            api.api_endpoint_path = "/changed-after-approval".into();
+            api.updated_at = chrono::Utc::now();
+            kronn::db::quick_apis::update_quick_api(conn, &api)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, changed_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": "qp-repository-import", "vars": {}}),
+    )
+    .await;
+    assert_eq!(changed_prompt["success"], false);
+    assert!(changed_prompt["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+    let (_, changed_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert!(changed_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+
+    let (_, local_prompt_run) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": local_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(local_prompt_run["success"], true, "{local_prompt_run}");
+    let (_, local_api_run) = post_json(
+        app,
+        "/api/quick-apis/qa-local/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(local_api_run["success"], true, "{local_api_run}");
+    assert!(local_api_run["data"]["run_id"].is_string());
+    assert!(!local_api_run["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+}
+
+#[tokio::test]
+async fn project_repository_resources_classifies_repository_and_kronn_skills() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    for relative in [
+        "kronn/skills/rust/SKILL.md",
+        ".claude/skills/rust/SKILL.md",
+        ".agents/skills/repo-review/SKILL.md",
+    ] {
+        let path = project_directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let name = if relative.contains("repo-review") {
+            "Repository review"
+        } else {
+            "Rust"
+        };
+        std::fs::write(
+            path,
+            format!("---\nname: {name}\ndescription: Test skill\n---\n\nInstructions\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project_directory.path().join("Cargo.toml"),
+        "[package]\nname='demo'\n",
+    )
+    .unwrap();
+    std::fs::write(project_directory.path().join("go.mod"), "module example.test/demo\n")
+        .unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at, default_skill_ids_json) VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                    rusqlite::params![
+                        "skills-project",
+                        "Skills project",
+                        project_path,
+                        now,
+                        r#"["rust","python"]"#,
+                    ],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, response) =
+        get_json(app, "/api/projects/skills-project/repository-resources").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    let present = response["data"]["skills_present"].as_array().unwrap();
+    let rust = present
+        .iter()
+        .find(|skill| skill["id"] == "rust")
+        .expect("attached Rust skill");
+    assert_eq!(rust["provenance"], "both");
+    assert_eq!(
+        rust["repository_paths"],
+        serde_json::json!([".claude/skills/rust/SKILL.md", "kronn/skills/rust/SKILL.md",]),
+    );
+    let attached = present
+        .iter()
+        .find(|skill| skill["id"] == "python")
+        .expect("attached Kronn-only skill");
+    assert_eq!(attached["provenance"], "kronn");
+    assert_eq!(attached["status"], "not_published");
+    let detected = present
+        .iter()
+        .find(|skill| skill["id"] == "go")
+        .expect("filesystem-detected skill");
+    assert_eq!(detected["provenance"], "repository");
+    let repository_only = present
+        .iter()
+        .find(|skill| skill["slug"] == "repo-review")
+        .expect("repository-only native skill");
+    assert_eq!(repository_only["name"], "Repository review");
+    assert_eq!(repository_only["provenance"], "repository");
+    assert!(response["data"]["skills_available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["id"] == "typescript" && skill["provenance"] == "kronn"));
 }
 
 #[tokio::test]
@@ -4836,6 +5851,42 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     .await;
     assert_eq!(accepted["success"], true, "{accepted}");
     assert_eq!(accepted["data"]["child_discussion_id"], child_id);
+
+    // Compatibility fixture: pre-KT-837 bridges physically moved both the live
+    // membership and the durable source binding into the execution child after
+    // accepting. Keep exercising the authenticated return-resume route against
+    // exactly that persisted legacy state, independently of the new acceptance model.
+    state
+        .db
+        .with_conn({
+            let child_id = child_id.clone();
+            move |conn| {
+                kronn::db::discussion_sessions::move_session_to_discussion(conn, 657, &child_id)?;
+                kronn::db::disc_source::bind_to_source(conn, &child_id, "Codex", "stable-binding")?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let legacy_child_state = state
+        .db
+        .with_conn(|conn| {
+            let membership: String = conn.query_row(
+                "SELECT disc_id FROM discussion_sessions WHERE id = 657",
+                [],
+                |row| row.get(0),
+            )?;
+            let binding = kronn::db::disc_source::find_disc_by_source_session(
+                conn,
+                "Codex",
+                "stable-binding",
+            )?;
+            Ok((membership, binding))
+        })
+        .await
+        .unwrap();
+    assert_eq!(legacy_child_state.0, child_id);
+    assert_eq!(legacy_child_state.1.as_deref(), Some(child_id.as_str()));
 
     let (status, brief) = get_json(
         app.clone(),
@@ -13846,6 +14897,330 @@ async fn mcp_update_config_persists_only_available_plugin_interfaces() {
         .is_some_and(|error| error.contains("unavailable")));
 }
 
+#[tokio::test]
+async fn mcp_create_config_from_registry_defaults_host_sync_to_none_when_omitted() {
+    // "registre" creation path: no `host_sync` in the request body must
+    // resolve to the documented default, never a silent unrelated value.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "mcp-github",
+            "label": "GitHub default host_sync",
+            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_test" },
+            "args_override": null,
+            "is_global": false,
+            "project_ids": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_create_config_custom_api_defaults_host_sync_to_none_when_omitted() {
+    // "Custom API" creation path — same `/api/mcps/configs` endpoint as the
+    // registry path, routed through `custom_spec` instead of a registry id.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "api-custom",
+            "label": "Custom plugin default host_sync",
+            "env": {},
+            "args_override": null,
+            "is_global": false,
+            "project_ids": [],
+            "custom_spec": {
+                "name": "Custom plugin default host_sync",
+                "base_url": "https://example.test",
+                "description": "test",
+                "docs_url": null,
+                "fields": [],
+                "endpoints": [],
+                "auth": "None"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_custom_import_file_defaults_host_sync_to_none() {
+    // "JSON" creation path: `/api/mcps/custom/import-file` is a distinct
+    // endpoint from `/api/mcps/configs` (reads a `.kronn-plugin.json` file,
+    // not a `custom_spec` on the create request) — its own explicit,
+    // documented default must be exercised separately.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, imported) = post_json(
+        app,
+        "/api/mcps/custom/import-file",
+        serde_json::json!({
+            "name": "Imported plugin default host_sync",
+            "base_url": "https://example.test",
+            "description": "test",
+            "docs_url": null,
+            "fields": [],
+            "endpoints": [],
+            "auth": "None"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import failed: {imported:?}");
+    assert_eq!(imported["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_create_config_reports_merge_into_existing_config() {
+    // Re-adding an identical plugin (same server + env + args) must signal
+    // the merge instead of silently discarding the second request's label,
+    // scope and CLI-exposure choice.
+    let state = test_state();
+    let first_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "GitHub original",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_same_token" },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": [],
+        "host_sync": "None"
+    });
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, first) = post_json(app, "/api/mcps/configs", first_body).await;
+    assert_eq!(status, StatusCode::OK, "first create failed: {first:?}");
+    assert_eq!(
+        first["data"]["merged_into_existing"],
+        Value::Null,
+        "a genuinely new config must not report a merge"
+    );
+    let existing_id = first["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(first["data"]["label"], "GitHub original");
+
+    // Same server, same env/args → identical config_hash → merge branch.
+    let second_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "GitHub duplicate attempt",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_same_token" },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": [],
+        "host_sync": "GlobalOnly"
+    });
+    let app = build_router_with_auth(state, false);
+    let (status, second) = post_json(app, "/api/mcps/configs", second_body).await;
+    assert_eq!(status, StatusCode::OK, "second create failed: {second:?}");
+    assert_eq!(second["data"]["id"], existing_id);
+    assert_eq!(
+        second["data"]["merged_into_existing"], existing_id,
+        "re-adding an identical plugin must flag the merge with the existing id"
+    );
+    // Label/host_sync of the pre-existing config are untouched by the
+    // duplicate request — only project scope gets merged.
+    assert_eq!(second["data"]["label"], "GitHub original");
+    assert_eq!(second["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
+    // "rescan" creation path: a plugin surfaced from a project's own
+    // `.mcp.json` must never be silently opted into host sync.
+    let state = test_state();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
+
+    let mut mcp_servers = std::collections::HashMap::new();
+    mcp_servers.insert(
+        "github".to_string(),
+        kronn::core::mcp_scanner::McpServerEntry {
+            command: Some("npx".to_string()),
+            args: Some(vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ]),
+            url: None,
+            env: std::collections::HashMap::new(),
+        },
+    );
+    kronn::core::mcp_scanner::write_mcp_json(
+        &project_path,
+        &kronn::core::mcp_scanner::McpJsonFile { mcp_servers },
+    )
+    .unwrap();
+
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "rescan-test-proj".to_string(),
+        name: "Rescan Test".to_string(),
+        path: project_path,
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, refreshed) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "refresh failed: {refreshed:?}");
+    assert_eq!(refreshed["success"], true, "{refreshed:?}");
+    assert_eq!(
+        refreshed["data"]["dry_run"], false,
+        "a real (non-dry-run) refresh must say so"
+    );
+
+    let configs = refreshed["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    let detected = configs
+        .iter()
+        .find(|c| c["server_id"] == "mcp-github")
+        .expect("rescan should have detected the github entry from .mcp.json");
+    assert_eq!(
+        detected["host_sync"], "None",
+        "a config detected from a project's own .mcp.json must not be opted into host sync"
+    );
+}
+
+#[tokio::test]
+async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates_it() {
+    // KT-829 — `?dry_run=true` must report exactly what a real scan would do
+    // (via the returned counts + preview overview) while leaving the
+    // database and the filesystem untouched; only a subsequent real run
+    // may actually create anything.
+    let state = test_state();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
+
+    let mut mcp_servers = std::collections::HashMap::new();
+    mcp_servers.insert(
+        "github".to_string(),
+        kronn::core::mcp_scanner::McpServerEntry {
+            command: Some("npx".to_string()),
+            args: Some(vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ]),
+            url: None,
+            env: std::collections::HashMap::new(),
+        },
+    );
+    kronn::core::mcp_scanner::write_mcp_json(
+        &project_path,
+        &kronn::core::mcp_scanner::McpJsonFile { mcp_servers },
+    )
+    .unwrap();
+
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "dry-run-test-proj".to_string(),
+        name: "Dry Run Test".to_string(),
+        path: project_path,
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, dry) = post_json(app, "/api/mcps/refresh?dry_run=true", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "dry-run refresh failed: {dry:?}");
+    assert_eq!(dry["success"], true, "{dry:?}");
+    assert_eq!(dry["data"]["dry_run"], true);
+    assert_eq!(dry["data"]["configs_created"], 1, "{dry:?}");
+    assert!(
+        dry["data"]["projects_rewritten"].is_null(),
+        "a dry run never touches the filesystem, so this cannot be established: {dry:?}"
+    );
+    let preview_configs = dry["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(
+        preview_configs
+            .iter()
+            .any(|c| c["server_id"] == "mcp-github"),
+        "the preview must show what a real run WOULD create: {dry:?}"
+    );
+
+    // The rollback is real: a plain read afterwards sees nothing new.
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, overview_after_dry) = get_json(app, "/api/mcps").await;
+    assert_eq!(status, StatusCode::OK);
+    let configs_after_dry = overview_after_dry["data"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(
+        configs_after_dry.is_empty(),
+        "a dry run must not persist anything: {overview_after_dry:?}"
+    );
+
+    // A real run performs exactly what the preview showed.
+    let app = build_router_with_auth(state, false);
+    let (status, real) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "real refresh failed: {real:?}");
+    assert_eq!(real["data"]["dry_run"], false);
+    assert_eq!(real["data"]["configs_created"], 1, "{real:?}");
+    assert!(
+        real["data"]["projects_rewritten"].is_number(),
+        "a real run always establishes how many projects were rewritten: {real:?}"
+    );
+    let configs_after_real = real["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(configs_after_real
+        .iter()
+        .any(|c| c["server_id"] == "mcp-github"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Export/Import ZIP tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -18803,15 +20178,25 @@ mod cold_api_handlers_tests {
     #[tokio::test]
     async fn redirectors_sync_repairs_recognized_template_without_touching_user_content() {
         let (_dir, repo) = seed_repo("redirectors-upgrade");
-        let old_template = include_str!("../../templates/CLAUDE.md")
-            .replace(
-                "Test: {{TEST_CMD}}",
-                "Test: {{TEST_CMD}} [ex: \"cargo test && npm test\"]",
-            )
-            .replace(
-                "Lint: {{LINT_CMD}}",
-                "Lint: {{LINT_CMD}} [ex: \"cargo clippy && npx tsc --noEmit\"]",
-            );
+        // The pre-KT-841 shape a project audited earlier still has on disk.
+        let old_template = "\
+# {{PROJECT_NAME}} — {{STACK_SUMMARY}}
+
+Working language: {{PROJECT_LANGUAGE}}
+
+<!-- KRONN:FACTS — regenerated by audit, do not edit manually -->
+Test: {{TEST_CMD}} [ex: \"cargo test && npm test\"]
+Lint: {{LINT_CMD}} [ex: \"cargo clippy && npx tsc --noEmit\"]
+<!-- END KRONN:FACTS -->
+
+## Critical rules (follow these BEFORE any action)
+- {{DO_NOT_1}}
+- {{DO_NOT_2}}
+- DO NOT guess when info is missing — say NOT_FOUND and ask.
+
+## More context
+Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what each task needs). Source of truth.
+";
         let prefix = "<!-- user prefix stays -->\n";
         let suffix = "\n## User rules\nKeep {{USER_TOKEN}} byte-identical.\n";
         std::fs::write(

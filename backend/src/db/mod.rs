@@ -44,6 +44,8 @@ pub mod quick_apis;
 pub mod quick_exec_runs;
 pub mod quick_execs;
 pub mod quick_prompts;
+pub mod repository_resources;
+pub mod resource_identities;
 pub mod review_ledger;
 pub mod run_outcome;
 pub mod run_state;

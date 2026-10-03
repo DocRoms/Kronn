@@ -26,8 +26,18 @@ export interface CollectionAction<TItem> {
   label: string;
   icon?: React.ReactNode;
   danger?: boolean;
-  onSelect: (items: TItem[]) => void | Promise<void>;
+  /** Absent only for a link action (see `href`) — a plain action always
+   *  provides one. */
+  onSelect?: (items: TItem[]) => void | Promise<void>;
   disabled?: (items: TItem[]) => boolean;
+  /** Renders the action as a real link instead of a button — lets a user
+   *  right-click / open-in-new-tab (e.g. a mosaic view). Returning `null`
+   *  falls back to a disabled button for the current selection; `onSelect`
+   *  is never called for a link action. */
+  href?: (items: TItem[]) => string | null;
+  /** Tooltip shown while the action is disabled — a different one than
+   *  `label` (e.g. "pick at least two"). Falls back to `label`. */
+  disabledTitle?: (items: TItem[]) => string;
 }
 
 /** Props for a custom row's native focusable control. The caller owns any
@@ -105,6 +115,15 @@ export interface CollectionShellSlots<TItem> {
   renderList?: (context: CollectionListContext<TItem>) => React.ReactNode;
   /** Rendered below the list, inside the sidebar (hints, shortcuts…). */
   sidebarFooter?: React.ReactNode;
+  /** Extra items in the shared "…" menu, alongside the built-in "select
+   *  multiple" one (e.g. "mark all read", "import"). The menu closes itself
+   *  on any click inside it (bubbling), so an item only needs its own
+   *  `onClick` for its actual action. */
+  moreActionsMenuExtra?: () => React.ReactNode;
+  /** Extra custom content in the selection-mode title-actions row, rendered
+   *  before the mapped `actions` — for a control that doesn't fit the plain
+   *  button/link action shape (e.g. a layout-picker popover). */
+  selectionActionsExtra?: (context: { items: TItem[] }) => React.ReactNode;
 }
 
 export interface CollectionShellProps<TItem> {
@@ -129,8 +148,15 @@ export interface CollectionShellProps<TItem> {
   /** Enables the canonical Discussions-style sidebar title row. */
   title?: React.ReactNode;
   titleCount?: number;
-  /** Domain actions such as create/import that remain visible outside bulk mode. */
-  headerActions?: React.ReactNode;
+  /** Domain actions such as create/import that remain visible outside bulk
+   *  mode. The function form also receives `enterSelectionMode` — lets a
+   *  surface keep its own direct "select multiple" icon instead of the
+   *  built-in "…" menu item (pair with `hideSelectMultipleMenu`). */
+  headerActions?: React.ReactNode | ((context: { enterSelectionMode: () => void }) => React.ReactNode);
+  /** Suppresses the built-in "…" → "select multiple" menu item — for a
+   *  surface whose `headerActions` already exposes its own direct entry
+   *  point via `enterSelectionMode`, so multi-select isn't offered twice. */
+  hideSelectMultipleMenu?: boolean;
   slots: CollectionShellSlots<TItem>;
   isMobile?: boolean;
   /** For surfaces whose detail pane is already composed by the caller. */
@@ -224,7 +250,7 @@ export function CollectionSidebarRail({
 export function CollectionShell<TItem>({
   ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [], itemFilter, filterQuery = true,
   persistence, selectedId, onSelect, selectedIds, onSelectedIdsChange, actions = [],
-  title, titleCount, headerActions, slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, showSearchClear = false, shortcutsEnabled = true, showControls = true, sidebarOpen = true, onSidebarOpenChange, onSearchSubmit, labels,
+  title, titleCount, headerActions, hideSelectMultipleMenu = false, slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, showSearchClear = false, shortcutsEnabled = true, showControls = true, sidebarOpen = true, onSidebarOpenChange, onSearchSubmit, labels,
 }: CollectionShellProps<TItem>) {
   const searchInputId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
@@ -288,7 +314,7 @@ export function CollectionShell<TItem>({
   }, [onSelectedIdsChange]);
 
   const runAction = useCallback(async (action: CollectionAction<TItem>) => {
-    if (actionBusy || action.disabled?.(actionItems)) return;
+    if (actionBusy || action.disabled?.(actionItems) || !action.onSelect) return;
     setActionBusy(true);
     try {
       await action.onSelect(actionItems);
@@ -425,23 +451,35 @@ export function CollectionShell<TItem>({
         </strong>
         <div className="collection-shell-title-actions">
           {selectionMode ? <>
-            {actions.map(action => <button
-              key={action.id}
-              type="button"
-              className="collection-shell-icon"
-              data-danger={action.danger || undefined}
-              disabled={actionBusy || action.disabled?.(actionItems)}
-              onClick={() => void runAction(action)}
-              aria-label={action.label}
-              title={action.label}
-            >{actionBusy ? <Loader2 size={15} className="spin" /> : action.icon ?? action.label}</button>)}
+            {slots.selectionActionsExtra?.({ items: actionItems })}
+            {actions.map(action => {
+              const isDisabled = actionBusy || action.disabled?.(actionItems);
+              const title = isDisabled ? (action.disabledTitle?.(actionItems) ?? action.label) : action.label;
+              if (action.href) {
+                const url = !isDisabled ? action.href(actionItems) : null;
+                return url
+                  ? <a key={action.id} className="collection-shell-icon" href={url} target="_blank" rel="noopener noreferrer" aria-label={action.label} title={title}>{action.icon ?? action.label}</a>
+                  : <button key={action.id} type="button" className="collection-shell-icon" disabled aria-label={action.label} title={title}>{action.icon ?? action.label}</button>;
+              }
+              return <button
+                key={action.id}
+                type="button"
+                className="collection-shell-icon"
+                data-danger={action.danger || undefined}
+                disabled={isDisabled}
+                onClick={() => void runAction(action)}
+                aria-label={action.label}
+                title={title}
+              >{actionBusy ? <Loader2 size={15} className="spin" /> : action.icon ?? action.label}</button>;
+            })}
             <button type="button" className="collection-shell-icon" disabled={actionBusy} onClick={leaveSelectionMode} aria-label={labels.cancelSelection ?? labels.closeCollection} title={labels.cancelSelection ?? labels.closeCollection}><X size={16} /></button>
           </> : <>
-            {headerActions}
-            {canMultiSelect && <div className="collection-shell-title-menu" ref={menuRef}>
+            {typeof headerActions === 'function' ? headerActions({ enterSelectionMode: () => setSelectionMode(true) }) : headerActions}
+            {canMultiSelect && !hideSelectMultipleMenu && <div className="collection-shell-title-menu" ref={menuRef}>
               <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? menuId : undefined}><MoreHorizontal size={17} /></button>
-              {menuOpen && <div id={menuId} className="collection-shell-menu" role="menu" aria-label={labels.moreActions} onKeyDown={onMenuKeyDown}>
-                <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); closeMenu(false); }}><ListChecks size={14} />{labels.selectMultiple ?? labels.selectItem}</button>
+              {menuOpen && <div id={menuId} className="collection-shell-menu" role="menu" aria-label={labels.moreActions} onKeyDown={onMenuKeyDown} onClick={() => closeMenu(false)}>
+                {slots.moreActionsMenuExtra?.()}
+                <button type="button" role="menuitem" onClick={() => setSelectionMode(true)}><ListChecks size={14} />{labels.selectMultiple ?? labels.selectItem}</button>
               </div>}
             </div>}
             {onSidebarOpenChange && <CollectionSidebarCollapseButton

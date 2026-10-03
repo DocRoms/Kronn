@@ -30,7 +30,7 @@ import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction } from '../types/generated';
+import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
 import { externalAgentColor } from '../lib/externalAgentIdentity';
@@ -232,6 +232,8 @@ const KronnSeedToggle = memo(({ seed }: { seed: string }) => {
 
 export interface MessageBubbleProps {
   msg: DiscussionMessage;
+  /** Kronn-owned workflow step that authored this message. */
+  workflowStep?: WorkflowStepIdentity;
   /** Durable addressees recorded when this user message was accepted. */
   targets?: MessageTarget[];
   /** Who an ordinary turn reaches, resolved server-side. A discussion keeps
@@ -314,7 +316,7 @@ export interface MessageBubbleProps {
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
-  const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
+  const { msg, workflowStep, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
     defaultTargets = [],
     onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
@@ -395,11 +397,13 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     : null;
   const agentIdentityLabel = isTourDemo
     ? t('disc.tourDemoKind')
-    : msg.source_msg_id
-      ? t('disc.targetCli')
-      : agentType === defaultAgent
-        ? t('disc.targetDiscussionAgent')
-        : t('disc.targetPunctualAgent');
+    : workflowStep
+      ? t('disc.targetDiscussionAgent')
+      : msg.source_msg_id
+        ? t('disc.targetCli')
+        : agentType === defaultAgent
+          ? t('disc.targetDiscussionAgent')
+          : t('disc.targetPunctualAgent');
   const replyAuthor = useMemo(() => {
     if (!replyTarget) return '';
     if (replyTarget.agent_type) {
@@ -765,7 +769,16 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                   {/* KT-247 — stable per-provider CLI ordinal, so two joined
                    *  Claude Code (or two Codex) are distinguishable in the
                    *  timeline. Matches the `@claude-cli-2` room alias. */}
-                  {msg.author_cli_ordinal != null && (
+                  {workflowStep && (
+                    <span
+                      className="disc-msg-workflow-step"
+                      data-testid="workflow-step-message-provenance"
+                      title={t('disc.workflowRun', workflowStep.run_id)}
+                    >
+                      {' '}· {workflowStep.workflow_name} › {workflowStep.step_name}
+                    </span>
+                  )}
+                  {workflowStep === undefined && msg.author_cli_ordinal != null && (
                     <span
                       className="disc-msg-agent-cli"
                       style={{ opacity: 0.75, fontWeight: 600 }}

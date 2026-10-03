@@ -1,4 +1,5 @@
 import type { LivePageAction, LivePageDetail } from '../types/generated';
+import { standaloneDiscussionId, standaloneLivePageId } from './live-page-navigation';
 
 export const LIVE_PAGE_CSP = [
   "default-src 'none'",
@@ -555,6 +556,18 @@ function safeLivePageLink(value: unknown): string | null {
   }
 }
 
+function isInternalKronnLink(value: string): boolean {
+  const url = new URL(value);
+  return url.origin === window.location.origin
+    && url.pathname === window.location.pathname
+    && Boolean(standaloneDiscussionId(url.hash) || standaloneLivePageId(url.hash));
+}
+
+function navigateInternalKronnLink(url: string): void {
+  window.history.pushState(null, '', url);
+  window.dispatchEvent(new Event('hashchange'));
+}
+
 /**
  * Let a sandboxed Live Page request one browser-controlled external tab.
  * The parent transfers a private MessagePort to the injected bridge. Its
@@ -574,6 +587,7 @@ export function createLivePageOpenLinkRelay(
   onAction?: (intent: LivePageActionIntent) => void,
   onAnchor?: (anchor: LivePageActionIntent['anchor']) => void,
   onHeight?: (height: number) => void,
+  navigateInternal: (url: string) => unknown = navigateInternalKronnLink,
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
   const validAnchor = (anchor: LivePageActionAnchor | undefined): anchor is LivePageActionAnchor => (
@@ -619,6 +633,10 @@ export function createLivePageOpenLinkRelay(
     if (message.type !== 'kronn:page-open-link') return;
     const url = safeLivePageLink(message.url);
     if (!url) return;
+    if (isInternalKronnLink(url)) {
+      navigateInternal(url);
+      return;
+    }
     openExternal(url, '_blank', 'noopener,noreferrer');
   };
   return {

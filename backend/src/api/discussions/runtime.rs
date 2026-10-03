@@ -853,6 +853,26 @@ async fn finish_dispatch_turn(
                 return;
             }
         };
+        let approval_prompt = qp.clone();
+        if let Err(error) = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                    conn,
+                    &approval_prompt,
+                )
+                .map_err(anyhow::Error::msg)
+            })
+            .await
+        {
+            fail_dispatch_job(
+                state,
+                &job,
+                &format!("chain QuickPrompt preflight failed: {error}"),
+            )
+            .await;
+            return;
+        }
         let message = crate::models::DiscussionMessage {
             recovered_partial: false,
             session_tokens_at_message: None,

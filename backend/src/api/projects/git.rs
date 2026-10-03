@@ -299,6 +299,7 @@ fn spawn_language_refresh(
 
     let cache = state.git_language_cache.clone();
     tokio::spawn(async move {
+        let started_at = chrono::Utc::now();
         let repo_for_compute = repo_path.clone();
         let exclusions_for_compute = exclusions.clone();
         let languages = tokio::task::spawn_blocking(move || {
@@ -309,15 +310,22 @@ fn spawn_language_refresh(
         })
         .await;
         if let Ok(languages) = languages {
-            cache.lock().await.insert(
-                project_id.clone(),
-                CachedProjectLanguages {
-                    inserted_at: Instant::now(),
-                    checked_at: chrono::Utc::now(),
-                    exclusions,
-                    languages,
-                },
-            );
+            let mut cache = cache.lock().await;
+            // An explicit refresh that landed while this ran is fresher: keep it.
+            let superseded = cache.get(&project_id).is_some_and(|cached| {
+                cached.exclusions == exclusions && cached.checked_at >= started_at
+            });
+            if !superseded {
+                cache.insert(
+                    project_id.clone(),
+                    CachedProjectLanguages {
+                        inserted_at: Instant::now(),
+                        checked_at: chrono::Utc::now(),
+                        exclusions,
+                        languages,
+                    },
+                );
+            }
         }
         let mut in_flight = match IN_FLIGHT.lock() {
             Ok(guard) => guard,

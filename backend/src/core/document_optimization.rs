@@ -338,6 +338,7 @@ fn inspect_docs(
         let rel = relative(project, path);
         if rel != "docs/AGENTS.md"
             && !rel.starts_with("docs/tech-debt/")
+            && !rel.starts_with("docs/reports/")
             && !linked.contains(&normalize(path))
         {
             out.push(diag(
@@ -460,6 +461,10 @@ fn markdown_files(root: &Path) -> Result<Vec<PathBuf>, String> {
                     .extension()
                     .and_then(|s| s.to_str())
                     .is_some_and(|s| s.eq_ignore_ascii_case("md"))
+                // A `TEMPLATE.md` is a gabarit meant to be copied per-instance
+                // (per sequence, per MCP server), never filled in place — it
+                // is not project documentation and is excluded from the scan.
+                && path.file_name().and_then(|n| n.to_str()) != Some("TEMPLATE.md")
             {
                 out.push(path);
             }
@@ -631,7 +636,23 @@ fn measure(path: &str, content: &str) -> DocumentMeasure {
     }
 }
 fn word_count(s: &str) -> usize {
-    s.split_whitespace().count()
+    strip_html_comments(s).split_whitespace().count()
+}
+/// HTML comments (`<!-- kronn:section ... -->` markers, spec headers) carry
+/// no context-window cost for an agent that renders Markdown, so they are
+/// excluded from every word budget.
+fn strip_html_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
 }
 fn contains_placeholder(s: &str) -> bool {
     crate::api::audit::validation::count_raw_placeholders(s) > 0
@@ -697,8 +718,18 @@ fn diag(code: &str, path: &str, message: String) -> Diagnostic {
         code: code.into(),
         path: path.into(),
         message,
-        blocking: true,
+        blocking: is_blocking_code(code),
     }
+}
+
+/// Only an invented path — a link or citation pointing at something that
+/// does not exist — is worth losing a whole audit run over. Volume,
+/// structure (orphans/duplicates), citation ranges and "obsolete" markers
+/// are real findings but surface as warnings instead: `full.rs` gates
+/// validation-discussion creation and the drift baseline on
+/// `blocking_diagnostics()` being empty (KT-840).
+fn is_blocking_code(code: &str) -> bool {
+    matches!(code, "broken_link" | "broken_citation")
 }
 
 #[cfg(test)]
@@ -767,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_budgets_placeholders_broken_links_orphans_and_mutable_ranges() {
+    fn only_invented_paths_block_the_rest_warns() {
         let tmp = tempfile::tempdir().unwrap();
         write(
             &tmp.path().join("AGENTS.md"),
@@ -796,26 +827,29 @@ mod tests {
             &tmp.path().join("docs/.kronn-document-budgets.json"),
             r#"{"adapter_max_words":1,"agents_md_max_words":2,"mandatory_path_max_words":3,"initially_routed_max_documents":0}"#,
         );
-        let codes: BTreeSet<_> = analyze(tmp.path())
-            .unwrap()
-            .diagnostics
-            .into_iter()
-            .map(|d| d.code)
-            .collect();
-        for code in [
-            "adapter_budget",
-            "agents_md_budget",
-            "mandatory_path_budget",
-            "initial_routing_budget",
-            "placeholder",
-            "broken_link",
-            "orphan_document",
-            "obsolete_guide",
-            "mutable_line_reference",
-            "duplicate_guide",
-            "large_inventory_not_search_first",
+        let diagnostics = analyze(tmp.path()).unwrap().diagnostics;
+        // (code, expected blocking) — only an invented path (a link or
+        // citation to something that does not exist) halts the run; every
+        // other finding here is real but surfaces as a warning (KT-840).
+        for (code, expect_blocking) in [
+            ("adapter_budget", false),
+            ("agents_md_budget", false),
+            ("mandatory_path_budget", false),
+            ("initial_routing_budget", false),
+            ("placeholder", false),
+            ("broken_link", true),
+            ("broken_citation", true),
+            ("orphan_document", false),
+            ("obsolete_guide", false),
+            ("mutable_line_reference", false),
+            ("duplicate_guide", false),
+            ("large_inventory_not_search_first", false),
         ] {
-            assert!(codes.contains(code), "missing {code}: {codes:?}");
+            let matches: Vec<_> = diagnostics.iter().filter(|d| d.code == code).collect();
+            assert!(!matches.is_empty(), "missing {code}: {diagnostics:#?}");
+            for d in matches {
+                assert_eq!(d.blocking, expect_blocking, "{code}: {d:#?}");
+            }
         }
     }
 
@@ -844,6 +878,109 @@ mod tests {
         let mut actual_citations = Vec::new();
         inspect_citations(project, "docs/AGENTS.md", &actual, &mut actual_citations);
         assert!(actual_citations.is_empty(), "{actual_citations:?}");
+    }
+
+    fn copy_dir_recursive(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let target = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir_recursive(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// Builds a fresh project carrying only the shipped skeleton: the whole
+    /// `templates/docs/` tree plus the anti-hallu spec that project bootstrap
+    /// installs into `docs/conventions/` (`api/projects/template.rs:101-110`).
+    fn skeleton_project() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let templates_docs = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("templates/docs");
+        copy_dir_recursive(&templates_docs, &tmp.path().join("docs"));
+        write(
+            &tmp.path().join("docs/conventions/agents-md-format-v1.md"),
+            crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
+        );
+        tmp
+    }
+
+    #[test]
+    fn full_audit_reaches_completion_on_the_provided_skeleton() {
+        // DoD #1 (KT-840): a Full audit on a blank repo that only carries
+        // the provided skeleton (unfilled `{{...}}` placeholders and all)
+        // must be able to reach Completed. `full.rs` gates
+        // validation-discussion creation and the drift baseline write on
+        // `blocking_diagnostics()` being empty (full.rs:1723-1798) — this
+        // is that precondition.
+        let tmp = skeleton_project();
+        let report = analyze(tmp.path()).unwrap();
+        assert!(
+            report.blocking_diagnostics().next().is_none(),
+            "{:#?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn provided_skeleton_fits_its_word_budget_html_comments_excluded() {
+        // DoD #3 (KT-840): the empty skeleton must fit the default 800-word
+        // `agents_md_max_words` budget once HTML comments (section markers,
+        // the spec header) are excluded from the count.
+        let tmp = skeleton_project();
+        let content = fs::read_to_string(tmp.path().join("docs/AGENTS.md")).unwrap();
+        let words = word_count(&content);
+        let default_budget = DocumentBudgets::default().agents_md_max_words;
+        assert!(
+            words <= default_budget,
+            "skeleton is {words} words; budget is {default_budget}"
+        );
+        let report = analyze(tmp.path()).unwrap();
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "agents_md_budget"),
+            "{:#?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn template_gabarit_files_are_excluded_from_the_scan() {
+        // Objective (KT-840): `TEMPLATE.md` gabarits (per-flow sequence,
+        // per-MCP server context) are copied per-instance, never filled in
+        // place, and must not be scanned as project documentation.
+        let tmp = skeleton_project();
+        let docs = markdown_files(&tmp.path().join("docs")).unwrap();
+        assert!(
+            !docs
+                .iter()
+                .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("TEMPLATE.md")),
+            "{docs:?}"
+        );
+    }
+
+    #[test]
+    fn dated_reports_are_excluded_from_routing_diagnostics() {
+        let tmp = skeleton_project();
+        write(
+            &tmp.path().join("docs/reports/2026-09-27-audit-note.md"),
+            "# Audit note\n\nPoint-in-time result.\n",
+        );
+        let report = analyze(tmp.path()).unwrap();
+        assert!(
+            !report.diagnostics.iter().any(|d| {
+                d.code == "orphan_document" && d.path == "docs/reports/2026-09-27-audit-note.md"
+            }),
+            "dated reports are intentionally outside T0-T2 routing: {:#?}",
+            report.diagnostics
+        );
     }
 
     #[test]

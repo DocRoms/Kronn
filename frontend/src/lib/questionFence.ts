@@ -20,9 +20,10 @@ export interface FenceProblem {
 /// `deny_unknown_fields`: anything else and the whole fence is refused.
 const SPEC_FIELDS = new Set([
   'version', 'key', 'question', 'context',
-  'options', 'multiple', 'recommended_option_ids', 'task_ref',
+  'options', 'items', 'multiple', 'recommended_option_ids', 'task_ref', 'resume',
 ]);
 const OPTION_FIELDS = new Set(['id', 'label', 'description']);
+const RESUME_FIELDS = new Set(['workflow_id', 'variables']);
 
 /// `parse_spec` refuses a body over this many BYTES before parsing it at all.
 const MAX_FENCE_BYTES = 24_000;
@@ -90,6 +91,27 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   if (spec.task_ref != null && !isFilled(spec.task_ref, 100)) {
     return { key: 'disc.question.invalidTaskRef' };
   }
+  if (spec.resume != null) {
+    if (typeof spec.resume !== 'object' || Array.isArray(spec.resume)) {
+      return { key: 'disc.question.invalidResume' };
+    }
+    const resume = spec.resume as Record<string, unknown>;
+    if (Object.keys(resume).some(field => !RESUME_FIELDS.has(field))
+      || !isFilled(resume.workflow_id, 128)) {
+      return { key: 'disc.question.invalidResume' };
+    }
+    const variables = 'variables' in resume ? resume.variables : {};
+    if (typeof variables !== 'object' || variables === null || Array.isArray(variables)
+      || Object.keys(variables).length > 16
+      || Object.entries(variables).some(([key, value]) => (
+        !/^[A-Za-z0-9_.-]{1,64}$/.test(key)
+        || typeof value !== 'string'
+        || [...value].length > 8000
+        || [...value].some(character => /\p{Cc}/u.test(character))
+      ))) {
+      return { key: 'disc.question.invalidResume' };
+    }
+  }
 
   // `#[serde(default)]` supplies a value for a key that is ABSENT. A key that
   // is present and null is a value, and `Vec`/`bool` refuse it.
@@ -112,6 +134,27 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
     ids.add(option.id);
   }
   if (ids.size !== options.length) return { key: 'disc.question.invalidOptionId' };
+
+  const items = 'items' in spec ? spec.items : [];
+  if (!Array.isArray(items) || items.length > 8) {
+    return { key: 'disc.question.invalidOptions' };
+  }
+  const itemIds = new Set<string>();
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null) return { key: 'disc.question.invalidOptions' };
+    const item = raw as Record<string, unknown>;
+    if (Object.keys(item).some(field => !OPTION_FIELDS.has(field))) {
+      return { key: 'disc.question.invalidUnknownField' };
+    }
+    if (!isStableKey(item.id)) return { key: 'disc.question.invalidOptionId' };
+    if (!isFilled(item.label, 250)) return { key: 'disc.question.invalidOptionLabel' };
+    if (!isOptionalText(item.description, 1000)) {
+      return { key: 'disc.question.invalidOptionDescription' };
+    }
+    itemIds.add(item.id);
+  }
+  if (itemIds.size !== items.length) return { key: 'disc.question.invalidOptionId' };
+  if (items.length > 0 && options.length === 0) return { key: 'disc.question.invalidOptions' };
 
   const recommended = 'recommended_option_ids' in spec ? spec.recommended_option_ids : [];
   if (!Array.isArray(recommended) || recommended.some(id => !ids.has(id as string))) {

@@ -171,6 +171,9 @@ pub struct ParticipantView {
     /// `@claude-cli-2` and the "CLI 2" header label, computed once here so the
     /// front never re-derives (and diverges from) it.
     pub cli_ordinal: Option<i64>,
+    /// Present for a Kronn-owned workflow Agent step. The UI renders this as a
+    /// discussion agent with workflow/step provenance, never as `CLI N`.
+    pub workflow_step: Option<crate::models::WorkflowStepIdentity>,
 }
 
 /// Provider wire name (`ClaudeCode`, `Codex`…) → its canonical mention trigger
@@ -325,9 +328,10 @@ pub fn cli_session_identity(
     Ok((ordinal, alias))
 }
 
-/// Re-home a joined CLI session's membership to another discussion (KT-328 handshake:
-/// on acceptance the worker leaves the origin room and joins its sub-discussion). The
-/// "one active session = one discussion" invariant is preserved because
+/// Re-home a joined CLI session's membership to another discussion. Current worker
+/// acceptance keeps the principal-room membership; this primitive remains for explicit
+/// room transfers and compatibility with sessions moved by older bridges. The "one
+/// active session = one discussion" invariant is preserved because
 /// `idx_disc_sessions_session_active` is on `(agent_type, session_id)` WITHOUT
 /// `disc_id`, so moving the row keeps exactly one active row for the identity. Only a
 /// non-`left` row moves. Returns whether a row moved (idempotent: a session already in
@@ -617,8 +621,12 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 -- renumber. Correlated count is exact and index-friendly.
                 (SELECT COUNT(*) FROM discussion_sessions e
                   WHERE e.disc_id = s.disc_id AND e.agent_type = s.agent_type
-                    AND e.id <= s.id) AS cli_ordinal
+                    AND e.id <= s.id) AS cli_ordinal,
+                a.run_id, a.workflow_id, a.workflow_name, a.step_key, a.step_name
            FROM discussion_sessions s
+           LEFT JOIN workflow_step_room_sessions link ON link.session_pk = s.id
+           LEFT JOIN workflow_step_room_activities a
+             ON a.run_id = link.run_id AND a.step_key = link.step_key
           WHERE s.disc_id = ?1 AND s.status != 'left'
           ORDER BY s.joined_at ASC",
     )?;
@@ -630,18 +638,31 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             let next_poll_at: Option<String> = r.get(11)?;
             let last_write_at: Option<String> = r.get(12)?;
             let stored_write = WriteState::parse(&r.get::<_, String>(13)?);
-            // A session row is always an external CLI peer; a native Codex/Ollama
-            // runner is a DIFFERENT instance, so a dispatch job never proves THIS
-            // participant is generating. `Running` is reserved for a future
-            // obligation-participant surface — never synthesised here (0.9.2).
-            let presence_state = derive_presence_state(
-                &status,
-                activity.as_deref(),
-                next_poll_at.as_deref(),
-                now,
-                false,
-                None,
-            );
+            let workflow_step = match r.get::<_, Option<String>>(17)? {
+                Some(run_id) => Some(crate::models::WorkflowStepIdentity {
+                    run_id,
+                    workflow_id: r.get(18)?,
+                    workflow_name: r.get(19)?,
+                    step_key: r.get(20)?,
+                    step_name: r.get(21)?,
+                }),
+                None => None,
+            };
+            // A workflow-step bridge is owned by Kronn and its activity row is
+            // direct proof that this participant is generating. Ordinary
+            // session rows remain external CLI peers and use poll telemetry.
+            let presence_state = if workflow_step.is_some() {
+                PresenceState::Running
+            } else {
+                derive_presence_state(
+                    &status,
+                    activity.as_deref(),
+                    next_poll_at.as_deref(),
+                    now,
+                    false,
+                    None,
+                )
+            };
             // read_live = an OPEN read channel — `Listening` only. `Running`
             // would be generation, not reading.
             let read_live = matches!(presence_state, PresenceState::Listening);
@@ -661,7 +682,11 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 disc_id: r.get(1)?,
                 agent_type,
                 session_id: r.get(3)?,
-                role: r.get(4)?,
+                role: if workflow_step.is_some() {
+                    "agent".to_string()
+                } else {
+                    r.get(4)?
+                },
                 status,
                 joined_at: r.get(6)?,
                 left_at: r.get(7)?,
@@ -670,15 +695,19 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 presence_state,
                 read_live,
                 write_state,
-                // Every session row is a joined external CLI peer in 0.9.2.
-                wake_mode: WakeMode::ExternalPoll,
+                wake_mode: if workflow_step.is_some() {
+                    WakeMode::NativeDispatch
+                } else {
+                    WakeMode::ExternalPoll
+                },
                 next_poll_at,
                 last_write_at,
                 resume_reason: None,
                 resume_since: None,
                 model: r.get(14)?,
                 conversation_id: r.get(15)?,
-                cli_ordinal: r.get(16)?,
+                cli_ordinal: workflow_step.is_none().then(|| r.get(16)).transpose()?,
+                workflow_step,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -867,6 +896,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             model: None,
             conversation_id: None,
             cli_ordinal: None,
+            workflow_step: None,
         });
         synth_id -= 1;
     }
@@ -934,6 +964,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             conversation_id: None,
             // No real session row, so no stable ordinal / room alias.
             cli_ordinal: None,
+            workflow_step: None,
         });
         synth_id -= 1;
         synth_id -= 1;

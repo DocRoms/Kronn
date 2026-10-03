@@ -824,6 +824,8 @@ pub fn retry_batch_run(
         .ok_or_else(|| anyhow::anyhow!("Batch run is not linked to a Quick Prompt"))?;
     let qp = crate::db::quick_prompts::get_quick_prompt(conn, qp_id)?
         .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found"))?;
+    crate::core::repository_resources::ensure_quick_prompt_execution_approved(conn, &qp)
+        .map_err(anyhow::Error::msg)?;
     let child_summaries = crate::db::discussions::list_discussions_by_run(conn, old_run_id)?;
     if child_summaries.is_empty() {
         anyhow::bail!("Batch run has no child discussions to retry");

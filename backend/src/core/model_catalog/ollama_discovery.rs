@@ -121,6 +121,8 @@ pub fn discovered_models(tags: &[OllamaTag]) -> Vec<DiscoveredModel> {
         .map(|tag| DiscoveredModel {
             model_id: tag.name.clone(),
             display_name: tag.name.clone(),
+            resolved_model: None,
+            description: None,
             capabilities: vec!["chat".into()],
             reasoning_modes: Vec::new(),
             default_reasoning_mode: None,

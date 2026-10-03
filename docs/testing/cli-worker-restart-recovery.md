@@ -1,9 +1,27 @@
 # Joined CLI recovery after an accepted handoff
 
-An accepted worker offer moves the exact joined session from the principal
-discussion into the execution's pinned child discussion. Boot recovery must
-recognize that session in either permitted room. Checking only the principal
-room falsely classified the accepted KT-613 worker as unavailable.
+## Current contract (KT-837)
+
+An accepted worker offer no longer moves the joined session out of its principal
+discussion. The execution's pinned CLI session id carries the worker role, while
+the durable source binding and live membership stay in the principal room. The
+child remains the task/evidence room, and acceptance returns the work instructions
+directly to the CLI. A bridge reload therefore resumes the principal room instead
+of the child.
+[src: file: backend/src/api/orchestration.rs:3789-3948]
+[src: file: backend/scripts/disc-introspection-mcp.py:6091-6137]
+
+The terminal return path remains compatibility code for offers accepted by older
+bridges. It emits return messages only when it actually moved legacy child-owned
+state; an execution-scoped worker already in its origin is a no-op.
+[src: file: backend/src/db/orchestration.rs:4016-4059]
+
+## Historical pre-KT-837 recovery contract
+
+Before KT-837, acceptance moved the exact joined session from the principal
+discussion into the execution's pinned child discussion. The recovery work below
+documents that former contract and remains relevant only to legacy sessions that
+were already moved before upgrading.
 
 The lookup still requires the recorded session primary key, provider and an
 active membership. A same-provider substitute, a third room, a departed worker
@@ -61,13 +79,12 @@ session catalogue observed after a reload.
 
 Migration 171 adds `task_execution_cli_bindings`, keyed by execution and exact CLI
 session primary key. Offer acceptance records the server-derived source identity
-in its staging transaction, before the child transfer. Identical acceptance is
-idempotent; a divergent identity for the same assignment is refused. Old
+in its staging transaction. Identical acceptance is idempotent; a divergent
+identity for the same assignment is refused. Old
 assignments remain recorded when a replacement is explicitly selected. The two
-return paths use this retained key in their existing terminal/reassignment
-transaction, without selecting an owner by agent or room. A different replacement
-CLI now returns its predecessor too; recovering the same exact worker still keeps
-that worker in the child.
+legacy return paths use this retained key in their existing terminal/reassignment
+transaction, without selecting an owner by agent or room. New KT-837 acceptances
+do not require a return because they never transfer the session.
 [src: file: backend/src/db/sql/171_cli_worker_bindings.sql:1]
 [src: file: backend/src/db/worker_offers.rs:526]
 [src: file: backend/src/db/cli_worker_bindings.rs:35]

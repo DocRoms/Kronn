@@ -53,6 +53,11 @@ const mkConfig = (id: string, server_id: string): McpConfigDisplay => ({
   secrets_broken: false,
   host_sync: 'None',
   preferred_interface: 'api',
+  interfaces: ['api'],
+  effective_kind: 'api',
+  effective_preferred_interface: 'api',
+  credential_source: 'stored',
+  last_probes: [],
 });
 
 const chartbeatServer = mkServer('chartbeat', 'Chartbeat', {

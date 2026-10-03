@@ -916,6 +916,22 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::discover::discover_repos),
         )
         .route("/api/projects/{id}", get(api::projects::get))
+        .route(
+            "/api/projects/{id}/repository-resources",
+            get(api::projects::repository_resources),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/publish",
+            post(api::projects::publish_repository_resource),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/import",
+            post(api::projects::import_repository_resource),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/approve",
+            post(api::projects::approve_repository_resource),
+        )
         .route("/api/projects/{id}", delete(api::projects::delete))
         // KT-194 — what each agent actually loads in this project, and which
         // sections could leave the always-loaded tier. Read-only: the audit
@@ -1290,6 +1306,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
+        .route("/api/mcps/test-all", post(api::mcps::test_all_configs))
         .route(
             "/api/mcps/bundles/preview",
             post(api::plugin_portability::preview_plugin_bundle),

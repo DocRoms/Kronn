@@ -10,6 +10,29 @@ use ts_rs::TS;
 
 use super::{AgentType, ModelTier};
 
+/// Durable identity of an Agent step that joined a discussion room.
+///
+/// This is not a host-launched CLI identity: the workflow and step own the
+/// process, while the provider only describes which runtime executes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowStepIdentity {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub step_key: String,
+    pub step_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActiveWorkflowStep {
+    #[serde(flatten)]
+    pub identity: WorkflowStepIdentity,
+    pub agent_type: AgentType,
+    pub started_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ActiveAgentDispatch {
@@ -81,6 +104,16 @@ pub struct DiscussionDetail {
     #[serde(flatten)]
     pub discussion: Discussion,
     pub active_agent_dispatches: Vec<ActiveAgentDispatch>,
+    /// Workflow Agent steps currently attached to this room. They have no
+    /// native discussion dispatch, so this separate projection keeps their
+    /// activity visible without pretending they are host-launched CLIs.
+    #[serde(default)]
+    pub active_workflow_steps: Vec<ActiveWorkflowStep>,
+    /// Historical step identity keyed by the messages its session authored.
+    /// Finished activities remain here so an old message never falls back to
+    /// a misleading `CLI N` label after the step exits.
+    #[serde(default)]
+    pub workflow_step_authors: HashMap<String, WorkflowStepIdentity>,
     /// Durable routing intent keyed by the user-message id. Keeping it next
     /// to the transcript lets the UI show what was requested even when the
     /// concrete model that eventually answered differs.

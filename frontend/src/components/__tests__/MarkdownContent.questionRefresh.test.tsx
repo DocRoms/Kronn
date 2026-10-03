@@ -20,7 +20,9 @@ const question: DiscussionQuestion = {
   fence_index: 0, key: 'refresh-proof', question: 'Choisir sans perdre le formulaire',
   context: 'Diagnostic local, sans réseau.',
   options: [{ id: 'a', label: 'Continuer', description: null }],
+  items: [],
   multiple: false, recommended_option_ids: [], task_ref: null,
+  requester_workflow_step: null, resume: null,
   state: 'pending', answer: null,
   created_at: '2026-09-08T15:00:00Z', updated_at: '2026-09-08T15:00:00Z',
 };
@@ -121,7 +123,7 @@ describe('KT-622 — arbitration remains usable during live Markdown refreshes',
     expect(answerMock).toHaveBeenCalledTimes(1);
     await act(async () => {
       resolveAnswer({ ...question, state: 'answered', answer: {
-        selected_option_ids: ['a'], text: 'Réponse en cours', author_pseudo: 'Human',
+        selected_option_ids: ['a'], item_answers: [], text: 'Réponse en cours', author_pseudo: 'Human',
         answered_at: '2026-09-08T16:00:00Z', message_id: 'answer-refresh',
       } });
     });

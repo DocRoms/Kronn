@@ -27,10 +27,14 @@ the with/without-values flag, but no value, passphrase or payload.
   current trusted registry definition; commands from the bundle are ignored.
 - Unknown executable and MCP server definitions are refused. Only a manual
   API-only definition without a CLI credential command may be materialized.
-- Imported configurations are unscoped, non-global and have host sync disabled.
-  After a successful import the UI lists every created configuration with
-  **Global** selected by default; the operator must explicitly confirm that
-  choice or replace it with one or more projects before the scope is applied.
+- Imported configurations are unscoped, non-global and have host sync disabled
+  at the database level. The UI lists every created configuration with
+  **all projects** selected by default. The shared scope editor also exposes
+  project/General visibility and, for trusted registry MCP/hybrid plugins,
+  optional local-CLI sync with the concrete host-file preview. The dialog
+  applies the displayed choices through either the explicit apply button or
+  X/backdrop close; a failed write keeps the dialog open. A closed import
+  therefore never leaves a configuration silently unscoped (KT-352/KT-831).
 - A configuration with the same plugin/label or semantic configuration hash is
   skipped and reported rather than overwritten.
 - Exact replay is idempotent. Reusing a bundle id with changed content is an

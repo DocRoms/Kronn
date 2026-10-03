@@ -47,7 +47,7 @@ fn action_dependencies(html: &str) -> Result<Vec<(ResourceKind, String)>> {
     Ok(dependencies)
 }
 
-fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
     // Refuse oversized observations before hydrating the complete dataset graph.
     let estimated: Option<i64> = conn.query_row(
         "SELECT length(CAST(r.html AS BLOB)) +

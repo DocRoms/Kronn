@@ -27,8 +27,10 @@ use tokio::time::timeout;
 use crate::db::model_catalog::{self as db, DiscoveredModel};
 use crate::db::Database;
 use crate::models::{
-    AgentType, AppConfig, CatalogPreflightFailure, ModelAvailability, ModelCatalogView, ModelTier,
-    ModelTierConfig, ModelTiersConfig, ModelUnavailableReason,
+    AgentType, AppConfig, CatalogModelEntry, CatalogPreflightFailure, CatalogPreflightResolution,
+    CatalogPreflightWarning, CatalogReplacementSource, ModelAvailability, ModelCatalogAlert,
+    ModelCatalogReference, ModelCatalogReferenceKind, ModelCatalogView, ModelProvenance, ModelTier,
+    ModelTierConfig, ModelTiersConfig, ModelUnavailableReason, StepType,
 };
 
 /// How long a successful live snapshot is trusted before a consumer should
@@ -82,10 +84,11 @@ pub fn reasoning_modes_for_agent_model(
         .and_then(|catalog| catalog.get(&(target, model_id.to_owned())).cloned())
 }
 
-/// Historical unit-test expectations only, never a runtime resolver fallback.
-/// The one-time migration below writes its own durable seed rows.
-#[cfg(test)]
-pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
+/// Historical per-agent tier defaults used by the one-time seed migration and
+/// as the last same-agent fallback when a configured model disappears. A
+/// fallback is still accepted only when this exact identity is live in the
+/// durable catalogue; these literals never bypass discovery.
+pub fn agent_default_for_tier(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
     match (agent_type, tier) {
         (AgentType::ClaudeCode, ModelTier::Economy) => Some("haiku".into()),
         (AgentType::ClaudeCode, ModelTier::Default) => Some("sonnet".into()),
@@ -98,6 +101,11 @@ pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<Strin
         (AgentType::Ollama, ModelTier::Reasoning) => Some("qwen3:30b-a3b".into()),
         _ => None,
     }
+}
+
+#[cfg(test)]
+pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
+    agent_default_for_tier(agent_type, tier)
 }
 
 pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
@@ -527,7 +535,214 @@ pub async fn build_view(
         last_attempt_at: log.as_ref().map(|l| l.last_attempt_at),
         last_error_reason: log.as_ref().and_then(|l| l.last_error_reason),
         last_error_detail: log.as_ref().and_then(|l| l.last_error_detail.clone()),
+        alerts: Vec::new(),
     })
+}
+
+fn live_replacement_for_entry(
+    entries: &[CatalogModelEntry],
+    missing: &CatalogModelEntry,
+) -> Option<String> {
+    let resolved = missing.resolved_model.as_deref()?;
+    let alias_stem = missing.model_id.split_once('[').map(|(stem, _suffix)| stem);
+    entries
+        .iter()
+        .filter(|candidate| {
+            candidate.model_id != missing.model_id
+                && candidate.provenance == ModelProvenance::Live
+                && candidate.availability == ModelAvailability::Available
+                && candidate.resolved_model.as_deref() == Some(resolved)
+        })
+        .min_by_key(|candidate| {
+            (
+                alias_stem != Some(candidate.model_id.as_str()),
+                candidate.model_id == "default",
+                candidate.model_id.clone(),
+            )
+        })
+        .map(|candidate| candidate.model_id.clone())
+}
+
+fn available_chat_entry<'a>(
+    entries: &'a [CatalogModelEntry],
+    model_id: &str,
+) -> Option<&'a CatalogModelEntry> {
+    entries.iter().find(|entry| {
+        entry.model_id == model_id
+            && entry.availability == ModelAvailability::Available
+            && crate::http_transport::entry_supports_capability(
+                entry,
+                crate::http_transport::CAPABILITY_CHAT,
+            )
+    })
+}
+
+fn tier_replacement_for_entry(
+    entries: &[CatalogModelEntry],
+    missing: &CatalogModelEntry,
+    agent_type: &AgentType,
+    selected_tier: ModelTier,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Option<(String, ModelTier)> {
+    let equivalent_tier = missing.tier_assignment.unwrap_or(selected_tier);
+    let configured =
+        crate::agents::runner::configured_model_flag(agent_type, equivalent_tier, model_tiers);
+    configured
+        .as_deref()
+        .filter(|candidate| *candidate != missing.model_id)
+        .and_then(|candidate| available_chat_entry(entries, candidate))
+        .or_else(|| {
+            db::resolve_tier_entry(entries, equivalent_tier).filter(|candidate| {
+                crate::http_transport::entry_supports_capability(
+                    candidate,
+                    crate::http_transport::CAPABILITY_CHAT,
+                )
+            })
+        })
+        .filter(|candidate| candidate.model_id != missing.model_id)
+        .or_else(|| {
+            agent_default_for_tier(agent_type, equivalent_tier)
+                .filter(|candidate| *candidate != missing.model_id)
+                .and_then(|candidate| available_chat_entry(entries, &candidate))
+        })
+        .map(|candidate| (candidate.model_id.clone(), equivalent_tier))
+}
+
+fn configured_tier_models(
+    config: &ModelTiersConfig,
+    agent_type: &AgentType,
+) -> Vec<(ModelTier, String)> {
+    let tier_config = match agent_type {
+        AgentType::ClaudeCode => Some(&config.claude_code),
+        AgentType::Codex => Some(&config.codex),
+        AgentType::OpenCode => Some(&config.open_code),
+        AgentType::GeminiCli => Some(&config.gemini_cli),
+        AgentType::Kiro => Some(&config.kiro),
+        AgentType::Vibe => Some(&config.vibe),
+        AgentType::CopilotCli => Some(&config.copilot_cli),
+        AgentType::Ollama => Some(&config.ollama),
+        AgentType::LiteLlm => Some(&config.lite_llm),
+        AgentType::Nvidia => Some(&config.nvidia),
+        AgentType::Custom => None,
+    };
+    let Some(tier_config) = tier_config else {
+        return Vec::new();
+    };
+    [
+        (ModelTier::Economy, tier_config.economy.as_ref()),
+        (ModelTier::Default, tier_config.default.as_ref()),
+        (ModelTier::Reasoning, tier_config.reasoning.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(tier, model)| {
+        model
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| (tier, model.clone()))
+    })
+    .collect()
+}
+
+fn reference_runtime_target(agent_type: &AgentType, connection_id: Option<&str>) -> String {
+    connection_id
+        .map(db::http_runtime_target_id)
+        .unwrap_or_else(|| db::agent_runtime_target_id(agent_type))
+}
+
+/// Attach warnings for persisted references to models that disappeared from
+/// the latest successful catalogue. The warning is recalculated from current
+/// workflow, tier and Quick Prompt state, so fixing the last reference clears
+/// it without mutating catalogue history.
+pub async fn populate_reference_alerts(
+    database: &Database,
+    config: &AppConfig,
+    view: &mut ModelCatalogView,
+) -> anyhow::Result<()> {
+    if !view.models.iter().any(|entry| {
+        entry.availability == ModelAvailability::Unavailable
+            && entry.unavailable_reason == Some(ModelUnavailableReason::Disappeared)
+    }) {
+        view.alerts.clear();
+        return Ok(());
+    }
+    let (workflows, quick_prompts) = database
+        .with_read_conn(|conn| {
+            Ok((
+                crate::db::workflows::list_workflows(conn)?,
+                crate::db::quick_prompts::list_quick_prompts(conn)?,
+            ))
+        })
+        .await?;
+    let tier_models = configured_tier_models(&config.agents.model_tiers, &view.agent_type);
+    let mut alerts = Vec::new();
+
+    for missing in view.models.iter().filter(|entry| {
+        entry.availability == ModelAvailability::Unavailable
+            && entry.unavailable_reason == Some(ModelUnavailableReason::Disappeared)
+    }) {
+        let mut references = Vec::new();
+        for workflow in &workflows {
+            for step in workflow.steps.iter().chain(&workflow.on_failure) {
+                if !matches!(step.step_type, StepType::Agent | StepType::BatchQuickPrompt) {
+                    continue;
+                }
+                let Some(settings) = step.agent_settings.as_ref() else {
+                    continue;
+                };
+                if settings.model.as_deref() != Some(missing.model_id.as_str())
+                    || reference_runtime_target(&step.agent, settings.connection_id.as_deref())
+                        != view.runtime_target_id
+                {
+                    continue;
+                }
+                references.push(ModelCatalogReference {
+                    kind: ModelCatalogReferenceKind::WorkflowStep,
+                    resource_id: Some(workflow.id.clone()),
+                    label: format!("{} · {}", workflow.name, step.name),
+                });
+            }
+        }
+        if view.runtime_target_id == db::agent_runtime_target_id(&view.agent_type) {
+            for (tier, model) in &tier_models {
+                if model == &missing.model_id {
+                    references.push(ModelCatalogReference {
+                        kind: ModelCatalogReferenceKind::ModelTier,
+                        resource_id: None,
+                        label: format!("{:?} · {tier:?}", view.agent_type),
+                    });
+                }
+            }
+        }
+        for prompt in &quick_prompts {
+            let Some(settings) = prompt.agent_settings.as_ref() else {
+                continue;
+            };
+            let connection_id = settings
+                .connection_id
+                .as_deref()
+                .or(prompt.connection_id.as_deref());
+            if settings.model.as_deref() != Some(missing.model_id.as_str())
+                || reference_runtime_target(&prompt.agent, connection_id) != view.runtime_target_id
+            {
+                continue;
+            }
+            references.push(ModelCatalogReference {
+                kind: ModelCatalogReferenceKind::QuickPrompt,
+                resource_id: Some(prompt.id.clone()),
+                label: prompt.name.clone(),
+            });
+        }
+        references.sort_by(|left, right| left.label.cmp(&right.label));
+        if !references.is_empty() {
+            alerts.push(ModelCatalogAlert {
+                model_id: missing.model_id.clone(),
+                replacement: live_replacement_for_entry(&view.models, missing),
+                references,
+            });
+        }
+    }
+    alerts.sort_by(|left, right| left.model_id.cmp(&right.model_id));
+    view.alerts = alerts;
+    Ok(())
 }
 
 /// Serve the current snapshot, refreshing first when it is stale (or when
@@ -588,20 +803,20 @@ fn recommended_action_for(reason: ModelUnavailableReason) -> &'static str {
     }
 }
 
-/// Catalog-driven proactive preflight for one launch target. Returns `None`
-/// when nothing in the catalog contradicts launching (including "we simply
-/// have no record of this identity" — an unknown model is not blocked on
-/// absence alone, only a model the catalog has positively marked
-/// unavailable). HTTP targets read their own durable identity but never trigger
-/// CLI discovery here; reachability remains owned by their transport preflight.
-pub async fn preflight_check(
+/// Catalog-driven proactive preflight for one launch target. A disappeared
+/// identity resolves to a same-agent replacement when possible, while every
+/// other positive incompatibility remains a refusal. Unknown identities still
+/// pass through unchanged. HTTP targets read their own durable identity but
+/// never trigger CLI discovery here; reachability remains owned by their
+/// transport preflight.
+pub async fn preflight_resolve(
     db: &Database,
     runtime_target_id: Option<&str>,
     agent_type: AgentType,
     tier: ModelTier,
     model_override: Option<&str>,
     model_tiers: Option<&ModelTiersConfig>,
-) -> Option<CatalogPreflightFailure> {
+) -> Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>> {
     let configured_model = model_override
         .filter(|model| !model.trim().is_empty())
         .map(str::to_string)
@@ -637,9 +852,16 @@ pub async fn preflight_check(
             })
             .await;
         match result {
-            Ok(model) => model?,
+            Ok(Some(model)) => model,
+            Ok(None) => {
+                return Ok(CatalogPreflightResolution {
+                    requested_model: None,
+                    effective_model: None,
+                    warning: None,
+                })
+            }
             Err(error) => {
-                return Some(CatalogPreflightFailure {
+                return Err(Box::new(CatalogPreflightFailure {
                     runtime_target_id,
                     agent_type,
                     model_id: None,
@@ -647,7 +869,8 @@ pub async fn preflight_check(
                     detail: format!("catalog assignment lookup failed: {error}"),
                     last_checked_at: Utc::now(),
                     recommended_action: "recheck_catalog".into(),
-                })
+                    replacement: None,
+                }))
             }
         }
     };
@@ -662,7 +885,7 @@ pub async fn preflight_check(
         match refresh_if_stale(db, agent_type.clone(), false).await {
             Ok(view) => Some(view),
             Err(error) => {
-                return Some(CatalogPreflightFailure {
+                return Err(Box::new(CatalogPreflightFailure {
                     runtime_target_id,
                     agent_type,
                     model_id: Some(model_id.clone()),
@@ -670,7 +893,8 @@ pub async fn preflight_check(
                     detail: format!("catalog refresh failed: {error}"),
                     last_checked_at: Utc::now(),
                     recommended_action: "recheck_catalog".into(),
-                });
+                    replacement: None,
+                }));
             }
         }
     } else if runtime_target_id.starts_with("http:") {
@@ -700,7 +924,7 @@ pub async fn preflight_check(
                 });
             !matches!(reason, ModelUnavailableReason::Unsupported) && !retained_claude_model
         }) {
-            return Some(CatalogPreflightFailure {
+            return Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
                 model_id: Some(model_id.clone()),
@@ -710,32 +934,89 @@ pub async fn preflight_check(
                     .unwrap_or_else(|| "the runtime catalog could not be refreshed".into()),
                 last_checked_at: view.last_attempt_at.unwrap_or_else(Utc::now),
                 recommended_action: recommended_action_for(reason).to_string(),
-            });
+                replacement: None,
+            }));
         }
     }
     let target = runtime_target_id.clone();
     let mid = model_id.clone();
-    let entry = db
-        .with_conn(move |conn| db::get(conn, &target, &mid))
+    let (entry, entries) = db
+        .with_read_conn(move |conn| {
+            let entries = db::list_for_target(conn, &target)?;
+            let entry = entries.iter().find(|entry| entry.model_id == mid).cloned();
+            Ok((entry, entries))
+        })
         .await
-        .ok()
-        .flatten();
+        .unwrap_or((None, Vec::new()));
     match entry {
         Some(entry) if entry.availability == ModelAvailability::Unavailable => {
             let reason = entry
                 .unavailable_reason
                 .unwrap_or(ModelUnavailableReason::Disappeared);
-            Some(CatalogPreflightFailure {
+            let equivalent_tier = entry.tier_assignment.unwrap_or(tier);
+            let replacement = (reason == ModelUnavailableReason::Disappeared)
+                .then(|| live_replacement_for_entry(&entries, &entry))
+                .flatten()
+                .filter(|candidate| available_chat_entry(&entries, candidate).is_some())
+                .map(|model| {
+                    (
+                        model,
+                        CatalogReplacementSource::ResolvedModel,
+                        equivalent_tier,
+                    )
+                })
+                .or_else(|| {
+                    (reason == ModelUnavailableReason::Disappeared)
+                        .then(|| {
+                            tier_replacement_for_entry(
+                                &entries,
+                                &entry,
+                                &agent_type,
+                                tier,
+                                model_tiers,
+                            )
+                        })
+                        .flatten()
+                        .map(|(model, tier)| {
+                            (model, CatalogReplacementSource::EquivalentTier, tier)
+                        })
+                });
+            if let Some((effective_model, replacement_source, equivalent_tier)) = replacement {
+                return Ok(CatalogPreflightResolution {
+                    requested_model: Some(model_id.clone()),
+                    effective_model: Some(effective_model.clone()),
+                    warning: Some(CatalogPreflightWarning {
+                        requested_model: model_id,
+                        effective_model,
+                        reason,
+                        detail: entry.unavailable_detail.unwrap_or_else(|| {
+                            "this model disappeared from the latest live catalogue".into()
+                        }),
+                        replacement_source,
+                        equivalent_tier,
+                    }),
+                });
+            }
+            let detail = if reason == ModelUnavailableReason::Disappeared {
+                format!(
+                    "model `{model_id}` disappeared and no available replacement exists for the {:?} tier on agent {:?}",
+                    equivalent_tier, agent_type
+                )
+            } else {
+                entry
+                    .unavailable_detail
+                    .unwrap_or_else(|| "this model is not currently available".into())
+            };
+            Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
                 model_id: Some(model_id),
                 reason,
-                detail: entry
-                    .unavailable_detail
-                    .unwrap_or_else(|| "this model is not currently available".into()),
+                detail,
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(reason).to_string(),
-            })
+                replacement: None,
+            }))
         }
         // KT-545 DoD #3: a model the catalog positively tags with
         // capabilities that exclude chat (e.g. an image/video-only entry)
@@ -748,7 +1029,7 @@ pub async fn preflight_check(
                 crate::http_transport::CAPABILITY_CHAT,
             ) =>
         {
-            Some(CatalogPreflightFailure {
+            Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
                 model_id: Some(model_id),
@@ -761,10 +1042,39 @@ pub async fn preflight_check(
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(ModelUnavailableReason::Unsupported)
                     .to_string(),
-            })
+                replacement: None,
+            }))
         }
-        _ => None,
+        _ => Ok(CatalogPreflightResolution {
+            requested_model: Some(model_id.clone()),
+            effective_model: Some(model_id),
+            warning: None,
+        }),
     }
+}
+
+/// Compatibility helper for launch surfaces that only need a blocking
+/// verdict. Callers that dispatch a model must use [`preflight_resolve`] so a
+/// non-blocking replacement reaches the actual runtime.
+pub async fn preflight_check(
+    db: &Database,
+    runtime_target_id: Option<&str>,
+    agent_type: AgentType,
+    tier: ModelTier,
+    model_override: Option<&str>,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Option<CatalogPreflightFailure> {
+    preflight_resolve(
+        db,
+        runtime_target_id,
+        agent_type,
+        tier,
+        model_override,
+        model_tiers,
+    )
+    .await
+    .err()
+    .map(|failure| *failure)
 }
 
 #[cfg(test)]
@@ -781,6 +1091,8 @@ mod tests {
         DiscoveredModel {
             model_id: "claude-fable-5-1[1m]".into(),
             display_name: "Fable".into(),
+            resolved_model: Some("claude-fable-5-1".into()),
+            description: Some("Long-context Fable".into()),
             capabilities: vec!["chat".into()],
             reasoning_modes: vec!["low".into(), "max".into()],
             default_reasoning_mode: None,
@@ -1077,6 +1389,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "some-other-model".into(),
                     display_name: "Some other model".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1147,6 +1461,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "seedance-2.0-mini".into(),
                     display_name: "Seedance 2.0 mini".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["video".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1183,6 +1499,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "llama-3.3-70b".into(),
                     display_name: "Llama 3.3 70B".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1231,6 +1549,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "other-model".into(),
                     display_name: "Other model".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec![],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1254,6 +1574,355 @@ mod tests {
         assert_eq!(failure.model_id.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(failure.reason, ModelUnavailableReason::Disappeared);
         assert_eq!(failure.recommended_action, "choose_replacement");
+    }
+
+    #[tokio::test]
+    async fn disappeared_claude_alias_names_live_resolved_model_replacement() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let alias = DiscoveredModel {
+                    model_id: "opus[1m]".into(),
+                    display_name: "Opus 1M".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Legacy long-context alias".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let live = DiscoveredModel {
+                    model_id: "opus".into(),
+                    display_name: "Opus".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Current Opus alias".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let default = DiscoveredModel {
+                    model_id: "default".into(),
+                    display_name: "Default".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Recommended model".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    &[alias, default.clone(), live.clone()],
+                )?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[default, live])
+            })
+            .await
+            .unwrap();
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("opus[1m]"),
+            None,
+        )
+        .await
+        .expect("the disappeared alias has a same-agent live replacement");
+        assert_eq!(resolution.requested_model.as_deref(), Some("opus[1m]"));
+        assert_eq!(resolution.effective_model.as_deref(), Some("opus"));
+        let warning = resolution.warning.expect("the replacement is never silent");
+        assert_eq!(warning.reason, ModelUnavailableReason::Disappeared);
+        assert_eq!(warning.requested_model, "opus[1m]");
+        assert_eq!(warning.effective_model, "opus");
+        assert_eq!(
+            warning.replacement_source,
+            CatalogReplacementSource::ResolvedModel
+        );
+        assert_eq!(warning.equivalent_tier, ModelTier::Reasoning);
+    }
+
+    #[tokio::test]
+    async fn disappeared_model_without_resolved_identity_uses_equivalent_tier_default() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let missing = DiscoveredModel {
+                    model_id: "retired-reasoner".into(),
+                    display_name: "Retired reasoner".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let live = DiscoveredModel {
+                    model_id: "opus".into(),
+                    display_name: "Opus".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    &[missing, live.clone()],
+                )?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[live])
+            })
+            .await
+            .unwrap();
+        let mut tiers = ModelTiersConfig::default();
+        tiers.claude_code.reasoning = Some("opus".into());
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("retired-reasoner"),
+            Some(&tiers),
+        )
+        .await
+        .expect("the live equivalent-tier default replaces the missing model");
+        assert_eq!(resolution.effective_model.as_deref(), Some("opus"));
+        let warning = resolution.warning.unwrap();
+        assert_eq!(
+            warning.replacement_source,
+            CatalogReplacementSource::EquivalentTier
+        );
+        assert_eq!(warning.equivalent_tier, ModelTier::Reasoning);
+    }
+
+    #[tokio::test]
+    async fn disappeared_model_without_tier_config_uses_live_agent_default() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let missing = DiscoveredModel {
+                    model_id: "retired-reasoner".into(),
+                    display_name: "Retired reasoner".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let live_default = DiscoveredModel {
+                    model_id: "opus".into(),
+                    display_name: "Opus".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    &[missing, live_default.clone()],
+                )?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[live_default])
+            })
+            .await
+            .unwrap();
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("retired-reasoner"),
+            None,
+        )
+        .await
+        .expect("the live built-in tier default replaces the missing model");
+        assert_eq!(resolution.effective_model.as_deref(), Some("opus"));
+        let warning = resolution.warning.unwrap();
+        assert_eq!(
+            warning.replacement_source,
+            CatalogReplacementSource::EquivalentTier
+        );
+        assert_eq!(warning.equivalent_tier, ModelTier::Reasoning);
+    }
+
+    #[tokio::test]
+    async fn disappeared_model_without_same_agent_tier_replacement_is_explicitly_refused() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let missing = DiscoveredModel {
+                    model_id: "retired-reasoner".into(),
+                    display_name: "Retired reasoner".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[missing])?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[])
+            })
+            .await
+            .unwrap();
+
+        let failure = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("retired-reasoner"),
+            None,
+        )
+        .await
+        .expect_err("no other agent or unavailable model may be selected");
+        assert_eq!(failure.reason, ModelUnavailableReason::Disappeared);
+        assert!(failure.detail.contains("no available replacement"));
+        assert!(failure.detail.contains("Reasoning"));
+        assert!(failure.detail.contains("ClaudeCode"));
+    }
+
+    #[tokio::test]
+    async fn available_model_passes_preflight_without_rewrite_or_warning() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                db::reconcile_live(
+                    conn,
+                    &db::agent_runtime_target_id(&AgentType::ClaudeCode),
+                    &AgentType::ClaudeCode,
+                    &[DiscoveredModel {
+                        model_id: "opus".into(),
+                        display_name: "Opus".into(),
+                        resolved_model: Some("claude-opus-5-5".into()),
+                        description: None,
+                        capabilities: vec!["chat".into()],
+                        reasoning_modes: vec![],
+                        default_reasoning_mode: None,
+                    }],
+                )
+            })
+            .await
+            .unwrap();
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("opus"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolution.requested_model, resolution.effective_model);
+        assert!(resolution.warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_alert_names_workflow_tier_and_quick_prompt_references() {
+        let database = test_db();
+        let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+        let alias = DiscoveredModel {
+            model_id: "opus[1m]".into(),
+            display_name: "Opus 1M".into(),
+            resolved_model: Some("claude-opus-5-5".into()),
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        let live = DiscoveredModel {
+            model_id: "opus".into(),
+            display_name: "Opus".into(),
+            resolved_model: Some("claude-opus-5-5".into()),
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        database
+            .with_conn({
+                let target = target.clone();
+                let alias = alias.clone();
+                let live = live.clone();
+                move |conn| {
+                    db::reconcile_live(
+                        conn,
+                        &target,
+                        &AgentType::ClaudeCode,
+                        &[alias, live],
+                    )?;
+                    let now = Utc::now().to_rfc3339();
+                    conn.execute(
+                        "INSERT INTO workflows \
+                         (id, name, trigger_json, steps_json, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                        rusqlite::params![
+                            "workflow-release",
+                            "Release workflow",
+                            r#"{"type":"Manual"}"#,
+                            r#"[{"name":"orchestrator","step_type":{"type":"Agent"},"agent":"ClaudeCode","prompt_template":"Ship","agent_settings":{"model":"opus[1m]"}}]"#,
+                            now,
+                        ],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO quick_prompts \
+                         (id, name, prompt_template, agent, tier, agent_settings_json, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                        rusqlite::params![
+                            "qp-framing",
+                            "Framing analysis",
+                            "Analyse",
+                            "ClaudeCode",
+                            "reasoning",
+                            r#"{"model":"opus[1m]"}"#,
+                            now,
+                        ],
+                    )?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let mut config = crate::core::config::default_config();
+        config.agents.model_tiers.claude_code.reasoning = Some("opus[1m]".into());
+
+        let mut view = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![live]),
+                refresh_if_stale(&database, AgentType::ClaudeCode, true),
+            )
+            .await
+            .unwrap();
+        populate_reference_alerts(&database, &config, &mut view)
+            .await
+            .unwrap();
+
+        assert_eq!(view.alerts.len(), 1);
+        let alert = &view.alerts[0];
+        assert_eq!(alert.model_id, "opus[1m]");
+        assert_eq!(alert.replacement.as_deref(), Some("opus"));
+        assert_eq!(
+            alert
+                .references
+                .iter()
+                .map(|reference| reference.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ClaudeCode · Reasoning",
+                "Framing analysis",
+                "Release workflow · orchestrator",
+            ]
+        );
     }
 
     #[tokio::test]

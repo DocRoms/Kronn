@@ -25,16 +25,12 @@ use super::helpers::{
     compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills,
     remove_bootstrap_block,
 };
-use super::{SseStream, PROMPT_PREAMBLE};
+use super::{detach_sse_stream, SseStream, PROMPT_PREAMBLE};
 
 /// POST /api/projects/:id/full-audit
 /// Unified endpoint: install template + run the assembled audit chain + create validation discussion.
-/// Finalizes an audit whose SSE consumer vanished mid-run (MCP bridge
-/// death, browser tab close): the generator is dropped at its next yield
-/// and nothing downstream runs — observed live as a zombie (tracker frozen
-/// on step 1, run row stuck on Running, orphaned agent, zero logs).
-/// Armed at pipeline start, disarmed on every normal ending. Drop can't do
-/// async work, so the cleanup is spawned onto the runtime.
+/// Settles durable state and releases shared resources if the pipeline exits abnormally.
+/// Subscriber disconnects cannot trigger it because audit streams run detached.
 ///
 /// Also holds the shared power assertion (`core::power_guard`): default
 /// `pmset` puts the machine to sleep mid-audit (a 1h27 freeze was measured
@@ -45,8 +41,7 @@ pub(super) struct AuditDropGuard {
     armed: bool,
     db: std::sync::Arc<crate::db::Database>,
     tracker: std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-    /// None for partial/drift refreshes — they have no audit_runs row;
-    /// the guard then only clears the tracker (+ power assertion).
+    /// Attached after the durable run row is created.
     run_id: Option<String>,
     project_id: String,
     power: Option<crate::core::power_guard::PowerLease>,
@@ -102,10 +97,8 @@ impl AuditDropGuard {
 
 impl Drop for AuditDropGuard {
     fn drop(&mut self) {
-        // Power assertion FIRST, by design: the run's real work is already
-        // over (the SSE consumer vanished), only the ms-scale DB finalization
-        // below remains, so there is nothing left to keep the machine awake
-        // for. Distinct from the AUDIT lease just below, which is different.
+        // Internal failures leave only the short finalization path below.
+        // Distinct from the AUDIT lease just below, which is different.
         self.release_power_assertion();
         // Order matters for the AUDIT (project) lease: it is released LAST,
         // only once this run's terminal state is settled — otherwise a
@@ -113,7 +106,7 @@ impl Drop for AuditDropGuard {
         // Running rows) or have its fresh progress wiped by a late clear.
         if self.armed {
             tracing::warn!(
-                "Audit for {} dropped mid-flight (SSE consumer vanished) — cleaning up (run: {:?})",
+                "Audit for {} dropped mid-flight; cleaning up (run: {:?})",
                 self.project_id,
                 self.run_id
             );
@@ -138,7 +131,7 @@ impl Drop for AuditDropGuard {
                     handle.spawn(async move {
                         match db.with_conn(move |conn| {
                             crate::db::audit_runs::mark_interrupted(
-                                conn, &run_id, "sse consumer dropped mid-run (bridge/tab gone)",
+                                conn, &run_id, "audit pipeline dropped before completion",
                             )
                         }).await {
                             Ok(()) => {
@@ -158,9 +151,7 @@ impl Drop for AuditDropGuard {
                 }
             }
         }
-        // Synchronous release for the remaining paths: disarmed (the pipeline
-        // finalized the run itself before this Drop) and armed-without-row
-        // (partial/drift — tracker cleanup above is all there is to settle).
+        // Release synchronously after normal completion or before row creation.
         if self.leased {
             if let Ok(mut t) = self.tracker.lock() {
                 t.release_lease(&self.project_id);
@@ -339,6 +330,14 @@ pub async fn full_audit(
         // fresher output. Resolving after the lease closes the TOCTOU where
         // another run could finish between validation and insert. Every
         // rejection is a hard error, never a silent fresh run.
+        // KT-841 — steps the interrupted predecessor already completed
+        // CLEANLY (no CLI failure, no validation warning), keyed by
+        // 1-based step index. Populated below only on resume. Drives the
+        // per-step skip decision so a warned step past a chain of later
+        // successes still gets retried WITHOUT replaying those successes
+        // (the old `step <= resume_from` contiguous check replayed them).
+        let mut already_succeeded_steps: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
         let (kind, resume_from) = if let Some(run_id) = resume_run_id_req.clone() {
             let fetched = db.with_conn({
                 let run_id = run_id.clone();
@@ -347,24 +346,28 @@ pub async fn full_audit(
                     let row = crate::db::audit_runs::get_by_id(conn, &run_id)?;
                     let latest = crate::db::audit_runs::list_recent(conn, &pid, 1)?
                         .into_iter().next();
-                    Ok((row, latest))
+                    let steps = crate::db::audit_runs::list_audit_steps(conn, &run_id)?;
+                    Ok((row, latest, steps))
                 }
             }).await;
             let resolved = match fetched {
-                Ok((row, latest)) => {
+                Ok((row, latest, steps)) => {
                     if latest.as_ref().map(|l| l.id != run_id).unwrap_or(true) {
                         Err(format!(
                             "resume_run_id {run_id} is not the project's most recent run — \
                              a newer attempt supersedes it; launch a fresh audit instead"
                         ))
                     } else {
-                        resolve_resume_row(&run_id, row.as_ref(), &project_id)
+                        resolve_resume_row(&run_id, row.as_ref(), &project_id).map(|plan| (plan, steps))
                     }
                 }
                 Err(e) => Err(format!("resume_run_id lookup failed: {e}")),
             };
             match resolved {
-                Ok(plan) => plan,
+                Ok((plan, steps)) => {
+                    already_succeeded_steps = already_succeeded_step_indices(&steps);
+                    plan
+                }
                 Err(msg) => {
                     yield Event::default().event("error").data(
                         serde_json::json!({ "error": msg }).to_string(),
@@ -626,11 +629,6 @@ pub async fn full_audit(
                             );
                         }
                     }
-                }
-
-                let index_file = project_path.join("docs/AGENTS.md");
-                if index_file.exists() {
-                    crate::api::projects::inject_bootstrap_prompt(&index_file);
                 }
 
                 runner::fix_file_ownership(&project_path);
@@ -920,10 +918,13 @@ pub async fn full_audit(
             let file_label = if analysis_step.target_file == "REVIEW" { "Final review" } else { analysis_step.target_file };
 
             // 0.8.3 (#311) — resume support. Skip steps the previous
-            // interrupted run already completed. We still advance the
-            // tracker's `step_index` so the UI bar shows correct
+            // interrupted run already completed CLEANLY (KT-841: per-step,
+            // from `already_succeeded_steps` — NOT a `step <= resume_from`
+            // contiguous check, which used to replay every step past a
+            // warning that itself froze the checkpoint). We still advance
+            // the tracker's `step_index` so the UI bar shows correct
             // progress, but we don't spawn an agent for these.
-            if (step as u32) <= resume_from {
+            if already_succeeded_steps.contains(&(step as u32)) {
                 if let Ok(mut t) = audit_tracker.lock() {
                     t.advance_step(&project_id, step as u32, Some(file_label.to_string()));
                 }
@@ -1031,6 +1032,61 @@ pub async fn full_audit(
             // live elapsed counter (computed client-side from the
             // step_started_at wallclock).
             let step_started_at = std::time::Instant::now();
+
+            // KT-841 — rewrite-proof snapshot BEFORE the agent runs (parity
+            // with `drift.rs`'s partial pipeline). Taken ONCE per step,
+            // outside the retry loop below, so a retry is still compared
+            // against the state before the FIRST attempt, not a partially
+            // rewritten intermediate. Compared as the LAST gate, after
+            // CLI/validator/enforce, so equality only means `unchanged` when
+            // every other gate was already green.
+            let pre_snapshot = match super::validation::target_snapshot(&project_path, analysis_step.target_file) {
+                Ok(snap) => snap,
+                Err(reason) => {
+                    // Unreadable pre-state (≠ absent): fail before burning tokens.
+                    yield Event::default().event("step_warning").data(
+                        serde_json::json!({
+                            "step": step, "file": file_label,
+                            "reason": reason, "repaired_from_template": false,
+                        }).to_string()
+                    );
+                    yield Event::default().event("step_done").data(
+                        serde_json::json!({
+                            "step": step, "success": false, "file": file_label,
+                            "tokens": 0, "duration_ms": 0,
+                            "total_tokens": total_tokens_so_far,
+                        }).to_string()
+                    );
+                    any_step_warning = true;
+                    warned_steps.push(step as u32);
+                    continue;
+                }
+            };
+            // Snapshot the full human-owned surface, not just target_file:
+            // Step 9 and future review prompts may legitimately edit several
+            // docs during one attempt.
+            let human_owned_snapshot =
+                match super::helpers::capture_human_owned_sections(&project_path) {
+                    Ok(snapshot) => snapshot,
+                    Err(reason) => {
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step, "file": file_label,
+                                "reason": reason, "repaired_from_template": false,
+                            }).to_string()
+                        );
+                        yield Event::default().event("step_done").data(
+                            serde_json::json!({
+                                "step": step, "success": false, "file": file_label,
+                                "tokens": 0, "duration_ms": 0,
+                                "total_tokens": total_tokens_so_far,
+                            }).to_string()
+                        );
+                        any_step_warning = true;
+                        warned_steps.push(step as u32);
+                        continue;
+                    }
+                };
 
             // 0.8.8 PR-A — enforce-mode per-step retry loop. `off`/`warn` run a
             // single attempt (`max_attempts == 1`) with the gate inert, so the
@@ -1241,6 +1297,37 @@ pub async fn full_audit(
                         }
                     }
 
+                    // Ownership is enforced at the attempt boundary, before
+                    // cancellation, retry, or failure can leave an agent's
+                    // rewrite on disk. A report failure also fails the step:
+                    // the human text is restored, but the promised proposal
+                    // was not durably recorded.
+                    let ownership_warning = match super::helpers::protect_human_owned_sections(
+                        &project_path,
+                        &human_owned_snapshot,
+                        &today,
+                    ) {
+                        Ok(_) => None,
+                        Err(reason) => {
+                            let reason = format!(
+                                "human-owned section protection failed for {file_label}: {reason}"
+                            );
+                            tracing::warn!("Audit step {} ({}): {}", step, file_label, reason);
+                            yield Event::default().event("step_warning").data(
+                                serde_json::json!({
+                                    "step": step,
+                                    "file": file_label,
+                                    "reason": reason.clone(),
+                                    "repaired_from_template": false,
+                                }).to_string()
+                            );
+                            Some(crate::api::audit::validation::StepValidationWarning {
+                                reason,
+                                repaired: false,
+                            })
+                        }
+                    };
+
                     // Check if cancelled during this step. Must finalize
                     // exactly like the pre-step branch: persist `Cancelled`
                     // and disarm the drop-guard. Without this the guard's Drop
@@ -1293,6 +1380,11 @@ pub async fn full_audit(
                         &project_path,
                         analysis_step.target_file,
                     );
+
+                    if let Some(ownership_warning) = ownership_warning {
+                        success = false;
+                        warning = Some(ownership_warning);
+                    }
 
                     if let Some(w) = &warning {
                         tracing::warn!(
@@ -1398,20 +1490,67 @@ pub async fn full_audit(
                                     reason, repaired: false,
                                 });
                             }
-                            EnforceGateOutcome::Pass { written } => {
-                                // Clean citations — stamp `audit="<today>"` on
-                                // any curated="ai" section (deterministic, 0
-                                // tokens). The Full pipeline has no rewrite
-                                // proof, so stamping here is safe.
-                                if let Some(stamped) =
-                                    super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
-                                {
-                                    let target_path = project_path.join(analysis_step.target_file);
-                                    if let Err(e) = std::fs::write(&target_path, &stamped) {
-                                        tracing::warn!(
-                                            "Audit step {} ({}): failed to stamp audit dates: {}",
-                                            step, file_label, e
-                                        );
+                            EnforceGateOutcome::Pass { .. } => {
+                                // No mutation here (mirrors the partial
+                                // pipeline, Codex msg 150): the audit-date
+                                // stamp only applies once the rewrite-proof
+                                // gate below has PROVEN a substantial
+                                // rewrite — stamping an unchanged file would
+                                // mask the very thing that gate exists to
+                                // catch.
+                            }
+                        }
+                    }
+
+                    // KT-841 — rewrite-proof gate (parity with the partial
+                    // pipeline's `drift.rs`): a step that reports success but
+                    // left its target BYTE-IDENTICAL (post-normalization) to
+                    // before the agent ran did nothing — that must fail, not
+                    // silently pass through as a no-op success. Runs LAST,
+                    // only when every earlier gate is green. The decision
+                    // itself is a pure function (`rewrite_proof_verdict`, unit
+                    // tested below) — this block only maps it to SSE events.
+                    if success {
+                        match rewrite_proof_verdict(
+                            analysis_step.target_file,
+                            &pre_snapshot,
+                            super::validation::target_snapshot(&project_path, analysis_step.target_file),
+                        ) {
+                            RewriteProofVerdict::Skipped => {}
+                            RewriteProofVerdict::Unreadable(reason) | RewriteProofVerdict::Unchanged(reason) => {
+                                success = false;
+                                tracing::warn!(
+                                    "Audit step {} ({}) rewrite-proof gate failed: {}",
+                                    step, file_label, reason
+                                );
+                                yield Event::default().event("step_warning").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "reason": reason.clone(), "repaired_from_template": false,
+                                    }).to_string()
+                                );
+                                warning = Some(crate::api::audit::validation::StepValidationWarning {
+                                    reason, repaired: false,
+                                });
+                            }
+                            RewriteProofVerdict::Proven => {
+                                let target_path = project_path.join(analysis_step.target_file);
+                                // Substantial rewrite PROVEN — only now may we
+                                // stamp the curated audit dates (mirrors
+                                // drift.rs: stamping an unproven rewrite would
+                                // mask a no-op step as freshly audited).
+                                if enforce_mode {
+                                    if let Ok(written) = std::fs::read_to_string(&target_path) {
+                                        if let Some(stamped) =
+                                            super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
+                                        {
+                                            if let Err(e) = std::fs::write(&target_path, &stamped) {
+                                                tracing::warn!(
+                                                    "Audit step {} ({}): failed to stamp audit dates: {}",
+                                                    step, file_label, e
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1472,21 +1611,25 @@ pub async fn full_audit(
                         if analysis_step.target_file.contains("inconsistencies-") {
                             freshly_written_indices.push(analysis_step.target_file.to_string());
                         }
-                        // The checkpoint is the CONTIGUOUS successful prefix:
-                        // once any step warned/failed, later successes no
-                        // longer advance it — otherwise resume would skip
-                        // 1..=checkpoint right over the failed step and the
-                        // gap would never be re-run.
-                        if !any_step_warning {
-                            last_successful_step = step as u32;
-                            let run_id = audit_run_id.clone();
-                            let log_run_id = run_id.clone();
-                            let step_n = step as u32;
-                            if let Err(e) = db.with_conn(move |conn| {
-                                crate::db::audit_runs::update_last_completed_step(conn, &run_id, step_n)
-                            }).await {
-                                tracing::error!("Failed to persist last_completed_step={step_n} for run {log_run_id}: {e}");
-                            }
+                        // KT-841 — advance on EVERY success, even after an
+                        // earlier step warned/failed: freezing the scalar
+                        // checkpoint here used to make resume replay every
+                        // already-succeeded step past the first warning (it
+                        // only re-ran steps `> resume_from`, contiguously).
+                        // Resume now decides skip/replay per step from the
+                        // persisted `audit_run_steps` outcomes (see the
+                        // `already_succeeded_steps` set below), so a warned
+                        // step is still retried on its own merits — this
+                        // scalar only needs to track "at least this much
+                        // succeeded" for the resume-checkpoint display.
+                        last_successful_step = step as u32;
+                        let run_id = audit_run_id.clone();
+                        let log_run_id = run_id.clone();
+                        let step_n = step as u32;
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::update_last_completed_step(conn, &run_id, step_n)
+                        }).await {
+                            tracing::error!("Failed to persist last_completed_step={step_n} for run {log_run_id}: {e}");
                         }
                     } else {
                         // Track that something went wrong so the
@@ -1718,8 +1861,12 @@ pub async fn full_audit(
 
         // ── Phase 2.6: Documentary optimization ──
         // Deterministic and token-free. It runs after generation/reconciliation
-        // and before validation so an oversized or broken mandatory context can
-        // never earn a completed audit or spawn a validation discussion.
+        // and before validation. Only an invented path (a link or citation to
+        // something that doesn't exist) is worth losing the whole run over —
+        // that's the one thing `blocking_diagnostics()` can still contain
+        // (KT-840). Volume, orphans, citation ranges and "obsolete" markers
+        // are surfaced as warnings on the SAME event and never gate
+        // completion.
         if run_is_complete && should_optimize_documents(kind) {
             let pp = project_path.clone();
             let optimization = tokio::task::spawn_blocking(move || {
@@ -2156,7 +2303,63 @@ pub async fn full_audit(
         yield Event::default().event("done").data(done.to_string());
     });
 
-    Sse::new(stream)
+    // The response only subscribes; the producer owns the run lifecycle.
+    Sse::new(detach_sse_stream(stream))
+}
+
+/// KT-841 — the set of 1-based step indices the interrupted predecessor
+/// already completed CLEANLY (`cli_success = true`, which `finalize_audit_step`
+/// only sets when there was neither a CLI failure nor a validation warning).
+/// Resume uses this to skip PRECISELY those steps, so a step that warned is
+/// always retried on its own merits regardless of what later steps did —
+/// unlike the old `step <= last_completed_step` contiguous check, which
+/// froze at the first warning and therefore replayed every later step that
+/// had already succeeded once the run was resumed.
+pub(crate) fn already_succeeded_step_indices(
+    steps: &[crate::models::AuditRunStep],
+) -> std::collections::HashSet<u32> {
+    steps
+        .iter()
+        .filter(|s| s.cli_success)
+        .map(|s| s.step_index)
+        .collect()
+}
+
+/// KT-841 — outcome of the Full pipeline's rewrite-proof gate.
+#[derive(Debug, PartialEq)]
+pub(crate) enum RewriteProofVerdict {
+    /// The synthetic "REVIEW" pseudo-step (or an empty target) writes no
+    /// file — same exemption as `validate_step_output`.
+    Skipped,
+    /// A real rewrite was confirmed — the step's success stands.
+    Proven,
+    /// The post-agent snapshot could not be read (≠ absent).
+    Unreadable(String),
+    /// The target is BYTE-IDENTICAL (post-normalization) to before the
+    /// agent ran — a reported success that changed nothing.
+    Unchanged(String),
+}
+
+/// Pure decision for the rewrite-proof gate (parity with `drift.rs`'s
+/// partial pipeline): given the step's pre-agent snapshot and the freshly
+/// read post-agent snapshot, decide whether the step actually rewrote its
+/// target. Isolated from the SSE stream so it's unit-testable without a
+/// mocked agent process.
+pub(crate) fn rewrite_proof_verdict(
+    target_file: &str,
+    pre: &super::validation::TargetSnapshot,
+    post: Result<super::validation::TargetSnapshot, String>,
+) -> RewriteProofVerdict {
+    if target_file == "REVIEW" || target_file.is_empty() {
+        return RewriteProofVerdict::Skipped;
+    }
+    match post {
+        Err(reason) => RewriteProofVerdict::Unreadable(reason),
+        Ok(post) if &post == pre => RewriteProofVerdict::Unchanged(
+            "step reported success but rewrote nothing — target file unchanged from before the agent ran".to_string(),
+        ),
+        Ok(_) => RewriteProofVerdict::Proven,
+    }
 }
 
 /// Resolve a resume-by-run-id request against the persisted row. The row is
@@ -2527,8 +2730,29 @@ pub(crate) struct SeverityCounts {
     pub low: u32,
 }
 
+/// True when a TD detail file's `- **Status**: <value>` line (mirrors the
+/// latest `audit_history` entry — see `mod.rs`'s Step 8 template) is
+/// `Rejected`. The user explicitly dismissed the finding during validation
+/// (Phase 2 "reject all/selected"); the file stays on disk as an audit
+/// trail (its row is removed from the index, not the detail file itself),
+/// so it must not keep weighing on the health score or severity tallies.
+fn td_status_is_rejected(content: &str) -> bool {
+    content.lines().any(|l| {
+        let lc = l.trim().to_ascii_lowercase();
+        let Some(value) = lc
+            .strip_prefix("- **status**:")
+            .or_else(|| lc.strip_prefix("**status**:"))
+            .or_else(|| lc.strip_prefix("status:"))
+        else {
+            return false;
+        };
+        value.trim().starts_with("rejected")
+    })
+}
+
 /// Scan every `TD-*.md` file in the tech-debt directory (skipping
-/// scaffolding/reconciliation reports) and tally findings by severity.
+/// scaffolding/reconciliation reports and TDs the user explicitly
+/// `Rejected` during validation) and tally findings by severity.
 ///
 /// The severity is matched from the line shape:
 ///   `- **Severity**: Critical | High | Medium | Low`
@@ -2556,6 +2780,9 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
+        if td_status_is_rejected(&content) {
+            continue;
+        }
         // Pick the FIRST Severity line — multiple lines in the same
         // file would be a malformed TD anyway.
         let Some(sev_line) = content.lines().find(|l| {
@@ -2792,9 +3019,7 @@ mod drop_guard_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn abandoned_run_is_finalized_as_interrupted() {
-        // The SSE consumer vanishing drops the pipeline generator: the
-        // guard must settle the run row (observed live: zombie tracker +
-        // row stuck on Running until the next boot reconcile).
+        // Only an internal pipeline failure can reach the armed guard.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         {
             let db = db.clone();
@@ -2850,7 +3075,7 @@ mod drop_guard_tests {
             .report_path
             .as_deref()
             .unwrap_or("")
-            .contains("sse consumer dropped"));
+            .contains("audit pipeline dropped before completion"));
         assert!(
             tracker.lock().unwrap().progress.is_empty(),
             "tracker entry must be cleared"
@@ -3114,8 +3339,8 @@ mod cancel_ack_tests {
 
 #[cfg(test)]
 mod resume_resolution_tests {
-    use super::resolve_resume_row;
-    use crate::models::{AuditKind, AuditRun};
+    use super::{already_succeeded_step_indices, resolve_resume_row};
+    use crate::models::{AuditKind, AuditRun, AuditRunStep};
 
     fn run(kind: &str, status: &str, project_id: &str, step: u32) -> AuditRun {
         serde_json::from_value(serde_json::json!({
@@ -3173,6 +3398,124 @@ mod resume_resolution_tests {
         let r = run("Nonsense", "Interrupted", "p1", 3);
         let err = resolve_resume_row("r1", Some(&r), "p1").unwrap_err();
         assert!(err.contains("unknown kind"), "{err}");
+    }
+
+    fn step(index: u32, cli_success: bool) -> AuditRunStep {
+        serde_json::from_value(serde_json::json!({
+            "audit_run_id": "r1", "step_index": index, "file_label": "x",
+            "started_at": "2026-07-20T00:00:00Z", "cli_success": cli_success,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_warned_step_never_shows_up_as_already_succeeded() {
+        // KT-841 — step 3 warned (cli_success=false), steps 1,2,4,5 succeeded
+        // cleanly. The set must exclude 3 (must be retried) and include
+        // every other index — even though 4 and 5 are AFTER the warning,
+        // unlike the old contiguous `<= last_completed_step` checkpoint that
+        // used to freeze at 2 and replay 3..=5 wholesale.
+        let steps = vec![
+            step(1, true),
+            step(2, true),
+            step(3, false),
+            step(4, true),
+            step(5, true),
+        ];
+        let already = already_succeeded_step_indices(&steps);
+        assert!(already.contains(&1) && already.contains(&2));
+        assert!(already.contains(&4) && already.contains(&5), "{already:?}");
+        assert!(
+            !already.contains(&3),
+            "the warned step must be retried, never skipped: {already:?}"
+        );
+    }
+
+    #[test]
+    fn a_step_that_never_ran_is_not_already_succeeded() {
+        let steps = vec![step(1, true)];
+        let already = already_succeeded_step_indices(&steps);
+        assert!(already.contains(&1));
+        assert!(
+            !already.contains(&2),
+            "an unattempted step is not in the set"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_proof_tests {
+    use super::{rewrite_proof_verdict, RewriteProofVerdict};
+    use crate::api::audit::validation::TargetSnapshot;
+
+    #[test]
+    fn a_full_step_that_rewrites_nothing_fails() {
+        // KT-841 DoD #3 — a step that reports success (CLI + validator +
+        // enforce all green) but left its target byte-identical to before
+        // the agent ran must NOT be treated as a genuine success.
+        let pre = TargetSnapshot::Present("hash-a".into());
+        let post = Ok(TargetSnapshot::Present("hash-a".into()));
+        let verdict = rewrite_proof_verdict("docs/AGENTS.md", &pre, post);
+        assert_eq!(
+            verdict,
+            RewriteProofVerdict::Unchanged(
+                "step reported success but rewrote nothing — target file unchanged from before the agent ran".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_full_step_that_actually_rewrites_its_target_passes() {
+        let pre = TargetSnapshot::Present("hash-a".into());
+        let post = Ok(TargetSnapshot::Present("hash-b".into()));
+        assert_eq!(
+            rewrite_proof_verdict("docs/AGENTS.md", &pre, post),
+            RewriteProofVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn missing_to_present_is_a_proven_rewrite_never_equal_to_missing() {
+        let pre = TargetSnapshot::Missing;
+        let post = Ok(TargetSnapshot::Present("hash-a".into()));
+        assert_eq!(
+            rewrite_proof_verdict("docs/tech-debt/TD-x.md", &pre, post),
+            RewriteProofVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn unreadable_post_state_fails_with_its_reason() {
+        let pre = TargetSnapshot::Present("hash-a".into());
+        let post = Err("target unreadable for rewrite proof: permission denied".to_string());
+        assert_eq!(
+            rewrite_proof_verdict("docs/AGENTS.md", &pre, post),
+            RewriteProofVerdict::Unreadable(
+                "target unreadable for rewrite proof: permission denied".into()
+            )
+        );
+    }
+
+    #[test]
+    fn the_synthetic_review_step_is_exempt_even_when_nothing_changed() {
+        // The final chained "REVIEW" pseudo-step writes no file by design —
+        // it must never be flagged as a no-op rewrite.
+        let pre = TargetSnapshot::Missing;
+        let post = Ok(TargetSnapshot::Missing);
+        assert_eq!(
+            rewrite_proof_verdict("REVIEW", &pre, post),
+            RewriteProofVerdict::Skipped
+        );
+    }
+
+    #[test]
+    fn an_empty_target_file_is_exempt() {
+        let pre = TargetSnapshot::Missing;
+        let post = Ok(TargetSnapshot::Missing);
+        assert_eq!(
+            rewrite_proof_verdict("", &pre, post),
+            RewriteProofVerdict::Skipped
+        );
     }
 }
 
@@ -3813,6 +4156,34 @@ mod severity_tests {
         assert_eq!(counts.high, 0);
         assert_eq!(counts.medium, 0);
         assert_eq!(counts.low, 0);
+    }
+
+    #[test]
+    fn count_td_severities_ignores_rejected_tds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let td_dir = tmp.path();
+        // Confirmed by user — still weighs on the score.
+        std::fs::write(
+            td_dir.join("TD-001.md"),
+            "# X\n- **Severity**: Critical\n- **Status**: Confirmed by user\n",
+        )
+        .unwrap();
+        // Rejected — the file stays on disk (only its index row is removed)
+        // but must NOT keep weighing on the health score.
+        std::fs::write(
+            td_dir.join("TD-002.md"),
+            "# Y\n- **Severity**: Critical\n- **Status**: Rejected\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td_dir.join("TD-003.md"),
+            "# Z\n- **Severity**: High\n- **Status**:   Rejected\n",
+        )
+        .unwrap();
+
+        let counts = count_td_severities(td_dir);
+        assert_eq!(counts.critical, 1, "only the confirmed TD counts");
+        assert_eq!(counts.high, 0, "the rejected High TD must not count");
     }
 
     #[test]

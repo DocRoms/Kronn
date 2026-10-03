@@ -465,6 +465,25 @@ pub async fn partial_audit(
                     continue;
                 }
             };
+            let human_owned_snapshot =
+                match super::helpers::capture_human_owned_sections(&project_path) {
+                    Ok(snapshot) => snapshot,
+                    Err(reason) => {
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step, "file": file_label,
+                                "reason": reason, "repaired_from_template": false,
+                            }).to_string()
+                        );
+                        yield Event::default().event("step_done").data(
+                            serde_json::json!({
+                                "step": step, "success": false,
+                                "outcome": "failed", "file": file_label,
+                            }).to_string()
+                        );
+                        continue;
+                    }
+                };
 
             let max_attempts = if enforce_mode {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
@@ -531,6 +550,28 @@ pub async fn partial_audit(
                             return;
                         }
                     }
+
+                    // Restore protected sections before any retry/failure
+                    // branch can leave this attempt's rewrite on disk.
+                    let ownership_error = match super::helpers::protect_human_owned_sections(
+                        &project_path,
+                        &human_owned_snapshot,
+                        &today,
+                    ) {
+                        Ok(_) => None,
+                        Err(reason) => {
+                            let reason = format!(
+                                "human-owned section protection failed for {file_label}: {reason}"
+                            );
+                            yield Event::default().event("step_warning").data(
+                                serde_json::json!({
+                                    "step": step, "file": file_label,
+                                    "reason": reason.clone(), "repaired_from_template": false,
+                                }).to_string()
+                            );
+                            Some(reason)
+                        }
+                    };
                     let cli_success = status.map(|s| s.success()).unwrap_or(false);
                     // Gate order = Full parity (matrix v2): CLI → semantic
                     // validator → step-8 disposition → enforce lint → the
@@ -539,6 +580,9 @@ pub async fn partial_audit(
                         super::validation::validate_step_output(
                             cli_success, &project_path, analysis_step.target_file,
                         );
+                    if ownership_error.is_some() {
+                        success = false;
+                    }
                     if let Some(w) = validation_warning {
                         let ev = serde_json::json!({
                             "step": step, "file": file_label,
@@ -627,6 +671,7 @@ pub async fn partial_audit(
                             }
                             Ok(_) => {
                                 succeeded_steps.push(step);
+                                let target_path = project_path.join(analysis_step.target_file);
                                 // Substantial rewrite PROVEN — only now may
                                 // enforce stamp the curated audit dates. The
                                 // step already succeeded, so any stamp failure
@@ -634,7 +679,6 @@ pub async fn partial_audit(
                                 // — the partial dispatcher shows it, never
                                 // swallows it.
                                 if enforce_mode {
-                                    let target_path = project_path.join(analysis_step.target_file);
                                     match std::fs::read_to_string(&target_path) {
                                         Ok(written) => {
                                             let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -962,7 +1006,11 @@ pub async fn partial_audit(
         yield Event::default().event("done").data(done.to_string());
     });
 
-    Sse::new(stream)
+    detached_partial_audit_response(stream)
+}
+
+fn detached_partial_audit_response(stream: SseStream) -> Sse<SseStream> {
+    Sse::new(super::detach_sse_stream(stream))
 }
 
 /// Merge the freshly-refreshed step mappings into the stored baseline.
@@ -1088,6 +1136,32 @@ pub(crate) async fn finalize_partial_run(
 #[cfg(test)]
 mod partial_finalize_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn partial_audit_continues_after_its_subscriber_is_dropped() {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let producer_progress = progress.clone();
+        let producer: SseStream = Box::pin(async_stream::try_stream! {
+            for _ in 0..3 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                producer_progress.fetch_add(1, Ordering::SeqCst);
+                yield Event::default().event("progress").data("{}");
+            }
+        });
+
+        drop(detached_partial_audit_response(producer));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while progress.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("partial audit must finish after its subscriber is dropped");
+        assert_eq!(progress.load(Ordering::SeqCst), 3);
+    }
 
     fn mini_disc(id: &str, project: &str) -> (Discussion, DiscussionMessage) {
         let now = chrono::Utc::now();

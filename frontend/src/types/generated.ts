@@ -31,6 +31,8 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
+export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
  */
@@ -356,7 +358,7 @@ export type AiFileNode = { path: string, name: string, is_dir: boolean, children
 
 export type AiSearchResult = { path: string, match_count: number, };
 
-export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, text?: string | null, idempotency_key: string, };
+export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, item_answers?: Array<DiscussionQuestionItemAnswer>, text?: string | null, idempotency_key: string, };
 
 export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection,
 /**
@@ -510,6 +512,8 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
  * report rides the stored message (UI badge), same as streaming replies.
  */
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
+
+export type ApproveProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, id: string, };
 
 export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>,
 /**
@@ -1134,6 +1138,17 @@ agent_type: AgentType,
  */
 model_id: string, display_name: string,
 /**
+ * Provider-reported canonical model identity. For Claude aliases this
+ * lets Kronn relate two CLI identifiers without treating either one as
+ * an automatic substitute for the other.
+ */
+resolved_model?: string | null,
+/**
+ * Provider-supplied explanatory text, retained verbatim when discovery
+ * exposes it. `None` means the source did not report a description.
+ */
+description?: string | null,
+/**
  * Operator-set label override. When present, selectors show this
  * instead of `display_name`, even after the record is reconciled to
  * `Live` (KT-531: operator display choices survive reconciliation).
@@ -1190,7 +1205,24 @@ export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: A
  * maps this to the recheck/settings shortcut; it is deliberately not a
  * prose sentence so i18n stays centralized in the frontend dictionaries.
  */
-recommended_action: string, };
+recommended_action: string,
+/**
+ * Live identifier resolving to the same provider model, when discovery
+ * reported one. Refusals expose it as operator guidance; successful
+ * same-agent fallbacks use `CatalogPreflightWarning` instead.
+ */
+replacement?: string | null, };
+
+export type CatalogPreflightResolution = { requested_model: string | null, effective_model: string | null, warning?: CatalogPreflightWarning | null, };
+
+/**
+ * Non-blocking catalogue decision made immediately before a launch. The
+ * requested and effective identifiers remain distinct so execution history
+ * can explain an automatic same-agent replacement without rewriting config.
+ */
+export type CatalogPreflightWarning = { requested_model: string, effective_model: string, reason: ModelUnavailableReason, detail: string, replacement_source: CatalogReplacementSource, equivalent_tier: ModelTier, };
+
+export type CatalogReplacementSource = "resolved_model" | "equivalent_tier";
 
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
@@ -1565,6 +1597,17 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * adoption of Kronn by drafting common patterns autonomously.
  */
 enabled?: boolean | null, };
+
+/**
+ * Where a plugin's outbound API credential actually comes from, computed
+ * once server-side (`registry::credential_source`) from `ApiAuthKind`.
+ * Independent of the registry's `cli` tag: Microsoft 365 uses `CliToken`
+ * (no stored env keys at all) but has no `cli` tag, so the old
+ * tag-based frontend guess mislabelled it as "credentials used by the
+ * API" (KT-821) — this field lets the badge say "no token stored"
+ * whenever the auth kind is actually `CliToken`, Fastly included.
+ */
+export type CredentialSource = "stored" | "cli_token" | "none";
 
 export type CustomApiField = { label: string, value: string, };
 
@@ -2171,6 +2214,18 @@ paid_limit: number | null, };
 
 export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispatch>,
 /**
+ * Workflow Agent steps currently attached to this room. They have no
+ * native discussion dispatch, so this separate projection keeps their
+ * activity visible without pretending they are host-launched CLIs.
+ */
+active_workflow_steps: Array<ActiveWorkflowStep>,
+/**
+ * Historical step identity keyed by the messages its session authored.
+ * Finished activities remain here so an old message never falls back to
+ * a misleading `CLI N` label after the step exits.
+ */
+workflow_step_authors: { [key in string]: WorkflowStepIdentity },
+/**
  * Durable routing intent keyed by the user-message id. Keeping it next
  * to the transcript lets the UI show what was requested even when the
  * concrete model that eventually answered differs.
@@ -2620,15 +2675,25 @@ stats: PlanningPlanStats, };
  */
 export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
 
-export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
+export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
-export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+
+export type DiscussionQuestionItem = { id: string, label: string, description: string | null, };
+
+export type DiscussionQuestionItemAnswer = { item_id: string, selected_option_id: string, };
 
 export type DiscussionQuestionList = { questions: Array<DiscussionQuestion>, pending_count: number, };
 
 export type DiscussionQuestionOption = { id: string, label: string, description: string | null, };
 
+export type DiscussionQuestionResume = { workflow_id: string, variables: Record<string, string>, state: DiscussionQuestionResumeState, run_id: string | null, error: string | null, };
+
+export type DiscussionQuestionResumeState = "pending" | "launching" | "launched" | "failed";
+
 export type DiscussionQuestionState = "pending" | "answered" | "declined";
+
+export type DiscussionQuestionWorkflowStep = { active: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -3299,6 +3364,8 @@ imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
 
+export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string, };
+
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
  */
@@ -3758,7 +3825,47 @@ host_sync: HostSyncMode, preferred_interface: PluginInterface,
  * `None` means the config still matches, or belongs to a user-managed
  * (manual/detected/imported) server for which no registry contract exists.
  */
-registry_drift?: McpConfigRegistryDrift, };
+registry_drift?: McpConfigRegistryDrift,
+/**
+ * Interfaces this plugin's server actually exposes (`registry::
+ * available_plugin_interfaces`). Empty when the server row is missing
+ * (orphaned config). The frontend reads this instead of rebuilding the
+ * list from transport/api_spec/tags itself.
+ */
+interfaces: Array<PluginInterface>,
+/**
+ * Canonical badge classification — see `PluginKind`.
+ */
+effective_kind: PluginKind,
+/**
+ * `preferred_interface` clamped to `interfaces`: falls back to the
+ * first available interface (or `Mcp`) when a registry change made the
+ * stored preference stale. What the agent will actually use.
+ */
+effective_preferred_interface: PluginInterface,
+/**
+ * See `CredentialSource`.
+ */
+credential_source: CredentialSource,
+/**
+ * Set to the pre-existing config's id when this response is the result
+ * of re-adding an identical plugin: creation merged project scope into
+ * that config instead of silently dropping the new request's label,
+ * scope and CLI-exposure choice.
+ */
+merged_into_existing?: string,
+/**
+ * KT-829 — the last persisted probe result for each access this config
+ * exposes (`"api"` / `"mcp"` / `"cli"`), so the list can show health
+ * without re-running a probe on every page load. Empty when this
+ * config was never tested.
+ */
+last_probes: Array<McpLastProbe>, };
+
+/**
+ * KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
+ */
+export type McpConfigProbeResult = { config_id: string, probe: McpProbeResponse, };
 
 export type McpConfigRegistryDrift = {
 /**
@@ -3848,6 +3955,21 @@ missing_keys: Array<string>,
  */
 reason: string, };
 
+/**
+ * One access's last recorded probe result for a config — KT-829. Persisted
+ * so the config list can show health without re-running the probe on every
+ * page load.
+ */
+export type McpLastProbe = {
+/**
+ * Matches `McpProbeCheck.id` — `"api"`, `"mcp"` or `"cli"`.
+ */
+access: string, ok: boolean, code: ProbeDiagnosticCode, summary: string,
+/**
+ * RFC3339 timestamp of the probe that produced this result.
+ */
+tested_at: string, };
+
 export type McpOverview = { servers: Array<McpServer>, configs: Array<McpConfigDisplay>,
 /**
  * Set of "slug:projectId" pairs where the context file has been customized (not default template).
@@ -3873,13 +3995,51 @@ export type McpProbeCheck = { id: string, label: string, ok: boolean,
  * path. Optional capabilities remain visible without making the whole
  * plugin appear broken.
  */
-required: boolean, detail: string, };
+required: boolean, detail: string,
+/**
+ * KT-829 — stable machine-readable classification of `detail`, so the
+ * frontend can translate it instead of showing raw English.
+ */
+code: ProbeDiagnosticCode, };
 
 /**
  * Result of a real plugin readiness probe. Checks are deliberately
  * display-safe: command stdout/stderr and credentials never cross the API.
  */
 export type McpProbeResponse = { server_id: string, ready: boolean, checks: Array<McpProbeCheck>, };
+
+/**
+ * KT-829 — typed outcome of a `POST /api/mcps/refresh` rescan, so the
+ * caller can see (and, with `dry_run`, preview) exactly what changed
+ * instead of only getting back the post-scan `McpOverview`.
+ */
+export type McpRescanReport = {
+/**
+ * Echoes the request. `true` means every count below reflects what
+ * WOULD have happened — the transaction was rolled back and nothing
+ * was written to disk or to the database.
+ */
+dry_run: boolean,
+/**
+ * Brand-new `McpConfig` rows created from a `.mcp.json` entry that
+ * matched no existing config.
+ */
+configs_created: number,
+/**
+ * Existing configs found by hash and linked to a newly-scanned project
+ * instead of being duplicated.
+ */
+configs_merged: number,
+/**
+ * Duplicate config rows removed by deduplication.
+ */
+configs_deleted: number,
+/**
+ * Projects whose `.mcp.json` (or equivalent host file) was actually
+ * rewritten. `None` for a `dry_run` — it never touches the filesystem,
+ * so this count cannot be established without side effects.
+ */
+projects_rewritten?: number, overview: McpOverview, };
 
 /**
  * An MCP server type (e.g. "GitHub", "Atlassian", "Context7").
@@ -3898,6 +4058,12 @@ export type McpServer = { id: string, name: string, description: string, transpo
 api_spec?: ApiSpec | null, };
 
 export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
+
+/**
+ * KT-829 — `POST /api/mcps/test-all` response: every visible config probed
+ * with a bounded concurrency, one result each.
+ */
+export type McpTestAllResponse = { results: Array<McpConfigProbeResult>, };
 
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
@@ -4083,6 +4249,17 @@ export type Metric = { label: string, value: string, };
 
 export type ModelAvailability = "available" | "unavailable";
 
+export type ModelCatalogAlert = { model_id: string, replacement?: string | null, references: Array<ModelCatalogReference>, };
+
+export type ModelCatalogReference = { kind: ModelCatalogReferenceKind, resource_id?: string | null,
+/**
+ * Human-facing resource and location name, for example
+ * `Release workflow · review` or `ClaudeCode · reasoning`.
+ */
+label: string, };
+
+export type ModelCatalogReferenceKind = "workflow_step" | "model_tier" | "quick_prompt";
+
 export type ModelCatalogSnapshot = { targets: Array<ModelCatalogView>, };
 
 /**
@@ -4101,7 +4278,13 @@ live_refresh_ok: boolean,
  * window, or there has never been one. The UI must never present
  * `Cached`/`Migrated` entries as a current discovery when this is true.
  */
-stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null, };
+stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null,
+/**
+ * Referenced models that the latest successful catalogue no longer
+ * contains. This is a warning only: changing a reference remains an
+ * explicit operator action.
+ */
+alerts?: Array<ModelCatalogAlert>, };
 
 /**
  * Coarse, catalog-driven cost classification. Never inferred from a
@@ -4544,7 +4727,12 @@ conversation_id: string | null,
  * `@claude-cli-2` and the "CLI 2" header label, computed once here so the
  * front never re-derives (and diverges from) it.
  */
-cli_ordinal: number | null, };
+cli_ordinal: number | null,
+/**
+ * Present for a Kronn-owned workflow Agent step. The UI renders this as a
+ * discussion agent with workflow/step provenance, never as `CLI N`.
+ */
+workflow_step: WorkflowStepIdentity | null, };
 
 /**
  * One finding as the agent sees it.
@@ -4813,6 +5001,16 @@ export type PluginBundleValueDescriptor = { key: string, sensitive: boolean, exp
 export type PluginInterface = "api" | "mcp" | "cli";
 
 /**
+ * Canonical classification of a plugin's invocation surface — the badge
+ * shown on its config card, computed once server-side (`registry::
+ * effective_plugin_kind`) from `transport` + `api_spec` + the registry's
+ * `cli` tag. Mirrors the bucketing order previously duplicated in the
+ * frontend: a CLI wrapper is `Cli` even when it also exposes MCP/API,
+ * because the CLI prerequisite is what the user needs to satisfy first.
+ */
+export type PluginKind = "mcp" | "api" | "hybrid" | "cli";
+
+/**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
  * `disc_meta` and `peer-join` instead of living as an implicit convention
  * in each agent's prompt. Agents walk `poll_backoff_seconds` while the
@@ -4867,6 +5065,14 @@ export type PreviewTransformDataResponse = { value: JsonValue | null, error: str
  * instead of an opaque loop hidden behind an "active" badge.
  */
 export type PrincipalAttention = { active_executions: number, cli_executions: number, awaiting_review: number, awaiting_human: number, ready_tasks: number, actions: Array<string>, };
+
+/**
+ * KT-829 — stable diagnostic bucket for a failed (or passing) probe check,
+ * shared by the API-call probe, the MCP handshake probe and the CLI access
+ * probe. Stable across releases so the frontend can translate it instead of
+ * pattern-matching `detail` (free English text meant for logs, not i18n).
+ */
+export type ProbeDiagnosticCode = "ok" | "unauthorized" | "forbidden" | "not_found" | "invalid_header" | "unexpected_output" | "network" | "cli_missing" | "cli_version_too_old" | "cli_not_authenticated" | "other";
 
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
@@ -4989,6 +5195,26 @@ export type ProjectLanguageStat = { language: string, bytes: number, };
 export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: string | null, synced_at: string, };
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
+
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, };
+
+export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
+
+export type ProjectRepositoryResourceLevel = "usable_without_kronn" | "kronn_required";
+
+export type ProjectRepositoryResourceMutation = { kind: ProjectRepositoryResourceKind, id: string, slug: string, status: ProjectRepositoryResourceStatus, approved: boolean, };
+
+/**
+ * Read-only projection of the skills, automations and artifacts attached to a
+ * project and their alignment with the repository's `kronn/` directory.
+ */
+export type ProjectRepositoryResources = { kronn_exists: boolean, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>, };
+
+export type ProjectRepositoryResourceStatus = "not_published" | "up_to_date" | "repository_modified" | "kronn_modified" | "conflict";
+
+export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, publication_path: string, };
+
+export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
 
@@ -5154,6 +5380,12 @@ observed_at?: string | null,
  * `<run_id>:<write_index>` afin qu'une reprise ne duplique pas les points.
  */
 dedupe_key?: string | null, key_field?: string | null, };
+
+export type PublishProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, id: string,
+/**
+ * Required when the repository side also moved since the baseline.
+ */
+overwrite_repository_changes?: boolean, };
 
 /**
  * The sole accepted input for a local Ollama pull.  The endpoint never
@@ -7487,13 +7719,20 @@ export type WorkflowAgentAttempt = { id: number, role: WorkflowAgentAttemptRole,
  */
 retry: number, agent: AgentType, tier: ModelTier, connection_id: string | null,
 /**
- * Explicit model override, before resolving connection/tier defaults.
+ * Model requested at preflight after resolving any connection or tier
+ * default, before a catalogue fallback is applied.
  */
 requested_model: string | null,
 /**
  * Model resolved at the actual launch boundary. Not provider observation.
  */
 resolved_model: string | null,
+/**
+ * Non-blocking catalogue fallback applied before this attempt. Absent
+ * when the requested model was still available or catalogue state did not
+ * require a replacement.
+ */
+preflight_warning?: CatalogPreflightWarning | null,
 /**
  * Whether the transport applied that selection. None means unknown or no
  * selection; native ACP can explicitly retain its default (false).
@@ -8041,6 +8280,14 @@ multi_agent_review?: MultiAgentReviewConfig | null,
  * on every launch and every resume of the step.
  */
 room_id?: string | null, };
+
+/**
+ * Durable identity of an Agent step that joined a discussion room.
+ *
+ * This is not a host-launched CLI identity: the workflow and step own the
+ * process, while the provider only describes which runtime executes it.
+ */
+export type WorkflowStepIdentity = { run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 export type WorkflowSuggestion = { id: string, title: string, description: string, reason: string, required_mcps: Array<string>, audience: string, complexity: string, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, };
 

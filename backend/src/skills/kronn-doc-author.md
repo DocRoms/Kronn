@@ -28,7 +28,7 @@ message.
 ## 1. Section markers
 
 ```
-<!-- kronn:section name="stack" curated="ai" audit="2026-05-25" -->
+<!-- kronn:section name="stack" curated="ai" owner="audit" audit="2026-05-25" -->
 - … your assertions, each with [src: …] …
 <!-- kronn:section:end -->
 ```
@@ -38,6 +38,9 @@ message.
   assertion (= every `[src: …]` must resolve). Lint runs here.
 - `curated="human"` — owned by a person, never validated. Free-form.
   You may convert ai → human, never the reverse automatically.
+- `owner="audit"` / `owner="human"` — write ownership in Template v2. Never
+  rewrite a human-owned section; a re-audit proposes a dated diff instead.
+  Legacy `curated="human"` sections remain protected.
 - `audit="YYYY-MM-DD"` — required on `curated="ai"`. The date you (or
   the audit) last *verified the section against reality*. NOT git's
   last-edit date.

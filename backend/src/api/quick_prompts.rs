@@ -515,6 +515,20 @@ pub async fn batch_run(
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    let approval_prompt = qp.clone();
+    if let Err(error) = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn,
+                &approval_prompt,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+    {
+        return Json(ApiResponse::err(format!("preflight_failed:{error}")));
+    }
 
     // Read user identity for message attribution
     let (author_pseudo, author_avatar_email) = {
@@ -846,6 +860,20 @@ pub async fn compare_agents(
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    let approval_prompt = qp.clone();
+    if let Err(error) = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn,
+                &approval_prompt,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+    {
+        return Json(ApiResponse::err(format!("preflight_failed:{error}")));
+    }
 
     // Normalize old agent-only callers into the new target shape, then de-dupe
     // exact agent+tier pairs. Same-agent/different-tier comparisons remain.

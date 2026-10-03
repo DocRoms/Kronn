@@ -903,9 +903,16 @@ pub fn compute_bidirectional_link_updates(
                                                             //      "Backend is the api for Frontend" without ambiguity.
                                                             //   4. The original description if any (kept verbatim under
                                                             //      "Original:" so context isn't lost).
+                                                            //
+                                                            // KT-841 — `link.kind` is B's role FOR A (chosen by A's user
+                                                            // when linking to B), never A's own role. The old phrasing
+                                                            // "(original kind: api)" was appended right after A's name, so
+                                                            // it read as if it described A, not B (the reverse entry's
+                                                            // own project) — backwards. Spell out the sentence from the
+                                                            // design comment above so the direction is unambiguous.
         let mut description = format!(
-            "↩ Auto-linked from {} (original kind: {})",
-            source_project.name, link.kind,
+            "↩ Auto-linked from {} — {} is the {} for {}",
+            source_project.name, target.name, link.kind, source_project.name,
         );
         if !link.description.is_empty() {
             description.push_str(&format!(" — original note: \"{}\"", link.description));
@@ -1264,6 +1271,15 @@ mod bidirectional_link_tests {
         assert!(
             reverse.description.contains("api"),
             "reverse description must surface the original kind so B's user knows their role for A"
+        );
+        // KT-841 — the kind describes B's role FOR A, not A's own kind;
+        // the sentence must spell out "Backend is the api for Frontend",
+        // never attach "(original kind: api)" right after A's name (which
+        // read as if it described A instead of B).
+        assert_eq!(
+            reverse.description,
+            "↩ Auto-linked from Frontend — Backend is the api for Frontend",
+            "the direction must be unambiguous: B (Backend) is the api, FOR A (Frontend)"
         );
     }
 

@@ -76,13 +76,66 @@ pub async fn validate_audit(
             let latest = crate::db::audit_runs::list_recent(conn, &pid, 1)?
                 .into_iter()
                 .next();
-            let disc = match latest
+            let mut disc = match latest
                 .as_ref()
                 .and_then(|r| r.validation_discussion_id.clone())
             {
                 Some(disc_id) => crate::db::discussions::get_discussion(conn, &disc_id)?,
                 None => None,
             };
+            let linked_is_finished = disc.as_ref().is_some_and(|discussion| {
+                discussion
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| matches!(message.role, crate::models::MessageRole::Agent))
+                    .is_some_and(|message| {
+                        crate::api::discussions::ends_with_terminal_signal(
+                            &message.content,
+                            "KRONN:VALIDATION_COMPLETE",
+                        )
+                    })
+            });
+            if disc.as_ref().is_some_and(|discussion| discussion.archived) && !linked_is_finished {
+                let mut statement = conn.prepare(
+                    "SELECT id FROM discussions
+                     WHERE project_id=?1 AND archived=0 AND title LIKE 'Validation audit%'
+                     ORDER BY updated_at DESC, rowid DESC",
+                )?;
+                let candidate_ids = statement
+                    .query_map([&pid], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(statement);
+                for candidate_id in candidate_ids {
+                    let Some(candidate) =
+                        crate::db::discussions::get_discussion(conn, &candidate_id)?
+                    else {
+                        continue;
+                    };
+                    let finished = candidate
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| matches!(message.role, crate::models::MessageRole::Agent))
+                        .is_some_and(|message| {
+                            crate::api::discussions::ends_with_terminal_signal(
+                                &message.content,
+                                "KRONN:VALIDATION_COMPLETE",
+                            )
+                        });
+                    if finished {
+                        if let Some(run) = latest.as_ref() {
+                            crate::db::audit_runs::set_validation_discussion(
+                                conn,
+                                &run.id,
+                                &candidate.id,
+                            )?;
+                        }
+                        disc = Some(candidate);
+                        break;
+                    }
+                }
+            }
             Ok((latest, disc))
         })
         .await;
@@ -455,6 +508,59 @@ mod validate_gate_tests {
         let resp = call(&state).await;
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("another project"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archived_unfinished_validation_can_finish_in_a_replacement_discussion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d-archived"),
+            Some("Validation still pending"),
+        )
+        .await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions SET archived=1 WHERE id='d-archived'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO discussions
+                     (id, project_id, title, agent, language, created_at, updated_at)
+                     VALUES ('d-resumed', 'p1', 'Validation audit AI', 'ClaudeCode', 'fr', datetime('now'), datetime('now', '+1 second'))",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, tokens_used)
+                     VALUES ('m-resumed', 'd-resumed', 'Agent', 'Reprise terminée.\nKRONN:VALIDATION_COMPLETE', datetime('now'), 0)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = call(&state).await;
+        assert!(
+            response.success,
+            "replacement must validate: {:?}",
+            response.error
+        );
+        let linked = state
+            .db
+            .with_conn(|conn| {
+                Ok(crate::db::audit_runs::get_by_id(conn, "r1")?
+                    .and_then(|run| run.validation_discussion_id))
+            })
+            .await
+            .unwrap();
+        assert_eq!(linked.as_deref(), Some("d-resumed"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

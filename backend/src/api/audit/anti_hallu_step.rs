@@ -52,7 +52,7 @@ pub enum AntiHalluApplyResult {
 }
 
 /// The opening marker fragment we search for. We match on the prefix so any
-/// `curated=` / `audit=` attributes after the name don't break detection.
+/// ownership / provenance attributes after the name don't break detection.
 const OPEN_MARKER_PREFIX: &str = "<!-- kronn:section name=\"anti-hallu\"";
 
 /// Prefix of the spec-pointer marker line. Detected to avoid re-inserting it.
@@ -66,14 +66,16 @@ const SPEC_HEADER: &str = "\
 <!-- kronn:doc-version=\"1.0\" -->\n\
 <!-- kronn:spec=\"https://github.com/DocRoms/Kronn/blob/main/docs/conventions/agents-md-format-v1.md\" local=\"docs/conventions/agents-md-format-v1.md\" -->\n\
 <!-- This file follows the Kronn AGENTS.md convention v1. Sections marked\n\
-     curated=\"ai\" carry [src: …] provenance per assertion. Any agent — with\n\
-     or without Kronn — can read the spec at the URL above to understand the\n\
-     markers and the [src:] citation grammar. -->";
+     curated=\"ai\" carry [src: …] provenance per assertion. Template v2 adds\n\
+     owner=\"audit\" / owner=\"human\"; human-owned sections are never rewritten\n\
+     by an audit. Legacy curated=\"human\" sections receive the same protection. -->";
 
 /// Canonical opening marker — written with the date filled in.
 fn opening_marker_for_today() -> String {
     let today = Utc::now().format("%Y-%m-%d").to_string();
-    format!("<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"{today}\" -->")
+    format!(
+        "<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" owner=\"audit\" audit=\"{today}\" -->"
+    )
 }
 
 /// The full canonical block (open marker + body + close marker), with today's
@@ -254,16 +256,23 @@ mod tests {
 
     /// The canonical body must always start with the H2 and end with the
     /// last sentence — no stray leading/trailing newlines that would break
-    /// the `<!-- kronn:section:end -->` placement.
+    /// the `<!-- kronn:section:end -->` placement. Kept to 2 lines plus a
+    /// link to the full spec (KT-840): the doctrine itself lives in
+    /// `docs/conventions/agents-md-format-v1.md`, not duplicated here.
     #[test]
     fn canonical_body_shape() {
         assert!(ANTI_HALLU_SECTION_BODY
             .trim_start()
             .starts_with("## 0. Anti-Hallucination Protocol"));
-        assert!(ANTI_HALLU_SECTION_BODY.contains("**READ THE CODE**"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("[src: file:"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("[src: url:"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("rejected as fabricated"));
+        assert!(ANTI_HALLU_SECTION_BODY.contains("conventions/agents-md-format-v1.md"));
+        let word_count = ANTI_HALLU_SECTION_BODY.split_whitespace().count();
+        assert!(
+            word_count < 90,
+            "body ballooned to {word_count} words — it must stay a short pointer to the full spec"
+        );
     }
 
     #[test]
@@ -323,7 +332,7 @@ mod tests {
         // header gets prepended → Refreshed (see next test).
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let input = format!(
-            "{SPEC_HEADER}\n\n# Header\n\n<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"{today}\" -->\nBODY\n<!-- kronn:section:end -->\n"
+            "{SPEC_HEADER}\n\n# Header\n\n<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" owner=\"audit\" audit=\"{today}\" -->\nBODY\n<!-- kronn:section:end -->\n"
         );
         let (out, result) = transform(&input);
         assert_eq!(result, AntiHalluApplyResult::NoOp);

@@ -393,6 +393,50 @@ describe('api.projects', () => {
 // Core api() wrapper — error paths (the actual ApiResponse envelope handling)
 // ════════════════════════════════════════════════════════════════════════════
 describe('api() wrapper', () => {
+  it('retains allowlisted startup GETs for the two-second boot window', async () => {
+    const first = config.getServerConfig();
+    const second = config.getServerConfig();
+    await Promise.all([first, second]);
+    await config.getServerConfig();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/config/server', expect.objectContaining({ method: 'GET' }));
+  });
+
+  it('refetches a dynamic resource after the previous request resolves', async () => {
+    await discussions.list();
+    await discussions.list();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares simultaneous requests for a dynamic resource', async () => {
+    let resolveFetch!: (response: unknown) => void;
+    fetchMock.mockReturnValueOnce(new Promise(resolve => { resolveFetch = resolve; }));
+
+    const first = discussions.list();
+    const second = discussions.list();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch({
+      ok: true,
+      status: 200,
+      headers: { get: (name: string) => (name === 'content-type' ? 'application/json' : null) },
+      json: async () => ({ success: true, data: [] }),
+      text: async () => '',
+    });
+    await Promise.all([first, second]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates shared startup reads after a mutation', async () => {
+    await config.getLanguage();
+    await config.saveLanguage('fr');
+    await config.getLanguage();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('attaches Authorization header when authToken is set', async () => {
     setAuthToken('my-secret-token');
     await config.getLanguage();

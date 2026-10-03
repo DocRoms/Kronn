@@ -156,6 +156,8 @@ async fn run_handshake_and_list(
             .map(|entry| DiscoveredModel {
                 display_name: entry.display_name.unwrap_or_else(|| entry.id.clone()),
                 model_id: entry.id,
+                resolved_model: None,
+                description: None,
                 capabilities: Vec::new(),
                 reasoning_modes: entry
                     .supported_reasoning_efforts

@@ -11,6 +11,11 @@ import type {
   ApiKeyDisplay,
   ApiKeysResponse,
   Project,
+  ApproveProjectRepositoryResourceRequest,
+  ImportProjectRepositoryResourceRequest,
+  ProjectRepositoryResourceMutation,
+  ProjectRepositoryResources,
+  PublishProjectRepositoryResourceRequest,
   ProjectDockerAction,
   ProjectDockerLogs,
   ProjectDockerRunningSummary,
@@ -21,6 +26,8 @@ import type {
   McpOverview,
   McpConfigDisplay,
   McpProbeResponse,
+  McpRescanReport,
+  McpTestAllResponse,
   InviteResponse,
   MessageSearchHit,
   DiscLinkRequest,
@@ -261,9 +268,61 @@ import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } 
 // browser / Tauri webview localStorage always exists, so behaviour is unchanged.
 const _ls: Storage | undefined = typeof localStorage !== 'undefined' ? localStorage : undefined;
 
+const SHARED_GET_WINDOW_MS = 2_000;
+const STARTUP_GET_CACHE_PATHS = new Set([
+  '/config/server',
+  '/skills',
+  '/agents',
+  '/config/agent-access',
+]);
+interface SharedGetEntry {
+  promise: Promise<unknown>;
+}
+const sharedGets = new Map<string, SharedGetEntry>();
+
+function clearSharedGets(): void {
+  sharedGets.clear();
+}
+
+function retainSettledStartupGet(path: string): boolean {
+  return STARTUP_GET_CACHE_PATHS.has(path)
+    || /^\/discussions\/[^/]+\/native-agent$/.test(path);
+}
+
+function sharedGet<T>(
+  key: string,
+  request: () => Promise<T>,
+  retainAfterResolution = false,
+): Promise<T> {
+  const existing = sharedGets.get(key);
+  if (existing) return existing.promise as Promise<T>;
+
+  const entry: SharedGetEntry = {
+    promise: request(),
+  };
+  sharedGets.set(key, entry);
+  void entry.promise.then(
+    () => {
+      if (sharedGets.get(key) !== entry) return;
+      if (!retainAfterResolution) {
+        sharedGets.delete(key);
+        return;
+      }
+      globalThis.setTimeout(() => {
+        if (sharedGets.get(key) === entry) sharedGets.delete(key);
+      }, SHARED_GET_WINDOW_MS);
+    },
+    () => {
+      if (sharedGets.get(key) === entry) sharedGets.delete(key);
+    },
+  );
+  return entry.promise as Promise<T>;
+}
+
 let _authToken: string | null = _ls?.getItem('kronn_auth_token') ?? null;
 
 export function setAuthToken(token: string | null) {
+  clearSharedGets();
   _authToken = token;
   if (token) {
     _ls?.setItem('kronn_auth_token', token);
@@ -289,6 +348,7 @@ export function authHeaders(): Record<string, string> {
 let _apiBase = '';
 
 export function setApiBase(base: string) {
+  clearSharedGets();
   _apiBase = base.replace(/\/$/, ''); // strip trailing slash
 }
 
@@ -605,37 +665,50 @@ async function api<T>(
   const hasBody = body !== undefined;
   if (hasBody) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`${_apiBase}/api${path}`, {
-    method,
-    headers,
-    body: hasBody ? JSON.stringify(body) : undefined,
-    signal,
-  });
+  const execute = async (): Promise<T> => {
+    const res = await fetch(`${_apiBase}/api${path}`, {
+      method,
+      headers,
+      body: hasBody ? JSON.stringify(body) : undefined,
+      signal,
+    });
 
-  const contentType = res.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/json')) {
-    // 0.8.5 — when axum's `Json<T>` extractor rejects a request
-    // (missing field, unknown enum variant, type mismatch), it
-    // returns 422 with `Content-Type: text/plain` and the actual
-    // deserialization failure in the body. Pre-fix we threw away
-    // the body and surfaced a bare "Server error (HTTP 422)" with
-    // zero actionable info — exactly what tripped the QP-Improver
-    // agent on the JIRA helper during 0.8.4 dogfooding. Same path
-    // also covers gateway-style 5xx HTML bodies; we cap at 500
-    // chars so a 10MB nginx error page doesn't drown the toast.
-    const body = await res.text().catch(() => '');
-    const trimmed = body.trim();
-    const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
-    throw new Error(`Server error (HTTP ${res.status})${suffix}`);
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) {
+      // 0.8.5 — when axum's `Json<T>` extractor rejects a request
+      // (missing field, unknown enum variant, type mismatch), it
+      // returns 422 with `Content-Type: text/plain` and the actual
+      // deserialization failure in the body. Pre-fix we threw away
+      // the body and surfaced a bare "Server error (HTTP 422)" with
+      // zero actionable info — exactly what tripped the QP-Improver
+      // agent on the JIRA helper during 0.8.4 dogfooding. Same path
+      // also covers gateway-style 5xx HTML bodies; we cap at 500
+      // chars so a 10MB nginx error page doesn't drown the toast.
+      const responseBody = await res.text().catch(() => '');
+      const trimmed = responseBody.trim();
+      const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
+      throw new Error(`Server error (HTTP ${res.status})${suffix}`);
+    }
+
+    const json: ApiResponse<T> = await res.json();
+
+    if (!json.success) {
+      throw new Error(json.error ?? 'Unknown API error');
+    }
+
+    return json.data as T;
+  };
+
+  if (method === 'GET' && !hasBody && !signal) {
+    const authorization = headers.Authorization ?? '';
+    return sharedGet(
+      `${_apiBase}/api${path}\n${authorization}`,
+      execute,
+      retainSettledStartupGet(path),
+    );
   }
-
-  const json: ApiResponse<T> = await res.json();
-
-  if (!json.success) {
-    throw new Error(json.error ?? 'Unknown API error');
-  }
-
-  return json.data as T;
+  if (method !== 'GET') clearSharedGets();
+  return execute();
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -675,8 +748,15 @@ export const health = {
   /** `GET /api/health` — unauthed and NOT enveloped (raw JSON), so it bypasses
    *  the `api<T>()` `{success,data}` unwrap. */
   get: async (): Promise<HealthInfo> => {
-    const res = await fetch(`${_apiBase}/api/health`, { headers: { ...authHeaders() } });
-    return res.json() as Promise<HealthInfo>;
+    const headers = { ...authHeaders() };
+    return sharedGet(
+      `${_apiBase}/api/health\n${headers.Authorization ?? ''}`,
+      async () => {
+        const res = await fetch(`${_apiBase}/api/health`, { headers });
+        return res.json() as Promise<HealthInfo>;
+      },
+      true,
+    );
   },
 };
 
@@ -818,6 +898,14 @@ export interface MigrateDocsResponse {
 export const projects = {
   list: () => api<Project[]>('GET', '/projects'),
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
+  repositoryResources: (id: string) =>
+    api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
+  publishRepositoryResource: (id: string, request: PublishProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/publish`, request),
+  importRepositoryResource: (id: string, request: ImportProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/import`, request),
+  approveRepositoryResource: (id: string, request: ApproveProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/approve`, request),
   dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
   dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
   dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>
@@ -1382,7 +1470,9 @@ export const mcps = {
   projectEnvironmentNames: (projectId: string) =>
     api<string[]>('GET', `/mcps/project-environment-names/${encodeURIComponent(projectId)}`),
   registry: (q?: string) => api<McpDefinition[]>('GET', `/mcps/registry${q ? `?q=${encodeURIComponent(q)}` : ''}`),
-  refresh: () => api<McpOverview>('POST', '/mcps/refresh'),
+  refresh: (dryRun = false) =>
+    api<McpRescanReport>('POST', `/mcps/refresh${dryRun ? '?dry_run=true' : ''}`),
+  testAll: () => api<McpTestAllResponse>('POST', '/mcps/test-all'),
   previewBundle: (request: PluginBundleSelectionRequest) =>
     api<PluginBundlePreview>('POST', '/mcps/bundles/preview', request),
   exportBundle: async (
@@ -1429,13 +1519,6 @@ export const mcps = {
    *  `updateCustomSpec` call. */
   cleanupOrphanEnv: (serverId: string, keys: string[]) =>
     api<CleanupOrphanEnvResponse>('POST', `/mcps/custom/${encodeURIComponent(serverId)}/cleanup-orphan-env`, { keys }),
-  /** 0.8.6 (#63) — Path B export. Returns the path to call directly via
-   *  `<a href="...">` for download — the route emits Content-Disposition
-   *  attachment, the browser handles the rest. Auth header is added by
-   *  the global `api()` helper, so callers should fetch + blob if they
-   *  need to thread the token; here we return the URL for a direct link. */
-  exportFileUrl: (serverId: string) =>
-    `/api/mcps/custom/${encodeURIComponent(serverId)}/export-file`,
   /** 0.8.6 (#63) — Path B import. Frontend reads the user's `.json` file
    *  via `FileReader`, parses to JSON, POSTs the parsed payload. */
   importPluginFile: (payload: CustomApiPayload) =>
@@ -1506,7 +1589,13 @@ export const discussions = {
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
   getRunning: () => api<string[]>('GET', '/discussions/running'),
-  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>>(
+  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail,
+    'active_agent_dispatches'
+    | 'active_workflow_steps'
+    | 'workflow_step_authors'
+    | 'message_targets'
+    | 'partial_response'
+  >>>(
     'GET',
     `/discussions/${id}`,
   ),
@@ -2476,7 +2565,10 @@ export const pages = {
   previewImport: (request: ArtifactImportRequest) => api<ArtifactImportPreview>('POST', '/pages/import/preview', request),
   importArtifact: (request: ArtifactImportRequest) => api<ArtifactImportResult>('POST', '/pages/import', request),
   capability: () => api<LivePagesCapability>('GET', '/pages/capability'),
-  list: () => api<LivePage[]>('GET', '/pages'),
+  list: (projectId?: string) => api<LivePage[]>(
+    'GET',
+    `/pages${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
+  ),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
   revisions: (id: string) => api<LivePageRevision[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
   workflows: (id: string) => api<LivePageWorkflowLink[]>('GET', `/pages/${encodeURIComponent(id)}/workflows`),

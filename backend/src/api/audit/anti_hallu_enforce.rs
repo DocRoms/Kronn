@@ -108,11 +108,9 @@ Do NOT invent a path just to pass the check. Re-write the file, then finish.\n",
     out
 }
 
-/// Idempotently stamp `audit="<today>"` on every `curated="ai"` section opener
-/// in `content`. Returns `Some(new_content)` when something changed, `None`
-/// when every `curated="ai"` marker already carries today's date (no write
-/// needed). The audit just (re)generated this file, so today's date honestly
-/// reflects "verified conformant today".
+/// Idempotently stamp `audit="<today>"` on every audit-owned section opener.
+/// Template v2 emits `owner="audit"`; legacy `curated="ai"` markers remain
+/// accepted. A human-owned marker always wins if both attributes are present.
 pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
     let today_attr = format!("audit=\"{today}\"");
     let mut changed = false;
@@ -120,7 +118,10 @@ pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
 
     for line in &mut lines {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with("<!-- kronn:section") || !line.contains("curated=\"ai\"") {
+        if !trimmed.starts_with("<!-- kronn:section")
+            || is_human_owned_marker(line)
+            || !(line.contains("owner=\"audit\"") || line.contains("curated=\"ai\""))
+        {
             continue;
         }
         if line.contains(&today_attr) {
@@ -149,6 +150,174 @@ pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
         out.push('\n');
     }
     Some(out)
+}
+
+/// One human-owned section whose content an audit step changed (or deleted)
+/// between the pre- and post-agent snapshot of the same file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanSectionDiff {
+    pub name: String,
+    pub pre_block: String,
+    /// `None` when the agent deleted the section entirely (restored by
+    /// appending it back).
+    pub post_block: Option<String>,
+}
+
+struct SectionSpan {
+    name: String,
+    is_human: bool,
+    start: usize,
+    end: usize,
+}
+
+/// Scan `lines` for `<!-- kronn:section name="X" ... -->` … `<!-- kronn:section:end -->`
+/// pairs. An opener with no matching closer is skipped — there is nothing
+/// well-formed to protect there.
+fn parse_named_sections(lines: &[&str]) -> Vec<SectionSpan> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("<!-- kronn:section")
+            && !trimmed.starts_with("<!-- kronn:section:end")
+        {
+            if let Some(name) = extract_attr(lines[i], "name") {
+                let is_human = is_human_owned_marker(lines[i]);
+                if let Some(end) = ((i + 1)..lines.len())
+                    .find(|&j| lines[j].trim_start().starts_with("<!-- kronn:section:end"))
+                {
+                    spans.push(SectionSpan {
+                        name,
+                        is_human,
+                        start: i,
+                        end,
+                    });
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    spans
+}
+
+fn extract_attr(line: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let end = line[start..].find('"')?;
+    Some(line[start..start + end].to_string())
+}
+
+fn is_human_owned_marker(line: &str) -> bool {
+    line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
+}
+
+pub fn contains_human_owned_section(content: &str) -> bool {
+    let visible = crate::core::anti_halluc::strip_fenced_code(content);
+    let lines: Vec<&str> = visible.split('\n').collect();
+    parse_named_sections(&lines)
+        .iter()
+        .any(|span| span.is_human)
+}
+
+/// KT-843 mechanical backstop: restore every human-owned section found in
+/// `pre` to its exact original text wherever `post` changed or removed it,
+/// and return the audit-proposed diff. Template v2 uses `owner="human"`;
+/// legacy `curated="human"` sections receive the same protection.
+///
+/// Returns `None` when every human-owned section in `pre` survived
+/// byte-identical in `post`, including the common case of no human
+/// section at all. Runs independently of the anti-hallu citation gate: this
+/// is an ownership guarantee, not a provenance one.
+pub fn enforce_human_owned_sections(
+    pre: &str,
+    post: &str,
+) -> Option<(String, Vec<HumanSectionDiff>)> {
+    let pre_lines: Vec<&str> = pre.split('\n').collect();
+    let post_lines: Vec<&str> = post.split('\n').collect();
+    let pre_spans = parse_named_sections(&pre_lines);
+    let post_spans = parse_named_sections(&post_lines);
+
+    let mut replacements: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let mut diffs: Vec<HumanSectionDiff> = Vec::new();
+    let mut appended: Vec<String> = Vec::new();
+
+    for pre_span in pre_spans.iter().filter(|s| s.is_human) {
+        let pre_block_lines: Vec<String> = pre_lines[pre_span.start..=pre_span.end]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let pre_block = pre_block_lines.join("\n");
+        match post_spans.iter().find(|s| s.name == pre_span.name) {
+            Some(post_span) => {
+                let post_block = post_lines[post_span.start..=post_span.end].join("\n");
+                if post_block != pre_block {
+                    replacements.push((post_span.start, post_span.end, pre_block_lines));
+                    diffs.push(HumanSectionDiff {
+                        name: pre_span.name.clone(),
+                        pre_block,
+                        post_block: Some(post_block),
+                    });
+                }
+            }
+            None => {
+                appended.push(pre_block.clone());
+                diffs.push(HumanSectionDiff {
+                    name: pre_span.name.clone(),
+                    pre_block,
+                    post_block: None,
+                });
+            }
+        }
+    }
+
+    if diffs.is_empty() {
+        return None;
+    }
+
+    // Replace from the bottom up so an earlier range's indices stay valid
+    // even when a restored block has a different line count than the text
+    // it replaces.
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
+    let mut out_lines: Vec<String> = post_lines.iter().map(|s| s.to_string()).collect();
+    for (start, end, lines) in replacements {
+        out_lines.splice(start..=end, lines);
+    }
+    for block in appended {
+        if out_lines.last().is_some_and(|l| !l.is_empty()) {
+            out_lines.push(String::new());
+        }
+        out_lines.push(String::new());
+        out_lines.extend(block.split('\n').map(String::from));
+    }
+
+    Some((out_lines.join("\n"), diffs))
+}
+
+/// Render the audit-proposed changes for a human to review by hand.
+pub fn format_human_section_diff_report(
+    file_label: &str,
+    diffs: &[HumanSectionDiff],
+    today: &str,
+) -> String {
+    let mut out = format!(
+        "# Proposed changes to human-owned sections — {today}\n\n\
+The audit tried to update the following `owner=\"human\"` section(s) in \
+`{file_label}` but left them untouched, as the convention requires. Review \
+each diff below and apply it by hand if you agree with it.\n"
+    );
+    for d in diffs {
+        out.push_str(&format!(
+            "\n## Section `{}`\n\n### Kept (current)\n\n```\n{}\n```\n\n### Audit-proposed\n\n```\n{}\n```\n",
+            d.name,
+            d.pre_block,
+            d.post_block
+                .as_deref()
+                .unwrap_or("(the audit removed this section — it was restored)"),
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -232,12 +401,19 @@ mod tests {
 
     #[test]
     fn stamp_inserts_missing_audit_attr() {
-        let input = "<!-- kronn:section name=\"stack\" curated=\"ai\" -->\nBODY\n<!-- kronn:section:end -->\n";
+        let input = "<!-- kronn:section name=\"stack\" curated=\"ai\" owner=\"audit\" -->\nBODY\n<!-- kronn:section:end -->\n";
         let out = stamp_curated_audit_dates(input, "2026-06-14").expect("should change");
         assert!(out.contains("audit=\"2026-06-14\""));
         assert!(out.contains("curated=\"ai\""));
         // closing marker untouched
         assert!(out.contains("<!-- kronn:section:end -->"));
+    }
+
+    #[test]
+    fn stamp_accepts_owner_audit_without_legacy_curated_attribute() {
+        let input = "<!-- kronn:section name=\"stack\" owner=\"audit\" -->\nBODY\n<!-- kronn:section:end -->\n";
+        let out = stamp_curated_audit_dates(input, "2026-06-14").expect("should change");
+        assert!(out.contains("owner=\"audit\" audit=\"2026-06-14\""));
     }
 
     #[test]
@@ -258,11 +434,150 @@ mod tests {
 
     #[test]
     fn stamp_ignores_human_sections() {
-        let input = "<!-- kronn:section name=\"notes\" curated=\"human\" -->\nfree form\n";
+        let input =
+            "<!-- kronn:section name=\"notes\" curated=\"ai\" owner=\"human\" -->\nfree form\n";
         assert_eq!(
             stamp_curated_audit_dates(input, "2026-06-14"),
             None,
             "human-curated sections are never stamped"
+        );
+    }
+
+    // ─── KT-843: `owner="human"` sections survive full/partial audit ───────
+
+    #[test]
+    fn human_section_untouched_is_a_noop() {
+        let content = "# Doc\n\n\
+            <!-- kronn:section name=\"team\" owner=\"human\" -->\n\
+            Free-form human notes.\n\
+            <!-- kronn:section:end -->\n\
+            \n## Rest\nSame either way.\n";
+        assert_eq!(
+            enforce_human_owned_sections(content, content),
+            None,
+            "byte-identical human section must be a no-op"
+        );
+    }
+
+    #[test]
+    fn human_section_edited_by_the_audit_is_restored_and_diffed() {
+        let pre = "# Doc\n\
+            <!-- kronn:section name=\"team\" curated=\"human\" owner=\"human\" -->\n\
+            Original human note.\n\
+            <!-- kronn:section:end -->\n\
+            <!-- kronn:section name=\"stack\" owner=\"audit\" -->\n\
+            Rust.\n\
+            <!-- kronn:section:end -->\n";
+        // The agent rewrote BOTH the human section (must be restored) and
+        // the ai section (must survive untouched — not this function's job).
+        let post = "# Doc\n\
+            <!-- kronn:section name=\"team\" owner=\"human\" -->\n\
+            Agent-rewritten note — NOT what the human wrote.\n\
+            <!-- kronn:section:end -->\n\
+            <!-- kronn:section name=\"stack\" owner=\"audit\" -->\n\
+            Rust, updated.\n\
+            <!-- kronn:section:end -->\n";
+
+        let (restored, diffs) = enforce_human_owned_sections(pre, post)
+            .expect("an edited human section must be reported");
+
+        assert_eq!(
+            diffs.len(),
+            1,
+            "only the human section is a diff: {diffs:?}"
+        );
+        assert_eq!(diffs[0].name, "team");
+        assert!(diffs[0].pre_block.contains("Original human note."));
+        assert!(diffs[0]
+            .post_block
+            .as_deref()
+            .unwrap()
+            .contains("Agent-rewritten note"));
+
+        // The human section is back to its original text …
+        assert!(restored.contains("Original human note."));
+        assert!(!restored.contains("Agent-rewritten note"));
+        // … while the ai section's real update survives (never this
+        // function's concern).
+        assert!(restored.contains("Rust, updated."));
+    }
+
+    #[test]
+    fn human_section_removed_by_the_audit_is_restored_at_the_end() {
+        let pre = "# Doc\n\
+            <!-- kronn:section name=\"team\" curated=\"human\" owner=\"human\" -->\n\
+            Do not lose this.\n\
+            <!-- kronn:section:end -->\n";
+        // The agent deleted the section entirely.
+        let post = "# Doc\nNothing left.\n";
+
+        let (restored, diffs) = enforce_human_owned_sections(pre, post)
+            .expect("a deleted human section must be flagged");
+
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].name, "team");
+        assert!(diffs[0].post_block.is_none(), "removal is reported as None");
+        assert!(restored.contains("Do not lose this."));
+        assert!(
+            restored.contains("Nothing left."),
+            "the rest of post survives"
+        );
+    }
+
+    #[test]
+    fn no_human_sections_at_all_is_a_noop() {
+        let pre = "# Doc\n<!-- kronn:section name=\"s\" curated=\"ai\" -->\nA\n<!-- kronn:section:end -->\n";
+        let post = "# Doc\n<!-- kronn:section name=\"s\" curated=\"ai\" -->\nB (audit updated)\n<!-- kronn:section:end -->\n";
+        assert_eq!(
+            enforce_human_owned_sections(pre, post),
+            None,
+            "no owner=\"human\" section exists — nothing to protect"
+        );
+    }
+
+    #[test]
+    fn human_marker_inside_a_fenced_report_excerpt_is_not_a_live_section() {
+        let report = "# Report\n\n```\n<!-- kronn:section name=\"quoted\" owner=\"human\" -->\nQuoted.\n<!-- kronn:section:end -->\n```\n";
+        assert!(!contains_human_owned_section(report));
+    }
+
+    #[test]
+    fn legacy_curated_human_section_remains_protected() {
+        let pre = "<!-- kronn:section name=\"legacy\" curated=\"human\" -->\nOriginal.\n<!-- kronn:section:end -->\n";
+        let post = "<!-- kronn:section name=\"legacy\" curated=\"human\" -->\nChanged.\n<!-- kronn:section:end -->\n";
+        let (restored, diffs) = enforce_human_owned_sections(pre, post)
+            .expect("legacy human ownership must remain supported");
+        assert_eq!(diffs.len(), 1);
+        assert!(restored.contains("Original."));
+        assert!(!restored.contains("Changed."));
+    }
+
+    #[test]
+    fn diff_report_names_the_file_and_every_section() {
+        let diffs = vec![
+            HumanSectionDiff {
+                name: "team".to_string(),
+                pre_block: "kept text".to_string(),
+                post_block: Some("agent text".to_string()),
+            },
+            HumanSectionDiff {
+                name: "roadmap".to_string(),
+                pre_block: "kept roadmap".to_string(),
+                post_block: None,
+            },
+        ];
+        let report = format_human_section_diff_report("docs/AGENTS.md", &diffs, "2026-09-27");
+        assert!(report.contains("docs/AGENTS.md"));
+        assert!(report.contains("2026-09-27"));
+        assert!(
+            report.contains("team")
+                && report.contains("kept text")
+                && report.contains("agent text")
+        );
+        assert!(report.contains("roadmap") && report.contains("kept roadmap"));
+        assert!(
+            report.contains("restored"),
+            "the removed section notes it was restored"
         );
     }
 

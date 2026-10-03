@@ -190,7 +190,7 @@ pub fn looks_like_secret(input: &str) -> bool {
 // Anchored on the secret NAME, so ordinary path-keyed hex checksums (no NAME)
 // are never touched. Quoted MUST run before unquoted (the unquoted value class
 // excludes quotes, so it can't consume a quoted value itself).
-const ASSIGNMENT_NAME: &str = r"[a-z0-9_.-]*(?:secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token)";
+const ASSIGNMENT_NAME: &str = r"[a-z0-9_.-]*(?:secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|token)";
 
 static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let quoted_dq = format!("(?i)(\\b{ASSIGNMENT_NAME}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
@@ -325,6 +325,26 @@ mod tests {
             "name kept, value masked: {out}"
         );
         assert!(n >= 1, "redaction count must be reported, got {n}");
+    }
+
+    #[test]
+    fn audit_artifact_masks_bare_token_assignment() {
+        // The shape that actually leaked in an iris-api TD: a bare `TOKEN=` /
+        // `iris_token:` name with no auth/access/refresh/bearer qualifier and
+        // no vendor prefix, so neither the old ASSIGNMENT_NAME alternation nor
+        // `redact_secrets` caught it.
+        for line in [
+            "TOKEN=Ab3xZ9Qw7Lm2Ns5Pt8Rv",
+            "iris_token: Ab3xZ9Qw7Lm2Ns5Pt8Rv",
+            "session_token=\"Ab3xZ9Qw7Lm2Ns5Pt8Rv\"",
+        ] {
+            let (out, n) = redact_for_audit_artifact(line);
+            assert!(
+                !out.contains("Ab3xZ9Qw7Lm2Ns5Pt8Rv"),
+                "token value must be masked in {line:?}: {out}"
+            );
+            assert!(n >= 1, "{line:?} should redact");
+        }
     }
 
     #[test]

@@ -119,6 +119,8 @@ fn models_from_config_options(options: &[AcpConfigOption]) -> Option<Vec<Discove
                 .map(|value| DiscoveredModel {
                     model_id: value.id.clone(),
                     display_name: value.name.clone(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: Vec::new(),
                     reasoning_modes: reasoning_modes.clone(),
                     default_reasoning_mode: default_reasoning_mode.clone(),

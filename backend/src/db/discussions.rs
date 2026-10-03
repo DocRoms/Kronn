@@ -1847,6 +1847,7 @@ pub fn insert_native_agent_message_with_checkpoint(
             )?;
             let joined: Vec<crate::db::discussion_sessions::JoinedCliSession> = views
                 .iter()
+                .filter(|view| view.workflow_step.is_none())
                 .map(|v| crate::db::discussion_sessions::JoinedCliSession {
                     agent_type: v.agent_type.clone(),
                     ordinal: v.cli_ordinal,
@@ -2308,7 +2309,11 @@ fn list_all_messages(
                             AND e.id <= s.id)
                    FROM message_cli_authors mca
                    JOIN discussion_sessions s ON s.id = mca.cli_session_id
-                  WHERE mca.message_id = messages.id) AS author_cli_ordinal
+                  WHERE mca.message_id = messages.id
+                    AND NOT EXISTS (
+                        SELECT 1 FROM workflow_step_room_sessions step_session
+                         WHERE step_session.session_pk = mca.cli_session_id
+                    )) AS author_cli_ordinal
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -2389,7 +2394,11 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                             AND e.id <= s.id)
                    FROM message_cli_authors mca
                    JOIN discussion_sessions s ON s.id = mca.cli_session_id
-                  WHERE mca.message_id = messages.id) AS author_cli_ordinal
+                  WHERE mca.message_id = messages.id
+                    AND NOT EXISTS (
+                        SELECT 1 FROM workflow_step_room_sessions step_session
+                         WHERE step_session.session_pk = mca.cli_session_id
+                    )) AS author_cli_ordinal
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;

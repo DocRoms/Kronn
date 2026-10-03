@@ -175,7 +175,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />
     );
 
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     const trigger = document.querySelector<HTMLButtonElement>('.qp-card .kr-agent-switch-btn');
     expect(trigger).not.toBeNull();
     expect(screen.getAllByTestId('qp-history-toggle')).toHaveLength(1);
@@ -219,7 +219,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     );
 
     // Switch to the Quick Prompts tab so the QP card renders.
-    const qpTab = await screen.findByText(/Quick Prompts/);
+    const qpTab = await screen.findByRole('button', { name: /Quick Prompts/ });
     await act(async () => { fireEvent.click(qpTab); });
 
     // Click "Launch" on the QP card to open the variable form.
@@ -256,7 +256,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    const qpTab = await screen.findByText(/Quick Prompts/);
+    const qpTab = await screen.findByRole('button', { name: /Quick Prompts/ });
     await act(async () => { fireEvent.click(qpTab); });
 
     // The Launch button on a no-variable QP fires handleLaunchQP synchronously.
@@ -296,7 +296,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />
     );
 
-    const qpTab = await screen.findByText(/Quick Prompts/);
+    const qpTab = await screen.findByRole('button', { name: /Quick Prompts/ });
     await act(async () => { fireEvent.click(qpTab); });
 
     // Open the compare form via the 🤝 icon button. For no-var QPs this
@@ -365,7 +365,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />,
     );
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
 
     // The finished connection is an ordinary target.
@@ -400,7 +400,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />,
     );
 
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
 
     const ticketInput = await screen.findByPlaceholderText('EW-1234');
@@ -441,7 +441,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />,
     );
 
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
 
     const ticketInput = await screen.findByPlaceholderText('EW-1234') as HTMLInputElement;
@@ -503,7 +503,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />
     );
 
-    const qpTab = await screen.findByText(/Quick Prompts/);
+    const qpTab = await screen.findByRole('button', { name: /Quick Prompts/ });
     await act(async () => { fireEvent.click(qpTab); });
 
     const compareBtn = await screen.findByTestId('qp-compare-agents-btn');
@@ -562,7 +562,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />
     );
 
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
     await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
     await act(async () => { await new Promise(r => setTimeout(r, 0)); });
@@ -591,7 +591,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />
     );
 
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
     await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
     await act(async () => { await new Promise(r => setTimeout(r, 0)); });
@@ -615,7 +615,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
         agentAccess={fullConfig}
       />,
     );
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
 
     const claudeTarget = screen.getByTestId('qp-compare-chip-ClaudeCode').closest('.qp-compare-target');
@@ -663,7 +663,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
         agentAccess={fullConfig}
       />,
     );
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
 
     const chip = await screen.findByTestId('qp-compare-chip-conn-gateway');
@@ -706,7 +706,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode', 'OpenCode']} agentAccess={fullConfig} />,
     );
-    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Quick Prompts/ })); });
     await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
 
     const target = screen.getByTestId('qp-compare-chip-OpenCode');
@@ -733,7 +733,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       />
     );
 
-    const qpTab = await screen.findByText(/Quick Prompts/);
+    const qpTab = await screen.findByRole('button', { name: /Quick Prompts/ });
     await act(async () => { fireEvent.click(qpTab); });
 
     const compareBtn = await screen.findByTestId('qp-compare-agents-btn');
@@ -770,13 +770,13 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
-    const qpTab = await screen.findByText(/Quick Prompts/);
+    const qpTab = await screen.findByRole('button', { name: /Quick Prompts/ });
     await act(async () => { fireEvent.click(qpTab); });
 
     // The Batch button is rendered for QPs with at least 1 var. Click it to
     // open the batch form, then assert the label calls out the first var only.
     await waitFor(() => {
-      expect(screen.getAllByText('Analyse ticket')).toHaveLength(2);
+      expect(screen.getAllByText('Analyse ticket')).toHaveLength(3);
     });
     // Find the batch icon button — it has title `qp.batch.launch` ("Batch").
     const batchBtn = document.querySelector('button[title*="Batch"], button[title*="atch"]');
