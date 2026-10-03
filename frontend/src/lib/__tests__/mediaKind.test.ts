@@ -64,6 +64,14 @@ describe('mediaKind', () => {
     expect(isVideoFile(image)).toBe(false);
   });
 
+  it('downloads legacy archives and binary documents even when stored as text/plain', () => {
+    for (const filename of ['pack.zip', 'PACK.ZIP', 'archive.tar.gz', 'book.pdf', 'report.docx', 'sheet.xlsx']) {
+      const item = file({ filename, mime_type: 'text/plain' });
+      expect(isTextAttachment(item)).toBe(false);
+      expect(isPreviewableAttachment(item)).toBe(false);
+    }
+  });
+
   it('recognises the formats these providers actually return', () => {
     // OpenRouter returns mp4 for video and png for image.
     expect(mediaKind(file({ filename: 'video-abc.mp4', mime_type: 'video/mp4' }))).toBe('video');

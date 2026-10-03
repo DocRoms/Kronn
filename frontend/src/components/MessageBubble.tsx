@@ -42,12 +42,15 @@ import {
   isDeletedMessage,
 } from '../lib/messageContent';
 import { parseModelErrorEvent } from '../lib/modelErrorEvent';
-import { executionVariables } from '../lib/api';
+import { discussions as discussionsApi, executionVariables, projects as projectsApi } from '../lib/api';
+import { isPreviewableAttachment } from '../lib/mediaKind';
+import { attachmentForLink, fileLinkUrlTransform, linkKind, projectFileTarget, unavailableFileReason } from '../lib/localFileLinks';
+import { MessageFileLinkContext, type MessageFileLinkContextValue } from '../lib/messageFileLinkContext';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
   ChevronRight, ListTodo, User, Users, Trash2, Workflow,
-  Reply, Eye, EyeOff, Wrench,
+  Reply, Eye, EyeOff, Wrench, Paperclip, FileText, ArrowUpRight,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
@@ -320,6 +323,23 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
     defaultTargets = [],
     onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
+  const [fileOpenRequest, setFileOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
+  const fileLinkContext = useMemo<MessageFileLinkContextValue>(() => ({
+    attachments: discussionMedia ?? attachments,
+    onOpenAttachment: file => setFileOpenRequest(current => ({ assetId: file.id, nonce: (current?.nonce ?? 0) + 1 })),
+    onOpenProjectFile: projectId
+      ? async (path, line) => {
+          try { await projectsApi.readSourceFile(projectId, path); } catch { return false; }
+          // Read once by the project card when it opens (see ProjectCard).
+          try {
+            sessionStorage.setItem(`kronn:codeView:${projectId}`, JSON.stringify({ path, line }));
+          } catch { /* private mode / quota — the card still opens */ }
+          window.location.hash = `#project-${projectId}`;
+          onNavigate('projects');
+          return true;
+        }
+      : undefined,
+  }), [attachments, discussionMedia, projectId, onNavigate]);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     if (isEditing && editTextareaRef.current) {
@@ -634,10 +654,13 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         ? 'system'
         : 'agent';
 
+
+
   return (
-    // KT-58 — `data-target-agent` carries the message's durable dispatch
-    // target, so CSS can single out the mention actually awaiting a reply
-    // instead of giving every mention the same weight.
+    <MessageFileLinkContext.Provider value={fileLinkContext}>
+    {/* KT-58 — `data-target-agent` carries the message's durable dispatch
+     *  target, so CSS can single out the mention actually awaiting a reply
+     *  instead of giving every mention the same weight. */}
     <div
       className="disc-msg-row"
       data-role={visualRole}
@@ -1119,9 +1142,10 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           })()
         )}
         </div>
-        {attachments && attachments.length > 0 && discussionId && (
+        {((attachments?.length ?? 0) > 0 || fileOpenRequest) && discussionId && (
           <MessageAttachments
-            files={attachments}
+            openRequest={fileOpenRequest}
+            files={attachments ?? []}
             discussionId={discussionId}
             t={t}
             carouselScope={discussionMedia}
@@ -1490,6 +1514,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
       </div>
     </div>
+    </MessageFileLinkContext.Provider>
   );
 });
 
@@ -1626,6 +1651,7 @@ function MarkdownLink({ href, children }: MdProps) {
   const { mentionColors } = useLocalIdentity();
   const { t } = useT();
   const discussionAgent = useContext(MentionDiscussionAgentContext);
+  const fileLinks = useContext(MessageFileLinkContext);
   if (href === USER_MENTION_URL) {
     return <UserMentionChip />;
   }
@@ -1669,10 +1695,139 @@ function MarkdownLink({ href, children }: MdProps) {
       </span>
     );
   }
+  const refusal = href ? unavailableFileReason(href) : undefined;
+  if (refusal) return <span className="disc-md-file-link disc-md-file-link--unavailable" title={t(`disc.localFile.reason.${refusal}`)}>{children}</span>;
+  const kind = linkKind(href);
+  if (href && (kind === 'local' || kind === 'project')) {
+    return (
+      <FileLink
+        href={href}
+        kind={kind}
+        attachment={attachmentForLink(href, fileLinks.attachments)}
+        onOpenProjectFile={fileLinks.onOpenProjectFile}
+        onOpenAttachment={fileLinks.onOpenAttachment}
+      >
+        {children}
+      </FileLink>
+    );
+  }
   return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
 }
 
+// A path on the agent's machine means nothing to the browser: open the
+// attachment it names, or say plainly that the file is not here.
+function FileLink({ href, kind, attachment, onOpenProjectFile, onOpenAttachment, children }: {
+  href: string;
+  kind: 'local' | 'project';
+  attachment?: ContextFile;
+  onOpenProjectFile?: MessageFileLinkContextValue['onOpenProjectFile'];
+  onOpenAttachment?: (file: ContextFile) => void;
+  children?: MdProps['children'];
+}) {
+  const { t } = useT();
+  const [missingHref, setMissingHref] = useState<string | null>(null);
+  const opening = useRef(false);
+  if (missingHref === href) return <span className="disc-md-file-link disc-md-file-link--unavailable" title={t('disc.localFile.reason.missing')}>{children}</span>;
+  if (!attachment && kind === 'project' && onOpenProjectFile) {
+    const { path, line } = projectFileTarget(href);
+    return (
+      <span className="disc-md-file-link disc-md-file-link--project" data-local-path={href}>
+        <FileText size={11} aria-hidden="true" />
+        {children}
+        <button
+          type="button"
+          className="disc-md-file-link-open"
+          title={t('disc.localFile.openInProject')}
+          aria-label={t('disc.localFile.openInProject')}
+          onClick={() => {
+            if (opening.current) return;
+            opening.current = true;
+            void Promise.resolve(onOpenProjectFile(path, line)).then(found => {
+              if (found === false) setMissingHref(href);
+            }).catch(() => setMissingHref(href)).finally(() => { opening.current = false; });
+          }}
+        >
+          <ArrowUpRight size={11} aria-hidden="true" />
+        </button>
+      </span>
+    );
+  }
+  if (!attachment) {
+    const reason = kind === 'project' ? 'disc.localFile.projectPath' : 'disc.localFile.notAttached';
+    return (
+      <span className="disc-md-file-link disc-md-file-link--unavailable" title={t(reason, href)} data-local-path={href}>
+        <FileText size={11} aria-hidden="true" />
+        {children}
+      </span>
+    );
+  }
+  const open = async () => {
+    if (opening.current) return;
+    if (onOpenAttachment && isPreviewableAttachment(attachment)) {
+      onOpenAttachment(attachment);
+      return;
+    }
+    opening.current = true;
+    try {
+      const blob = await discussionsApi.contextFileBlob(attachment.discussion_id, attachment.id);
+      const url = URL.createObjectURL(blob);
+      if (isPreviewableAttachment(attachment)) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } else {
+        // An archive opened in a tab would download under a random blob name.
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = attachment.filename;
+        anchor.click();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      setMissingHref(href);
+    } finally {
+      opening.current = false;
+    }
+  };
+  return (
+    <button
+      type="button"
+      className="disc-md-file-link"
+      title={t('disc.localFile.open', attachment.filename)}
+      onClick={() => { void open(); }}
+    >
+      <Paperclip size={11} aria-hidden="true" />
+      {children}
+    </button>
+  );
+}
+
+function MarkdownFileImage({ src, alt }: { src?: string; alt?: string }) {
+  const links = useContext(MessageFileLinkContext);
+  const { t } = useT();
+  const file = src ? attachmentForLink(src, links.attachments) : undefined;
+  const fileId = file?.id;
+  const fileDiscussionId = file?.discussion_id;
+  const [loaded, setLoaded] = useState<{ id: string; url: string } | null>(null);
+  useEffect(() => {
+    if (!fileId || !fileDiscussionId) return;
+    let cancelled = false;
+    let url: string | undefined;
+    void discussionsApi.contextFileBlob(fileDiscussionId, fileId).then(blob => {
+      if (cancelled) return;
+      url = URL.createObjectURL(blob);
+      setLoaded({ id: fileId, url });
+    }).catch(() => { /* Keep the unavailable chip. */ });
+    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+  }, [fileDiscussionId, fileId]);
+  const refusal = src ? unavailableFileReason(src) : undefined;
+  if (src && linkKind(src) === 'external') return <img src={src} alt={alt ?? ''} loading="lazy" />;
+  if (!file || loaded?.id !== file.id) {
+    return <span className="disc-md-file-link disc-md-file-link--unavailable" title={t(refusal ? `disc.localFile.reason.${refusal}` : 'disc.localFile.notAttached', src ?? '')}>{alt ?? t('disc.localFile.notAttached', src ?? '')}</span>;
+  }
+  return <button type="button" className="disc-md-file-link" onClick={() => links.onOpenAttachment?.(file)}><img src={loaded.url} alt={alt ?? file.filename} /></button>;
+}
+
 const mdComponents = {
+  img: MarkdownFileImage,
   p: ({ children }: MdProps) => <p>{children}</p>,
   h1: ({ children }: MdProps) => <h1>{children}</h1>,
   h2: ({ children }: MdProps) => <h2>{children}</h2>,
@@ -1960,6 +2115,7 @@ export const MarkdownContent = memo(({
     <MarkdownRenderContext.Provider value={renderContext}>
       <div className="disc-md" ref={hostRef}>
         <ReactMarkdown
+          urlTransform={fileLinkUrlTransform}
           remarkPlugins={agentMentions ? mentionRemarkPluginsList : remarkPluginsList}
           components={discussionMdComponents}
         >

@@ -730,29 +730,11 @@ pub(super) enum ToolRecord {
     Native(String),
 }
 
-/// Format a finished tool call into its transcript record. kronn-internal
-/// calls get pretty-printed args (`disc_get_message(4)`) ; native calls get
-/// their raw input truncated to ~120 chars to keep the banner compact.
-/// Moves the tool calls an ACP runtime reported into the transcript's tool
-/// lists.
-///
-/// ACP has no stdout event stream, so its runtime reports each call into the
-/// run's stderr capture, one name per line. Until 0.13.0 it forwarded them on
-/// the channel carrying the reply instead, which glued
-/// `[ClaudeCode tool: ToolSearch]` into the middle of the agent's sentences and
-/// left the group under the message empty — the calls were both in the wrong
-/// place and missing from the right one.
-///
-/// Classified through the same `classify_tool_call` the CLI path uses, so
-/// kronn-internal and agent-native keep splitting visually. ACP reports a name
-/// without arguments, hence the empty input.
-/// A line the ACP forwarder wrote to reach [`lift_acp_tool_calls`].
-///
-/// The marker is a wire detail between the two, so it must not escape to a
-/// surface a human reads. The transcript consumes it; the live log panel skips
-/// it. One predicate for both, so the two halves cannot drift apart again.
+/// Internal metadata lines carried by the runner's stderr capture. Both the
+/// legacy name-only marker and correlated trace updates belong in the tool
+/// banners, never in answer text or the live log panel.
 pub(super) fn is_acp_tool_marker(line: &str) -> bool {
-    line.starts_with(runner::ACP_TOOL_MARKER)
+    line.starts_with(runner::ACP_TOOL_MARKER) || line.starts_with(crate::agents::tool_trace::MARKER)
 }
 
 /// Whether a captured stderr line belongs in the live log panel.
@@ -763,35 +745,74 @@ pub(super) fn forwards_to_log_panel(trimmed: &str) -> bool {
     !trimmed.is_empty() && !is_acp_tool_marker(trimmed)
 }
 
+/// Merge observed native tool metadata into the transcript buckets. Partial
+/// updates correlate by call id; missing arguments/status stay explicitly
+/// unknown. Detailed records replace legacy entries for the same tool name.
 pub(super) fn lift_acp_tool_calls(
     stderr_lines: &[String],
     kronn_tool_calls: &mut Vec<String>,
     native_tool_calls: &mut Vec<String>,
 ) {
+    let traces = crate::agents::tool_trace::collect(stderr_lines);
+    let names: std::collections::BTreeSet<&str> = traces
+        .iter()
+        .filter_map(|trace| trace.name.as_deref())
+        .collect();
+    // The stream's lifecycle events may already have added a name-only entry.
+    // Replace those with correlated records, preserving repeated calls by ID.
+    kronn_tool_calls.retain(|record| {
+        !names.iter().any(|name| {
+            name.strip_prefix("mcp__kronn-internal__")
+                .is_some_and(|name| record.starts_with(&format!("[kronn-internal: {name}(")))
+        })
+    });
+    native_tool_calls.retain(|record| {
+        !names
+            .iter()
+            .any(|name| record.starts_with(&format!("[agent-native: {name}(")))
+    });
     for name in stderr_lines
         .iter()
         .filter_map(|line| line.strip_prefix(runner::ACP_TOOL_MARKER))
         .map(str::trim)
         .filter(|name| !name.is_empty())
+        .filter(|name| !names.contains(name))
     {
         match classify_tool_call(name, "") {
             ToolRecord::Kronn(record) => kronn_tool_calls.push(record),
             ToolRecord::Native(record) => native_tool_calls.push(record),
         }
     }
+    for trace in traces {
+        let name = trace.name.as_deref().unwrap_or("unreported_tool");
+        let state = trace.status.as_deref().unwrap_or("unknown");
+        let args = trace.input.as_deref().unwrap_or("arguments not reported");
+        let (bucket, name) = match name.strip_prefix("mcp__kronn-internal__") {
+            Some(name) => (&mut *kronn_tool_calls, format!("kronn-internal: {name}")),
+            None => (&mut *native_tool_calls, format!("agent-native: {name}")),
+        };
+        bucket.push(format!("[{name}(status={state}; {args})]"));
+    }
 }
 
 pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
+    let input = crate::agents::tool_trace::safe_input(input);
     if let Some(name) = tool.strip_prefix("mcp__kronn-internal__") {
-        let pretty_args = pretty_kronn_args(name, input);
-        ToolRecord::Kronn(format!("[kronn-internal: {}({})]", name, pretty_args))
+        let pretty_args = pretty_kronn_args(name, &input);
+        ToolRecord::Kronn(format!(
+            "[kronn-internal: {}(status=unknown; {})]",
+            name, pretty_args
+        ))
     } else {
         let args = if input.is_empty() {
-            String::new()
+            "arguments not reported".to_string()
         } else {
-            truncate_tool_args(input, 120)
+            truncate_tool_args(&input, 120)
         };
-        ToolRecord::Native(format!("[agent-native: {}({})]", tool, args))
+        ToolRecord::Native(format!(
+            "[agent-native: {}(status=unknown; {})]",
+            tool, args
+        ))
     }
 }
 
@@ -2225,6 +2246,53 @@ async fn make_agent_stream_inner(
         }
     }
 
+    // Without a project the agent used to run in the shared system temp dir,
+    // where its files could not be told apart from anything else on the machine.
+    if !tool_free_judge && workspace_path.is_none() && project_path.is_empty() {
+        match runner::discussion_scratch_dir(&discussion_id) {
+            Ok(dir) => workspace_path = Some(dir.to_string_lossy().into_owned()),
+            Err(error) => {
+                let content = if disc.language == "fr" {
+                    format!("Impossible de préparer le dossier de cette discussion : {error}")
+                } else {
+                    format!("Unable to prepare this discussion's working directory: {error}")
+                };
+                let mut message = crate::api::orchestration::orchestrator_message(
+                    Uuid::new_v4().to_string(),
+                    content.clone(),
+                );
+                message.role = MessageRole::System;
+                message.reply_to_message_id = dispatch_trigger_message_id.clone();
+                let did = discussion_id.clone();
+                let job = dispatch_job_id.clone();
+                if let Err(db_error) = state
+                    .db
+                    .with_conn(move |conn| {
+                        persist_agent_start_error(
+                            conn,
+                            &did,
+                            &message,
+                            job.as_deref(),
+                            tracked_dispatch,
+                        )
+                    })
+                    .await
+                {
+                    tracing::error!("Failed to persist discussion directory error: {db_error}");
+                }
+                finish_tracked_preflight(&mut completion_tx, &content);
+                let stream: SseStream = Box::pin(futures::stream::once(async move {
+                    Ok::<_, Infallible>(
+                        Event::default()
+                            .event("error")
+                            .data(serde_json::json!({"error": content}).to_string()),
+                    )
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        }
+    }
+
     // Validation discussions are a second agent boundary over the audit
     // artifacts. Detect them through the durable run link, never a mutable or
     // localized title, and sanitize before prompt construction or spawn.
@@ -2965,9 +3033,12 @@ async fn make_agent_stream_inner(
         (None, None)
     };
 
-    let runtime_target_id = external_connection
-        .as_ref()
-        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    let runtime_target_id = match external_connection.as_ref() {
+        Some(connection) => Some(crate::db::model_catalog::http_runtime_target_id(
+            &connection.id,
+        )),
+        None => crate::core::model_catalog::legacy_runtime_target_id(&state.db, &agent_type).await,
+    };
     // The catalogue namespace a failed model is flagged in: the named
     // connection's own, or the family's when none is attached.
     let catalog_target_id = runtime_target_id
@@ -3300,6 +3371,7 @@ async fn make_agent_stream_inner(
                 // disappears when the stream ends, leaving no trace for
                 // post-hoc debug. Persisting them keeps the audit trail.
                 let mut native_tool_calls: Vec<String> = Vec::new();
+                let mut direct_tool_traces: Vec<String> = Vec::new();
                 let stall_timeout_min = {
                     let cfg = state.config.read().await;
                     if cfg.server.agent_stall_timeout_min > 0 {
@@ -3483,6 +3555,11 @@ async fn make_agent_stream_inner(
                     let client_gone = tx.is_closed();
 
                     if is_stream_json {
+                        direct_tool_traces.extend(
+                            crate::agents::tool_trace::from_claude_line(&line)
+                                .into_iter()
+                                .map(|trace| trace.marker()),
+                        );
                         match runner::parse_claude_stream_line(&line) {
                             runner::StreamJsonEvent::Text(text) => {
                                 // Loop-repeat detection — see constants above.
@@ -3787,7 +3864,8 @@ async fn make_agent_stream_inner(
                     full_response = "Validation bloquée : la suppression des secrets dans les artefacts d’audit a échoué après l’exécution de l’agent. Aucun signal de validation n’a été accepté.".to_string();
                 }
 
-                let stderr_lines = process.captured_stderr_flushed().await;
+                let mut stderr_lines = process.captured_stderr_flushed().await;
+                stderr_lines.extend(direct_tool_traces);
                 // `ollama_tokens:prompt:eval` is an internal accounting marker the
                 // token parser reads out of stderr. It has no meaning for a reader,
                 // and it leaked verbatim into the failure bubble (seen in the room:
@@ -4176,6 +4254,18 @@ async fn make_agent_stream_inner(
                     };
                 }
                 tracked_execution_succeeded = child_run_was_success;
+                // An HTTP model that replied is proven servable, which a
+                // provider's listing alone never shows.
+                if child_run_was_success && runner::is_http_chat_agent(&agent_type) {
+                    if let Some(model) = attempted_model.as_deref() {
+                        crate::api::lite_llm::clear_unreachable_model(
+                            &state.db,
+                            &catalog_target_id,
+                            model,
+                        )
+                        .await;
+                    }
+                }
 
                 // Concrete model this reply ran on — resolved once before spawn
                 // (`attempted_model`) so a non-zero exit / stall / cancel with
@@ -4193,7 +4283,7 @@ async fn make_agent_stream_inner(
                 } else {
                     Vec::new()
                 };
-                let agent_msg = DiscussionMessage {
+                let mut agent_msg = DiscussionMessage {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
@@ -4222,6 +4312,22 @@ async fn make_agent_stream_inner(
                     reply_to_message_id: dispatch_trigger_message_id.clone(),
                 };
 
+                let linked_files_changed = if let Some(content) =
+                    crate::api::discussions::context::attach_files_linked_in_message(
+                        &state,
+                        &disc_id,
+                        &agent_msg.id,
+                        &agent_msg.content,
+                        workspace_path.as_deref(),
+                        &project_path,
+                    )
+                    .await
+                {
+                    agent_msg.content = content;
+                    true
+                } else {
+                    false
+                };
                 let did = disc_id.clone();
                 let msg = agent_msg.clone();
                 let source_agent = agent_type.clone();
@@ -4301,14 +4407,28 @@ async fn make_agent_stream_inner(
                             );
                             state.agent_dispatch_notify.notify_one();
                         }
+                        if linked_files_changed {
+                            let _ = state.ws_broadcast.send(
+                                crate::models::WsMessage::ContextFilesChanged {
+                                    discussion_id: disc_id.clone(),
+                                    message_id: agent_msg.id.clone(),
+                                },
+                            );
+                        }
+                        // Publish the persisted body before its attachments.
+                        crate::api::federation::federate_message(&state, &disc_id, &agent_msg)
+                            .await;
                     }
-                    Err(e) => tracing::error!("Failed to save agent message: {e}"),
+                    Err(e) => {
+                        tracing::error!("Failed to save agent message: {e}");
+                        crate::api::discussions::context::discard_uncommitted_message_files(
+                            &state,
+                            &disc_id,
+                            &agent_msg.id,
+                        )
+                        .await;
+                    }
                 }
-                // F1 — federate the native-runner reply to peers of a shared
-                // disc. Previously ONLY MCP `disc_append` + UI `send_message`
-                // federated, so a reply produced by Kronn's own runner was
-                // invisible to the other instance. No-op for a local disc.
-                crate::api::federation::federate_message(&state, &disc_id, &agent_msg).await;
 
                 // 0.8.8 PR-B — enforce-mode P3 fail-fast (non-destructive). The
                 // agent message above is kept (with its red pill); when it
@@ -5394,6 +5514,59 @@ mod agent_lifecycle_tests {
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
 
+    #[tokio::test]
+    async fn an_unavailable_discussion_directory_stops_before_the_agent_and_persists_the_error() {
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO discussions (id, title, agent, language, created_at, updated_at, awaiting_agent)
+                VALUES ('invalid/directory', 'directory fixture', 'Codex', 'en', datetime('now'), datetime('now'), 1)", [])?;
+            Ok(())
+        }).await.unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response = super::make_agent_stream_inner(
+            state,
+            "invalid/directory".into(),
+            None,
+            None,
+            None,
+            None,
+            Some(tx),
+        )
+        .await
+        .into_response();
+        assert!(matches!(
+            rx.await.unwrap(),
+            AgentExecutionOutcome::PreflightFailed { .. }
+        ));
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Unable to prepare"));
+        db.with_read_conn(|conn| {
+            let messages = crate::db::discussions::list_messages(conn, "invalid/directory")?;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, MessageRole::System);
+            assert!(messages[0].content.contains("Invalid discussion id"));
+            let awaiting: bool = conn.query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'invalid/directory'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert!(!awaiting);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn missing_sdk_auth_is_an_actionable_system_message_not_an_agent_reply() {
         let message = auth_required_system_message(&AgentType::Vibe, "fr", Some("vibe --setup"));
@@ -5622,12 +5795,12 @@ mod agent_lifecycle_tests {
 
         assert_eq!(
             native,
-            vec!["[agent-native: ToolSearch()]".to_string()],
+            vec!["[agent-native: ToolSearch(status=unknown; arguments not reported)]".to_string()],
             "an agent's own tool is native"
         );
         assert_eq!(
             kronn,
-            vec!["[kronn-internal: disc_append()]".to_string()],
+            vec!["[kronn-internal: disc_append(status=unknown; )]".to_string()],
             "and Kronn's own stays in its bucket, as on the CLI path"
         );
     }
@@ -5642,6 +5815,56 @@ mod agent_lifecycle_tests {
         let mut native = Vec::new();
         lift_acp_tool_calls(&[emitted], &mut kronn, &mut native);
         assert_eq!(native.len(), 1, "the emitted shape must be recognised");
+    }
+
+    #[test]
+    fn detailed_tool_calls_replace_empty_markers_and_preserve_distinct_invocations() {
+        use crate::agents::tool_trace::{from_acp, from_codex};
+        let first = from_codex(&serde_json::json!({
+            "id":"mcp-1", "type":"mcp_tool_call", "server":"kronn-internal", "tool":"disc_append",
+            "arguments":{"content":"hello", "api_key":"fixture-private"}, "status":"completed",
+        }))
+        .unwrap();
+        let native = from_acp(&serde_json::json!({
+            "toolCallId":"bash-1", "title":"Bash", "rawInput":{"command":"echo first"}, "status":"completed",
+        })).unwrap();
+        let repeated = from_acp(&serde_json::json!({
+            "toolCallId":"bash-2", "title":"Bash", "rawInput":{"command":"echo second"}, "status":"failed",
+        })).unwrap();
+        let lines = [
+            format!(
+                "{}mcp__kronn-internal__disc_append",
+                crate::agents::runner::ACP_TOOL_MARKER
+            ),
+            first.marker(),
+            native.marker(),
+            repeated.marker(),
+            format!("{}Bash", crate::agents::runner::ACP_TOOL_MARKER),
+        ];
+        let mut kronn = vec!["[kronn-internal: disc_append()]".to_string()];
+        let mut native = vec!["[agent-native: Bash()]".to_string()];
+        lift_acp_tool_calls(&lines, &mut kronn, &mut native);
+        assert_eq!(kronn.len(), 1);
+        assert_eq!(native.len(), 2, "same tool name is not the same invocation");
+        assert!(kronn[0].starts_with("[kronn-internal: disc_append(status=completed;"));
+        assert!(kronn[0].contains("hello"));
+        assert!(!kronn[0].contains("fixture-private"));
+        assert!(native[0].contains("echo first"));
+        assert!(native[1].contains("status=failed"));
+        assert!(native[1].contains("echo second"));
+        assert!(lines.iter().all(|line| !forwards_to_log_panel(line)));
+    }
+
+    #[test]
+    fn legacy_tool_arguments_are_redacted_before_the_display_excerpt() {
+        let super::ToolRecord::Native(record) = super::classify_tool_call(
+            "Bash",
+            r#"{"command":"APP_SECRET=fixture-private echo ok"}"#,
+        ) else {
+            panic!("expected native tool");
+        };
+        assert!(!record.contains("fixture-private"));
+        assert!(record.contains("REDACTED"));
     }
 
     #[test]
@@ -7368,10 +7591,13 @@ mod stream_helpers_tests {
     }
 
     #[test]
-    fn native_tool_with_empty_input_has_empty_args() {
+    fn native_tool_with_missing_metadata_reports_it_as_unknown() {
         let r = classify_tool_call("Bash", "");
         match r {
-            ToolRecord::Native(s) => assert_eq!(s, "[agent-native: Bash()]"),
+            ToolRecord::Native(s) => assert_eq!(
+                s,
+                "[agent-native: Bash(status=unknown; arguments not reported)]"
+            ),
             ToolRecord::Kronn(_) => panic!("Bash is native"),
         }
     }
@@ -7400,7 +7626,8 @@ mod stream_helpers_tests {
 
 #[cfg(test)]
 mod connection_fallback_tests {
-    use super::effective_connection_id;
+    use super::{agent_http_status, effective_connection_id};
+    use crate::models::AgentType;
 
     #[test]
     fn dispatch_job_wins_over_the_room_default() {
@@ -7425,5 +7652,75 @@ mod connection_fallback_tests {
     #[test]
     fn none_when_neither_side_carries_one() {
         assert_eq!(effective_connection_id(None, None), None);
+    }
+
+    #[tokio::test]
+    async fn a_404_without_a_chosen_connection_flags_the_model_the_runner_called() {
+        // A LiteLLM discussion with no connection runs on the canonical legacy
+        // connection, whose catalogue holds the model: flagging it under the
+        // agent's own id updated nothing and the next launch was let through.
+        use crate::db::model_catalog::{self as catalog, DiscoveredModel};
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            crate::db::external_api_connections::backfill_legacy_config(
+                conn,
+                &crate::core::config::default_config(),
+            )?;
+            catalog::reconcile_live(
+                conn,
+                "http:external-api-litellm",
+                &AgentType::LiteLlm,
+                &[DiscoveredModel {
+                    model_id: "vertex_ai/claude-opus-5".into(),
+                    display_name: "vertex_ai/claude-opus-5".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec![],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                }],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let target = crate::core::model_catalog::legacy_runtime_target_id(&db, &AgentType::LiteLlm)
+            .await
+            .expect("the legacy LiteLLM connection exists");
+        assert_eq!(target, "http:external-api-litellm");
+        let error = "LiteLLM error 404 Not Found: Provider response: \
+            Publisher model `claude-opus-5` was not found or your project does not have access to it";
+        let status = agent_http_status(error).expect("the runner's status is parsed");
+        assert!(
+            crate::api::lite_llm::flag_unreachable_model(
+                &db,
+                &target,
+                "vertex_ai/claude-opus-5",
+                status,
+                error,
+            )
+            .await
+        );
+
+        let refusal = crate::core::model_catalog::preflight_resolve(
+            &db,
+            Some(&target),
+            AgentType::LiteLlm,
+            crate::models::ModelTier::Default,
+            Some("vertex_ai/claude-opus-5"),
+            None,
+        )
+        .await
+        .expect_err("a model the proxy refused is refused before the next call");
+        assert_eq!(
+            refusal.reason,
+            crate::models::ModelUnavailableReason::NotFound
+        );
+        assert!(
+            crate::core::model_catalog::legacy_runtime_target_id(&db, &AgentType::Ollama)
+                .await
+                .is_none()
+        );
     }
 }

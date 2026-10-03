@@ -164,6 +164,10 @@ pub struct CatalogModelEntry {
     pub last_seen_at: Option<DateTime<Utc>>,
     /// Last time Kronn attempted to verify this identity, live or not.
     pub last_checked_at: DateTime<Utc>,
+    /// Last time a real call to this model answered. Being listed is not
+    /// being served: `None` means no call has proven it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_answered_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

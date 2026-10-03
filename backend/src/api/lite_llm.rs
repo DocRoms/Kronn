@@ -117,8 +117,10 @@ pub(crate) async fn clear_unreachable_model(
 
 /// Catalogue namespace of the single, un-named LiteLLM configured in the card.
 /// Named connections have their own `http:<id>` namespace.
-fn legacy_runtime_target() -> String {
-    crate::db::model_catalog::agent_runtime_target_id(&AgentType::LiteLlm)
+async fn legacy_runtime_target(db: &crate::db::Database) -> String {
+    crate::core::model_catalog::legacy_runtime_target_id(db, &AgentType::LiteLlm)
+        .await
+        .unwrap_or_else(|| crate::db::model_catalog::agent_runtime_target_id(&AgentType::LiteLlm))
 }
 
 /// Public accessor for the runner, which already holds the saved endpoint and
@@ -539,7 +541,8 @@ pub async fn retry_model(
                 })
                 .await;
             // The catalogue flag follows the same verdict as the failure memory.
-            clear_unreachable_model(&state.db, &legacy_runtime_target(), &model).await;
+            clear_unreachable_model(&state.db, &legacy_runtime_target(&state.db).await, &model)
+                .await;
             Json(ApiResponse::ok(LiteLlmModelRetryResponse {
                 healthy: true,
                 failure: None,
@@ -572,8 +575,14 @@ pub async fn retry_model(
                 })
                 .await;
             if from_model_call {
-                flag_unreachable_model(&state.db, &legacy_runtime_target(), &model, status, &error)
-                    .await;
+                flag_unreachable_model(
+                    &state.db,
+                    &legacy_runtime_target(&state.db).await,
+                    &model,
+                    status,
+                    &error,
+                )
+                .await;
             }
             let endpoint_for_db = endpoint.clone();
             let model_for_db = model.clone();

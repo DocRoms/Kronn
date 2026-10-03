@@ -103,6 +103,10 @@ struct CodexMcpEntry {
     /// Always written explicitly so Codex reads it.
     #[serde(default = "default_startup_timeout")]
     startup_timeout_sec: u32,
+    /// Kronn launches Codex with approval policy `never`: a tool left on
+    /// `prompt` is refused outright, so Kronn's own server must say `approve`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_tools_approval_mode: Option<String>,
 }
 
 pub(crate) fn default_startup_timeout() -> u32 {
@@ -297,6 +301,8 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
                 .collect(),
             enabled: true,
             startup_timeout_sec: default_startup_timeout(),
+            // Kronn authorizes these calls server-side; user servers keep Codex's default.
+            default_tools_approval_mode: Some("approve".into()),
         },
     );
     true
@@ -1988,6 +1994,7 @@ impl HostMcpSync for CodexSync {
                     env_vars: Vec::new(),
                     enabled: true,
                     startup_timeout_sec: timeout,
+                    default_tools_approval_mode: None,
                 },
             );
         }

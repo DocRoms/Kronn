@@ -372,6 +372,24 @@ mod tests {
             "no credential, and no placeholder for one, may travel over ACP"
         );
 
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"kronn-internal":{"command":"project-spoof"}}}"#,
+        )
+        .unwrap();
+        let project_registry = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let own: Vec<_> = project_registry
+            .iter()
+            .filter(|server| server.id == "kronn-internal")
+            .collect();
+        assert_eq!(
+            own.len(),
+            1,
+            "a project copy cannot duplicate the owned bridge"
+        );
+        assert_eq!(own[0], bridge);
+
         match previous {
             Some(value) => std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
             None => std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),
@@ -8135,6 +8153,88 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn claude_code_without_full_access_allows_only_kronn_internal_tools() {
+        for context in ["", "mcp context"] {
+            let (_, _, args, _, _, _) = super::super::agent_command(
+                &AgentType::ClaudeCode,
+                "test prompt",
+                false,
+                context,
+                None,
+            );
+            assert!(
+                args.contains(&"--allowedTools=mcp__kronn-internal".to_string()),
+                "`--print` cannot ask for permission: Kronn's tools must be allowed. {args:?}"
+            );
+            // A space-separated value would let the variadic flag swallow the prompt.
+            assert!(!args.contains(&"--allowedTools".to_string()), "{args:?}");
+            assert_eq!(args.last().map(String::as_str), Some("test prompt"));
+        }
+    }
+
+    #[test]
+    fn a_discussion_without_project_gets_its_own_folder_not_the_system_temp_dir() {
+        let home = tempfile::tempdir().unwrap();
+
+        let dir = super::super::discussion_scratch_dir_under(
+            home.path(),
+            "5ad1d4d3-cd66-4699-8cd2-89706f29388e",
+        )
+        .expect("a plain discussion id gets a folder");
+        assert_eq!(
+            dir,
+            home.path()
+                .join(".kronn/discussions/5ad1d4d3-cd66-4699-8cd2-89706f29388e")
+        );
+        assert!(dir.is_dir());
+        assert_ne!(dir, std::env::temp_dir());
+        // Each discussion is kept apart from the others.
+        let other =
+            super::super::discussion_scratch_dir_under(home.path(), "other-discussion").unwrap();
+        assert_ne!(dir, other);
+
+        for unsafe_id in ["", "..", "../escape", "a/b", "a\\b", "id with space"] {
+            assert!(
+                super::super::discussion_scratch_dir_under(home.path(), unsafe_id).is_err(),
+                "{unsafe_id:?} must not become a path segment"
+            );
+        }
+    }
+
+    #[test]
+    fn discussion_directory_creation_failure_never_returns_a_shared_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".kronn"),
+            "a file blocks directory creation",
+        )
+        .unwrap();
+        let error = super::super::discussion_scratch_dir_under(home.path(), "test-discussion")
+            .expect_err("creation failure must stop the launch, not select the system temp dir");
+        assert!(error.contains("Cannot create the discussion working directory"));
+    }
+
+    #[test]
+    fn claude_task_worker_keeps_its_narrow_tool_allowance() {
+        let worktree = tempfile::tempdir().unwrap();
+        let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "test prompt",
+            false,
+            "worker context",
+            None,
+            None,
+            true,
+            Some(worktree.path()),
+            None,
+        );
+        assert!(
+            !args.contains(&"--allowedTools=mcp__kronn-internal".to_string()),
+            "{args:?}"
+        );
+    }
+
+    #[test]
     fn claude_task_worker_uses_fail_closed_workspace_sandbox() {
         let worktree = tempfile::tempdir().unwrap();
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
@@ -9083,6 +9183,40 @@ Suite de la réponse.";
             parsed["mcp_servers"].as_table().map(toml::Table::len),
             Some(1),
             "an isolated worker must inherit no user MCP server"
+        );
+    }
+
+    #[test]
+    fn codex_discussion_pins_a_complete_and_approved_kronn_entry() {
+        let overrides = super::super::render_codex_discussion_mcp_overrides(Some(
+            super::super::InternalMcpCommand::script("/tmp/disc-introspection-mcp.py".into()),
+        ));
+        let values: Vec<&str> = overrides
+            .chunks(2)
+            .map(|pair| {
+                assert_eq!(pair[0], "-c");
+                pair[1].as_str()
+            })
+            .collect();
+        // Dotted keys only: a `mcp_servers={…}` table would wipe the user's servers.
+        assert!(values
+            .iter()
+            .all(|v| v.starts_with("mcp_servers.kronn-internal.")));
+        assert!(values.contains(&"mcp_servers.kronn-internal.command=\"python3\""));
+        assert!(values
+            .iter()
+            .any(|v| v.starts_with("mcp_servers.kronn-internal.args=")
+                && v.contains("/tmp/disc-introspection-mcp.py")));
+        assert!(
+            values.contains(&"mcp_servers.kronn-internal.default_tools_approval_mode=\"approve\"")
+        );
+
+        // No bridge script: no approval key that would stand alone as an entry
+        // without transport and make Codex reject its configuration.
+        let without = super::super::render_codex_discussion_mcp_overrides(None);
+        assert!(
+            without.is_empty(),
+            "even env_vars alone creates an invalid MCP entry"
         );
     }
 
@@ -11077,7 +11211,7 @@ Suite de la réponse.";
         assert_eq!(bin, "copilot");
         assert_eq!(npx, Some("@github/copilot"));
         assert_eq!(env_key, "GH_TOKEN");
-        assert_eq!(args, vec!["-p", "hello"]);
+        assert_eq!(args, vec!["--allow-tool=kronn-internal", "-p", "hello"]);
     }
 
     #[test]
@@ -11096,7 +11230,35 @@ Suite de la réponse.";
             "",
             Some("gpt-4o-mini"),
         );
-        assert_eq!(args, vec!["--model", "gpt-4o-mini", "-p", "hello"]);
+        assert_eq!(
+            args,
+            vec![
+                "--model",
+                "gpt-4o-mini",
+                "--allow-tool=kronn-internal",
+                "-p",
+                "hello"
+            ]
+        );
+    }
+
+    #[test]
+    fn copilot_task_worker_gets_no_kronn_internal_allowance() {
+        let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::CopilotCli,
+            "test prompt",
+            false,
+            "worker context",
+            None,
+            None,
+            true,
+            None,
+            None,
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--allow-tool")),
+            "{args:?}"
+        );
     }
 
     #[test]

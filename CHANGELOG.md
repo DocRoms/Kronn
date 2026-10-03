@@ -319,6 +319,50 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Codex, launched by Kronn in a discussion or a room, can use Kronn's own
+  tools again (KT-953). Kronn starts Codex non-interactively, so a tool left on
+  "ask" was refused ("MCP tool call requires approval, but approval policy is
+  never"): Codex could not read a message, post one, attach a file, generate a
+  media or create a task — even with full access. Kronn now approves its own
+  tools, and only them, in the configuration it hands Codex at launch (so it
+  no longer depends on the sync of `~/.codex/config.toml`) and in the Kronn
+  entry of that file; your other MCP servers keep Codex's own setting. Claude Code and Copilot CLI
+  without full access hit the same wall for a fresh install: they now get
+  Kronn's tools, and nothing else, explicitly allowed (Claude:
+  `--allowedTools=mcp__kronn-internal`; Copilot: `--allow-tool=kronn-internal`).
+  Full access and task workers keep their current permissions.
+  Native MCP posts no longer start an extra answer from their own discussion
+  agent merely because the CLI supplies a runtime session id. Joined peers
+  and explicitly addressed responders keep their routing.
+  Native ACP sessions also receive the owned Kronn bridge without a project;
+  the project-server filter no longer removes it. Its scoped tool permissions
+  cover reads and writes without requiring full access.
+
+- Native tool history now keeps reported names, redacted argument excerpts
+  and observed completion/error status, correlating updates by call id.
+  Repeated calls remain distinct; missing metadata is shown as unknown.
+  Command output, MCP results and patch bodies are not copied into the trace
+  (KT-953).
+
+- A link an agent writes to a file on its machine now leads somewhere
+  (KT-954). Agents often hand over a file by its path
+  (`[the GIF](/private/var/…/loop.gif)`); the link resolved against Kronn's own
+  address and opened nothing. When the agent's message is saved, Kronn now
+  attaches the files it links that sit in the agent's own folder or in the
+  project. Known credential filenames and directories (including `.env`,
+  private keys and `.ssh`) and Kronn's data directory are excluded; each
+  message can add at most eight files and read 64 MiB in total. Persisted links
+  identify the exact attachment, including when two files share a name. Images,
+  videos and text open in the attachment viewer; other files download under
+  their original names. Unavailable paths show a reason instead of a dead
+  link. Project-relative paths open the project viewer at the requested line;
+  attached Markdown images render inline. A discussion without a project runs its agent in its own
+  folder (`~/.kronn/discussions/<id>`) instead of the system's shared temp
+  folder. If that folder cannot be prepared, the turn stops with a visible
+  error instead of falling back to shared temporary files. This working
+  directory and the attachment filters do not sandbox
+  the CLI's filesystem access.
+
 - HTTP audits can write more than twelve findings and their index within a
   dedicated bounded budget. A missing artifact after a tool ceiling now keeps
   that cause in its persisted warning (KT-951). Full audits correct verifiable
@@ -694,6 +738,44 @@ Release notes for 0.9.3 and earlier are available in the
   `404:` and found none, so every provider error skipped the model diagnostics
   and surfaced as the raw body; the status is now read correctly, for every HTTP
   agent.
+
+- An HTTP agent's file search can no longer flood its own context (KT-959).
+  On 02/10 a framing step asked `find_files` for `**/*` over a PHP repository
+  with `vendor/`: the answer listed every one of up to 20 000 files, about
+  880 000 tokens, which every later turn sent again until the request outgrew
+  the model and the proxy failed it nine minutes in. `find_files` and recursive
+  `list_files` still walk and count the whole tree, but return only the entries
+  that fit in 64 KiB, with the number left out and a hint to narrow the
+  pattern. Any other tool answer is cut at 320 KiB, saying so, before it enters
+  the history.
+
+- A LiteLLM model that answers 404 is now flagged wherever it is picked, and
+  can no longer be saved on a tier by mistake (KT-957). On 02/10
+  `vertex_ai/claude-opus-5` was set as the standard tier, failed every message
+  with a 404, and stayed "available": a discussion with no connection chosen
+  runs on the LiteLLM connection, but Kronn recorded the failure under the
+  agent's own catalogue, where no model is listed, so nothing was ever flagged
+  and the next message was sent anyway. The failure, the up-front refusal and
+  the Retry button now use the connection's catalogue, and the model pickers of
+  such a discussion read it too. **Test** on a LiteLLM connection now calls
+  every chat model the proxy lists, once and with one token, in parallel and
+  within about a minute, and records what each answered: on 02/10 the proxy
+  took 9 s to refuse `vertex_ai/claude-fable-5@default` by its tag rules, so
+  model calls now wait up to 20 s instead of 6 s, which had read that refusal
+  as a timeout. Saving a LiteLLM connection calls each tier model it changes;
+  a model the proxy refuses (not found, or not allowed for this key), or that
+  the catalogue already knows it refuses when the call proves nothing, is kept
+  only after an explicit confirmation that names it. A rejected key does not
+  block the save, and an unchanged model is not called again. Lists mark a
+  model ✅ once a real call (a test, a save, a reply) has answered, ❌ when the
+  proxy refused it, with the reason on hover, and nothing when no call has
+  proved either — being listed is not being served. A refused model cannot be
+  picked for a tier, nor for the image or video slot. While the test calls
+  the models, it shows how far it has got (`12/96`), so a minute of waiting
+  never looks like a hang. What each model is for — chat, image or video
+  generation, embedding — is now read from the proxy itself (`model_info.mode`,
+  from `/model/info` or `/model_group/info`): image and video lists are
+  filtered on it as for OpenRouter, and only chat models are called.
 
 ## [0.14.1] - 2026-09-26
 

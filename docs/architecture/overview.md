@@ -33,7 +33,7 @@ Three Docker services behind nginx gateway:
 ### Agent execution
 - `agents/runner.rs` spawns CLI processes (`claude`, `codex`, `vibe`, `gemini`, `kiro-cli`, `copilot`) with `--print` / non-interactive flags.
 - **Two output modes**: `Text` (line-by-line stdout, default for Codex/Vibe/Gemini/Copilot) and `StreamJson` (Claude Code with `--output-format stream-json --verbose --include-partial-messages`). In StreamJson mode, each line is a JSON event parsed by `parse_claude_stream_line()` — text deltas from `stream_event` events, token usage from `result` event.
-- Agents run in the project's directory context (or temp dir for global discussions).
+- Agents run in the project's directory context (or `~/.kronn/discussions/<id>` for global discussions).
 - **Runtime probe**: if no local binary is found, `probe_runtime()` tests npx availability (15s timeout, 5min cache). `AgentDetection.runtime_available` distinguishes "installed locally" from "runnable via npx". Frontend uses `isUsable(agent) = (installed || runtime_available) && enabled`.
 - MCPs work with all 6 agents: Claude Code (`.mcp.json`), Kiro (`.kiro/settings/mcp.json`), Gemini CLI (`.gemini/settings.json`), Vibe (`.vibe/config.toml`), Codex (`~/.codex/config.toml`), Copilot (prompt-injected). Disk sync writes all formats simultaneously. Claude/Kiro/Gemini use identical JSON format (`mcpServers`). Kiro auth via AWS Builder ID.
 - **Prompt injection order**: profiles → skills → directives → MCP context. All injected via `extra_context` parameter to `agent_command()`.
@@ -82,7 +82,7 @@ Three Docker services behind nginx gateway:
   [src: file: backend/src/api/disc_portability.rs:291-359]
   [src: file: backend/src/api/disc_portability.rs:439-764]
   [src: file: backend/src/db/sql/093_discussion_imports.sql:1-15]
-- Agent runs in a temp directory for global discussions (no project context).
+- Agent runs in its own folder, `~/.kronn/discussions/<id>`, for global discussions (no project context). Native final messages can attach linked files from the run/project folder: at most eight new files and 64 MiB read per message, excluding known credential paths and the Kronn data directory. Link destinations are rewritten to exact asset IDs before initial message persistence; failed insertion cleans up staged files. This is an attachment filter, not a filesystem sandbox. [src: file: backend/src/api/discussions/context.rs:321] [src: file: backend/src/api/discussions/streaming.rs:2230]
 - `CreateDiscussionRequest.project_id` is also optional; frontend offers "Aucun projet" option.
 - **Discussion search/filter**: sidebar includes a search input (`discSearchFilter` state) that filters discussions by title (case-insensitive substring match). When a search term is active, collapsed groups are auto-expanded and only matching discussions are shown. A clear button resets the filter.
 - **Archive/unarchive**: `Discussion.archived: bool` (default false). Swipe right on sidebar item to archive, swipe left to delete. Archived discussions shown in a collapsible "Archives" section at the bottom of the sidebar. `PATCH /api/discussions/:id` with `UpdateDiscussionRequest { title?, archived? }`.

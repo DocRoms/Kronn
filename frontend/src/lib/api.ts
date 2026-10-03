@@ -250,6 +250,7 @@ import type {
   DeclineDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
+import { ApiRequestError } from './apiRequestError';
 
 import type {
   CatalogModelEntry,
@@ -658,6 +659,7 @@ interface ApiResponse<T> {
   success: boolean;
   data: T | null;
   error: string | null;
+  error_code?: string;
 }
 
 async function api<T>(
@@ -703,7 +705,7 @@ async function api<T>(
     const json: ApiResponse<T> = await res.json();
 
     if (!json.success) {
-      throw new Error(json.error ?? 'Unknown API error');
+      throw new ApiRequestError(json.error ?? 'Unknown API error', json.error_code);
     }
 
     return json.data as T;
@@ -3063,6 +3065,8 @@ export interface UpsertExternalApiConnection {
   media_endpoint?: string | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
+  /** Keep a tier model the proxy just refused; otherwise the save fails with `unreachable_model`. */
+  confirm_unreachable_models?: boolean;
 }
 
 /** What one tier's model answered to a real one-token call (KT-941). */
@@ -3076,6 +3080,9 @@ export interface ExternalApiTierCheck {
   hint?: string | null;
 }
 
+/** What one listed model answered when its LiteLLM connection was tested. */
+export type ExternalApiModelCheck = Omit<ExternalApiTierCheck, 'tier' | 'hint'>;
+
 export interface ExternalApiConnectionTestResult {
   ok: boolean;
   /** `model_error`: the connection works but a tier's model does not answer
@@ -3084,6 +3091,10 @@ export interface ExternalApiConnectionTestResult {
   models: string[];
   /** One entry per tier verified by the test, for a LiteLLM connection. */
   tier_checks?: ExternalApiTierCheck[];
+  /** LiteLLM: what each listed chat model answered to one call (KT-957). */
+  model_checks?: ExternalApiModelCheck[];
+  /** LiteLLM: the proxy route that declared each model's mode, if any. */
+  capability_source?: 'model_info' | 'model_group_info' | null;
   /** Capability-bearing union from provider-specific catalogue routes. Older
    * backends omit it; callers keep `models` as the chat-only fallback. */
   catalog?: Array<{
@@ -3216,8 +3227,13 @@ export const externalApi = {
     endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[];
     /** The model of each tier: a LiteLLM test calls each one and answers per tier. */
     tier_models?: Array<{ tier: ExternalApiTierCheck['tier']; model: string }>;
+    /** Id under which the model sweep reports its progress (LiteLLM). */
+    progress_id?: string;
   }) =>
     api<ExternalApiConnectionTestResult>('POST', '/external-api/connections/test', body),
+  /** How far the model sweep of the test started with `progress_id` has got. */
+  testProgress: (progressId: string) =>
+    api<{ done: number; total: number }>('GET', `/external-api/connections/test/progress/${encodeURIComponent(progressId)}`),
 };
 
 // 0.8.6 (#24) — Unified API call logs.

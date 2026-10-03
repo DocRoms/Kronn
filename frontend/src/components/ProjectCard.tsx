@@ -140,6 +140,7 @@ export function ProjectCard({
   const isMobile = useIsMobile();
   const [detailView, setDetailView] = useState<ProjectDetailView>(readProjectDetailView);
   const [codeInitialPath, setCodeInitialPath] = useState<string | null>(null);
+  const [codeInitialLine, setCodeInitialLine] = useState<number | null>(null);
   const [expandedTab, setExpandedTab] = useState<string | undefined>(undefined);
   const selectDetailView = useCallback((view: ProjectDetailView) => {
     setDetailView(view);
@@ -441,6 +442,32 @@ export function ProjectCard({
         selectDetailView('docs');
         setExpandedTab('docAi');
         setDocDeepLink(target);
+      });
+    }
+    return () => { cancelled = true; };
+  }, [isOpen, proj.id, selectDetailView]);
+
+  // KT-954 — a project path an agent cited in a discussion opens here, on its
+  // file and line. Same one-shot sessionStorage contract as the links above.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    let target: { path?: unknown; line?: unknown } | null = null;
+    try {
+      const raw = sessionStorage.getItem(`kronn:codeView:${proj.id}`);
+      if (raw) {
+        sessionStorage.removeItem(`kronn:codeView:${proj.id}`);
+        target = JSON.parse(raw) as { path?: unknown; line?: unknown };
+      }
+    } catch { /* private mode / quota / malformed — no deep-link */ }
+    if (target && typeof target.path === 'string' && target.path) {
+      const path = target.path;
+      const line = typeof target.line === 'number' && target.line > 0 ? target.line : null;
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setCodeInitialPath(path);
+        setCodeInitialLine(line);
+        selectDetailView('code');
       });
     }
     return () => { cancelled = true; };
@@ -2482,6 +2509,7 @@ export function ProjectCard({
                 key={`${proj.id}:${gitRevision}`}
                 projectId={proj.id}
                 initialPath={codeInitialPath}
+                initialLine={codeInitialLine}
               />
             </section>
           )}
@@ -2493,6 +2521,7 @@ export function ProjectCard({
                 onRunningChange={reportDockerRunning}
                 onOpenConfig={(path) => {
                   setCodeInitialPath(path);
+                  setCodeInitialLine(null);
                   selectDetailView('code');
                 }}
               />

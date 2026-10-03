@@ -12707,7 +12707,8 @@ async fn litellm_test_probes_each_tier_and_says_which_model_answers() {
     ] {
         assert!(!text.contains(private), "{private} leaked: {text}");
     }
-    // One call per distinct model, one token each.
+    // One call per distinct listed model, one token each: the tiers' three
+    // plus `claude-sonnet-4-6`, which the sweep calls too (KT-957).
     assert_eq!(
         upstream
             .received_requests()
@@ -12716,7 +12717,7 @@ async fn litellm_test_probes_each_tier_and_says_which_model_answers() {
             .iter()
             .filter(|request| request.method.as_str() == "POST")
             .count(),
-        3
+        4
     );
 }
 
@@ -12822,6 +12823,378 @@ async fn litellm_saved_connection_state(endpoint: String) -> AppState {
             active: true,
         });
     state
+}
+
+/// The body of a save of the `litellm-saved` connection with these tiers.
+fn litellm_save_body(endpoint: &str, tiers: [&str; 3], confirm: bool) -> Value {
+    serde_json::json!({
+        "display_name": "Euronews proxy",
+        "mention_alias": "euronews",
+        "endpoint": endpoint,
+        "origin_preset": "lite_llm",
+        "economy_model": tiers[0],
+        "default_model": tiers[1],
+        "reasoning_model": tiers[2],
+        "confirm_unreachable_models": confirm,
+    })
+}
+
+#[tokio::test]
+async fn saving_a_litellm_tier_on_a_model_the_proxy_refuses_needs_a_confirmation() {
+    // KT-957 — the proxy lists `vertex_ai/claude-sonnet-5` but answers 404:
+    // assigning it to a tier must not pass silently, as it did on 02/10.
+    use kronn::models::{ModelAvailability, ModelUnavailableReason};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    // Fill the catalogue the way a connection test does.
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+            "models": ["gemini-3.6-flash"],
+        }),
+    )
+    .await;
+    assert_eq!(tested["data"]["ok"], true, "{tested}");
+    let healthy = ["gemini-3.6-flash", "claude-sonnet-4-6", "claude-sonnet-4-6"];
+    let (_, saved) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(&upstream.uri(), healthy, false),
+    )
+    .await;
+    assert_eq!(saved["success"], true, "{saved}");
+    // Its own call proved the new model: the pickers can say so.
+    assert!(saved_litellm_catalogue(&state).await["claude-sonnet-4-6"]
+        .last_answered_at
+        .is_some());
+
+    let refused_tiers = [
+        "gemini-3.6-flash",
+        "vertex_ai/claude-sonnet-5",
+        "claude-sonnet-4-6",
+    ];
+    let (_, refused) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(&upstream.uri(), refused_tiers, false),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert_eq!(refused["error_code"], "unreachable_model");
+    let message = refused["error"].as_str().unwrap();
+    assert!(
+        message.contains("vertex_ai/claude-sonnet-5") && message.contains("default tier"),
+        "{message}"
+    );
+    assert!(!message.contains("enws-private-project"), "{message}");
+    let stored = state
+        .db
+        .with_read_conn(|conn| kronn::db::external_api_connections::get(conn, "litellm-saved"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.default_model.as_deref(), Some("claude-sonnet-4-6"));
+
+    let (_, confirmed) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(&upstream.uri(), refused_tiers, true),
+    )
+    .await;
+    assert_eq!(confirmed["success"], true, "{confirmed}");
+    let entry = &saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"];
+    assert_eq!(entry.availability, ModelAvailability::Unavailable);
+    assert_eq!(
+        entry.unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn testing_a_litellm_connection_calls_every_listed_model_and_flags_the_refused_ones() {
+    // KT-957 — a ❌ only on the tier models left every other refused model
+    // looking usable; the test now calls each listed chat model once.
+    use kronn::models::{ModelAvailability, ModelUnavailableReason};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+    assert_eq!(tested["data"]["ok"], true, "{tested}");
+    let checks: std::collections::HashMap<String, String> = tested["data"]["model_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| {
+            (
+                check["model"].as_str().unwrap().to_string(),
+                check["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(checks.len(), 4, "{checks:?}");
+    assert_eq!(checks["gemini-3.6-flash"], "ok");
+    assert_eq!(checks["claude-sonnet-4-6"], "ok");
+    assert_eq!(checks["vertex_ai/claude-sonnet-5"], "not_found");
+    assert_eq!(checks["vertex_ai/claude-fable-5"], "access_denied");
+    assert!(!tested.to_string().contains("enws-private-project"));
+
+    let catalogue = saved_litellm_catalogue(&state).await;
+    assert_eq!(
+        catalogue["vertex_ai/claude-sonnet-5"].unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+    assert_eq!(
+        catalogue["vertex_ai/claude-fable-5"].unavailable_reason,
+        Some(ModelUnavailableReason::AccessDenied)
+    );
+    let healthy = &catalogue["claude-sonnet-4-6"];
+    assert_eq!(healthy.availability, ModelAvailability::Available);
+    assert!(healthy.last_answered_at.is_some());
+}
+
+#[tokio::test]
+async fn a_litellm_test_reads_each_model_mode_and_reports_its_progress() {
+    // KT-957 — what each model is for comes from the proxy (`model_info.mode`),
+    // so image and embedding deployments are offered as such and never called
+    // as chat; the sweep reports how far it got under the caller's id.
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/model/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"model_name": "gemini-3.6-flash", "model_info": {"mode": "chat", "supports_vision": true}},
+                {"model_name": "claude-sonnet-4-6", "model_info": {"mode": "chat"}},
+                {"model_name": "vertex_ai/claude-sonnet-5", "model_info": {"mode": "image_generation"}},
+                {"model_name": "vertex_ai/claude-fable-5", "model_info": {"mode": "embedding"}}
+            ]
+        })))
+        .mount(&upstream)
+        .await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+            "progress_id": "progress-kt957",
+        }),
+    )
+    .await;
+    let data = &tested["data"];
+    assert_eq!(data["ok"], true, "{tested}");
+    assert_eq!(data["capability_source"], "model_info");
+    assert_eq!(data["image_capability_known"], true);
+    let capabilities = |id: &str| {
+        data["catalog"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap()["capabilities"]
+            .clone()
+    };
+    assert_eq!(
+        capabilities("gemini-3.6-flash"),
+        serde_json::json!(["chat", "vision"])
+    );
+    assert_eq!(
+        capabilities("vertex_ai/claude-sonnet-5"),
+        serde_json::json!(["image"])
+    );
+    assert_eq!(
+        capabilities("vertex_ai/claude-fable-5"),
+        serde_json::json!(["embedding"])
+    );
+    let swept: Vec<&str> = data["model_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["model"].as_str().unwrap())
+        .collect();
+    assert_eq!(swept.len(), 2, "only chat models are called: {swept:?}");
+    assert!(!swept.contains(&"vertex_ai/claude-sonnet-5"));
+
+    let (_, progress) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test/progress/progress-kt957",
+    )
+    .await;
+    assert_eq!(progress["data"], serde_json::json!({"done": 2, "total": 2}));
+    let (_, unknown) = get_json(
+        build_router_with_auth(state, false),
+        "/api/external-api/connections/test/progress/never-started",
+    )
+    .await;
+    assert_eq!(unknown["data"], serde_json::json!({"done": 0, "total": 0}));
+}
+
+#[tokio::test]
+async fn a_slow_refusal_still_blocks_a_litellm_save() {
+    // The proxy took 9 s to refuse `vertex_ai/claude-fable-5@default` on 02/10;
+    // a 6 s probe read that as a timeout and let the save through.
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(
+            serde_json::json!({"model": "vertex_ai/claude-fable-5@default"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_delay(std::time::Duration::from_secs(7))
+                .set_body_json(
+                    serde_json::json!({"error": {"message": LITELLM_PRIVATE_TAGS, "code": "401"}}),
+                ),
+        )
+        .mount(&upstream)
+        .await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, refused) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "gemini-3.6-flash",
+                "vertex_ai/claude-fable-5@default",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(refused["error_code"], "unreachable_model", "{refused}");
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("vertex_ai/claude-fable-5@default"));
+}
+
+#[tokio::test]
+async fn a_litellm_save_refuses_a_model_the_catalogue_knows_is_refused() {
+    // The call proves nothing this time (the proxy fails), but the catalogue
+    // remembers the model was refused: keeping it still needs a confirmation.
+    use kronn::models::ModelUnavailableReason;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+    assert_eq!(tested["data"]["ok"], true, "{tested}");
+    assert_eq!(
+        saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"].unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+
+    upstream.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream unavailable"))
+        .mount(&upstream)
+        .await;
+    let (_, refused) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "vertex_ai/claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(refused["error_code"], "unreachable_model", "{refused}");
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("vertex_ai/claude-sonnet-5 (economy tier"));
+}
+
+#[tokio::test]
+async fn a_litellm_save_is_not_blocked_by_what_it_cannot_judge() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    // Every call refused with a bare 401: the key, not the model, is in doubt.
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid key"))
+        .mount(&upstream)
+        .await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, saved) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "gemini-3.6-flash",
+                "claude-sonnet-4-6",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(saved["success"], true, "{saved}");
+
+    // A model left as it was is not called again.
+    upstream.reset().await;
+    let (_, unchanged) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "gemini-3.6-flash",
+                "claude-sonnet-4-6",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(unchanged["success"], true, "{unchanged}");
+    assert!(upstream.received_requests().await.unwrap().is_empty());
 }
 
 async fn saved_litellm_catalogue(

@@ -22,7 +22,7 @@ const COLUMNS: &str =
     availability, unavailable_reason, unavailable_detail, capabilities_json, \
     reasoning_modes_json, default_reasoning_mode, tier_assignment, cost_hint, privacy_note, \
     manual_origin, first_seen_at, last_seen_at, last_checked_at, created_at, updated_at, \
-    resolved_model, description";
+    resolved_model, description, last_answered_at";
 
 pub fn canonical_id(runtime_target_id: &str, model_id: &str) -> String {
     let payload = format!("{runtime_target_id}\0{model_id}");
@@ -272,6 +272,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
         last_checked_at: parse_dt(row.get(19)?),
         created_at: parse_dt(row.get(20)?),
         updated_at: parse_dt(row.get(21)?),
+        last_answered_at: row.get::<_, Option<String>>(24)?.map(parse_dt),
     })
 }
 
@@ -339,7 +340,7 @@ pub fn create_manual(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10,NULL,NULL)"
+             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10,NULL,NULL,NULL)"
         ),
         params![
             id,
@@ -612,7 +613,7 @@ pub fn reconcile_live(
                 conn.execute(
                     &format!(
                         "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9,?12,?13)"
+                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9,?12,?13,NULL)"
                     ),
                     params![
                         id,
@@ -716,10 +717,10 @@ pub fn mark_available(conn: &Connection, runtime_target_id: &str, model_id: &str
     Ok(affected > 0)
 }
 
-/// Forget a not-found / access-denied verdict after the model answered a real
-/// call (KT-941). Narrower than [`mark_available`]: an entry that is
-/// unavailable for another reason (it `Disappeared` from the live catalogue,
-/// say) is never revived by a successful call.
+/// Record that the model answered a real call and forget a not-found /
+/// access-denied verdict (KT-941). Narrower than [`mark_available`]: an entry
+/// that is unavailable for another reason (it `Disappeared` from the live
+/// catalogue, say) is never revived by a successful call.
 pub fn clear_model_failure(
     conn: &Connection,
     runtime_target_id: &str,
@@ -727,6 +728,10 @@ pub fn clear_model_failure(
 ) -> Result<bool> {
     let id = canonical_id(runtime_target_id, model_id);
     let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE model_catalog_entries SET last_answered_at = ?1, last_checked_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
     let affected = conn.execute(
         "UPDATE model_catalog_entries SET availability = 'available', unavailable_reason = NULL, \
          unavailable_detail = NULL, last_checked_at = ?1, updated_at = ?1 \
@@ -891,7 +896,7 @@ pub fn insert_migrated_seed_for_target(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9,NULL,NULL)"
+             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9,NULL,NULL,NULL)"
         ),
         params![
             id,
@@ -1175,6 +1180,7 @@ mod tests {
         assert_eq!(entry.availability, ModelAvailability::Available);
         assert_eq!(entry.unavailable_reason, None);
         assert_eq!(entry.unavailable_detail, None);
+        assert!(entry.last_answered_at.is_some(), "the answer is remembered");
 
         // A model that left the live catalogue is not revived by an answer.
         reconcile_live(
@@ -1184,6 +1190,16 @@ mod tests {
             &[listed("tagged-model")],
         )
         .unwrap();
+        assert!(
+            list_for_target(&conn, target)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.model_id == "tagged-model")
+                .unwrap()
+                .last_answered_at
+                .is_some(),
+            "a catalogue refresh keeps what a call proved"
+        );
         assert!(!clear_model_failure(&conn, target, "gone-model").unwrap());
         let gone = list_for_target(&conn, target)
             .unwrap()
@@ -1403,6 +1419,7 @@ mod tests {
             last_checked_at: now,
             created_at: now,
             updated_at: now,
+            last_answered_at: None,
         }
     }
 

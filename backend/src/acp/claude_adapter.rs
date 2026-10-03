@@ -333,6 +333,15 @@ impl AcpTransport for ClaudeAcpAdapter {
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
+                    for trace in crate::agents::tool_trace::from_claude_line(&line) {
+                        if matches!(
+                            trace.status.as_deref(),
+                            Some("completed" | "failed" | "cancelled")
+                        ) {
+                            let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                        }
+                        let _ = events.send(AcpSessionEvent::ToolTrace(trace)).await;
+                    }
                     if let Some(model) = crate::agents::provenance::claude_observed_model(&line) {
                         let _ = events.send(AcpSessionEvent::ModelObserved(model)).await;
                     }

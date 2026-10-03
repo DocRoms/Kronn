@@ -231,6 +231,29 @@ export function Dashboard({ onReset }: DashboardProps) {
     return () => window.removeEventListener('hashchange', followDiscussionLink);
   }, []);
 
+  // A link inside the app (a discussion pointing at a project file) sets the
+  // hash after the first-load consumer above has already run.
+  useEffect(() => {
+    const followProjectLink = () => {
+      const hash = window.location.hash;
+      if (!hash.startsWith('#project-')) return;
+      const projectId = hash.slice('#project-'.length);
+      if (!projectId) return;
+      setPage('projects');
+      setExpandedId(projectId);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          document.getElementById(`project-${projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      });
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    };
+    window.addEventListener('hashchange', followProjectLink);
+    return () => window.removeEventListener('hashchange', followProjectLink);
+  }, []);
+
   useEffect(() => {
     if (pagesCapability && !pagesCapability.activated && page === 'pages') {
       setPage('projects');

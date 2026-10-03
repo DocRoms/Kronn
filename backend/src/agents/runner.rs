@@ -2377,6 +2377,38 @@ pub(crate) fn codex_kronn_internal_env_override() -> String {
     )
 }
 
+/// Kronn's own server for a Codex discussion run, complete and approved, so the
+/// run does not depend on the global config sync (KT-953). Dotted keys merge
+/// with the user's config instead of replacing their other servers.
+pub(crate) fn codex_discussion_mcp_overrides() -> Vec<String> {
+    render_codex_discussion_mcp_overrides(disc_introspection_mcp_command())
+}
+
+fn render_codex_discussion_mcp_overrides(launch: Option<InternalMcpCommand>) -> Vec<String> {
+    const KEY: &str = "mcp_servers.kronn-internal";
+    // Without its command a key alone is an entry with no transport, and Codex
+    // then rejects the whole configuration.
+    let Some(launch) = launch else {
+        return Vec::new();
+    };
+    let (Ok(command), Ok(args)) = (
+        serde_json::to_string(&launch.command),
+        serde_json::to_string(&launch.args),
+    ) else {
+        return Vec::new();
+    };
+    let values = vec![
+        codex_kronn_internal_env_override(),
+        format!("{KEY}.command={command}"),
+        format!("{KEY}.args={args}"),
+        format!("{KEY}.default_tools_approval_mode=\"approve\""),
+    ];
+    values
+        .into_iter()
+        .flat_map(|value| ["-c".to_string(), value])
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct AcpSessionStore {
     db: Arc<crate::db::Database>,
@@ -4593,6 +4625,11 @@ async fn run_acp_session(
                     AcpSessionEvent::ToolTarget(target) => {
                         super::activity::tool_target(activity.as_ref(), target);
                     }
+                    AcpSessionEvent::ToolTrace(trace) => {
+                        if let Ok(mut capture) = forwarder_stderr.lock() {
+                            capture.push(trace.marker());
+                        }
+                    }
                     AcpSessionEvent::Usage {
                         input_tokens,
                         output_tokens,
@@ -4762,7 +4799,7 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
     // because Kronn spawns the ACP process itself (`spawn_native`), so nothing
     // sensitive passes through the protocol.
     let mut servers: Vec<crate::acp::AcpMcpServer> = Vec::new();
-    if let Some(launch) = disc_introspection_mcp_command_for_shared_config() {
+    if let Some(launch) = disc_introspection_mcp_command() {
         servers.push(crate::acp::AcpMcpServer {
             id: "kronn-internal".to_string(),
             command: launch.command,
@@ -4780,6 +4817,9 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
+            if id == "kronn-internal" {
+                return None;
+            }
             let command = entry.command.clone()?;
             // Fail closed: a credential in `env` OR embedded directly in
             // `args` (`["--token", "secret"]`) drops the whole server rather
@@ -10549,6 +10589,29 @@ fn claude_project_slug(work_dir: &Path) -> String {
         .collect()
 }
 
+/// Working directory of a discussion without a project: one folder per
+/// discussion under `~/.kronn/discussions`, outside Kronn's data dir.
+pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
+    let home = directories::BaseDirs::new()
+        .ok_or_else(|| "The user home directory is unavailable".to_string())?;
+    discussion_scratch_dir_under(home.home_dir(), discussion_id)
+}
+
+fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
+    // The id becomes a path segment: anything but a plain id could escape it.
+    if discussion_id.is_empty()
+        || !discussion_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("Invalid discussion id for its working directory".into());
+    }
+    let dir = home.join(".kronn").join("discussions").join(discussion_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Cannot create the discussion working directory: {error}"))?;
+    Ok(dir)
+}
+
 /// The directory an agent will actually run in.
 ///
 /// Public because a resumable session is scoped to this exact path: the caller
@@ -11256,6 +11319,10 @@ fn agent_command_with_task_worker_policy(
                 args.push("acceptEdits".into());
             } else if full_access {
                 args.push("--dangerously-skip-permissions".into());
+            } else {
+                // `--print` cannot ask, so Kronn's own tools must be allowed up front.
+                // The `=` form matters: a variadic flag followed by a space eats the prompt.
+                args.push("--allowedTools=mcp__kronn-internal".into());
             }
             // Inject MCP context via --append-system-prompt (separate from user prompt)
             if !mcp_context.is_empty() {
@@ -11282,15 +11349,17 @@ fn agent_command_with_task_worker_policy(
             // children. Pin the same narrow allowlist per invocation so the
             // current discussion/task capability cannot depend on a later
             // global config sync and concurrent workers stay isolated.
-            args.push("-c".into());
-            args.push(if task_worker {
+            if task_worker {
                 // `start_agent_with_config` validates availability before this
                 // builder is reached. The fallback keeps direct unit calls
                 // deterministic without ever broadening the worker surface.
-                codex_task_worker_mcp_override().unwrap_or_else(|| "mcp_servers={}".into())
+                args.push("-c".into());
+                args.push(
+                    codex_task_worker_mcp_override().unwrap_or_else(|| "mcp_servers={}".into()),
+                );
             } else {
-                codex_kronn_internal_env_override()
-            });
+                args.extend(codex_discussion_mcp_overrides());
+            }
             // KT-646 — official per-run TOML override for reasoning effort
             // (https://learn.chatgpt.com/docs/config-file/config-reference,
             // https://learn.chatgpt.com/docs/developer-commands?surface=cli).
@@ -11461,6 +11530,9 @@ fn agent_command_with_task_worker_policy(
             }
             if full_access && !task_worker {
                 args.push("--allow-all-tools".into());
+            } else if !task_worker {
+                // Non-interactive Copilot refuses any tool it would have to ask about.
+                args.push("--allow-tool=kronn-internal".into());
             }
             // Copilot has no system prompt flag — prepend context to prompt
             let full_prompt = if mcp_context.is_empty() {

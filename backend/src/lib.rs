@@ -1311,6 +1311,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/external-api/connections/test",
             post(api::external_api_connections::test),
         )
+        .route(
+            "/api/external-api/connections/test/progress/{id}",
+            get(api::external_api_connections::test_progress),
+        )
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))

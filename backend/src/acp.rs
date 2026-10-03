@@ -474,6 +474,8 @@ pub enum AcpSessionEvent {
     ToolCallEnded,
     /// The informative input of the latest `ToolCall`, once that input is complete.
     ToolTarget(String),
+    /// Correlated tool metadata for the durable transcript, redacted and bounded.
+    ToolTrace(crate::agents::tool_trace::ToolTraceUpdate),
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -1198,6 +1200,9 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                             .to_owned(),
                     });
                 }
+                if let Some(trace) = crate::agents::tool_trace::from_acp(update) {
+                    events.push(AcpSessionEvent::ToolTrace(trace));
+                }
             }
             if let Some(usage) = update.get("usage") {
                 events.push(AcpSessionEvent::Usage {
@@ -1218,22 +1223,54 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
         .collect()
 }
 
+/// Kronn's bridge is supplied by the runtime, independently of the project
+/// registry. Reconstruct its command instead of trusting a reserved-name
+/// candidate, and keep ordinary project servers under the broker's checks.
+fn native_session_mcp_servers(
+    broker: &AcpPermissionBroker,
+    candidates: Vec<AcpMcpServer>,
+    internal: Option<crate::agents::runner::InternalMcpCommand>,
+) -> Vec<AcpMcpServer> {
+    let requested_internal = candidates
+        .iter()
+        .any(|server| server.id == "kronn-internal");
+    let mut servers = broker.authorize_mcp_servers(
+        candidates
+            .into_iter()
+            .filter(|server| server.id != "kronn-internal")
+            .collect(),
+    );
+    if let Some(launch) = internal.filter(|_| requested_internal) {
+        let bridge = AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: launch.command,
+            args: launch.args,
+            allowed_tools: Vec::new(),
+        };
+        broker.register_trusted_mcp_server(&bridge);
+        servers.insert(0, bridge);
+    }
+    servers
+}
+
 #[async_trait]
 impl AcpTransport for AcpJsonRpcTransport {
     async fn initialize(
         &self,
         request: AcpInitialize,
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
-        let servers: Vec<Value> = self
-            .broker
-            .authorize_mcp_servers(request.mcp_servers)
-            .into_iter()
-            .map(|server| {
-                json!({
-                    "name": server.id, "command": server.command, "args": server.args, "env": [],
-                })
+        let servers: Vec<Value> = native_session_mcp_servers(
+            &self.broker,
+            request.mcp_servers,
+            crate::agents::runner::disc_introspection_mcp_command(),
+        )
+        .into_iter()
+        .map(|server| {
+            json!({
+                "name": server.id, "command": server.command, "args": server.args, "env": [],
             })
-            .collect();
+        })
+        .collect();
         let result = self
             .request(
                 "initialize",
@@ -1588,6 +1625,39 @@ mod tests {
     // Only the Unix liveness fixtures read from a socket.
     #[cfg(unix)]
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn native_mcp_registry_keeps_the_owned_bridge_without_trusting_projectless_candidates() {
+        let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "discussion"));
+        let declared = |id: &str| AcpMcpServer {
+            id: id.into(),
+            command: "untrusted".into(),
+            args: vec!["--token=fixture".into()],
+            allowed_tools: Vec::new(),
+        };
+        let launch = || crate::agents::runner::InternalMcpCommand {
+            command: "owned-kronn-mcp".into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        let servers = native_session_mcp_servers(
+            &broker,
+            vec![declared("kronn-internal"), declared("other-project")],
+            Some(launch()),
+        );
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, "kronn-internal");
+        assert_eq!(servers[0].command, "owned-kronn-mcp");
+        assert!(servers[0].args.is_empty());
+        assert!(
+            native_session_mcp_servers(&broker, vec![declared("kronn-internal")], None).is_empty(),
+            "a missing owned bridge cannot fall back to the candidate command"
+        );
+        assert!(
+            native_session_mcp_servers(&broker, vec![], Some(launch())).is_empty(),
+            "catalogue probes that do not request MCP must remain tool-free"
+        );
+    }
 
     struct FakeTransport;
 
@@ -2405,6 +2475,12 @@ mod tests {
                 AcpSessionEvent::ToolCall {
                     name: "read_file".into()
                 },
+                AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                    id: "call-1".into(),
+                    name: Some("read_file".into()),
+                    input: None,
+                    status: None,
+                }),
                 AcpSessionEvent::TextDelta("Bonjour 🦀".into()),
                 AcpSessionEvent::Usage {
                     input_tokens: 30,
@@ -2427,7 +2503,19 @@ mod tests {
                 }}})],
                 "s1",
             );
-            assert_eq!(events, vec![AcpSessionEvent::ToolCallEnded], "{status}");
+            assert_eq!(
+                events,
+                vec![
+                    AcpSessionEvent::ToolCallEnded,
+                    AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                        id: "call-1".into(),
+                        name: None,
+                        input: None,
+                        status: Some(status.into()),
+                    }),
+                ],
+                "{status}"
+            );
         }
 
         for status in ["pending", "in_progress"] {
@@ -2440,9 +2528,17 @@ mod tests {
             );
             assert_eq!(
                 events,
-                vec![AcpSessionEvent::ToolCall {
-                    name: "read_file".into()
-                }],
+                vec![
+                    AcpSessionEvent::ToolCall {
+                        name: "read_file".into()
+                    },
+                    AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                        id: "call-1".into(),
+                        name: Some("read_file".into()),
+                        input: None,
+                        status: Some("in_progress".into()),
+                    }),
+                ],
                 "{status} is still the tool call in progress, not its end"
             );
         }
@@ -2457,9 +2553,17 @@ mod tests {
         );
         assert_eq!(
             events,
-            vec![AcpSessionEvent::ToolCall {
-                name: "cargo test".into()
-            }]
+            vec![
+                AcpSessionEvent::ToolCall {
+                    name: "cargo test".into()
+                },
+                AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
+                    id: "call-1".into(),
+                    name: Some("cargo test".into()),
+                    input: None,
+                    status: None,
+                }),
+            ]
         );
     }
 

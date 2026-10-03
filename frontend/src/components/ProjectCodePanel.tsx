@@ -14,6 +14,7 @@ import './ProjectCodePanel.css';
 interface ProjectCodePanelProps {
   projectId: string;
   initialPath?: string | null;
+  initialLine?: number | null;
 }
 
 interface SelectedDiff {
@@ -21,7 +22,7 @@ interface SelectedDiff {
   committed: boolean;
 }
 
-export function ProjectCodePanel({ projectId, initialPath }: ProjectCodePanelProps) {
+export function ProjectCodePanel({ projectId, initialPath, initialLine }: ProjectCodePanelProps) {
   const { t } = useT();
   const [mode, setMode] = useState<'source' | 'diff' | 'commit'>('source');
   // KT-75 — ONE temporary commit tab, deliberately: opening another commit
@@ -269,6 +270,7 @@ export function ProjectCodePanel({ projectId, initialPath }: ProjectCodePanelPro
         <SourceCodeViewer
           projectId={projectId}
           initialPath={initialPath}
+          initialLine={initialLine}
           onOpenCommit={sha => void openCommit(sha)}
         />
       ) : statusLoading && !status ? (

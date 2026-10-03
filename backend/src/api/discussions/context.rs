@@ -92,10 +92,44 @@ pub async fn upload_context_file(
         )));
     }
 
+    let owner = match extracted_from {
+        Some(source_id) => ContextFileOwner::ExtractedFrom(source_id),
+        None => ContextFileOwner::Pending,
+    };
+    match store_context_file(&state, discussion_id, filename, &data, owner).await {
+        Ok((file, suggested_skills)) => {
+            Json(ApiResponse::ok(crate::models::UploadContextFileResponse {
+                file,
+                suggested_skills,
+            }))
+        }
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// Who an attachment belongs to when it is stored.
+pub(crate) enum ContextFileOwner {
+    /// A composer upload, pinned to the user's next message.
+    Pending,
+    /// A frame taken out of the clip with this asset id.
+    ExtractedFrom(String),
+    /// A file an agent linked in this message.
+    Message(String),
+}
+
+/// Store one attachment: extract its content, write the file, record it.
+/// Shared by the upload route and by the files agents link in their messages.
+pub(crate) async fn store_context_file(
+    state: &AppState,
+    discussion_id: String,
+    filename: String,
+    data: &[u8],
+    owner: ContextFileOwner,
+) -> Result<(crate::models::ContextFile, Vec<String>), String> {
     // Extract content (text or image)
-    let content = match crate::core::context_files::extract_content(&filename, &data) {
+    let content = match crate::core::context_files::extract_content(&filename, data) {
         Ok(c) => c,
-        Err(e) => return Json(ApiResponse::err(e.to_string())),
+        Err(e) => return Err(e.to_string()),
     };
 
     // Resolve the work directory for this discussion. With a project, images
@@ -144,7 +178,17 @@ pub async fn upload_context_file(
 
     // Handle text vs image vs on-disk file
     let (extracted_text, disk_path) = match content {
-        crate::core::context_files::ExtractedContent::Text(text) => (text, None),
+        crate::core::context_files::ExtractedContent::Text(text) => {
+            let path = if matches!(&owner, ContextFileOwner::Message(_)) {
+                Some(
+                    crate::core::context_files::save_file_to_dir(&work_dir, &id, &filename, data)
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            };
+            (text, path)
+        }
         crate::core::context_files::ExtractedContent::DiskFile {
             data: file_data,
             preview,
@@ -161,9 +205,7 @@ pub async fn upload_context_file(
                     {
                         Ok(path) => (preview, Some(path)),
                         Err(e2) => {
-                            return Json(ApiResponse::err(format!(
-                                "Failed to save file: {e} / fallback: {e2}"
-                            )))
+                            return Err(format!("Failed to save file: {e} / fallback: {e2}"))
                         }
                     }
                 }
@@ -188,9 +230,7 @@ pub async fn upload_context_file(
                             (label, Some(path))
                         }
                         Err(e2) => {
-                            return Json(ApiResponse::err(format!(
-                                "Failed to save image: {e} / fallback: {e2}"
-                            )))
+                            return Err(format!("Failed to save image: {e} / fallback: {e2}"))
                         }
                     }
                 }
@@ -206,7 +246,15 @@ pub async fn upload_context_file(
     let text = extracted_text.clone();
     let dp = disk_path.clone();
 
-    let source_asset = extracted_from.clone();
+    let source_asset = match &owner {
+        ContextFileOwner::ExtractedFrom(source_id) => Some(source_id.clone()),
+        _ => None,
+    };
+    let owning_message = match &owner {
+        ContextFileOwner::Message(message_id) => Some(message_id.clone()),
+        _ => None,
+    };
+    let owning_message_for_db = owning_message.clone();
     let insert_result = state
         .db
         .with_conn(move |conn| {
@@ -237,35 +285,222 @@ pub async fn upload_context_file(
                     rusqlite::params![file_id, message_id, source_id],
                 )?;
             }
+            if let Some(message_id) = &owning_message_for_db {
+                conn.execute(
+                    "UPDATE context_files SET message_id = ?2 WHERE id = ?1",
+                    rusqlite::params![file_id, message_id],
+                )?;
+            }
             Ok(anchored)
         })
         .await;
 
-    match insert_result {
-        Ok(anchored) => {
-            let file = crate::models::ContextFile {
-                id,
-                discussion_id,
-                filename,
-                mime_type: mime,
-                original_size,
-                extracted_size,
-                disk_path,
-                // Freshly uploaded files are pending until the user sends a
-                // message; send_message pins them to that message id. A frame
-                // taken out of a clip owns its own message from the start.
-                message_id: anchored.as_ref().map(|(message_id, _)| message_id.clone()),
-                // A user upload has no attested generation job.
-                ai_generation: None,
-                extracted_from_asset_id: anchored.map(|(_, source_id)| source_id),
-                created_at: chrono::Utc::now(),
-            };
-            Json(ApiResponse::ok(crate::models::UploadContextFileResponse {
-                file,
-                suggested_skills,
-            }))
+    let anchored = insert_result.map_err(|e| format!("DB error: {e}"))?;
+    let message_id =
+        owning_message.or_else(|| anchored.as_ref().map(|(message_id, _)| message_id.clone()));
+    let file = crate::models::ContextFile {
+        id,
+        discussion_id,
+        filename,
+        mime_type: mime,
+        original_size,
+        extracted_size,
+        disk_path,
+        // A composer upload stays pending until the user sends a message;
+        // a frame or a file an agent linked belongs to its message already.
+        message_id,
+        // Neither a user upload nor a linked file has an attested generation job.
+        ai_generation: None,
+        extracted_from_asset_id: anchored.map(|(_, source_id)| source_id),
+        created_at: chrono::Utc::now(),
+    };
+    Ok((file, suggested_skills))
+}
+
+/// Prepare files and destinations before inserting the agent message (KT-954).
+/// The caller persists the returned body as the initial message, then publishes
+/// its files; this must not silently edit an already-persisted message.
+/// Only files under the run's own folder or its project are taken; secrets
+/// and Kronn's data dir never are.
+pub(crate) async fn attach_files_linked_in_message(
+    state: &AppState,
+    discussion_id: &str,
+    message_id: &str,
+    content: &str,
+    workspace_path: Option<&str>,
+    project_path: &str,
+) -> Option<String> {
+    use crate::core::message_file_links::{
+        local_link_targets, points_to_attached_file, resolve_attachable, rewrite_local_links,
+        Refusal, MAX_LINKED_FILE_BYTES,
+    };
+    use std::io::Read;
+
+    let targets = local_link_targets(content);
+    if targets.is_empty() {
+        return None;
+    }
+    // A run with neither its own folder nor a project ran in the shared
+    // system temp dir: nothing there is the agent's to publish.
+    if workspace_path.is_none() && project_path.is_empty() {
+        return None;
+    }
+    let mut allowed_roots = Vec::new();
+    if let Ok(dir) = crate::agents::runner::resolve_agent_work_dir(workspace_path, project_path) {
+        allowed_roots.push(dir);
+    }
+    if !project_path.is_empty() {
+        allowed_roots.push(crate::core::scanner::resolve_host_path(project_path));
+    }
+    let forbidden_roots: Vec<std::path::PathBuf> =
+        crate::core::config::config_dir().into_iter().collect();
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+
+    let did = discussion_id.to_string();
+    let existing = state
+        .db
+        .with_conn(move |conn| Ok(crate::db::discussions::list_context_files(conn, &did)?))
+        .await
+        .unwrap_or_default();
+
+    let mut attached = 0usize;
+    let mut bytes_read = 0u64;
+    let mut rewrites = std::collections::BTreeMap::new();
+    let href = |id: &str| format!("/api/discussions/{discussion_id}/context-files/{id}/content");
+    let unavailable = |reason: &str| format!("#kronn-local-file-unavailable-{reason}");
+    for target in targets {
+        // A URL already naming one of this discussion's assets stays usable.
+        // A mirrored discussion remaps its ID while retaining the asset UUID.
+        if let Some(file) = target
+            .strip_prefix("/api/discussions/")
+            .and_then(|tail| tail.split_once("/context-files/"))
+            .and_then(|(_, tail)| tail.strip_suffix("/content"))
+            .and_then(|id| existing.iter().find(|file| file.id == id))
+        {
+            rewrites.insert(target, href(&file.id));
+            continue;
         }
-        Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
+        // A previously attached asset is already available to this discussion.
+        // Match its actual stored path, never a filename/size guess.
+        if let Some(file) = existing.iter().find(|file| {
+            file.disk_path.as_deref().is_some_and(|path| {
+                points_to_attached_file(&target, std::path::Path::new(path), home.as_deref())
+            })
+        }) {
+            rewrites.insert(target, href(&file.id));
+            continue;
+        }
+        if attached >= 8 || bytes_read >= MAX_LINKED_FILE_BYTES {
+            rewrites.insert(target, unavailable("limit"));
+            continue;
+        }
+        let path =
+            match resolve_attachable(&target, &allowed_roots, &forbidden_roots, home.as_deref()) {
+                Ok(path) => path,
+                Err(refusal) => {
+                    tracing::info!(discussion_id, ?refusal, "linked local file not attached");
+                    let reason = match refusal {
+                        Refusal::Missing | Refusal::NotAFile => "missing",
+                        Refusal::Sensitive => "sensitive",
+                        Refusal::OutsideAllowedRoots => "outside",
+                        Refusal::TooLarge => "limit",
+                    };
+                    rewrites.insert(target, unavailable(reason));
+                    continue;
+                }
+            };
+        let Some(filename) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            rewrites.insert(target, unavailable("missing"));
+            continue;
+        };
+        let mut data = Vec::new();
+        let remaining = MAX_LINKED_FILE_BYTES - bytes_read;
+        let read_result = std::fs::File::open(&path).and_then(|file| {
+            // Do not read a file already known to exceed the remaining budget.
+            if file.metadata()?.len() > remaining {
+                return Ok(false);
+            }
+            file.take(remaining + 1).read_to_end(&mut data)?;
+            Ok(data.len() as u64 <= remaining)
+        });
+        // Count partial reads and the growth probe too: repeated failures must
+        // not let a message reread a fresh 64 MiB for every linked path.
+        bytes_read = bytes_read
+            .saturating_add(data.len() as u64)
+            .min(MAX_LINKED_FILE_BYTES);
+        match read_result {
+            Ok(true) => {}
+            Ok(false) => {
+                rewrites.insert(target, unavailable("limit"));
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(discussion_id, %error, "linked local file unreadable");
+                rewrites.insert(target, unavailable("missing"));
+                continue;
+            }
+        }
+        match store_context_file(
+            state,
+            discussion_id.to_string(),
+            filename,
+            &data,
+            ContextFileOwner::Message(message_id.to_string()),
+        )
+        .await
+        {
+            Ok((file, _)) => {
+                attached += 1;
+                rewrites.insert(target, href(&file.id));
+            }
+            Err(error) => {
+                tracing::warn!(discussion_id, %error, "linked local file not stored");
+                rewrites.insert(target, unavailable("unavailable"));
+            }
+        }
+    }
+    let rewritten = rewrite_local_links(content, &rewrites);
+    (rewritten != content).then_some(rewritten)
+}
+
+/// Remove only files staged for a message whose insertion failed. Some callers
+/// can report an error after committing the message, so check its existence
+/// under the database lock before deleting anything.
+pub(crate) async fn discard_uncommitted_message_files(
+    state: &AppState,
+    discussion_id: &str,
+    message_id: &str,
+) {
+    let (did, mid) = (discussion_id.to_owned(), message_id.to_owned());
+    let paths = state.db.with_conn(move |conn| {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1 AND discussion_id = ?2)",
+            rusqlite::params![mid, did], |row| row.get(0),
+        )?;
+        if exists { return Ok(Vec::<String>::new()); }
+        let paths = conn.prepare(
+            "SELECT disk_path FROM context_files WHERE message_id = ?1 AND discussion_id = ?2 AND disk_path IS NOT NULL",
+        )?.query_map(rusqlite::params![mid, did], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        conn.execute(
+            "DELETE FROM context_files WHERE message_id = ?1 AND discussion_id = ?2",
+            rusqlite::params![mid, did],
+        )?;
+        Ok(paths)
+    }).await;
+    match paths {
+        Ok(paths) => {
+            for path in paths {
+                crate::core::context_files::delete_image_from_disk(&path);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(discussion_id, %error, "uncommitted linked files could not be cleaned up")
+        }
     }
 }
 
@@ -593,6 +828,252 @@ async fn forget_deleted_media_asset(state: &AppState, file_id: &str) {
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    #[tokio::test]
+    async fn agent_file_links_persist_exact_assets_and_refuse_unsafe_sources() {
+        use http_body_util::BodyExt;
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        for (name, bytes) in [("a/out.txt", b"first"), ("b/out.txt", b"other")] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        std::fs::write(root.path().join(".env"), b"PRIVATE").unwrap();
+        std::fs::write(outside.path().join("private.txt"), b"PRIVATE").unwrap();
+        std::fs::File::create(root.path().join("huge.txt"))
+            .unwrap()
+            .set_len(crate::core::message_file_links::MAX_LINKED_FILE_BYTES + 1)
+            .unwrap();
+        let content = format!("[first]({}/a/out.txt) [other]({}/b/out.txt) [secret]({}/.env) [outside]({}/private.txt) [large]({}/huge.txt)", root.path().display(), root.path().display(), root.path().display(), outside.path().display(), root.path().display());
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let path = root.path().to_string_lossy().into_owned();
+        db.with_conn(move |conn| {
+            conn.execute("INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p', 'fixture', ?1, datetime('now'), datetime('now'))", [&path])?;
+            conn.execute("INSERT INTO discussions (id, project_id, title, created_at, updated_at) VALUES ('d', 'p', 'fixture', datetime('now'), datetime('now'))", [])?;
+            Ok(())
+        }).await.unwrap();
+        let state = AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let rewritten = attach_files_linked_in_message(
+            &state,
+            "d",
+            "m",
+            &content,
+            None,
+            &root.path().to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let message: crate::models::DiscussionMessage = serde_json::from_value(serde_json::json!({
+            "id": "m", "role": "Agent", "content": rewritten,
+            "agent_type": "Codex", "timestamp": chrono::Utc::now(),
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row
+                        .get::<_, i64>(0))?,
+                    0,
+                    "preparing attachments must not insert or revise the message"
+                );
+                crate::db::discussions::insert_native_agent_message_with_checkpoint(
+                    conn,
+                    "d",
+                    &message,
+                    true,
+                    None,
+                    &crate::models::AgentType::Codex,
+                    &[],
+                    false,
+                    None,
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (files, saved) = state
+            .db
+            .with_conn(|conn| {
+                Ok((
+                    crate::db::discussions::list_context_files(conn, "d")?,
+                    conn.query_row("SELECT content FROM messages WHERE id = 'm'", [], |row| {
+                        row.get::<_, String>(0)
+                    })?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(saved, rewritten);
+        assert_eq!(
+            files.len(),
+            2,
+            "same name and size must not merge different contents"
+        );
+        for file in &files {
+            assert_eq!(file.filename, "out.txt");
+            assert_eq!(file.message_id.as_deref(), Some("m"));
+            let response =
+                get_context_file_content(State(state.clone()), Path(("d".into(), file.id.clone())))
+                    .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let label = if bytes.as_ref() == b"first" {
+                "first"
+            } else {
+                assert_eq!(bytes.as_ref(), b"other");
+                "other"
+            };
+            assert!(rewritten.contains(&format!(
+                "[{label}](/api/discussions/d/context-files/{}/content)",
+                file.id
+            )));
+        }
+        for reason in ["sensitive", "outside", "limit"] {
+            assert!(rewritten.contains(&format!("#kronn-local-file-unavailable-{reason}")));
+        }
+        let stored_link = format!("[existing]({})", files[0].disk_path.as_deref().unwrap());
+        let existing = attach_files_linked_in_message(
+            &state,
+            "d",
+            "m",
+            &stored_link,
+            None,
+            &root.path().to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        assert!(existing.contains(&files[0].id));
+        let count = state
+            .db
+            .with_conn(|conn| Ok(crate::db::discussions::list_context_files(conn, "d")?.len()))
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "an exact existing asset is reused");
+        let mirrored = format!(
+            "[mirror](/api/discussions/origin/context-files/{}/content)",
+            files[0].id
+        );
+        let mapped = attach_files_linked_in_message(
+            &state,
+            "d",
+            "m",
+            &mirrored,
+            None,
+            &root.path().to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mapped,
+            format!(
+                "[mirror](/api/discussions/d/context-files/{}/content)",
+                files[0].id
+            )
+        );
+        assert!(attach_files_linked_in_message(
+            &state,
+            "d",
+            "m",
+            &mapped,
+            None,
+            &root.path().to_string_lossy()
+        )
+        .await
+        .is_none());
+        let source = format!("[new]({}/a/out.txt)", root.path().display());
+        attach_files_linked_in_message(
+            &state,
+            "d",
+            "failed",
+            &source,
+            None,
+            &root.path().to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        let staged = state
+            .db
+            .with_conn(|conn| {
+                Ok(crate::db::discussions::list_context_files(conn, "d")?
+                    .into_iter()
+                    .find(|file| file.message_id.as_deref() == Some("failed"))
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        assert!(std::path::Path::new(staged.disk_path.as_deref().unwrap()).exists());
+        discard_uncommitted_message_files(&state, "d", "failed").await;
+        assert!(!std::path::Path::new(staged.disk_path.as_deref().unwrap()).exists());
+        discard_uncommitted_message_files(&state, "d", "m").await;
+        let retained = state
+            .db
+            .with_conn(|conn| Ok(crate::db::discussions::list_context_files(conn, "d")?))
+            .await
+            .unwrap();
+        assert_eq!(
+            retained.len(),
+            2,
+            "cleanup must keep committed and reused assets"
+        );
+        for file in retained {
+            assert!(std::path::Path::new(file.disk_path.as_deref().unwrap()).exists());
+        }
+        let mut many_links = String::new();
+        for index in 0..9 {
+            let path = root.path().join(format!("small-{index}.txt"));
+            std::fs::write(&path, b"x").unwrap();
+            many_links.push_str(&format!("[{index}]({}) ", path.display()));
+        }
+        let bounded = attach_files_linked_in_message(
+            &state,
+            "d",
+            "many",
+            &many_links,
+            None,
+            &root.path().to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bounded.matches("/context-files/").count(), 8);
+        assert!(bounded.contains("[8](#kronn-local-file-unavailable-limit)"));
+        discard_uncommitted_message_files(&state, "d", "many").await;
+
+        for name in ["half-a.bin", "half-b.bin"] {
+            std::fs::File::create(root.path().join(name))
+                .unwrap()
+                .set_len(crate::core::message_file_links::MAX_LINKED_FILE_BYTES / 2 + 1)
+                .unwrap();
+        }
+        let large_links = format!(
+            "[a]({}/half-a.bin) [b]({}/half-b.bin) [tiny]({}/small-0.txt)",
+            root.path().display(),
+            root.path().display(),
+            root.path().display()
+        );
+        let bounded = attach_files_linked_in_message(
+            &state,
+            "d",
+            "budget",
+            &large_links,
+            None,
+            &root.path().to_string_lossy(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bounded.matches("/context-files/").count(), 2);
+        assert!(bounded.contains("[b](#kronn-local-file-unavailable-limit)"));
+        discard_uncommitted_message_files(&state, "d", "budget").await;
+    }
 
     /// A discussion holding one clip and one plain image.
     async fn seeded() -> Database {

@@ -197,8 +197,10 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
     let args_json = serde_json::to_string(&launch.args).ok()?;
     let env_vars_json =
         serde_json::to_string(crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
+    // `codex exec` cannot ask: a Kronn tool left on `prompt` is refused (KT-953).
+    // Project servers keep Codex's default.
     entries.push_str(&format!(
-        "\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30}}"
+        "\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30,default_tools_approval_mode=\"approve\"}}"
     ));
     Some(format!("mcp_servers={{{entries}}}"))
 }
@@ -210,7 +212,11 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
 enum CodexLineEvent {
     ThreadStarted(Option<String>),
     Text(String),
-    ToolCall(String),
+    ToolCall {
+        name: String,
+        trace: Option<crate::agents::tool_trace::ToolTraceUpdate>,
+        ended: bool,
+    },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -236,12 +242,12 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         ),
-        "item.completed" => match json
+        "item.started" | "item.updated" | "item.completed" => match json
             .get("item")
             .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
         {
-            Some("agent_message") => {
+            Some("agent_message") if json["type"] == "item.completed" => {
                 let text = json
                     .pointer("/item/text")
                     .and_then(Value::as_str)
@@ -255,7 +261,17 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
             Some(
                 kind @ ("command_execution" | "file_change" | "mcp_tool_call" | "collab_tool_call"
                 | "web_search"),
-            ) => CodexLineEvent::ToolCall(kind.to_owned()),
+            ) => {
+                let trace = crate::agents::tool_trace::from_codex(&json["item"]);
+                CodexLineEvent::ToolCall {
+                    name: trace
+                        .as_ref()
+                        .and_then(|trace| trace.name.clone())
+                        .unwrap_or_else(|| kind.to_owned()),
+                    trace,
+                    ended: json["type"] == "item.completed",
+                }
+            }
             _ => CodexLineEvent::Skip,
         },
         "turn.completed" => {
@@ -467,8 +483,14 @@ impl AcpTransport for CodexAcpAdapter {
                     CodexLineEvent::Text(text) => {
                         let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
                     }
-                    CodexLineEvent::ToolCall(name) => {
+                    CodexLineEvent::ToolCall { name, trace, ended } => {
                         let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
+                        if let Some(trace) = trace {
+                            let _ = events.send(AcpSessionEvent::ToolTrace(trace)).await;
+                        }
+                        if ended {
+                            let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                        }
                     }
                     CodexLineEvent::Usage {
                         input_tokens,
@@ -560,7 +582,7 @@ mod tests {
             parse_codex_line(
                 r#"{"type":"item.completed","item":{"id":"i2","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0,"status":"completed"}}"#
             ),
-            CodexLineEvent::ToolCall(kind) if kind == "command_execution"
+            CodexLineEvent::ToolCall { name, ended: true, .. } if name == "command_execution"
         ));
         assert!(matches!(
             parse_codex_line(
@@ -987,6 +1009,14 @@ exec sleep 30"#,
                 crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS
             );
             assert!(internal.get("env").is_none());
+            assert_eq!(
+                internal["default_tools_approval_mode"].as_str(),
+                Some("approve"),
+                "`codex exec` cannot ask, so Kronn's own tools must be pre-approved"
+            );
+            assert!(servers["project-safe"]
+                .get("default_tools_approval_mode")
+                .is_none());
         }
     }
 

@@ -176,6 +176,31 @@ fn try_lock_for_edit(file: std::fs::File, requested: &str) -> Result<ExclusiveEd
 /// Directories that are never worth walking into: they are enormous, generated,
 /// and contain nothing the model reasons about. Skipping them is what makes a
 /// bounded walk useful rather than exhausted on build artefacts.
+/// What a listing may send back to the model. The walk stays whole so `count`
+/// stays true; only the entries returned are bounded. A `**/*` over a PHP tree
+/// with `vendor/` returned ~880k tokens in one answer.
+const MAX_LISTING_BYTES: usize = 64 * 1024;
+
+/// Keep entries, in order, until their JSON reaches [`MAX_LISTING_BYTES`];
+/// the number left out is returned with them.
+fn bounded_entries(entries: Vec<Value>) -> (Vec<Value>, usize) {
+    let total = entries.len();
+    let mut used = 0;
+    let mut kept = Vec::new();
+    for entry in entries {
+        // +1 for the separating comma.
+        used += entry.to_string().len() + 1;
+        if used > MAX_LISTING_BYTES {
+            break;
+        }
+        kept.push(entry);
+    }
+    let omitted = total - kept.len();
+    (kept, omitted)
+}
+
+const LISTING_OMITTED_HINT: &str = "Only the first entries fit in one answer. Narrow the pattern or the directory (a sub-folder, an extension) to see the rest.";
+
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -2107,12 +2132,19 @@ pub fn find_files_payload(root: &Path, pattern: &str) -> Result<Value, String> {
         })
         .collect();
     matches.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-    Ok(json!({
+    let count = matches.len();
+    let (files, omitted) = bounded_entries(matches);
+    let mut payload = json!({
         "pattern": pattern,
         "truncated": truncated,
-        "count": matches.len(),
-        "files": matches,
-    }))
+        "count": count,
+        "files": files,
+    });
+    if omitted > 0 {
+        payload["omitted"] = json!(omitted);
+        payload["hint"] = json!(LISTING_OMITTED_HINT);
+    }
+    Ok(payload)
 }
 
 pub fn list_files_payload(
@@ -2127,13 +2159,20 @@ pub fn list_files_payload(
     if recursive {
         let (mut entries, truncated) = walk_bounded(root, &dir, MAX_WALK_DEPTH);
         entries.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-        return Ok(json!({
+        let count = entries.len();
+        let (entries, omitted) = bounded_entries(entries);
+        let mut payload = json!({
             "path": requested.unwrap_or(""),
             "recursive": true,
             "truncated": truncated,
-            "count": entries.len(),
+            "count": count,
             "entries": entries,
-        }));
+        });
+        if omitted > 0 {
+            payload["omitted"] = json!(omitted);
+            payload["hint"] = json!(LISTING_OMITTED_HINT);
+        }
+        return Ok(payload);
     }
     let mut entries: Vec<Value> = Vec::new();
     let read = std::fs::read_dir(&dir)
@@ -3873,6 +3912,44 @@ mod tests {
                 .any(|p| p.starts_with("node_modules") || p.starts_with("target")),
             "build and vendor directories must not be walked: {paths:?}"
         );
+    }
+
+    #[test]
+    fn a_huge_tree_is_counted_in_full_but_returned_within_a_bounded_answer() {
+        // KT-959 — `**/*` over a PHP repo with `vendor/` sent ~880k tokens.
+        let root = tempfile::tempdir().unwrap();
+        let deep = root
+            .path()
+            .join("vendor/twig/extensions/lib/Twig/Extensions");
+        std::fs::create_dir_all(&deep).unwrap();
+        for index in 0..3_000 {
+            std::fs::write(deep.join(format!("Extension{index:05}.php")), "x").unwrap();
+        }
+        std::fs::write(root.path().join("composer.json"), "{}").unwrap();
+
+        let found = find_files_payload(root.path(), "**/*").unwrap();
+        assert_eq!(
+            found["count"],
+            json!(3_001),
+            "the walk still counts everything"
+        );
+        let files = found["files"].as_array().unwrap();
+        assert!(files.len() < 3_001);
+        assert_eq!(
+            found["omitted"].as_u64().unwrap() as usize,
+            3_001 - files.len()
+        );
+        assert!(found["hint"].as_str().unwrap().contains("Narrow"));
+        assert!(found.to_string().len() <= MAX_LISTING_BYTES + 1_024);
+
+        let listing = list_files_payload(root.path(), None, true).unwrap();
+        assert!(listing["omitted"].as_u64().unwrap() > 0);
+        assert!(listing.to_string().len() <= MAX_LISTING_BYTES + 1_024);
+
+        // A narrower pattern gets everything it matches, with no hint.
+        let narrow = find_files_payload(root.path(), "*.json").unwrap();
+        assert_eq!(narrow["count"], json!(1));
+        assert!(narrow.get("omitted").is_none() && narrow.get("hint").is_none());
     }
 
     #[test]

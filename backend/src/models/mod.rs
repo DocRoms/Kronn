@@ -162,6 +162,9 @@ pub enum ApiErrorCode {
     Conflict,
     /// An unexpected server-side failure (→ 500).
     Internal,
+    /// A model the request assigns was just refused by its provider; the
+    /// caller may confirm to keep it anyway.
+    UnreachableModel,
 }
 
 impl ApiErrorCode {
@@ -171,6 +174,7 @@ impl ApiErrorCode {
             ApiErrorCode::Validation => "validation",
             ApiErrorCode::Conflict => "conflict",
             ApiErrorCode::Internal => "internal",
+            ApiErrorCode::UnreachableModel => "unreachable_model",
         }
     }
 }

@@ -953,6 +953,26 @@ fn recommended_action_for(reason: ModelUnavailableReason) -> &'static str {
     }
 }
 
+/// The catalogue namespace of a legacy HTTP agent run without a connection:
+/// its models are listed under the canonical connection it runs on, never
+/// under the agent's own id, where a 404 would flag nothing.
+pub async fn legacy_runtime_target_id(db: &Database, agent_type: &AgentType) -> Option<String> {
+    let agent = agent_type.clone();
+    match db
+        .with_read_conn(move |conn| {
+            crate::db::external_api_connections::legacy_connection_for_agent(conn, &agent)
+        })
+        .await
+    {
+        Ok(connection) => connection
+            .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id)),
+        Err(error) => {
+            tracing::warn!("Unable to read the legacy connection of {agent_type:?}: {error}");
+            None
+        }
+    }
+}
+
 /// Catalog-driven proactive preflight for one launch target. A disappeared
 /// identity resolves to a same-agent replacement when possible, while every
 /// other positive incompatibility remains a refusal. Unknown identities still

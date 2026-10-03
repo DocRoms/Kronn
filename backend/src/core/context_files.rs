@@ -576,6 +576,7 @@ pub fn mime_from_extension(filename: &str) -> &'static str {
         "xml" | "html" | "htm" => "text/html",
         "yaml" | "yml" => "text/yaml",
         "pdf" => "application/pdf",
+        "zip" => "application/zip",
         "xlsx" | "xls" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -979,6 +980,7 @@ mod tests {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         );
         assert_eq!(mime_from_extension("doc.pdf"), "application/pdf");
+        assert_eq!(mime_from_extension("pack.ZIP"), "application/zip");
         assert_eq!(mime_from_extension("readme.md"), "text/plain");
     }
 

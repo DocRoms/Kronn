@@ -160,6 +160,7 @@ mod tests {
             last_checked_at: now,
             created_at: now,
             updated_at: now,
+            last_answered_at: None,
         }
     }
 

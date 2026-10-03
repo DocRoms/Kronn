@@ -13,12 +13,16 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { externalApi } from '../../lib/api';
+import { ApiRequestError } from '../../lib/apiRequestError';
 import type {
   ExternalApiConnectionView,
   ExternalApiConnectionTestResult,
   ExternalApiPreset,
   UpsertExternalApiConnection,
 } from '../../lib/api';
+import type { CatalogModelEntry } from '../../types/generated';
+import { useModelCatalogSnapshot } from '../../hooks/useModelCatalogSnapshot';
+import { modelCallVerdict, modelSweepCounts } from '../../lib/modelCatalogSelection';
 import { userError } from '../../lib/userError';
 import type { ToastFn } from '../../hooks/useToast';
 import { ContextHelp } from '../ContextHelp';
@@ -173,12 +177,14 @@ function ConnectionForm({
   submitting,
   testResult,
   testing,
+  sweepProgress,
   onTest,
   onConnectionChange,
   modelCostSuffix,
   title,
   storedCredential = false,
   onRevealStored,
+  savedModels,
 }: {
   t: ExternalApiSectionProps['t'];
   form: FormState;
@@ -188,12 +194,16 @@ function ConnectionForm({
   submitting: boolean;
   testResult: ExternalApiConnectionTestResult | null;
   testing: boolean;
+  /** How far a LiteLLM test's call to every listed model has got. */
+  sweepProgress?: { done: number; total: number } | null;
   onTest: () => void;
   onConnectionChange: (updater: (prev: FormState) => FormState) => void;
   modelCostSuffix?: (model: string) => string;
   title: string;
   storedCredential?: boolean;
   onRevealStored?: () => Promise<string | null>;
+  /** The saved connection's catalogue, for what earlier calls proved. */
+  savedModels?: CatalogModelEntry[];
 }) {
   const presets: { id: ExternalApiPreset; label: string }[] = [
     { id: 'lite_llm', label: 'LiteLLM' },
@@ -343,6 +353,13 @@ function ConnectionForm({
           <button type="button" className="set-btn-secondary" disabled={!form.endpoint.trim() || testing} onClick={onTest} data-testid="ext-api-test">
             {testing ? <Loader2 size={12} className="spin" /> : <Check size={12} />} {t('config.extApi.testConnection')}
           </button>
+          {testing && form.origin_preset === 'lite_llm' ? (
+            <p className="set-hint" data-testid="ext-api-testing-all-models" role="status">
+              {sweepProgress?.total
+                ? t('config.extApi.testingProgress', sweepProgress.done, sweepProgress.total)
+                : t('config.extApi.testingAllModels')}
+            </p>
+          ) : null}
           {testResult ? (
             <p className="set-hint" data-testid="ext-api-test-result" data-status={testResult.status}>
               {testResult.status === 'billing_error'
@@ -350,6 +367,14 @@ function ConnectionForm({
                 : testResult.hint ?? (testResult.models.length > 0 ? t('config.extApi.modelsLoaded', testResult.models.length) : t('config.extApi.noModels'))}
             </p>
           ) : <p className="set-hint" data-testid="ext-api-test-required">{t('config.extApi.testRequired')}</p>}
+          {testResult?.model_checks?.length ? (() => {
+            const sweep = modelSweepCounts(testResult.model_checks);
+            return (
+              <p className="set-hint" data-testid="ext-api-model-sweep" data-refused={sweep.refused}>
+                {t('config.extApi.modelSweep', sweep.called, sweep.answered, sweep.refused)}
+              </p>
+            );
+          })() : null}
         </div>
 
         <div className="set-ext-api-tier-panel">
@@ -394,15 +419,27 @@ function ConnectionForm({
                   <SearchableSelect
                     className="searchable-select--compact"
                     value={value}
-                    options={models.map(model => ({
-                      value: model,
-                      label: model,
-                      keywords: `${model.replaceAll('/', ' ')} ${available.find(entry => entry.id === model)?.display_name ?? ''}`,
-                      description: available.some(entry => entry.id === model)
-                        ? t('config.extApi.testedCatalog')
-                        : t('modelCatalog.unavailable'),
-                      disabled: !available.some(entry => entry.id === model),
-                    }))}
+                    options={models.map(model => {
+                      const verdict = modelCallVerdict(
+                        model,
+                        [...(testResult?.tier_checks ?? []), ...(testResult?.model_checks ?? [])],
+                        savedModels,
+                      );
+                      const listed = available.some(entry => entry.id === model);
+                      return {
+                        value: model,
+                        label: `${verdict?.state === 'answered' ? '✅ ' : verdict?.state === 'refused' ? '❌ ' : ''}${model}`,
+                        keywords: `${model.replaceAll('/', ' ')} ${available.find(entry => entry.id === model)?.display_name ?? ''}`,
+                        description: verdict?.state === 'refused'
+                          ? [t('modelCatalog.unavailable'), verdict.detail].filter(Boolean).join(' — ')
+                          : listed
+                            ? t('config.extApi.testedCatalog')
+                            : t('modelCatalog.unavailable'),
+                        // A model the proxy refused cannot be picked; a value
+                        // already saved stays visible, marked.
+                        disabled: !listed || verdict?.state === 'refused',
+                      };
+                    })}
                     onChange={setValue}
                     label={t(`disc.tier.${tier}`)}
                     placeholder={t('config.searchModel')}
@@ -497,15 +534,24 @@ function ConnectionForm({
                     <SearchableSelect
                       className="searchable-select--compact"
                       value={value}
-                      options={models.map(model => ({
-                        value: model,
-                        label: pool.find(item => item.id === model)?.display_name ?? model,
-                        keywords: model.replaceAll('/', ' '),
-                        disabled: !isUnknown && model === value && !poolIds.includes(model),
-                        description: !isUnknown && model === value && !poolIds.includes(model)
-                          ? t('modelCatalog.unavailable')
-                          : model,
-                      }))}
+                      options={models.map(model => {
+                        const verdict = modelCallVerdict(
+                          model,
+                          [...(testResult?.tier_checks ?? []), ...(testResult?.model_checks ?? [])],
+                          savedModels,
+                        );
+                        const absent = !isUnknown && model === value && !poolIds.includes(model);
+                        const mark = verdict?.state === 'answered' ? '✅ ' : verdict?.state === 'refused' ? '❌ ' : '';
+                        return {
+                          value: model,
+                          label: `${mark}${pool.find(item => item.id === model)?.display_name ?? model}`,
+                          keywords: model.replaceAll('/', ' '),
+                          disabled: absent || verdict?.state === 'refused',
+                          description: verdict?.state === 'refused'
+                            ? [t('modelCatalog.unavailable'), verdict.detail].filter(Boolean).join(' — ')
+                            : absent ? t('modelCatalog.unavailable') : model,
+                        };
+                      })}
                       onChange={setValue}
                       allowCustomValue={isUnknown}
                       customValueHint={t('config.extApi.mediaCustomOptionHint')}
@@ -550,12 +596,34 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
   const [connections, setConnections] = useState<ExternalApiConnectionView[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const editedTarget = editingId ? `http:${editingId}` : null;
+  const editedCatalog = useModelCatalogSnapshot(Boolean(editedTarget), editedTarget ? [editedTarget] : []);
+  const editedModels = editedCatalog.data?.targets
+    .find(view => view.runtime_target_id === editedTarget)?.models;
   const [form, setForm] = useState<FormState>(emptyForm());
   const [submitting, setSubmitting] = useState(false);
   const [testResult, setTestResult] = useState<ExternalApiConnectionTestResult | null>(null);
   const [testing, setTesting] = useState(false);
   const [savedTests, setSavedTests] = useState<Record<string, ExternalApiConnectionTestResult | null>>({});
   const [testingSavedId, setTestingSavedId] = useState<string | null>(null);
+  const [sweepProgress, setSweepProgress] = useState<{ done: number; total: number } | null>(null);
+  /** For a LiteLLM test, poll how far its call to every model has got (KT-957). */
+  const followSweep = (preset: ExternalApiPreset) => {
+    if (preset !== 'lite_llm' || typeof crypto?.randomUUID !== 'function') {
+      return { id: undefined, stop: () => {} };
+    }
+    const id = crypto.randomUUID();
+    const timer = window.setInterval(() => {
+      externalApi.testProgress(id).then(setSweepProgress).catch(() => {});
+    }, 1000);
+    return {
+      id,
+      stop: () => {
+        window.clearInterval(timer);
+        setSweepProgress(null);
+      },
+    };
+  };
   // State updates do not protect two synchronous clicks: retain the in-flight
   // request outside React so draft and saved probes share one bounded request.
   // Invalidating a form must release this lock immediately: the old request
@@ -593,6 +661,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
     activeTestRef.current = request;
     const generation = ++draftTestGenerationRef.current;
     setTesting(true);
+    const sweep = followSweep(form.origin_preset);
     try {
       // Before the endpoint/key pair is validated, preserved tier choices are
       // display-only and must not turn the initial connectivity check into
@@ -606,6 +675,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
         ...(models.length > 0 && form.origin_preset === 'lite_llm'
           ? { tier_models: tierModelsForProbe(form) } : {}),
         ...(editingId ? { connection_id: editingId } : {}),
+        ...(sweep.id ? { progress_id: sweep.id } : {}),
       });
       if (draftTestGenerationRef.current === generation) {
         setTestResult(result);
@@ -625,6 +695,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
         setTestResult({ ok: false, status: 'transport_error', models: [], hint: userError(e) });
       }
     } finally {
+      sweep.stop();
       if (activeTestRef.current?.id === request.id) {
         activeTestRef.current = null;
         if (draftTestGenerationRef.current === generation) setTesting(false);
@@ -639,6 +710,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
     const generation = ++savedTestGenerationRef.current;
     setTestingSavedId(connection.id);
     setSavedTests(prev => ({ ...prev, [connection.id]: null }));
+    const sweep = followSweep(connection.origin_preset);
     try {
       const models = modelsForProbe({
         origin_preset: connection.origin_preset,
@@ -651,6 +723,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
         api_key: null,
         connection_id: connection.id,
         origin_preset: connection.origin_preset,
+        ...(sweep.id ? { progress_id: sweep.id } : {}),
         ...(models.length > 0 ? { models } : {}),
         ...(models.length > 0 && connection.origin_preset === 'lite_llm'
           ? {
@@ -672,6 +745,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
         }));
       }
     } finally {
+      sweep.stop();
       if (activeTestRef.current?.id === request.id) {
         activeTestRef.current = null;
         if (savedTestGenerationRef.current === generation) setTestingSavedId(null);
@@ -716,10 +790,26 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
     setEditingId(null);
   };
 
+  /** Save; when the proxy refuses a tier model, keep it only on confirmation (KT-957). */
+  const saveConfirmingRefusals = async (
+    send: (payload: UpsertExternalApiConnection) => Promise<unknown>,
+  ): Promise<boolean> => {
+    const payload = toPayload(form);
+    try {
+      await send(payload);
+      return true;
+    } catch (e) {
+      if (!(e instanceof ApiRequestError && e.code === 'unreachable_model')) throw e;
+      if (!confirm(t('config.extApi.unreachableConfirm', e.message))) return false;
+      await send({ ...payload, confirm_unreachable_models: true });
+      return true;
+    }
+  };
+
   const submitCreate = async () => {
     setSubmitting(true);
     try {
-      await externalApi.create(toPayload(form));
+      if (!(await saveConfirmingRefusals(payload => externalApi.create(payload)))) return;
       onModelTiersChanged?.();
       toast(t('config.saved'), 'success');
       cancel();
@@ -734,7 +824,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
   const submitEdit = async (id: string) => {
     setSubmitting(true);
     try {
-      await externalApi.update(id, toPayload(form));
+      if (!(await saveConfirmingRefusals(payload => externalApi.update(id, payload)))) return;
       onModelTiersChanged?.();
       toast(t('config.saved'), 'success');
       cancel();
@@ -873,12 +963,14 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                 submitting={submitting}
                 testResult={testResult}
                 testing={testing}
+                sweepProgress={sweepProgress}
                 onTest={() => void testConnection()}
                 onConnectionChange={changeConnection}
                 modelCostSuffix={modelCostSuffix}
                 title={c.display_name}
                 storedCredential={c.has_credential}
                 onRevealStored={() => externalApi.reveal(c.id)}
+                savedModels={editedModels}
               />
             ) : (
               <div
@@ -950,6 +1042,13 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                     </span>
                   </div>
                 )}
+                {testingSavedId === c.id && c.origin_preset === 'lite_llm' ? (
+                  <p className="set-hint" data-testid={`ext-api-saved-progress-${c.id}`} role="status">
+                    {sweepProgress?.total
+                      ? t('config.extApi.testingProgress', sweepProgress.done, sweepProgress.total)
+                      : t('config.extApi.testingAllModels')}
+                  </p>
+                ) : null}
                 {savedTests[c.id] ? (
                   <p className="set-hint" data-testid={`ext-api-saved-test-result-${c.id}`} data-status={savedTests[c.id]?.status}>
                     {savedTests[c.id]?.status === 'billing_error' ? t('config.extApi.billingError') : savedTests[c.id]?.hint ?? (
@@ -959,6 +1058,14 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                     )}
                   </p>
                 ) : null}
+                {savedTests[c.id]?.model_checks?.length ? (() => {
+                  const sweep = modelSweepCounts(savedTests[c.id]?.model_checks);
+                  return (
+                    <p className="set-hint" data-testid={`ext-api-saved-model-sweep-${c.id}`} data-refused={sweep.refused}>
+                      {t('config.extApi.modelSweep', sweep.called, sweep.answered, sweep.refused)}
+                    </p>
+                  );
+                })() : null}
                 {savedTests[c.id]?.ok && savedTests[c.id]?.models.length ? (
                   <div className="set-ext-api-conn-models" data-testid={`ext-api-saved-models-${c.id}`}>
                     {savedTests[c.id]?.models.map(model => <code key={model}>{model}</code>)}
@@ -979,6 +1086,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
               submitting={submitting}
               testResult={testResult}
               testing={testing}
+              sweepProgress={sweepProgress}
               onTest={() => void testConnection()}
               onConnectionChange={changeConnection}
               modelCostSuffix={modelCostSuffix}

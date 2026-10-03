@@ -11,13 +11,14 @@ import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-li
 import { buildApiMock } from '../../../test/apiMock';
 import type { ExternalApiConnectionView } from '../../../lib/api';
 
-const { listMock, createMock, updateMock, revealMock, removeMock, testMock } = vi.hoisted(() => ({
+const { listMock, createMock, updateMock, revealMock, removeMock, testMock, testProgressMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
   updateMock: vi.fn(),
   revealMock: vi.fn(),
   removeMock: vi.fn(),
   testMock: vi.fn(),
+  testProgressMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () =>
@@ -29,6 +30,7 @@ vi.mock('../../../lib/api', () =>
       reveal: revealMock as never,
       remove: removeMock as never,
       test: testMock as never,
+      testProgress: testProgressMock as never,
     },
   }),
 );
@@ -70,11 +72,14 @@ function renderSection(onModelTiersChanged?: () => void) {
   return { toast };
 }
 
+/** An option's name, whether or not a call verdict (✅ / ❌) marks it. */
+const optionNamed = (model: string) => (name: string) => name.replace(/^(✅|❌) /, '') === model;
+
 function chooseTier(testId: string, model: string) {
   const input = screen.getByTestId(testId);
   fireEvent.focus(input);
   fireEvent.change(input, { target: { value: model } });
-  fireEvent.click(screen.getByRole('option', { name: model }));
+  fireEvent.click(screen.getByRole('option', { name: optionNamed(model) }));
 }
 
 function expectTierOption(testId: string, model: string) {
@@ -90,6 +95,7 @@ beforeEach(() => {
   updateMock.mockResolvedValue(conn({}));
   revealMock.mockResolvedValue('sk-stored-secret');
   removeMock.mockResolvedValue(null);
+  testProgressMock.mockResolvedValue({ done: 0, total: 0 });
   testMock.mockResolvedValue({
     ok: true,
     status: 'success',
@@ -506,6 +512,7 @@ describe('ExternalApiSection', () => {
       endpoint: 'http://localhost:4000',
       api_key: null,
       origin_preset: 'lite_llm',
+      progress_id: expect.any(String),
     }));
     expect(createMock).not.toHaveBeenCalled();
     expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(false);
@@ -651,6 +658,7 @@ describe('ExternalApiSection', () => {
       endpoint: 'https://changed.example.test',
       api_key: null,
       origin_preset: 'lite_llm',
+      progress_id: expect.any(String),
     }));
     await waitFor(() => expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled());
     fireEvent.click(screen.getByTestId('ext-api-save'));
@@ -1047,6 +1055,143 @@ describe('ExternalApiSection', () => {
         origin_preset: 'nvidia',
         models: ['nvidia/model'],
       }));
+    });
+
+    // ── KT-957 — a model the proxy refuses is marked, and kept only on confirmation ──
+    it('marks in the tier list which models answered a call and which were refused', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveAttribute('data-tier-check', 'not_found'));
+
+      const input = screen.getByTestId('ext-api-tier-default');
+      fireEvent.focus(input);
+      expect(screen.getByRole('option', { name: /✅ gemini-3\.6-flash/ })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/claude-sonnet-5/ })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/claude-fable-5/ })).toBeInTheDocument();
+      fireEvent.keyDown(input, { key: 'Escape' });
+    });
+
+    it('marks every model the test called, not only the tier ones, and refuses to pick a refused one', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue({
+        ...verified,
+        models: [...verified.models, 'vertex_ai/claude-opus-5', 'claude-sonnet-4-6'],
+        catalog: [...verified.catalog,
+          { id: 'vertex_ai/claude-opus-5', display_name: 'vertex_ai/claude-opus-5', capabilities: ['chat'] },
+          { id: 'claude-sonnet-4-6', display_name: 'claude-sonnet-4-6', capabilities: ['chat'] }],
+        model_checks: [
+          { model: 'gemini-3.6-flash', ok: true, status: 'ok', http_status: null },
+          { model: 'vertex_ai/claude-sonnet-5', ok: false, status: 'not_found', http_status: 404 },
+          { model: 'vertex_ai/claude-fable-5', ok: false, status: 'access_denied', http_status: 401 },
+          { model: 'vertex_ai/claude-opus-5', ok: false, status: 'not_found', http_status: 404 },
+          { model: 'claude-sonnet-4-6', ok: true, status: 'ok', http_status: null },
+        ],
+      });
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+
+      await waitFor(() => expect(screen.getByTestId('ext-api-model-sweep')).toHaveAttribute('data-refused', '3'));
+      expect(screen.getByTestId('ext-api-model-sweep')).toHaveTextContent('config.extApi.modelSweep:5,2,3');
+      const input = screen.getByTestId('ext-api-tier-economy');
+      fireEvent.focus(input);
+      // Never put on a tier, yet called by the test: marked and not selectable.
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/claude-opus-5/ })).toHaveAttribute('aria-disabled', 'true');
+      expect(screen.getByRole('option', { name: /✅ claude-sonnet-4-6/ })).not.toHaveAttribute('aria-disabled', 'true');
+      fireEvent.keyDown(input, { key: 'Escape' });
+    });
+
+    it('shows how far the call to every model has got while the test runs', async () => {
+      listMock.mockResolvedValue([saved]);
+      let finish: (value: unknown) => void = () => {};
+      testMock.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+      testProgressMock.mockResolvedValue({ done: 3, total: 96 });
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+
+      expect(screen.getByTestId('ext-api-testing-all-models')).toHaveTextContent('config.extApi.testingAllModels');
+      await waitFor(
+        () => expect(screen.getByTestId('ext-api-testing-all-models')).toHaveTextContent('config.extApi.testingProgress:3,96'),
+        { timeout: 3000 },
+      );
+      const progressId = testMock.mock.calls[0][0].progress_id;
+      expect(progressId).toEqual(expect.any(String));
+      expect(testProgressMock).toHaveBeenCalledWith(progressId);
+
+      finish(verified);
+      await waitFor(() => expect(screen.queryByTestId('ext-api-testing-all-models')).toBeNull());
+    });
+
+    it('marks a refused media model in the image list and keeps it from being picked', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue({
+        ...verified,
+        catalog: [...verified.catalog,
+          { id: 'vertex_ai/imagen-ok', display_name: 'vertex_ai/imagen-ok', capabilities: ['image'] },
+          { id: 'vertex_ai/imagen-refused', display_name: 'vertex_ai/imagen-refused', capabilities: ['image'] }],
+        image_capability_known: true,
+        model_checks: [
+          { model: 'vertex_ai/imagen-ok', ok: true, status: 'ok', http_status: null },
+          { model: 'vertex_ai/imagen-refused', ok: false, status: 'access_denied', http_status: 401 },
+        ],
+      });
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-media-image')).not.toBeDisabled());
+
+      fireEvent.focus(screen.getByTestId('ext-api-media-image'));
+      expect(screen.getByRole('option', { name: /✅ vertex_ai\/imagen-ok/ })).not.toHaveAttribute('aria-disabled', 'true');
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/imagen-refused/ })).toHaveAttribute('aria-disabled', 'true');
+    });
+
+    it.each([
+      [true, 2],
+      [false, 1],
+    ] as const)('asks before keeping a refused tier model (confirmed: %s)', async (confirmed, calls) => {
+      const { ApiRequestError } = await import('../../../lib/apiRequestError');
+      listMock.mockResolvedValue([saved]);
+      updateMock.mockRejectedValueOnce(new ApiRequestError(
+        'The proxy lists but refuses to serve vertex_ai/claude-sonnet-5 (default tier, HTTP 404)',
+        'unreachable_model',
+      ));
+      const confirmSpy = vi.fn(() => confirmed);
+      vi.stubGlobal('confirm', confirmSpy);
+      const { toast } = renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-save'));
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
+      expect(String(confirmSpy.mock.calls[0])).toContain('config.extApi.unreachableConfirm');
+      expect(String(confirmSpy.mock.calls[0])).toContain('vertex_ai/claude-sonnet-5');
+      await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(calls));
+      expect(updateMock.mock.calls[0][1]).not.toHaveProperty('confirm_unreachable_models');
+      if (confirmed) {
+        expect(updateMock.mock.calls[1][1]).toEqual(expect.objectContaining({ confirm_unreachable_models: true }));
+        await waitFor(() => expect(toast).toHaveBeenCalledWith('config.saved', 'success'));
+      } else {
+        // Declined: nothing saved, the form stays open for another choice.
+        expect(toast).not.toHaveBeenCalledWith('config.saved', 'success');
+        expect(screen.getByTestId('ext-api-save')).toBeInTheDocument();
+      }
+      vi.unstubAllGlobals();
+    });
+
+    it('turns any other save failure into an error toast without asking', async () => {
+      listMock.mockResolvedValue([saved]);
+      updateMock.mockRejectedValueOnce(new Error('Alias already used'));
+      const confirmSpy = vi.fn(() => true);
+      vi.stubGlobal('confirm', confirmSpy);
+      const { toast } = renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-save'));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('common.actionFailed'), 'error'));
+      expect(confirmSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
     });
   });
 });

@@ -646,6 +646,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
       remove: resolve(null),
       test: resolve({ ok: false, status: 'transport_error', models: [], hint: null }),
+      testProgress: resolve({ done: 0, total: 0 }),
     },
 
     debugApi: {

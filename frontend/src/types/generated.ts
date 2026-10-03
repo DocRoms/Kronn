@@ -1204,7 +1204,12 @@ last_seen_at?: string | null,
 /**
  * Last time Kronn attempted to verify this identity, live or not.
  */
-last_checked_at: string, created_at: string, updated_at: string, };
+last_checked_at: string,
+/**
+ * Last time a real call to this model answered. Being listed is not
+ * being served: `None` means no call has proven it yet.
+ */
+last_answered_at?: string | null, created_at: string, updated_at: string, };
 
 /**
  * Structured, catalog-driven preflight diagnostic. Shared by discussion

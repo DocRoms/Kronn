@@ -254,8 +254,29 @@ pub(crate) fn tool_result_message(outcome: &ToolOutcome) -> Value {
         "role": "tool",
         "tool_call_id": outcome.call.id,
         "name": outcome.call.name,
-        "content": outcome.content.to_string(),
+        "content": bounded_tool_content(outcome.content.to_string()),
     })
+}
+
+/// The most one tool answer may add to the history the model resends every
+/// turn. Above `read_file`'s own 256 KiB cap plus JSON escaping, so it only
+/// stops a tool that has no bound of its own.
+pub(crate) const MAX_TOOL_RESULT_BYTES: usize = 320 * 1024;
+
+fn bounded_tool_content(content: String) -> String {
+    if content.len() <= MAX_TOOL_RESULT_BYTES {
+        return content;
+    }
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[Kronn: this tool answer was cut at {} of {} bytes. Ask for less: a narrower path, pattern or range.]",
+        &content[..end],
+        end,
+        content.len()
+    )
 }
 
 /// Human-readable trace persisted alongside the reply, in the shape the UI
@@ -466,6 +487,23 @@ mod tests {
         assert_eq!(msg["role"], "tool");
         assert_eq!(msg["tool_call_id"], "call_1");
         assert_eq!(msg["name"], "mcp_list", "Ollama correlates on name");
+    }
+
+    #[test]
+    fn no_tool_answer_can_flood_the_history() {
+        // KT-959 — one unbounded answer was resent on every later turn.
+        let small = "x".repeat(10);
+        assert_eq!(bounded_tool_content(small.clone()), small);
+
+        let huge = "é".repeat(MAX_TOOL_RESULT_BYTES);
+        let bounded = bounded_tool_content(huge.clone());
+        assert!(bounded.len() < huge.len());
+        assert!(bounded.len() <= MAX_TOOL_RESULT_BYTES + 200);
+        assert!(
+            bounded.contains("was cut at"),
+            "the cut is said, never silent"
+        );
+        assert!(bounded.contains(&huge.len().to_string()));
     }
 
     #[test]

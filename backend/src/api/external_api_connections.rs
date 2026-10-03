@@ -57,6 +57,10 @@ pub struct UpsertConnectionRequest {
     /// it from `endpoint`.
     #[serde(default)]
     pub media_endpoint: Option<String>,
+    /// Keep a tier model even though a call to it was just refused. Without
+    /// it, such a save is refused with `unreachable_model` (KT-957).
+    #[serde(default)]
+    pub confirm_unreachable_models: bool,
 }
 
 /// A non-persisting probe for a saved connection or the form currently being
@@ -85,6 +89,47 @@ pub struct TestConnectionRequest {
     /// `models` alone keeps the older all-or-nothing verdict.
     #[serde(default)]
     pub tier_models: Vec<TierModelRequest>,
+    /// Caller-chosen id under which the model sweep reports how far it got,
+    /// read back from `GET /api/external-api/connections/test/progress/{id}`.
+    #[serde(default)]
+    pub progress_id: Option<String>,
+}
+
+/// How far a connection test's model sweep has got.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct TestProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// Sweeps in flight, by caller id. A sweep is a minute at most; entries older
+/// than ten are dropped on the next write.
+type ProgressMap = std::collections::HashMap<String, (TestProgress, std::time::Instant)>;
+static TEST_PROGRESS: std::sync::LazyLock<std::sync::Mutex<ProgressMap>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn valid_progress_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn set_test_progress(id: Option<&str>, progress: TestProgress) {
+    let Some(id) = id.filter(|id| valid_progress_id(id)) else {
+        return;
+    };
+    if let Ok(mut map) = TEST_PROGRESS.lock() {
+        map.retain(|_, (_, at)| at.elapsed() < std::time::Duration::from_secs(600));
+        map.insert(id.to_string(), (progress, std::time::Instant::now()));
+    }
+}
+
+/// GET /api/external-api/connections/test/progress/{id}
+pub async fn test_progress(Path(id): Path<String>) -> Json<ApiResponse<TestProgress>> {
+    let progress = TEST_PROGRESS
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&id).map(|(progress, _)| *progress))
+        .unwrap_or_default();
+    Json(ApiResponse::ok(progress))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +160,16 @@ pub struct TierCheck {
     pub hint: Option<String>,
 }
 
+/// What one listed model answered when its LiteLLM connection was tested
+/// (KT-957). Same statuses as [`TierCheck`], never the upstream body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelCheck {
+    pub model: String,
+    pub ok: bool,
+    pub status: String,
+    pub http_status: Option<u16>,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct TestConnectionResponse {
     pub ok: bool,
@@ -135,6 +190,11 @@ pub struct TestConnectionResponse {
     pub hint: Option<String>,
     /// One entry per tier the caller asked to verify; empty otherwise.
     pub tier_checks: Vec<TierCheck>,
+    /// LiteLLM only: one entry per listed chat model called during the test.
+    pub model_checks: Vec<ModelCheck>,
+    /// LiteLLM only: the route that said what each model is for
+    /// (`model_info` | `model_group_info`); `None` when the proxy said nothing.
+    pub capability_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -520,6 +580,17 @@ enum ChatProbe {
     Transport,
 }
 
+/// For calls whose answer is a verdict on a model. A proxy can take several
+/// seconds to refuse one (a tag refusal measured at 9 s), which the 6 s
+/// connection probe reported as a timeout and so let through.
+fn model_probe_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default()
+}
+
 async fn chat_probe(endpoint: &str, api_key: &str, model: &str) -> ChatProbe {
     let body = serde_json::json!({
         "model": model,
@@ -528,7 +599,7 @@ async fn chat_probe(endpoint: &str, api_key: &str, model: &str) -> ChatProbe {
         "temperature": 0,
         "stream": false,
     });
-    let request = probe_client()
+    let request = model_probe_client()
         .post(format!("{endpoint}/v1/chat/completions"))
         .bearer_auth(api_key)
         .json(&body);
@@ -678,14 +749,7 @@ fn assemble_tier_report(
     {
         return failure_response(model, probe, None).expect("billing is a failure");
     }
-    let key_accepted = probes.iter().any(|(_, probe)| match probe {
-        ChatProbe::Answered | ChatProbe::Http { .. } => true,
-        ChatProbe::Refused { status, body } => {
-            crate::api::lite_llm::classify_model_failure(*status, body).is_some()
-        }
-        ChatProbe::Billing | ChatProbe::Timeout | ChatProbe::Transport => false,
-    });
-    if !key_accepted {
+    if !key_accepted(probes) {
         let (model, probe) = &probes[0];
         return failure_response(model, probe, None)
             .expect("a probe that did not answer is a failure");
@@ -735,10 +799,29 @@ fn record_tier_verdicts(
     runtime_target_id: &str,
     checks: &[TierCheck],
 ) -> anyhow::Result<()> {
-    for check in checks {
-        let reason = match check.status.as_str() {
+    record_model_verdicts(
+        conn,
+        runtime_target_id,
+        checks.iter().map(|check| {
+            (
+                check.model.as_str(),
+                check.status.as_str(),
+                check.http_status,
+            )
+        }),
+    )
+}
+
+/// [`record_tier_verdicts`] for any `(model, status, http_status)` verdicts.
+fn record_model_verdicts<'a>(
+    conn: &rusqlite::Connection,
+    runtime_target_id: &str,
+    verdicts: impl IntoIterator<Item = (&'a str, &'a str, Option<u16>)>,
+) -> anyhow::Result<()> {
+    for (model, status, http_status) in verdicts {
+        let reason = match status {
             "ok" => {
-                catalog_store::clear_model_failure(conn, runtime_target_id, &check.model)?;
+                catalog_store::clear_model_failure(conn, runtime_target_id, model)?;
                 continue;
             }
             "not_found" => ModelUnavailableReason::NotFound,
@@ -748,15 +831,327 @@ fn record_tier_verdicts(
         catalog_store::mark_unavailable(
             conn,
             runtime_target_id,
-            &check.model,
+            model,
             reason,
             Some(&crate::api::lite_llm::model_failure_detail(
                 reason,
-                check.http_status.unwrap_or_default(),
+                http_status.unwrap_or_default(),
             )),
         )?;
     }
     Ok(())
+}
+
+/// How many listed models a LiteLLM test calls at once, and for how long in
+/// total; a model not reached in time keeps whatever was known about it.
+const SWEEP_PARALLELISM: usize = 12;
+const SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(75);
+
+/// One minimal call to every chat model a LiteLLM proxy lists (KT-957): it
+/// lists models it cannot serve, and only a call tells them apart. Runs once
+/// the key is known to be accepted, so a refusal is the model's. Models the
+/// tier checks already called reuse that answer.
+async fn sweep_listed_models(
+    endpoint: &str,
+    api_key: &str,
+    catalog: &[TestConnectionModel],
+    tier_checks: &[TierCheck],
+    progress_id: Option<&str>,
+) -> Vec<ModelCheck> {
+    use futures::StreamExt;
+
+    let mut checks: Vec<ModelCheck> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    for entry in catalog {
+        let chat = entry
+            .capabilities
+            .iter()
+            .any(|capability| capability == "chat");
+        if !chat
+            || checks.iter().any(|check| check.model == entry.id)
+            || pending.contains(&entry.id)
+        {
+            continue;
+        }
+        match tier_checks.iter().find(|check| check.model == entry.id) {
+            Some(check) => checks.push(model_check(&entry.id, check)),
+            None => pending.push(entry.id.clone()),
+        }
+    }
+    let total = checks.len() + pending.len();
+    let report = |done| set_test_progress(progress_id, TestProgress { done, total });
+    report(checks.len());
+    let deadline = tokio::time::Instant::now() + SWEEP_BUDGET;
+    let mut answers = futures::stream::iter(pending)
+        .map(|model| async move {
+            let probe = chat_probe(endpoint, api_key, &model).await;
+            let entry = TierModel {
+                tier: "catalog",
+                model,
+            };
+            let check = tier_check(&entry, &probe);
+            model_check(&entry.model, &check)
+        })
+        .buffer_unordered(SWEEP_PARALLELISM);
+    while let Ok(Some(check)) = tokio::time::timeout_at(deadline, answers.next()).await {
+        checks.push(check);
+        report(checks.len());
+    }
+    checks
+}
+
+/// What a LiteLLM proxy says each listed model is for, from `model_info.mode`
+/// (KT-957): chat, image or video generation, embedding… `/model/info` first,
+/// `/model_group/info` when a non-admin key is refused the former. `None` when
+/// neither says anything, and the catalogue then stays as listed.
+async fn lite_llm_model_modes(
+    endpoint: &str,
+    api_key: Option<&str>,
+) -> Option<(&'static str, std::collections::HashMap<String, Vec<String>>)> {
+    for (source, path) in [
+        ("model_info", "/model/info"),
+        ("model_group_info", "/model_group/info"),
+    ] {
+        let mut request = probe_client().get(format!("{endpoint}{path}"));
+        if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+            request = request.bearer_auth(key);
+        }
+        let Ok(response) = request.send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(body) = response.json::<serde_json::Value>().await else {
+            continue;
+        };
+        let modes = model_modes_from_body(&body);
+        if !modes.is_empty() {
+            return Some((source, modes));
+        }
+    }
+    None
+}
+
+/// `/model/info` (`model_name` + `model_info`) and `/model_group/info`
+/// (`model_group` + flat fields) answers, as capabilities per model id.
+fn model_modes_from_body(
+    body: &serde_json::Value,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut modes: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for item in body["data"].as_array().into_iter().flatten() {
+        let (Some(id), info) = (
+            item["model_name"]
+                .as_str()
+                .or_else(|| item["model_group"].as_str()),
+            if item["model_info"].is_object() {
+                &item["model_info"]
+            } else {
+                item
+            },
+        ) else {
+            continue;
+        };
+        let Some(mode) = info["mode"].as_str() else {
+            continue;
+        };
+        let capability = match mode {
+            "chat" | "completion" | "responses" => "chat",
+            "image_generation" | "image_edit" => "image",
+            "video_generation" => "video",
+            other => other,
+        };
+        let entry = modes.entry(id.to_string()).or_default();
+        if !entry.iter().any(|known| known == capability) {
+            entry.push(capability.to_string());
+        }
+        if info["supports_vision"] == true && !entry.iter().any(|known| known == "vision") {
+            entry.push("vision".into());
+        }
+    }
+    modes
+}
+
+/// Replace the listed models' guessed `chat` with what the proxy declared.
+fn apply_model_modes(
+    response: &mut TestConnectionResponse,
+    modes: &std::collections::HashMap<String, Vec<String>>,
+) {
+    for entry in &mut response.catalog {
+        if let Some(capabilities) = modes.get(&entry.id) {
+            entry.capabilities = capabilities.clone();
+        }
+    }
+    response.image_capability_known = true;
+    response.video_capability_known = true;
+}
+
+fn model_check(model: &str, check: &TierCheck) -> ModelCheck {
+    ModelCheck {
+        model: model.to_string(),
+        ok: check.ok,
+        status: check.status.clone(),
+        http_status: check.http_status,
+    }
+}
+
+/// Whether any answer shows the proxy accepted the key, which makes the
+/// remaining refusals verdicts on their models rather than on the key.
+fn key_accepted(probes: &[(&str, ChatProbe)]) -> bool {
+    probes.iter().any(|(_, probe)| match probe {
+        ChatProbe::Answered | ChatProbe::Http { .. } => true,
+        ChatProbe::Refused { status, body } => {
+            crate::api::lite_llm::classify_model_failure(*status, body).is_some()
+        }
+        ChatProbe::Billing | ChatProbe::Timeout | ChatProbe::Transport => false,
+    })
+}
+
+/// The tier models a save assigns: all of them on creation, the changed ones
+/// on edit. An unchanged model was already accepted and is not re-judged.
+fn assigned_tier_models(
+    previous: Option<&ExternalApiConnection>,
+    next: &ExternalApiConnection,
+) -> Vec<TierModel> {
+    let tiers = |connection: &ExternalApiConnection| {
+        [
+            ("economy", connection.economy_model.clone()),
+            ("default", connection.default_model.clone()),
+            ("reasoning", connection.reasoning_model.clone()),
+        ]
+    };
+    let before = previous.map(tiers);
+    tiers(next)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (tier, model))| {
+            let model = model?;
+            let unchanged = before
+                .as_ref()
+                .is_some_and(|before| before[index].1.as_deref() == Some(model.as_str()));
+            (!unchanged).then_some(TierModel { tier, model })
+        })
+        .collect()
+}
+
+/// One minimal call per model a LiteLLM save assigns (KT-957). Empty when
+/// nothing can be judged: no key, or no answer shows the key was accepted,
+/// since a key problem is not the model's.
+async fn probe_assigned_tier_models(
+    endpoint: &str,
+    api_key: Option<&str>,
+    tier_models: &[TierModel],
+) -> Vec<TierCheck> {
+    let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let mut distinct: Vec<&str> = Vec::new();
+    for entry in tier_models {
+        if !distinct.contains(&entry.model.as_str()) {
+            distinct.push(&entry.model);
+        }
+    }
+    let answers = futures::future::join_all(
+        distinct
+            .iter()
+            .map(|model| chat_probe(endpoint, api_key, model)),
+    )
+    .await;
+    let probes: Vec<(&str, ChatProbe)> = distinct.into_iter().zip(answers).collect();
+    assigned_tier_verdicts(tier_models, &probes)
+}
+
+/// The network-free half of [`probe_assigned_tier_models`].
+fn assigned_tier_verdicts(
+    tier_models: &[TierModel],
+    probes: &[(&str, ChatProbe)],
+) -> Vec<TierCheck> {
+    if !key_accepted(probes) {
+        return Vec::new();
+    }
+    tier_models
+        .iter()
+        .filter_map(|entry| {
+            probes
+                .iter()
+                .find(|(model, _)| *model == entry.model)
+                .map(|(_, probe)| tier_check(entry, probe))
+        })
+        .collect()
+}
+
+/// The assigned models the catalogue already knows the proxy refuses, when the
+/// save's own call proved nothing either way (no key, a timeout).
+fn remembered_refusals(
+    known: &[CatalogModelEntry],
+    assigned: &[TierModel],
+    checks: &[TierCheck],
+) -> Vec<TierCheck> {
+    assigned
+        .iter()
+        .filter(|entry| {
+            !checks.iter().any(|check| {
+                check.model == entry.model
+                    && matches!(check.status.as_str(), "ok" | "not_found" | "access_denied")
+            })
+        })
+        .filter_map(|entry| {
+            let known = known.iter().find(|known| known.model_id == entry.model)?;
+            let status = match known.unavailable_reason? {
+                ModelUnavailableReason::NotFound => "not_found",
+                ModelUnavailableReason::AccessDenied => "access_denied",
+                _ => return None,
+            };
+            Some(TierCheck {
+                tier: entry.tier.to_string(),
+                model: entry.model.clone(),
+                ok: false,
+                status: status.to_string(),
+                http_status: None,
+                hint: known.unavailable_detail.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The models a save must not keep without an explicit confirmation.
+fn refused_tier_checks(checks: &[TierCheck]) -> Vec<&TierCheck> {
+    checks
+        .iter()
+        .filter(|check| matches!(check.status.as_str(), "not_found" | "access_denied"))
+        .collect()
+}
+
+/// The refusal a save gets when a model it assigns was just refused and the
+/// operator has not confirmed keeping it.
+fn unconfirmed_refusal<T: Serialize>(
+    checks: &[TierCheck],
+    confirmed: bool,
+) -> Option<ApiResponse<T>> {
+    let refused = refused_tier_checks(checks);
+    (!confirmed && !refused.is_empty()).then(|| {
+        ApiResponse::err_coded(
+            ApiErrorCode::UnreachableModel,
+            unreachable_models_message(&refused),
+        )
+    })
+}
+
+fn unreachable_models_message(refused: &[&TierCheck]) -> String {
+    let models = refused
+        .iter()
+        .map(|check| match check.http_status {
+            Some(status) => format!("{} ({} tier, HTTP {status})", check.model, check.tier),
+            None => format!(
+                "{} ({} tier, refused when last called)",
+                check.model, check.tier
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "The proxy lists but refuses to serve {models}: not found upstream, or not allowed for this key or project. Choose another model, or confirm to keep it anyway."
+    )
 }
 
 fn tier_check(entry: &TierModel, probe: &ChatProbe) -> TierCheck {
@@ -846,6 +1241,8 @@ async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectio
                     image_capability_known: modality_declared,
                     video_capability_known: modality_declared,
                     tier_checks: Vec::new(),
+                    model_checks: Vec::new(),
+                    capability_source: None,
                     }
                 }
                 _ => TestConnectionResponse {
@@ -1151,7 +1548,7 @@ pub async fn test(
             }
         }
     }
-    let response = probe_models(
+    let mut response = probe_models(
         &endpoint,
         key,
         req.origin_preset,
@@ -1159,6 +1556,24 @@ pub async fn test(
         &tier_models,
     )
     .await;
+    // A passing test has proven the key, so every refusal the sweep meets is
+    // the model's own.
+    if req.origin_preset == Some(ExternalApiConnectionPreset::LiteLlm) && response.ok {
+        if let Some((source, modes)) = lite_llm_model_modes(&endpoint, key).await {
+            apply_model_modes(&mut response, &modes);
+            response.capability_source = Some(source.into());
+        }
+        if let Some(key) = key {
+            response.model_checks = sweep_listed_models(
+                &endpoint,
+                key,
+                &response.catalog,
+                &response.tier_checks,
+                req.progress_id.as_deref(),
+            )
+            .await;
+        }
+    }
 
     if let Some(connection) = saved_connection {
         // Keep credentials stable through the compare-and-commit boundary;
@@ -1198,6 +1613,7 @@ pub async fn test(
                 .unwrap_or_else(|| response.status.clone());
             let success = response.ok;
             let tier_checks = response.tier_checks.clone();
+            let model_checks = response.model_checks.clone();
             let persisted = state
                 .db
                 .with_conn(move |conn| {
@@ -1210,6 +1626,17 @@ pub async fn test(
                         // After the reconcile, so a verdict from a real call
                         // wins over "the proxy lists it" (KT-941).
                         record_tier_verdicts(&transaction, &target, &tier_checks)?;
+                        record_model_verdicts(
+                            &transaction,
+                            &target,
+                            model_checks.iter().map(|check| {
+                                (
+                                    check.model.as_str(),
+                                    check.status.as_str(),
+                                    check.http_status,
+                                )
+                            }),
+                        )?;
                     } else {
                         catalog_store::record_refresh_failure(
                             &transaction,
@@ -1386,6 +1813,18 @@ pub async fn create(
         media_endpoint: clean(req.media_endpoint),
     };
 
+    if connection.origin_preset == ExternalApiConnectionPreset::LiteLlm {
+        let checks = probe_assigned_tier_models(
+            connection.endpoint.as_deref().unwrap_or_default(),
+            req.api_key.as_deref(),
+            &assigned_tier_models(None, &connection),
+        )
+        .await;
+        if let Some(refusal) = unconfirmed_refusal(&checks, req.confirm_unreachable_models) {
+            return Json(refusal);
+        }
+    }
+
     // The DB insert enforces the case-insensitive alias uniqueness, so it runs
     // before we ever touch the credential store: a rejected alias must not
     // leave an orphan credential behind.
@@ -1480,16 +1919,69 @@ pub async fn update(
         media_endpoint: clean(req.media_endpoint),
     };
 
+    let tier_checks = if updated.origin_preset == ExternalApiConnectionPreset::LiteLlm {
+        // The stored key only goes back to the endpoint it was saved for.
+        let stored_key = if req.api_key.is_none()
+            && existing.endpoint == updated.endpoint
+            && existing.origin_preset == updated.origin_preset
+        {
+            state
+                .config
+                .read()
+                .await
+                .tokens
+                .active_key_for(&credential_slug)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let assigned = assigned_tier_models(Some(&existing), &updated);
+        let mut checks = probe_assigned_tier_models(
+            updated.endpoint.as_deref().unwrap_or_default(),
+            req.api_key.as_deref().or(stored_key.as_deref()),
+            &assigned,
+        )
+        .await;
+        // What the catalogue learnt belongs to the endpoint it was learnt on.
+        if existing.endpoint == updated.endpoint {
+            let target = catalog_store::http_runtime_target_id(&updated.id);
+            let known = state
+                .db
+                .with_read_conn(move |conn| catalog_store::list_for_target(conn, &target))
+                .await
+                .unwrap_or_default();
+            let remembered = remembered_refusals(&known, &assigned, &checks);
+            checks.extend(remembered);
+        }
+        checks
+    } else {
+        Vec::new()
+    };
+    if let Some(refusal) = unconfirmed_refusal(&tier_checks, req.confirm_unreachable_models) {
+        return Json(refusal);
+    }
+
     let to_update = updated.clone();
+    let target = catalog_store::http_runtime_target_id(&updated.id);
     if let Err(e) = state
         .db
-        .with_conn(move |conn| store::update(conn, &to_update))
+        .with_conn(move |conn| {
+            store::update(conn, &to_update)?;
+            // What the save's own calls proved shows in the pickers at once.
+            record_tier_verdicts(conn, &target, &tier_checks)
+        })
         .await
     {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Conflict,
             format!("{e}"),
         ));
+    }
+    if crate::core::model_catalog::refresh_runtime_cache(&state.db)
+        .await
+        .is_err()
+    {
+        tracing::warn!("external API connection saved, model catalog cache not reloaded");
     }
 
     let mut cfg = state.config.write().await;
@@ -2090,5 +2582,39 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.availability, ModelAvailability::Available);
         assert_eq!(recovered.unavailable_reason, None);
+    }
+
+    #[test]
+    fn model_modes_are_read_from_either_litellm_route() {
+        // `/model_group/info` is what a non-admin key may get instead of
+        // `/model/info`: flat fields under `model_group`.
+        let group = model_modes_from_body(&serde_json::json!({"data": [
+            {"model_group": "veo-3", "mode": "video_generation"},
+            {"model_group": "imagen-4", "mode": "image_generation"},
+            {"model_group": "gemini-3.6-flash", "mode": "chat", "supports_vision": true},
+            {"model_group": "text-embedding-005", "mode": "embedding"},
+            {"model_group": "no-mode"}
+        ]}));
+        assert_eq!(group["veo-3"], vec!["video"]);
+        assert_eq!(group["imagen-4"], vec!["image"]);
+        assert_eq!(group["gemini-3.6-flash"], vec!["chat", "vision"]);
+        assert_eq!(group["text-embedding-005"], vec!["embedding"]);
+        assert!(!group.contains_key("no-mode"), "no mode, no claim");
+
+        // Two deployments of one alias with different modes keep both.
+        let info = model_modes_from_body(&serde_json::json!({"data": [
+            {"model_name": "mixed", "model_info": {"mode": "chat"}},
+            {"model_name": "mixed", "model_info": {"mode": "image_edit"}}
+        ]}));
+        assert_eq!(info["mixed"], vec!["chat", "image"]);
+        assert!(model_modes_from_body(&serde_json::json!({"error": "forbidden"})).is_empty());
+    }
+
+    #[test]
+    fn test_progress_ids_are_plain_and_bounded() {
+        assert!(valid_progress_id("4f7c1d2e-9a3b-4c5d-8e6f-0a1b2c3d4e5f"));
+        for bad in ["", "../x", "a b", &"x".repeat(65)] {
+            assert!(!valid_progress_id(bad), "{bad:?}");
+        }
     }
 }
