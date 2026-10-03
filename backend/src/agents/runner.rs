@@ -1609,6 +1609,46 @@ pub enum StreamJsonEvent {
     Skip,
 }
 
+/// Joins the text of Claude's content blocks. `content_block_stop` ends every
+/// block (it reaches consumers as `ToolEnd`); the next block's text, from the
+/// same message, a message after a tool call or a turn a Stop hook relaunched,
+/// must not continue the previous block's last line: a `kronn-question` fence
+/// closed there would never close (#223).
+#[derive(Debug, Default)]
+pub struct TextBlockJoiner {
+    block_ended: bool,
+    emitted: bool,
+    trailing_newlines: usize,
+}
+
+impl TextBlockJoiner {
+    /// The current content block is over.
+    pub fn block_ended(&mut self) {
+        self.block_ended = true;
+    }
+
+    /// `text` as it must be appended: preceded by a blank line when it opens a
+    /// new block after earlier text.
+    pub fn join(&mut self, text: String) -> String {
+        let mut out = text;
+        if std::mem::take(&mut self.block_ended) && self.emitted {
+            let leading = out.chars().take_while(|c| *c == '\n').count();
+            let have = (self.trailing_newlines + leading).min(2);
+            out.insert_str(0, &"\n".repeat(2 - have));
+        }
+        if !out.is_empty() {
+            let trailing = out.chars().rev().take_while(|c| *c == '\n').count();
+            self.trailing_newlines = if trailing == out.chars().count() {
+                self.trailing_newlines + trailing
+            } else {
+                trailing
+            };
+            self.emitted = true;
+        }
+        out
+    }
+}
+
 /// Structured fields retained from a failed Claude Code `result` event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamJsonFailure {

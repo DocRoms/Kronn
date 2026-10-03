@@ -14596,3 +14596,88 @@ sleep 3600
         );
     }
 }
+
+// ─── #223: text blocks never share a line ──────────────────────────────────
+#[cfg(test)]
+mod text_block_tests {
+    use crate::agents::runner::*;
+
+    /// Accumulates a Claude stream the way the discussion loop does.
+    fn joined_stream(lines: &[&str]) -> String {
+        let mut joiner = TextBlockJoiner::default();
+        let mut out = String::new();
+        for line in lines {
+            match parse_claude_stream_line(line) {
+                StreamJsonEvent::Text(text) => out.push_str(&joiner.join(text)),
+                StreamJsonEvent::ToolEnd => joiner.block_ended(),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn text_delta(text: &str) -> String {
+        serde_json::json!({
+        "type": "stream_event",
+        "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}
+    })
+    .to_string()
+    }
+
+    const BLOCK_STOP: &str =
+        r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+
+    #[test]
+    fn a_question_fence_closed_at_the_end_of_a_block_stays_closed_when_the_next_turn_follows() {
+        // Issue #223: the second turn (relaunched by a Stop hook) was glued after
+        // the closing fence, which then never closed and the card was refused.
+        let first = text_delta("Une question :\n```kronn-question\n{\"version\":1}\n```");
+        let second = text_delta("Je ne modifie pas `docs/css-style-guide.md`.");
+        let out = joined_stream(&[&first, BLOCK_STOP, &second]);
+        assert_eq!(
+        out,
+        "Une question :\n```kronn-question\n{\"version\":1}\n```\n\nJe ne modifie pas `docs/css-style-guide.md`."
+    );
+    }
+
+    #[test]
+    fn deltas_inside_one_block_are_joined_as_they_come() {
+        let out = joined_stream(&[&text_delta("Hel"), &text_delta("lo")]);
+        assert_eq!(out, "Hello");
+    }
+
+    #[test]
+    fn a_new_block_adds_only_the_newlines_that_are_missing() {
+        assert_eq!(
+            joined_stream(&[&text_delta("a\n"), BLOCK_STOP, &text_delta("b")]),
+            "a\n\nb"
+        );
+        assert_eq!(
+            joined_stream(&[&text_delta("a\n\n"), BLOCK_STOP, &text_delta("b")]),
+            "a\n\nb"
+        );
+        assert_eq!(
+            joined_stream(&[&text_delta("a"), BLOCK_STOP, &text_delta("\nb")]),
+            "a\n\nb"
+        );
+        assert_eq!(
+            joined_stream(&[
+                &text_delta("a"),
+                &text_delta("\n"),
+                BLOCK_STOP,
+                &text_delta("b")
+            ]),
+            "a\n\nb",
+            "a newline-only delta still counts as the end of the text"
+        );
+    }
+
+    #[test]
+    fn a_block_that_ends_before_any_text_adds_no_separator() {
+        // A tool call first, then the answer: nothing precedes it.
+        assert_eq!(
+            joined_stream(&[BLOCK_STOP, &text_delta("Réponse")]),
+            "Réponse"
+        );
+    }
+}

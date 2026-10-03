@@ -988,6 +988,7 @@ const fr: TranslationDict = {
   'disc.question.invalidEmpty': 'Le bloc est vide.',
   'disc.question.invalidTooLong': 'Le bloc dépasse 24 000 octets : c’est une limite en octets, pas en caractères.',
   'disc.question.invalidJson': 'Le bloc n’est pas du JSON valide.',
+  'disc.question.invalidUnclosedFence': 'Le bloc n’est pas fermé : le ``` de fin est suivi d’un autre texte sur la même ligne. Le JSON est valide ; mettez le ``` de fin seul sur sa ligne.',
   'disc.question.invalidUnknownField': 'Un champ inconnu suffit à faire rejeter tout le bloc : vérifie l’orthographe des noms de champs.',
   'disc.question.invalidVersionString': '« version » doit être le nombre 1, pas le texte "1".',
   'disc.question.invalidVersion': '« version » doit valoir 1.',

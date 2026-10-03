@@ -42,6 +42,20 @@ function isOptionalText(value: unknown, max: number): boolean {
   return value == null || (typeof value === 'string' && [...value].length <= max);
 }
 
+/** #223 — valid JSON, then a closing fence with text glued after it on the
+ *  same line: markdown never closes that fence, so the block's body runs on
+ *  and reads as invalid JSON although the author wrote valid JSON. */
+function closingFenceSharesItsLine(source: string): boolean {
+  const glued = /^```[^\n]*\S/m.exec(source);
+  if (!glued) return false;
+  try {
+    JSON.parse(source.slice(0, glued.index));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * `null` when the notation is fine — meaning the absence has another cause,
  * and the card must not blame the author for it.
@@ -62,7 +76,9 @@ export function findFenceProblem(source: string | undefined): FenceProblem | nul
   try {
     parsed = JSON.parse(source);
   } catch {
-    return { key: 'disc.question.invalidJson' };
+    return closingFenceSharesItsLine(source)
+      ? { key: 'disc.question.invalidUnclosedFence' }
+      : { key: 'disc.question.invalidJson' };
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     return { key: 'disc.question.invalidJson' };

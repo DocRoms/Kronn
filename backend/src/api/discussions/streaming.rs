@@ -3517,6 +3517,7 @@ async fn make_agent_stream_inner(
                 // helper (module top) ; these own the per-stream state.
                 let mut last_text_delta = String::new();
                 let mut repeat_delta_count: u32 = 0;
+                let mut text_blocks = runner::TextBlockJoiner::default();
                 let mut stopped_on_loop: bool = false;
 
                 // Stall timeout pattern: the `tokio::time::sleep(stall_timeout)` future
@@ -3582,6 +3583,7 @@ async fn make_agent_stream_inner(
                                     was_interrupted = true;
                                     break;
                                 }
+                                let text = text_blocks.join(text);
                                 full_response.push_str(&text);
                                 chunks_since_checkpoint += 1;
                                 // Throttled checkpoint to DB (Option A) — survives backend restart
@@ -3686,6 +3688,7 @@ async fn make_agent_stream_inner(
                                 current_tool_input.push_str(&partial);
                             }
                             runner::StreamJsonEvent::ToolEnd => {
+                                text_blocks.block_ended();
                                 if let Some(ref tool) = current_tool {
                                     let log = crate::api::disc_git::format_tool_log(
                                         tool,
@@ -5122,6 +5125,7 @@ pub(super) async fn run_agent_streaming(
     // break out and return whatever text arrived before the loop started.
     let mut last_text_delta = String::new();
     let mut repeat_delta_count: u32 = 0;
+    let mut text_blocks = runner::TextBlockJoiner::default();
     loop {
         tokio::select! {
             line = process.next_line() => {
@@ -5141,6 +5145,7 @@ pub(super) async fn run_agent_streaming(
                                         full_response.push_str("\n\n---\n🔁 **Decoder loop detected** — agent killed.");
                                         break;
                                     }
+                                    let text = text_blocks.join(text);
                                     full_response.push_str(&text);
                                     if !tx.is_closed() {
                                         let chunk = serde_json::json!({
@@ -5175,6 +5180,7 @@ pub(super) async fn run_agent_streaming(
                                     tool_input.push_str(&partial);
                                 }
                                 runner::StreamJsonEvent::ToolEnd => {
+                                    text_blocks.block_ended();
                                     if let Some(ref tool) = current_tool {
                                         if !tx.is_closed() {
                                             let _ = tx.send(AgentStreamEvent::Log {
@@ -5327,6 +5333,7 @@ pub(super) async fn run_agent_collect(
     global_timeout: Duration,
 ) -> String {
     let mut output = String::new();
+    let mut text_blocks = runner::TextBlockJoiner::default();
     let is_json = process.output_mode() == runner::OutputMode::StreamJson;
     let deadline = tokio::time::Instant::now() + global_timeout;
     loop {
@@ -5336,7 +5343,8 @@ pub(super) async fn run_agent_collect(
                     Some(l) => {
                         if is_json {
                             match runner::parse_claude_stream_line(&l) {
-                                runner::StreamJsonEvent::Text(text) => output.push_str(&text),
+                                runner::StreamJsonEvent::Text(text) => output.push_str(&text_blocks.join(text)),
+                                runner::StreamJsonEvent::ToolEnd => text_blocks.block_ended(),
                                 runner::StreamJsonEvent::TerminalError(failure) => {
                                     if !output.is_empty() {
                                         output.push_str("\n\n---\n");
@@ -6505,6 +6513,19 @@ mod run_agent_collect_tests {
     }
 
     #[tokio::test]
+    async fn a_second_text_block_never_shares_the_closing_fence_line() {
+        // Issue #223, collected without SSE.
+        let proc = ScriptedProcess::stream_json([
+            text_delta("```kronn-question\n{}\n```"),
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#
+                .to_string(),
+            text_delta("Suite du tour relancé."),
+        ]);
+        let out = run_agent_collect(proc, TEST_GLOBAL_TIMEOUT).await;
+        assert_eq!(out, "```kronn-question\n{}\n```\n\nSuite du tour relancé.");
+    }
+
+    #[tokio::test]
     async fn raw_mode_single_line_no_leading_newline() {
         let proc = ScriptedProcess::raw(["only"]);
         assert_eq!(run_agent_collect(proc, TEST_GLOBAL_TIMEOUT).await, "only");
@@ -6629,6 +6650,37 @@ mod run_agent_streaming_tests {
     }
 
     #[tokio::test]
+    async fn a_second_text_block_is_separated_in_the_reply_and_in_the_stream_alike() {
+        // Issue #223: a turn relaunched by a Stop hook was glued after the
+        // closing fence of the first, so the question card never closed.
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let proc = ScriptedProcess::stream_json([
+            text_delta("```kronn-question\n{}\n```"),
+            tool_end(),
+            text_delta("Suite du tour relancé."),
+        ]);
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
+        drop(tx);
+        let expected = "```kronn-question\n{}\n```\n\nSuite du tour relancé.";
+        assert_eq!(res.response, expected);
+        let streamed: String = drain(rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentStreamEvent::Chunk { data } => data["text"].as_str().map(str::to_string),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed, expected, "the stream must show what is stored");
+    }
+
+    #[tokio::test]
     async fn tool_call_emits_a_log_event() {
         // ToolStart → ToolInputDelta → ToolEnd produces TWO Log events — the
         // tool starting, then the human-readable breadcrumb once it is done —
@@ -6654,8 +6706,9 @@ mod run_agent_streaming_tests {
         )
         .await;
         drop(tx);
-        // Tool JSON must NOT leak into the prose response.
-        assert_eq!(res.response, "Reading file. Done.");
+        // Tool JSON must NOT leak into the prose response. The text after the
+        // tool call is a new block, so it starts on a line of its own (#223).
+        assert_eq!(res.response, "Reading file. \n\nDone.");
         let logs: Vec<_> = drain(rx)
             .into_iter()
             .filter(|e| matches!(e, AgentStreamEvent::Log { .. }))

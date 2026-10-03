@@ -1368,6 +1368,7 @@ async fn drive_agent_to_output(
     step_name: &str,
 ) -> Result<AgentOutput> {
     let mut output = String::new();
+    let mut text_blocks = runner::TextBlockJoiner::default();
     let is_stream_json = process.output_mode() == OutputMode::StreamJson;
     let mut stream_json_tokens: u64 = 0;
     let mut stream_json_cache = runner::PromptCacheUsage::default();
@@ -1389,6 +1390,7 @@ async fn drive_agent_to_output(
                 if is_stream_json {
                     match runner::parse_claude_stream_line(&line) {
                         StreamJsonEvent::Text(text) => {
+                            let text = text_blocks.join(text);
                             output.push_str(&text);
                             if let Some(tx) = progress_tx {
                                 let _ = tx.send(text).await;
@@ -1432,6 +1434,7 @@ async fn drive_agent_to_output(
                             current_tool_input.push_str(&partial);
                         }
                         StreamJsonEvent::ToolEnd => {
+                            text_blocks.block_ended();
                             // Closes the `🔧 ToolName` line streamed at
                             // ToolStart with the tool's most informative
                             // input field (cf. format_tool_input_suffix).
