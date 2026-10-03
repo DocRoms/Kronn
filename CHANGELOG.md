@@ -11,34 +11,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
-### Fixed
-
-- Testing a LiteLLM connection no longer fails with "Could not persist the
-  saved connection's model catalog" (KT-939). A LiteLLM proxy lists a model once
-  per deployment; the second copy broke the catalogue's unique key and the whole
-  refresh rolled back, leaving the model pickers empty. A model listed twice is
-  now stored once.
-
-- A Full audit in which a step fails no longer invalidates the whole run.
-  Until now one failed step — often for an outside reason, such as the Mac going
-  to sleep — left the run Interrupted with no validation discussion, even when
-  the other fifteen documents existed. The run still ends Interrupted (only a
-  complete run can be validated and earn the Validated badge), but it now gets a
-  validation discussion for the steps that succeeded, which names the steps to
-  redo and tells the agent not to validate their documents — unless the step
-  that failed is the one that writes `docs/AGENTS.md`, the entry point every
-  other document hangs off: without it there is nothing to validate, so the run
-  stays Interrupted with no discussion and the Resume button still names that
-  step to redo. The documentary check that refuses a run with an invented link
-  still applies. The progress is now the exact number of steps that succeeded,
-  the ones after a failure included — a run that lost step 5 of 16 reads 15/16,
-  no longer 4 or 16. The Resume button names the steps it will run ("Resume —
-  redo step(s) 5"), and a resume runs only those: a resumed run now records the
-  steps it carried over, so resuming it again no longer replays the whole
-  chain, and a step that was started but never finished is no longer mistaken
-  for a successful one (KT-931).
-
-## [0.14.2] - 2026-09-30
+## [0.14.2] - 2026-10-03
 
 ### Added
 
@@ -318,6 +291,31 @@ Release notes for 0.9.3 and earlier are available in the
   answers, byte for byte, nor in what is masked (KT-915).
 
 ### Fixed
+
+- Testing a LiteLLM connection no longer fails with "Could not persist the
+  saved connection's model catalog" (KT-939). A LiteLLM proxy lists a model once
+  per deployment; the second copy broke the catalogue's unique key and the whole
+  refresh rolled back, leaving the model pickers empty. A model listed twice is
+  now stored once.
+
+- A Full audit in which a step fails no longer invalidates the whole run.
+  Until now one failed step — often for an outside reason, such as the Mac going
+  to sleep — left the run Interrupted with no validation discussion, even when
+  the other fifteen documents existed. The run still ends Interrupted (only a
+  complete run can be validated and earn the Validated badge), but it now gets a
+  validation discussion for the steps that succeeded, which names the steps to
+  redo and tells the agent not to validate their documents — unless the step
+  that failed is the one that writes `docs/AGENTS.md`, the entry point every
+  other document hangs off: without it there is nothing to validate, so the run
+  stays Interrupted with no discussion and the Resume button still names that
+  step to redo. The documentary check that refuses a run with an invented link
+  still applies. The progress is now the exact number of steps that succeeded,
+  the ones after a failure included — a run that lost step 5 of 16 reads 15/16,
+  no longer 4 or 16. The Resume button names the steps it will run ("Resume —
+  redo step(s) 5"), and a resume runs only those: a resumed run now records the
+  steps it carried over, so resuming it again no longer replays the whole
+  chain, and a step that was started but never finished is no longer mistaken
+  for a successful one (KT-931).
 
 - Codex, launched by Kronn in a discussion or a room, can use Kronn's own
   tools again (KT-953). Kronn starts Codex non-interactively, so a tool left on
@@ -739,6 +737,23 @@ Release notes for 0.9.3 and earlier are available in the
   and surfaced as the raw body; the status is now read correctly, for every HTTP
   agent.
 
+- Releases carry their desktop installers again (KT-970). 0.12.0 to 0.14.1
+  were published with no asset: the build workflow only ran on `v*` tags,
+  while this repository tags `0.14.1`, so the update banner led desktop users
+  to empty release pages. The workflow now runs on both forms, creates a
+  draft release with the four installers, and fails unless the published
+  release carries one for every platform. It can also attach installers to
+  an existing release, built from that release's tag. In the desktop app, the
+  update banner only offers a version whose installer exists for your
+  platform. See `docs/operations/releasing.md`.
+
+- A discussion no longer says its connection was interrupted while the agent
+  is fine (#220). The "Realtime connection interrupted — reconnecting" banner
+  showed on every WebSocket close, even one that reconnected within a second;
+  it now waits until the reconnect has lasted three seconds. A reply's
+  "Stream connection interrupted" note followed the local stream only; it now
+  shows only when the server no longer reports the agent as running.
+
 - The Projects page opens without waiting seconds (KT-987). Every refresh of
   the project list, on any page, asked each audited project for its drift —
   which hashes every source the audit mapped — and repeated it on the next
@@ -778,6 +793,20 @@ Release notes for 0.9.3 and earlier are available in the
   it to take over the machine. It is now off by default; the project Docker
   panel says how to turn it on (`KRONN_DOCKER_SOCKET=1` in `.env`, then
   `make start`) and what that allows.
+
+- In Docker, the backend's MCP sync no longer writes tokens into the CLIs'
+  global configs (KT-965). `~/.codex/config.toml`, `~/.copilot/mcp-config.json`,
+  `~/.gemini/settings.json` and `~/.claude.json` are mounted from your home and
+  read by every agent in the container, whatever its project; an MCP that
+  carries secrets is now left out of them, with a warning in the log. Natively
+  nothing changes.
+
+- Kronn's data directory is now readable by its owner only (KT-990, first
+  step). On Linux it was `0755`, and the database, its WAL and its backups
+  `0644`: any account on the machine could read discussions and the encrypted
+  secrets. The directory is set to `0700` and every database file to `0600` at
+  start-up. Agents run as your user, so this does not keep them out — that
+  isolation is planned for 0.14.3.
 
 - In Docker, a project's MCP file that already held a token gives it up
   (found by the 0.14.2 Docker run-through). An entry Kronn had not written

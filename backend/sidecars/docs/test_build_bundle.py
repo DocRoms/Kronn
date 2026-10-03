@@ -232,5 +232,39 @@ class DesktopArtifactTests(unittest.TestCase):
         self.assertIn("kronn-linux", message)
 
 
+class ReleaseAssetTests(unittest.TestCase):
+    # KT-970 — 0.12.0 to 0.14.1 were published with no installer at all.
+    RELEASE = [
+        "Kronn_0.14.2_aarch64.dmg",
+        "Kronn_0.14.2_x64.dmg",
+        "Kronn_0.14.2_x64-setup.exe",
+        "Kronn_0.14.2_x64_en-US.msi",
+        "Kronn_0.14.2_amd64.deb",
+        "Kronn_0.14.2_amd64.AppImage",
+    ]
+
+    def test_a_complete_release_passes(self) -> None:
+        self.assertEqual(verify_artifacts.missing_release_platforms(self.RELEASE), [])
+
+    def test_a_release_without_assets_names_every_platform(self) -> None:
+        self.assertEqual(
+            verify_artifacts.missing_release_platforms([]),
+            ["Windows", "macOS Apple Silicon", "macOS Intel", "Linux"],
+        )
+
+    def test_one_mac_build_does_not_stand_for_the_other(self) -> None:
+        without_intel = [name for name in self.RELEASE if not name.endswith("_x64.dmg")]
+        self.assertEqual(verify_artifacts.missing_release_platforms(without_intel), ["macOS Intel"])
+
+    def test_the_release_job_runs_on_this_repository_s_tags(self) -> None:
+        # Tags are `0.14.1`, never `v0.14.1`: a `v*`-only trigger never built
+        # a release, and the release job never ran.
+        workflow = (
+            Path(__file__).resolve().parents[3] / ".github" / "workflows" / "desktop-build.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("'[0-9]+.[0-9]+.[0-9]+*'", workflow)
+        self.assertNotIn("startsWith(github.ref, 'refs/tags/v')", workflow)
+        self.assertIn("verify_artifacts.py --release-assets", workflow)
+
 if __name__ == "__main__":
     unittest.main()

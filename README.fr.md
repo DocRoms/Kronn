@@ -74,6 +74,20 @@
   identifier ne rend plus sa room illisible, OpenCode est reconnu quand il la
   rejoint, et une discussion qui ne se charge pas dit pourquoi, avec un bouton
   Réessayer.
+- **Un mode Docker plus sûr :** les agents ne voient plus les fichiers
+  d'identifiants de votre home, ni le socket Docker de l'hôte, ni les jetons MCP
+  dans les dépôts et dans la config des CLI ; le dossier de données de Kronn
+  n'est lisible que par vous. Lisez l'avis de sécurité et régénérez les jetons
+  configurés.
+- **Rapide sur un gros espace de travail :** les pages Discussions et Projets
+  s'ouvrent en moins d'une seconde sur une base de 10 Go, un clic sur une
+  discussion ne redessine plus que deux cartes, et un seul écran de chargement
+  Kronn couvre le démarrage et les redémarrages, sans page d'erreur.
+- **Modèles LiteLLM vérifiés :** tester une connexion signale en direct chaque
+  modèle qui répond 404, et un modèle refusé ne peut plus être enregistré.
+- **Les installeurs desktop sont de retour :** chaque release porte à nouveau
+  ses installeurs Windows, macOS et Linux, et la bannière de mise à jour ne
+  propose qu'une version installable.
 
 Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 

@@ -856,6 +856,8 @@ async fn pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 // ── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
+    // The update banner then only offers a release that has an installer.
+    std::env::set_var(kronn::api::version::DESKTOP_APP_ENV, "1");
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_writer(std::io::stdout)

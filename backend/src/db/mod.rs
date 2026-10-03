@@ -120,7 +120,10 @@ impl Database {
         let dir = config::config_dir()?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("kronn.db");
-        Self::open_path_for_backend_boot(&path)
+        let db = Self::open_path_for_backend_boot(&path)?;
+        // After the open, so the WAL and shared-memory files exist too.
+        restrict_data_dir_to_owner(&dir);
+        Ok(db)
     }
 
     /// Open an in-memory database (useful for testing).
@@ -420,5 +423,80 @@ impl Database {
         })
         .await
         .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?
+    }
+}
+
+/// The data directory holds the database, its backups and copies of the
+/// encryption key: no other account on the machine may read them (KT-990).
+/// Agents run as the same user, so this does not keep them out; that is the
+/// isolation work planned for 0.14.3.
+pub(crate) fn restrict_data_dir_to_owner(dir: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let restrict = |path: &std::path::Path, mode: u32| {
+            if let Err(error) =
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            {
+                tracing::warn!(
+                    "Could not restrict {} to its owner: {error}",
+                    path.display()
+                );
+            }
+        };
+        restrict(dir, 0o700);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let is_database_file = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("kronn.db"));
+            if is_database_file && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                restrict(&entry.path(), 0o600);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+#[cfg(all(test, unix))]
+mod data_dir_permission_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_data_dir_and_every_database_file_end_up_owner_only() {
+        // KT-990 — kronn.db, its WAL/SHM and its backups were 0644 in a 0755
+        // directory on Linux: readable by any account on the machine.
+        let dir = tempfile::tempdir().unwrap();
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let database_files = [
+            "kronn.db",
+            "kronn.db-wal",
+            "kronn.db-shm",
+            "kronn.db.backup",
+            "kronn.db.pre-0.14.2-20260927",
+        ];
+        for name in database_files.iter().chain(["notes.txt"].iter()) {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"x").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        super::restrict_data_dir_to_owner(dir.path());
+
+        assert_eq!(mode(dir.path()), 0o700);
+        for name in database_files {
+            assert_eq!(mode(&dir.path().join(name)), 0o600, "{name}");
+        }
+        assert_eq!(
+            mode(&dir.path().join("notes.txt")),
+            0o644,
+            "files that are not the database are left alone"
+        );
     }
 }
