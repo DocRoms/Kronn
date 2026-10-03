@@ -280,7 +280,7 @@ async fn read_git_branch(path: &Path) -> Result<String> {
 
 /// Convert a container mount path back to the original host path.
 /// e.g. /host-home/Repositories/foo -> /home/priol/Repositories/foo
-fn restore_host_path(path: &Path) -> String {
+pub(crate) fn restore_host_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     if let Some(relative) = s.strip_prefix("/host-home") {
         if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {

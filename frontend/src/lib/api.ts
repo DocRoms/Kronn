@@ -252,6 +252,7 @@ import type {
 } from '../types/generated';
 import { ApiRequestError } from './apiRequestError';
 
+import type { AgentFilesPolicy, ProjectAgentFiles } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -910,6 +911,11 @@ export interface MigrateDocsResponse {
 export const projects = {
   list: () => api<Project[]>('GET', '/projects'),
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
+  /** Where Kronn writes this project's agent files (KT-971). */
+  agentFiles: (id: string) =>
+    api<ProjectAgentFiles>('GET', `/projects/${encodeURIComponent(id)}/agent-files`),
+  setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
+    api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
   repositoryResources: (id: string) =>
     api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
   /** The diffs behind one listed resource, built when its Compare sheet opens:

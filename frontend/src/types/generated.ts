@@ -291,6 +291,11 @@ runtime_warning?: string | null,
  */
 shadowed_installs?: Array<ShadowedInstall>, };
 
+/**
+ * Where Kronn writes a project's agent files (KT-971).
+ */
+export type AgentFilesPolicy = "repo" | "outside";
+
 export type AgentProfile = { id: string, name: string, persona_name: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, is_builtin: boolean,
 /**
  * Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
@@ -5250,6 +5255,16 @@ linked_repos?: Array<LinkedRepo>,
  */
 workspace?: ProjectWorkspace | null, created_at: string, updated_at: string, };
 
+export type ProjectAgentFiles = { policy: AgentFilesPolicy,
+/**
+ * Where the files are when they are outside the repository.
+ */
+outside_dir?: string,
+/**
+ * Repository files Kronn took its entries back out of during this change.
+ */
+cleaned?: Array<string>, };
+
 export type ProjectDockerAction = "start" | "stop" | "restart";
 
 export type ProjectDockerActionRequest = { action: ProjectDockerAction, service?: string | null, };
@@ -6757,6 +6772,8 @@ num_ctx: number | null,
  * genuinely have more RAM free than Kronn's coarse tiers assume.
  */
 warnings: Array<string>, };
+
+export type SetProjectAgentFiles = { policy: AgentFilesPolicy, };
 
 export type SetRecoveryResponse = {
 /**

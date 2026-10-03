@@ -724,6 +724,8 @@ fn native_command(
 ) -> tokio::process::Command {
     let mut command = crate::core::cmd::async_cmd(program);
     command.args(args).current_dir(cwd);
+    // Under Docker, the MCP values the project's MCP files refer to (KT-964).
+    crate::core::mcp_secret_refs::apply_to(&mut command, std::path::Path::new(cwd));
     if let Some(discussion_id) = discussion_id {
         command.env("KRONN_DISCUSSION_ID", discussion_id);
     }

@@ -35,6 +35,7 @@ import { ProjectTasksPanel } from './ProjectTasksPanel';
 import { ContextHelp } from './ContextHelp';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { ProjectDockerPanel } from './ProjectDockerPanel';
+import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
 
@@ -2452,6 +2453,7 @@ export function ProjectCard({
                   onUpdate={onRefetch}
                 />
               </section>
+              <ProjectAgentFilesSetting projectId={proj.id} t={t} />
               <div className="dash-delete-zone" data-testid="project-overview-delete-zone">
                 {deleteConfirmId === proj.id ? (
                   <div>

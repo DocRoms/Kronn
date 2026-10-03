@@ -23,6 +23,36 @@ pub struct ProjectWorkspace {
     pub hooks: crate::models::WorkspaceHooks,
 }
 
+/// Where Kronn writes a project's agent files (KT-971).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFilesPolicy {
+    /// In the repository: every CLI reads its MCP config there.
+    #[default]
+    Repo,
+    /// In Kronn's data directory: the repository is left untouched, and only
+    /// Claude Code, which takes its MCP config by path, keeps its MCP servers.
+    Outside,
+}
+
+impl AgentFilesPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Repo => "repo",
+            Self::Outside => "outside",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        if value == "outside" {
+            Self::Outside
+        } else {
+            Self::Repo
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Project {

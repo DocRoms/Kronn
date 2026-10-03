@@ -976,6 +976,66 @@ html[data-density="large"] .dash-main {
 }
 
 /* ── Delete confirmation area ──────────────────────────── */
+.project-agent-files {
+  margin-top: var(--kr-sp-6);
+  padding-top: var(--kr-sp-6);
+  border-top: 1px solid var(--kr-border-ghost);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.project-agent-files h4 {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.project-agent-files-help,
+.project-agent-files-where,
+.project-agent-files-cleaned {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+}
+
+.project-agent-files-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  cursor: pointer;
+}
+
+.project-agent-files-option[data-selected='true'] {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+
+.project-agent-files-option span {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+}
+
+.project-agent-files-option strong {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.project-agent-files-error {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: rgb(var(--kr-error-rgb));
+}
+
 .dash-delete-zone {
   margin-top: var(--kr-sp-6);
   padding-top: var(--kr-sp-6);

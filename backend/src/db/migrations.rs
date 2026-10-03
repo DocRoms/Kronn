@@ -795,6 +795,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "206_model_catalog_answered_at",
         include_str!("sql/206_model_catalog_answered_at.sql"),
     ),
+    (
+        "207_project_agent_files",
+        include_str!("sql/207_project_agent_files.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

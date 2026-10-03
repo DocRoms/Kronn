@@ -7,6 +7,7 @@ use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
 
+pub mod agent_files;
 pub mod anti_hallu_inject;
 pub mod bootstrap;
 pub mod clone;
@@ -278,8 +279,11 @@ pub(crate) async fn resync_project_assets(state: &AppState, project_id: &str) {
             } else {
                 tracing::debug!("Skipping MCP re-sync for project {pid}: no encryption secret configured");
             }
-            // Native skills + profiles → SKILL.md / agent files.
-            if let Ok(Some(project)) = crate::db::projects::get_project(conn, &pid) {
+            // Native skills + profiles → SKILL.md / agent files, unless the
+            // project keeps Kronn's files out of its repository (KT-971).
+            let outside = crate::db::projects::agent_files_policy(conn, &pid)?
+                == AgentFilesPolicy::Outside;
+            if let Some(project) = crate::db::projects::get_project(conn, &pid)?.filter(|_| !outside) {
                 let profile_ids: Vec<String> = project.default_profile_id.iter().cloned().collect();
                 if let Err(e) = crate::core::native_files::sync_project_native_files_full(
                     &project.path,

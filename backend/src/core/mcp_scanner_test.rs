@@ -118,6 +118,27 @@ mod tests {
             env: HashMap::new(),
         };
         assert!(!mcp_entry_leaks_secret(&clean));
+
+        let references = McpServerEntry {
+            env: HashMap::from([(
+                "API_KEY".to_string(),
+                "${KRONN_MCP_3F2A91BC7D_API_KEY}".to_string(),
+            )]),
+            ..clean.clone()
+        };
+        assert!(!mcp_entry_leaks_secret(&references));
+
+        let mixed = McpServerEntry {
+            env: HashMap::from([
+                (
+                    "API_KEY".to_string(),
+                    "${KRONN_MCP_3F2A91BC7D_API_KEY}".to_string(),
+                ),
+                ("OTHER".to_string(), "secret".to_string()),
+            ]),
+            ..clean
+        };
+        assert!(mcp_entry_leaks_secret(&mixed));
     }
 
     // ─── write_mcp_json (Claude Code .mcp.json) ────────────────────────────
@@ -3319,7 +3340,9 @@ args = ["@example/old-mcp"]
         std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &b);
         std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &b);
 
-        let wrote = write_kronn_internal_only(&tmp.to_string_lossy()).unwrap();
+        let wrote = crate::agents::with_cold_detection_cache(|| {
+            write_kronn_internal_only(&tmp.to_string_lossy()).unwrap()
+        });
 
         std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
         std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
@@ -3392,6 +3415,514 @@ args = ["@example/old-mcp"]
             );
         }
 
+        cleanup(&tmp);
+    }
+
+    /// KT-964 — under Docker, no project MCP file carries a secret value: Claude
+    /// Code gets references it resolves from the agent's environment, the CLIs
+    /// that cannot resolve them get no secret-bearing MCP, and the values stay
+    /// in memory for agents started in that directory only.
+    #[test]
+    #[serial]
+    fn under_docker_mcp_files_hold_references_and_never_a_secret_value() {
+        use crate::models::{McpConfig, McpServer, McpSource, McpTransport};
+        use rusqlite::Connection;
+        let tmp = setup_tmp("secret-refs");
+        let bridge = tmp.join("bridge.py");
+        std::fs::write(&bridge, "# stub bridge").unwrap();
+        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
+
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        crate::db::mcps::upsert_server(
+            &conn,
+            &McpServer {
+                id: "srv-github".into(),
+                name: "GitHub".into(),
+                description: String::new(),
+                transport: McpTransport::Stdio {
+                    command: "python3".into(),
+                    args: vec!["github-mcp.py".into()],
+                },
+                source: McpSource::Manual,
+                api_spec: None,
+            },
+        )
+        .unwrap();
+        let env = HashMap::from([(
+            "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+            "ghp_never_on_disk".to_string(),
+        )]);
+        crate::db::mcps::insert_config(
+            &conn,
+            &McpConfig {
+                id: "cfg-github-1".into(),
+                server_id: "srv-github".into(),
+                label: "github".into(),
+                env_keys: vec!["GITHUB_PERSONAL_ACCESS_TOKEN".into()],
+                env_encrypted: crate::db::mcps::encrypt_env(&env, secret).unwrap(),
+                args_override: None,
+                is_global: false,
+                include_general: true,
+                config_hash: "hash-github".into(),
+                project_ids: vec![],
+                host_sync: Default::default(),
+            },
+        )
+        .unwrap();
+
+        let result = write_general_mcp_json(&conn, secret, &tmp.to_string_lossy());
+        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        result.unwrap();
+
+        let claude = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
+        let reference = crate::core::mcp_secret_refs::reference_name(
+            "cfg-github-1",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+        );
+        assert!(claude.contains(&format!("${{{reference}}}")), "{claude}");
+        for path in [
+            ".mcp.json",
+            ".kiro/settings/mcp.json",
+            ".ai/mcp/mcp.json",
+            ".gemini/settings.json",
+            ".vibe/config.toml",
+        ] {
+            let content = std::fs::read_to_string(tmp.join(path)).unwrap();
+            assert!(
+                !content.contains("ghp_never_on_disk"),
+                "{path} holds the secret:\n{content}"
+            );
+            assert!(content.contains("kronn-internal"), "{path} lost the bridge");
+            if path != ".mcp.json" {
+                assert!(
+                    !content.contains("github-mcp.py"),
+                    "{path} still has the MCP"
+                );
+            }
+        }
+        assert_eq!(
+            crate::core::mcp_secret_refs::values_for(&tmp),
+            vec![(reference, "ghp_never_on_disk".to_string())]
+        );
+        crate::core::mcp_secret_refs::remember(&tmp.to_string_lossy(), Vec::new());
+        cleanup(&tmp);
+    }
+
+    /// Natively nothing changes: values are written as before (Romu, 02/10).
+    #[test]
+    #[serial]
+    fn natively_mcp_files_keep_their_values() {
+        use crate::models::{McpConfig, McpServer, McpSource, McpTransport};
+        use rusqlite::Connection;
+        let tmp = setup_tmp("secret-native");
+        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "0");
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        crate::db::mcps::upsert_server(
+            &conn,
+            &McpServer {
+                id: "srv-n".into(),
+                name: "N".into(),
+                description: String::new(),
+                transport: McpTransport::Stdio {
+                    command: "python3".into(),
+                    args: vec!["n.py".into()],
+                },
+                source: McpSource::Manual,
+                api_spec: None,
+            },
+        )
+        .unwrap();
+        let env = HashMap::from([("TOKEN".to_string(), "native-value".to_string())]);
+        crate::db::mcps::insert_config(
+            &conn,
+            &McpConfig {
+                id: "cfg-n".into(),
+                server_id: "srv-n".into(),
+                label: "n".into(),
+                env_keys: vec!["TOKEN".into()],
+                env_encrypted: crate::db::mcps::encrypt_env(&env, secret).unwrap(),
+                args_override: None,
+                is_global: false,
+                include_general: true,
+                config_hash: "hash-n".into(),
+                project_ids: vec![],
+                host_sync: Default::default(),
+            },
+        )
+        .unwrap();
+        let result = write_general_mcp_json(&conn, secret, &tmp.to_string_lossy());
+        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        result.unwrap();
+        let claude = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
+        assert!(claude.contains("native-value"), "{claude}");
+        assert!(crate::core::mcp_secret_refs::values_for(&tmp).is_empty());
+        cleanup(&tmp);
+    }
+
+    /// KT-971 — a project can keep Kronn's agent files out of its repository:
+    /// switching takes back only what Kronn wrote (a user's own MCP entry
+    /// stays), and Claude's config then lives in Kronn's stand-in directory.
+    #[test]
+    #[serial]
+    fn a_project_can_keep_kronn_agent_files_out_of_its_repository() {
+        use crate::models::{AgentFilesPolicy, AiAuditStatus, AiConfigStatus, Project};
+        use rusqlite::Connection;
+        let tmp = setup_tmp("agent-files-outside");
+        let repo = tmp.join("repo");
+        let data = tmp.join("data");
+        std::fs::create_dir_all(&repo).unwrap();
+        let bridge = tmp.join("bridge.py");
+        std::fs::write(&bridge, "# stub bridge").unwrap();
+        let previous_data = std::env::var("KRONN_DATA_DIR").ok();
+        std::env::set_var("KRONN_DATA_DIR", &data);
+        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        // The user's own server, which Kronn must never take out.
+        std::fs::write(
+            repo.join(".mcp.json"),
+            r#"{"mcpServers":{"mine":{"command":"my-server"}}}"#,
+        )
+        .unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now();
+        crate::db::projects::insert_project(
+            &conn,
+            &Project {
+                id: "p-files".into(),
+                name: "files".into(),
+                path: repo.to_string_lossy().into_owned(),
+                repo_url: None,
+                token_override: None,
+                ai_config: AiConfigStatus {
+                    detected: false,
+                    configs: vec![],
+                },
+                audit_status: AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                tech_debt_count: 0,
+                needs_docs_migration: false,
+                path_exists: true,
+                write_access: None,
+                mcp_sync_report: None,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                linked_repos: vec![],
+                workspace: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .unwrap();
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let path = repo.to_string_lossy().into_owned();
+
+        crate::agents::with_cold_detection_cache(|| {
+            sync_project_mcps_to_disk(&conn, "p-files", secret).unwrap()
+        });
+        let in_repo = std::fs::read_to_string(repo.join(".mcp.json")).unwrap();
+        assert!(
+            in_repo.contains("kronn-internal") && in_repo.contains("mine"),
+            "{in_repo}"
+        );
+
+        crate::db::projects::set_agent_files_policy(&conn, "p-files", AgentFilesPolicy::Outside)
+            .unwrap();
+        let cleaned = remove_kronn_agent_files(&path).unwrap();
+        sync_project_mcps_to_disk(&conn, "p-files", secret).unwrap();
+
+        assert!(cleaned.contains(&".mcp.json".to_string()), "{cleaned:?}");
+        let in_repo = std::fs::read_to_string(repo.join(".mcp.json")).unwrap();
+        assert!(
+            in_repo.contains("mine"),
+            "the user's entry stays: {in_repo}"
+        );
+        assert!(!in_repo.contains("kronn-internal"), "{in_repo}");
+        for gone in [".kiro", ".ai", ".gemini", ".vibe"] {
+            assert!(!repo.join(gone).exists(), "{gone} left in the repository");
+        }
+        let outside = outside_agent_files_dir(&path).unwrap();
+        assert!(outside.starts_with(&data), "{}", outside.display());
+        let claude = std::fs::read_to_string(outside.join(".mcp.json")).unwrap();
+        assert!(claude.contains("kronn-internal"), "{claude}");
+
+        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        match previous_data {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+        cleanup(&tmp);
+    }
+
+    /// KT-964 — the project sync, the main path, under Docker: the repository's
+    /// MCP files never hold the secret, and the value is kept for agents
+    /// started in that project only.
+    #[test]
+    #[serial]
+    fn under_docker_a_projects_mcp_files_never_hold_a_secret_value() {
+        use crate::models::{
+            AiAuditStatus, AiConfigStatus, McpConfig, McpServer, McpSource, McpTransport, Project,
+        };
+        use rusqlite::Connection;
+        let tmp = setup_tmp("project-secret-refs");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let bridge = tmp.join("bridge.py");
+        std::fs::write(&bridge, "# stub bridge").unwrap();
+        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
+
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now();
+        crate::db::projects::insert_project(
+            &conn,
+            &Project {
+                id: "p-refs".into(),
+                name: "refs".into(),
+                path: repo.to_string_lossy().into_owned(),
+                repo_url: None,
+                token_override: None,
+                ai_config: AiConfigStatus {
+                    detected: false,
+                    configs: vec![],
+                },
+                audit_status: AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                tech_debt_count: 0,
+                needs_docs_migration: false,
+                path_exists: true,
+                write_access: None,
+                mcp_sync_report: None,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                linked_repos: vec![],
+                workspace: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .unwrap();
+        crate::db::mcps::upsert_server(
+            &conn,
+            &McpServer {
+                id: "srv-gh".into(),
+                name: "GitHub".into(),
+                description: String::new(),
+                transport: McpTransport::Stdio {
+                    command: "python3".into(),
+                    args: vec!["github-mcp.py".into()],
+                },
+                source: McpSource::Manual,
+                api_spec: None,
+            },
+        )
+        .unwrap();
+        let env = HashMap::from([("GITHUB_TOKEN".to_string(), "ghp_project_secret".to_string())]);
+        crate::db::mcps::insert_config(
+            &conn,
+            &McpConfig {
+                id: "cfg-gh".into(),
+                server_id: "srv-gh".into(),
+                label: "github".into(),
+                env_keys: vec!["GITHUB_TOKEN".into()],
+                env_encrypted: crate::db::mcps::encrypt_env(&env, secret).unwrap(),
+                args_override: None,
+                is_global: false,
+                include_general: false,
+                config_hash: "hash-gh".into(),
+                project_ids: vec!["p-refs".into()],
+                host_sync: Default::default(),
+            },
+        )
+        .unwrap();
+        crate::db::mcps::link_config_project(&conn, "cfg-gh", "p-refs").unwrap();
+
+        let result = crate::agents::with_cold_detection_cache(|| {
+            sync_project_mcps_to_disk(&conn, "p-refs", secret)
+        });
+        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        result.unwrap();
+
+        let reference = crate::core::mcp_secret_refs::reference_name("cfg-gh", "GITHUB_TOKEN");
+        let claude = std::fs::read_to_string(repo.join(".mcp.json")).unwrap();
+        assert!(claude.contains(&format!("${{{reference}}}")), "{claude}");
+        for path in [
+            ".mcp.json",
+            ".kiro/settings/mcp.json",
+            ".ai/mcp/mcp.json",
+            ".gemini/settings.json",
+            ".vibe/config.toml",
+        ] {
+            if let Ok(content) = std::fs::read_to_string(repo.join(path)) {
+                assert!(
+                    !content.contains("ghp_project_secret"),
+                    "{path}:\n{content}"
+                );
+            }
+        }
+        assert_eq!(
+            crate::core::mcp_secret_refs::values_for(&repo),
+            vec![(reference, "ghp_project_secret".to_string())]
+        );
+        crate::core::mcp_secret_refs::remember(&repo.to_string_lossy(), Vec::new());
+        cleanup(&tmp);
+    }
+
+    /// KT-964 — the project sync, the main path, under Docker: the repository's
+    /// MCP files never hold the secret, and the value is kept for agents
+    /// started in that project only.
+    #[test]
+    #[serial]
+    fn under_docker_an_existing_token_in_a_project_mcp_file_gives_way_to_a_reference() {
+        use crate::models::{
+            AiAuditStatus, AiConfigStatus, McpConfig, McpServer, McpSource, McpTransport, Project,
+        };
+        use rusqlite::Connection;
+        let tmp = setup_tmp("project-secret-refs");
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let bridge = tmp.join("bridge.py");
+        std::fs::write(&bridge, "# stub bridge").unwrap();
+        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
+
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now();
+        crate::db::projects::insert_project(
+            &conn,
+            &Project {
+                id: "p-refs-existing".into(),
+                name: "refs".into(),
+                path: repo.to_string_lossy().into_owned(),
+                repo_url: None,
+                token_override: None,
+                ai_config: AiConfigStatus {
+                    detected: false,
+                    configs: vec![],
+                },
+                audit_status: AiAuditStatus::NoTemplate,
+                ai_todo_count: 0,
+                tech_debt_count: 0,
+                needs_docs_migration: false,
+                path_exists: true,
+                write_access: None,
+                mcp_sync_report: None,
+                default_skill_ids: vec![],
+                default_profile_id: None,
+                briefing_notes: None,
+                linked_repos: vec![],
+                workspace: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .unwrap();
+        crate::db::mcps::upsert_server(
+            &conn,
+            &McpServer {
+                id: "srv-gh".into(),
+                name: "GitHub".into(),
+                description: String::new(),
+                transport: McpTransport::Stdio {
+                    command: "python3".into(),
+                    args: vec!["github-mcp.py".into()],
+                },
+                source: McpSource::Manual,
+                api_spec: None,
+            },
+        )
+        .unwrap();
+        let env = HashMap::from([("GITHUB_TOKEN".to_string(), "ghp_project_secret".to_string())]);
+        crate::db::mcps::insert_config(
+            &conn,
+            &McpConfig {
+                id: "cfg-gh-existing".into(),
+                server_id: "srv-gh".into(),
+                label: "github".into(),
+                env_keys: vec!["GITHUB_TOKEN".into()],
+                env_encrypted: crate::db::mcps::encrypt_env(&env, secret).unwrap(),
+                args_override: None,
+                is_global: false,
+                include_general: false,
+                config_hash: "hash-gh".into(),
+                project_ids: vec!["p-refs-existing".into()],
+                host_sync: Default::default(),
+            },
+        )
+        .unwrap();
+        crate::db::mcps::link_config_project(&conn, "cfg-gh-existing", "p-refs-existing").unwrap();
+
+        // Recette 0.14.2: the file already held the token, written by hand or
+        // by the old `kronn mcp sync`, plus an unrelated entry of the user's.
+        std::fs::write(
+            repo.join(".mcp.json"),
+            r#"{"mcpServers":{"github":{"command":"python3","args":["github-mcp.py"],"env":{"GITHUB_TOKEN":"ghp_project_secret"}},"mine":{"command":"node","args":["mine.js"]}}}"#,
+        )
+        .unwrap();
+        let result = crate::agents::with_cold_detection_cache(|| {
+            sync_project_mcps_to_disk(&conn, "p-refs-existing", secret)
+        });
+        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        result.unwrap();
+
+        let reference =
+            crate::core::mcp_secret_refs::reference_name("cfg-gh-existing", "GITHUB_TOKEN");
+        let claude = std::fs::read_to_string(repo.join(".mcp.json")).unwrap();
+        assert!(claude.contains(&format!("${{{reference}}}")), "{claude}");
+        for path in [
+            ".mcp.json",
+            ".kiro/settings/mcp.json",
+            ".ai/mcp/mcp.json",
+            ".gemini/settings.json",
+            ".vibe/config.toml",
+        ] {
+            if let Ok(content) = std::fs::read_to_string(repo.join(path)) {
+                assert!(
+                    !content.contains("ghp_project_secret"),
+                    "{path}:\n{content}"
+                );
+            }
+        }
+        assert!(
+            claude.contains("mine.js"),
+            "the user's own entry stays: {claude}"
+        );
+        let backups = repo.join(".kronn/backups/mcp-configs");
+        for backup in std::fs::read_dir(&backups).unwrap().flatten() {
+            let content = std::fs::read_to_string(backup.path()).unwrap();
+            assert!(
+                !content.contains("ghp_project_secret"),
+                "{}:\n{content}",
+                backup.path().display()
+            );
+        }
+        assert_eq!(
+            crate::core::mcp_secret_refs::values_for(&repo),
+            vec![(reference, "ghp_project_secret".to_string())]
+        );
+        crate::core::mcp_secret_refs::remember(&repo.to_string_lossy(), Vec::new());
         cleanup(&tmp);
     }
 }

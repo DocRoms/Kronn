@@ -471,7 +471,7 @@ impl AcpPermissionBroker {
     pub fn session_policy(&self) -> AcpSessionPolicy {
         let policy = AcpSessionPolicy {
             claude_skip_permissions: self.full_access,
-            codex_sandbox: self.full_access.then_some("danger-full-access"),
+            codex_sandbox: codex_sandbox_for(self.full_access, crate::core::env::is_docker()),
         };
         self.record(
             "session/policy",
@@ -485,6 +485,8 @@ impl AcpPermissionBroker {
                 self.full_access,
                 if self.full_access {
                     "broadened CLI bypass granted"
+                } else if policy.codex_sandbox.is_some() {
+                    "restrictive runtime default kept; Codex runs unsandboxed inside the container"
                 } else {
                     "restrictive runtime default kept (deny-by-default)"
                 }
@@ -492,6 +494,13 @@ impl AcpPermissionBroker {
         );
         policy
     }
+}
+
+/// Codex's bwrap sandbox cannot start inside the Kronn container (no
+/// unprivileged user namespaces): every command would fail. There the container
+/// and the project's mounts are the boundary, as on the direct CLI path.
+fn codex_sandbox_for(full_access: bool, in_container: bool) -> Option<&'static str> {
+    (full_access || in_container).then_some("danger-full-access")
 }
 
 /// A location names a secret file by its own name or, when it exists, through the
@@ -716,10 +725,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_runs_without_its_sandbox_inside_the_container() {
+        // Recette 0.14.2 — under Docker, a Codex discussion could not run a
+        // single command: "bwrap: No permissions to create a new namespace".
+        assert_eq!(codex_sandbox_for(false, true), Some("danger-full-access"));
+        assert_eq!(codex_sandbox_for(false, false), None);
+        assert_eq!(codex_sandbox_for(true, false), Some("danger-full-access"));
+    }
+
+    #[test]
     fn session_policy_keeps_the_runtime_default_unless_full_access_is_set() {
         let restricted = AcpPermissionBroker::new(false).session_policy();
         assert!(!restricted.claude_skip_permissions);
-        assert_eq!(restricted.codex_sandbox, None);
+        assert_eq!(
+            restricted.codex_sandbox,
+            codex_sandbox_for(false, crate::core::env::is_docker())
+        );
 
         let broadened = AcpPermissionBroker::new(true).session_policy();
         assert!(broadened.claude_skip_permissions);

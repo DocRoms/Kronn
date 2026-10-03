@@ -203,6 +203,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     projects: {
       list: resolve([]),
       get: resolve(null),
+      agentFiles: resolve({ policy: 'repo' }),
+      setAgentFiles: resolve({ policy: 'repo' }),
       scan: resolve([]),
       create: resolve({}),
       addFolder: resolve({}),
