@@ -25,10 +25,17 @@ vi.mock('../../lib/api', async () => {
 });
 
 import { BackendStatus } from '../BackendStatus';
+import {
+  getBackendHealth,
+  onBackendRecovered,
+  reportBackendSuspect,
+  setBackendHealth,
+} from '../../lib/backendReachability';
 
 describe('BackendStatus', () => {
   beforeEach(() => {
     mocks.fetchHealth.mockReset();
+    setBackendHealth('unknown');
   });
 
   afterEach(() => {
@@ -52,9 +59,8 @@ describe('BackendStatus', () => {
     // localised label. Use findByRole to wait for the async update.
     const status = await screen.findByRole('status');
     expect(status).toHaveClass('kronn-backend-status');
-    // Localised label is in the pill's text — exact phrasing depends on
-    // locale, but it always contains the project name "Backend".
-    expect(status).toHaveTextContent(/Backend/i);
+    // A restart is the usual cause: the pill says it reconnects.
+    expect(status).toHaveTextContent(/reconnect|reconnexion|reconectando|重新连接/i);
   });
 
   it('clears the pill once the backend recovers', async () => {
@@ -81,5 +87,45 @@ describe('BackendStatus', () => {
     });
     expect(mocks.fetchHealth).toHaveBeenCalledTimes(2);
     expect(container.querySelector('.kronn-backend-status')).toBeNull();
+  });
+
+  it('checks at once when a request fails, instead of waiting for the 30 s poll', async () => {
+    // A restart shorter than the healthy poll interval left pages empty with
+    // no explanation: a failed call must surface the pill right away.
+    vi.useFakeTimers();
+    mocks.fetchHealth.mockResolvedValueOnce({ ok: true, version: '0.7.1' });
+    const { container } = render(<I18nProvider><BackendStatus /></I18nProvider>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(getBackendHealth()).toBe('up');
+
+    mocks.fetchHealth.mockRejectedValue(new Error('ECONNREFUSED'));
+    await act(async () => {
+      reportBackendSuspect();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mocks.fetchHealth).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('.kronn-backend-status')).not.toBeNull();
+    expect(getBackendHealth()).toBe('down');
+  });
+
+  it('announces the recovery once, so failed loads can retry', async () => {
+    vi.useFakeTimers();
+    const recovered = vi.fn();
+    const stop = onBackendRecovered(recovered);
+    mocks.fetchHealth
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValue({ ok: true, version: '0.7.1' });
+    render(<I18nProvider><BackendStatus /></I18nProvider>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(recovered).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(recovered).toHaveBeenCalledTimes(1);
+    expect(getBackendHealth()).toBe('up');
+
+    // Further healthy polls do not announce it again.
+    await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+    expect(recovered).toHaveBeenCalledTimes(1);
+    stop();
   });
 });

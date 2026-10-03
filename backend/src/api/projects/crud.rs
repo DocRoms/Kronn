@@ -18,12 +18,15 @@ use super::{enrich_audit_status, find_common_parent};
 
 /// GET /api/projects
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project>>> {
-    match state.db.with_conn(crate::db::projects::list_projects).await {
+    // Read connection: a list must not queue behind a long write.
+    match state
+        .db
+        .with_read_conn(crate::db::projects::list_projects)
+        .await
+    {
         Ok(mut projects) => {
             let projects = tokio::task::spawn_blocking(move || {
-                for p in &mut projects {
-                    enrich_audit_status(p);
-                }
+                enrich_all(&mut projects);
                 projects
             })
             .await
@@ -37,6 +40,18 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project
     }
 }
 
+/// Each project's enrichment reads its own docs tree; one thread per project
+/// keeps the list as slow as the slowest project, not the sum of all of them.
+fn enrich_all(projects: &mut [Project]) {
+    const MAX_THREADS: usize = 8;
+    let chunk = projects.len().div_ceil(MAX_THREADS).max(1);
+    std::thread::scope(|scope| {
+        for group in projects.chunks_mut(chunk) {
+            scope.spawn(move || group.iter_mut().for_each(enrich_audit_status));
+        }
+    });
+}
+
 /// GET /api/projects/:id
 pub async fn get(
     State(state): State<AppState>,
@@ -45,7 +60,7 @@ pub async fn get(
     let pid = id.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &pid))
         .await
     {
         Ok(Some(mut project)) => tokio::task::spawn_blocking(move || {
@@ -1196,6 +1211,38 @@ mod linked_repos_candidates_tests {
 mod bidirectional_link_tests {
     use super::*;
     use crate::models::{AiAuditStatus, AiConfigStatus};
+
+    #[test]
+    fn the_project_list_enriches_every_project_when_spread_over_threads() {
+        // KT-987 — enrichment now runs on several threads; none may be skipped
+        // or enriched with another project's tree.
+        let root = std::env::temp_dir().join(format!("kronn-enrich-all-{}", std::process::id()));
+        let mut projects = Vec::new();
+        for index in 0..21 {
+            let path = root.join(format!("p{index}"));
+            if index % 2 == 0 {
+                let docs = path.join("docs");
+                std::fs::create_dir_all(&docs).unwrap();
+                let rows: String = (0..index).map(|n| format!("| TD-{n} | x |\n")).collect();
+                std::fs::write(docs.join("inconsistencies-tech-debt.md"), rows).unwrap();
+            }
+            projects.push(make_project(
+                &format!("p{index}"),
+                "p",
+                path.to_str().unwrap(),
+                None,
+            ));
+        }
+
+        enrich_all(&mut projects);
+
+        for (index, project) in projects.iter().enumerate() {
+            assert_eq!(project.path_exists, index % 2 == 0, "{}", project.id);
+            let expected = if index % 2 == 0 { index as u32 } else { 0 };
+            assert_eq!(project.tech_debt_count, expected, "{}", project.id);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn make_project(id: &str, name: &str, path: &str, repo_url: Option<&str>) -> Project {
         Project {

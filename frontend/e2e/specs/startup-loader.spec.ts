@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test';
 import { BootPage } from '../pages/BootPage';
 
-// Hold setup pending to inspect the real splash CSS, without exercising the
-// backend or changing its state. App.test.tsx covers timeout and retry paths.
+// Hold setup pending to inspect the real start-up screen, without exercising
+// the backend or changing its state. App.test.tsx and bootScreen.test.tsx
+// cover the slow start, retry and hand-over paths.
 for (const colorScheme of ['dark', 'light'] as const) {
   test(`startup mark rotates slowly and respects reduced motion (${colorScheme})`, async ({ page }) => {
     const pageErrors: string[] = [];
@@ -27,7 +28,10 @@ for (const colorScheme of ['dark', 'light'] as const) {
     await expect(boot.mark).toHaveCSS('animation-duration', '6s');
     await expect(boot.mark).toHaveCSS('animation-timing-function', 'linear');
     await expect(boot.mark).toHaveCSS('animation-iteration-count', 'infinite');
-    await expect(boot.status).toContainText(/Entering the grid|Loading config|Detecting agents|Almost ready/);
+    // One screen from the first frame: only its sentence changes.
+    // The e2e browser runs in French (playwright.config.ts).
+    await expect(boot.status).toContainText(/Démarrage de Kronn|Connexion au service local|Le service local démarre/);
+    await expect(page.getByRole('status')).toHaveCount(1);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await expect(boot.mark).toHaveCSS('animation-name', 'none');
     await expect(boot.mark).toHaveCSS('transform', 'none');

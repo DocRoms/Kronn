@@ -372,3 +372,48 @@ describe('api module', () => {
     });
   });
 });
+
+describe('api — a stopped backend', () => {
+  it('asks for a health check when the request cannot reach the server', async () => {
+    const { onBackendSuspect } = await import('../backendReachability');
+    const { projects } = await import('../api');
+    const suspect = vi.fn();
+    const stop = onBackendSuspect(suspect);
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new TypeError('Failed to fetch'));
+
+    await expect(projects.list()).rejects.toThrow('Failed to fetch');
+
+    expect(suspect).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('asks for a health check on a gateway answer without JSON (dev proxy, nginx)', async () => {
+    const { onBackendSuspect } = await import('../backendReachability');
+    const { projects } = await import('../api');
+    const suspect = vi.fn();
+    const stop = onBackendSuspect(suspect);
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 502,
+      headers: { get: () => 'text/plain' },
+      text: () => Promise.resolve(''),
+    });
+
+    await expect(projects.list()).rejects.toThrow('HTTP 502');
+
+    expect(suspect).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('does not suspect the backend for an API error it answered', async () => {
+    const { onBackendSuspect } = await import('../backendReachability');
+    const { projects } = await import('../api');
+    const suspect = vi.fn();
+    const stop = onBackendSuspect(suspect);
+    mockFetchError('Project not found', 404);
+
+    await expect(projects.list()).rejects.toThrow('Project not found');
+
+    expect(suspect).not.toHaveBeenCalled();
+    stop();
+  });
+});

@@ -1,30 +1,22 @@
 import { useEffect, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { fetchHealth } from '../lib/api';
+import { onBackendSuspect, reportBackendRecovered, setBackendHealth } from '../lib/backendReachability';
 import { useT } from '../lib/I18nContext';
 
 /**
- * Persistent backend-health indicator anchored next to the UpdateBanner.
+ * Backend-health pill anchored next to the UpdateBanner, the only poller of
+ * `/api/health`.
  *
- * Polls `/api/health` every 30s. While the backend answers, the pill
- * stays hidden (no chrome noise). When it stops answering, a red
- * "backend offline" pill surfaces so the user knows the next API
- * call won't reach the server — without waiting for an action to
- * fail. While offline, polling accelerates so a restarted backend is
- * detected quickly.
+ * Hidden while the backend answers. When it stops — usually a restart — a
+ * "reconnecting" pill surfaces at once: any API call that fails the way a
+ * stopped backend fails triggers a check instead of waiting for the healthy
+ * 30 s poll. While down, polling every 2 s; on the way back up it announces
+ * the recovery so loads that failed meanwhile retry (`useApi`), and it keeps
+ * the shared health state the start-up screen reads.
  *
- * # Why not just rely on `<ApiErrorScreen />`
- *
- * `ApiErrorScreen` covers the **boot** path — when `setupApi.getStatus()`
- * fails on first mount. After the dashboard mounts, a backend crash
- * mid-session goes unnoticed until the user clicks something. This
- * pill closes that gap with minimal noise (hidden when healthy).
- *
- * # Why not surface inside the existing reconnect banner
- *
- * The WebSocket reconnect already shows progress, but only in
- * pages that actively subscribe to WS. Settings, Workflows etc.
- * don't always have a live WS — a pure HTTP health check is the
- * superset.
+ * Start-up itself is covered by the single loading screen (`bootScreen.ts`);
+ * this pill covers a backend lost mid-session, on every page, WebSocket or not.
  */
 const HEALTHY_POLL_INTERVAL_MS = 30_000;
 const UNHEALTHY_POLL_INTERVAL_MS = 2_000;
@@ -41,6 +33,7 @@ export function BackendStatus() {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let checking = false;
+    let wasDown = false;
 
     const check = async () => {
       if (checking || cancelled) return;
@@ -50,7 +43,14 @@ export function BackendStatus() {
         await fetchHealth();
         nextHealthy = true;
         if (!cancelled) setHealthy(true);
+        setBackendHealth('up');
+        if (wasDown) {
+          wasDown = false;
+          reportBackendRecovered();
+        }
       } catch {
+        wasDown = true;
+        setBackendHealth('down');
         // Any failure (network, 5xx, JSON parse) → mark unhealthy.
         // The pill renders, the user notices, and on the next tick we
         // try again — when it succeeds, the pill auto-hides.
@@ -78,10 +78,14 @@ export function BackendStatus() {
     // First check fires immediately so the pill surfaces a backend
     // crash that happened just before the user navigated.
     void check();
+    // A failed API call checks at once: a restart shorter than the healthy
+    // poll interval would otherwise leave pages empty with no explanation.
+    const stopSuspect = onBackendSuspect(checkNow);
     window.addEventListener('online', checkNow);
     document.addEventListener('visibilitychange', checkWhenVisible);
     return () => {
       cancelled = true;
+      stopSuspect();
       if (timer) clearTimeout(timer);
       window.removeEventListener('online', checkNow);
       document.removeEventListener('visibilitychange', checkWhenVisible);
@@ -99,7 +103,7 @@ export function BackendStatus() {
       aria-live="polite"
       title={t('app.backendOfflineTitle')}
     >
-      <span className="kronn-backend-status-dot" aria-hidden="true" />
+      <Loader2 size={12} className="kronn-backend-status-spinner" aria-hidden="true" />
       <span className="kronn-backend-status-text">
         {t('app.backendOffline')}
       </span>

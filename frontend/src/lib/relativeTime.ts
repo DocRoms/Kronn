@@ -67,12 +67,26 @@ export function formatRelativeTime(iso: string, lang: string = 'fr'): string {
   const nowD = new Date(now);
   const sameYear = nowD.getFullYear() === d.getFullYear();
   try {
-    return new Intl.DateTimeFormat(locale, {
-      day: 'numeric',
-      month: 'short',
-      ...(sameYear ? {} : { year: 'numeric' }),
-    }).format(d);
+    return shortDateFormat(locale, sameYear).format(d);
   } catch {
     return d.toISOString().slice(0, 10);
   }
+}
+
+// Building an Intl formatter costs far more than formatting with one, and the
+// sidebar formats one date per card on every render.
+const shortDateFormats = new Map<string, Intl.DateTimeFormat>();
+
+function shortDateFormat(locale: string, sameYear: boolean): Intl.DateTimeFormat {
+  const key = `${locale}|${sameYear}`;
+  let format = shortDateFormats.get(key);
+  if (!format) {
+    format = new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'short',
+      ...(sameYear ? {} : { year: 'numeric' }),
+    });
+    shortDateFormats.set(key, format);
+  }
+  return format;
 }

@@ -3342,6 +3342,32 @@ export function DiscussionsPage({
     setActiveDiscussionId(prev => prev === discId ? null : prev);
     refetchDiscussions();
   }, [refetchDiscussions]);
+  const handleDiscTogglePin = useCallback(async (discId: string, pinned: boolean) => {
+    try {
+      await discussionsApi.update(discId, { pinned });
+      refetchDiscussions();
+    } catch (e) {
+      toast(t('disc.pinError', userError(e)), 'error');
+    }
+  }, [refetchDiscussions, t, toast]);
+  const handleDiscStop = useCallback(async (discId: string) => {
+    try {
+      const res = await discussionsApi.stop(discId);
+      if (res.cancelled) {
+        toast(t('disc.stopAgentToast'), 'success');
+        // Don't manually clear sendingMap — the backend's cancel
+        // path in make_agent_stream finishes its finally-block,
+        // saves the partial message, then the WS batch_run_progress
+        // (or the normal done event) will tick sendingMap for us.
+        // Refetch to pick up the partial response promptly.
+        setTimeout(() => refetchDiscussions(), 500);
+      } else {
+        toast(t('disc.stopAgentNothing'), 'info');
+      }
+    } catch (e) {
+      toast(t('disc.stopAgentError', userError(e)), 'error');
+    }
+  }, [refetchDiscussions, t, toast]);
   const handleDiscDelete = useCallback(async (discId: string) => {
     if (!confirm(t('disc.confirmDelete'))) return;
     // Abort any in-flight stream + clear lifted streaming state BEFORE the
@@ -4038,14 +4064,7 @@ export function DiscussionsPage({
           onBulkArchive={handleBulkArchive}
           onBulkDelete={handleBulkDelete}
           onCompareSelected={openSelectedComparison}
-          onTogglePin={async (discId, pinned) => {
-            try {
-              await discussionsApi.update(discId, { pinned });
-              refetchDiscussions();
-            } catch (e) {
-              toast(t('disc.pinError', userError(e)), 'error');
-            }
-          }}
+          onTogglePin={handleDiscTogglePin}
           onNewDiscussion={() => setShowNewDiscussion(true)}
           onImportDiscussion={async file => {
             const content = await file.text();
@@ -4078,24 +4097,7 @@ export function DiscussionsPage({
           toast={toast}
           t={t}
           lang={configLanguage ?? 'fr'}
-          onStopDiscussion={async (discId) => {
-            try {
-              const res = await discussionsApi.stop(discId);
-              if (res.cancelled) {
-                toast(t('disc.stopAgentToast'), 'success');
-                // Don't manually clear sendingMap — the backend's cancel
-                // path in make_agent_stream finishes its finally-block,
-                // saves the partial message, then the WS batch_run_progress
-                // (or the normal done event) will tick sendingMap for us.
-                // Refetch to pick up the partial response promptly.
-                setTimeout(() => refetchDiscussions(), 500);
-              } else {
-                toast(t('disc.stopAgentNothing'), 'info');
-              }
-            } catch (e) {
-              toast(t('disc.stopAgentError', userError(e)), 'error');
-            }
-          }}
+          onStopDiscussion={handleDiscStop}
           batchSummaries={batchSummaries}
           onNavigateWorkflow={(workflowId) => onNavigate('workflows', { workflowId })}
           onDeleteBatch={async (runId, count) => {

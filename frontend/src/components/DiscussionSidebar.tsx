@@ -1,4 +1,5 @@
 import { Fragment, useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import type { ReactNode } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { DiscussionWeightBadge } from './DiscussionWeightBadge';
@@ -481,10 +482,20 @@ export function DiscussionSidebar({
   const { enabled: weightEnabled, weights, stateFor: weightStateFor } = useDiscussionWeights(weightIds);
   // Per-row state: a discussion outside the bounded batch reports
   // `unmeasured`, so it never renders a zero it was never measured for.
-  const weightBadgeFor = (id: string) =>
-    weightEnabled
-      ? <DiscussionWeightBadge weight={weights[id]} state={weightStateFor(id)} t={t} />
-      : undefined;
+  // Same element per row until the weights change: a fresh element on every
+  // render would defeat the card memo and re-render the whole list per click.
+  const weightBadgeFor = useMemo(() => {
+    const badges = new Map<string, ReactNode>();
+    return (id: string) => {
+      if (!weightEnabled) return undefined;
+      let badge = badges.get(id);
+      if (!badge) {
+        badge = <DiscussionWeightBadge weight={weights[id]} state={weightStateFor(id)} t={t} />;
+        badges.set(id, badge);
+      }
+      return badge;
+    };
+  }, [weightEnabled, weights, weightStateFor, t]);
   const executionChildrenByParent = new Map<string, ExecutionDiscussionLink[]>();
   const nestedExecutionChildIds = new Set<string>();
   for (const link of executionLinks) {

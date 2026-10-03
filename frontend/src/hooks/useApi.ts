@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { onBackendRecovered } from '../lib/backendReachability';
 
 interface UseApiState<T> {
   data: T | null;
@@ -64,6 +65,15 @@ export function useApi<T>(
   useEffect(() => {
     fetch();
   }, [fetch]);
+
+  // A load that failed while the backend was restarting retries on its own
+  // once it answers, instead of leaving the page empty.
+  useEffect(
+    () => onBackendRecovered(() => {
+      if (error !== null) void fetch();
+    }),
+    [error, fetch],
+  );
 
   return {
     data,

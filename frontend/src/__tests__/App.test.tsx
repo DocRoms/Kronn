@@ -8,6 +8,7 @@ import {
   setStatusTimeout,
 } from '../lib/appBoot';
 import { createLivePageOpenLinkRelay } from '../lib/live-page-sandbox';
+import { bootMessage, resetBootScreenForTests } from '../lib/bootScreen';
 
 // Mock the lazy-loaded pages to avoid loading the full component trees
 vi.mock('../pages/SetupWizard', () => ({
@@ -79,6 +80,7 @@ beforeEach(() => {
   window.location.hash = '';
   clearCachedSetupStatus();
   setRetryDelay(0); // instant retries in tests
+  resetBootScreenForTests();
   setStatusTimeout(20); // short boot timeout so hangs resolve fast in tests
   // Default: backend unreachable on the fast probe too (matches the existing
   // "backend down" expectations). Individual tests override.
@@ -89,33 +91,13 @@ describe('App', () => {
   it('shows loading screen initially', () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
     render(<App />);
-    // The splash cycles through hints every 1.5s — the first one always
-    // starts with "Entering the grid". The trailing character is a
-    // unicode ellipsis (…), not three dots.
-    expect(screen.getByText(/^Entering the grid…?$/)).toBeDefined();
+    expect(screen.getByRole('status')).toHaveTextContent(bootMessage('connecting'));
     const status = screen.getByRole('status');
     const mark = status.querySelector('svg');
     expect(mark).toHaveAttribute('width', '100');
     expect(mark).toHaveAttribute('height', '100');
     expect(mark).toHaveAttribute('aria-hidden', 'true');
     expect(mark?.querySelectorAll('circle')).toHaveLength(4);
-  });
-
-  it('keeps advancing startup hints with the loading mark', async () => {
-    vi.useFakeTimers();
-    setStatusTimeout(20_000);
-    vi.mocked(setupApi.getStatus).mockReturnValue(new Promise(() => {}));
-    const view = render(<App />);
-    try {
-      for (const hint of ['Loading config…', 'Detecting agents…', 'Almost ready…', 'Almost ready…']) {
-        await act(() => vi.advanceTimersByTimeAsync(1500));
-        expect(screen.getByRole('status')).toHaveTextContent(hint);
-        expect(screen.getByRole('status').querySelector('svg')).toBeInTheDocument();
-      }
-    } finally {
-      view.unmount();
-      vi.useRealTimers();
-    }
   });
 
   it('shows SetupWizard when setup is incomplete', async () => {
@@ -164,7 +146,7 @@ describe('App', () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
-    expect(screen.queryByText(/^Entering the grid/)).not.toBeInTheDocument();
+    expect(screen.queryByText(bootMessage('connecting'))).not.toBeInTheDocument();
     expect(setupApi.getStatus).toHaveBeenCalledTimes(1);
     await act(async () => { finishRefresh(cached); });
   });
@@ -240,17 +222,37 @@ describe('App', () => {
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 
-  it('shows API error screen after exhausting auto-retries', async () => {
+  it('keeps the loading screen and keeps retrying while the backend is unreachable', async () => {
+    // A restart with migrations outlasts the quick retries: the user must keep
+    // seeing Kronn starting, never an error that reads as a crash.
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Network error'));
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(bootMessage('slow')));
+    expect(screen.queryByText('Cannot connect to backend')).toBeNull();
     expect(screen.queryByTestId('setup-wizard')).toBeNull();
-    expect(screen.queryByRole('status')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
-    // 1 initial + 5 retries = 6 calls
-    expect(setupApi.getStatus).toHaveBeenCalledTimes(6);
+    expect(screen.getByRole('status').querySelector('svg')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: bootMessage('retry') })).toBeEnabled();
+    // Past the 1 + 5 quick attempts, it still tries.
+    await waitFor(() => expect(vi.mocked(setupApi.getStatus).mock.calls.length).toBeGreaterThan(7));
+  });
+
+  it('opens the app on its own once the backend answers after a long start', async () => {
+    const mockGetStatus = setupApi.getStatus as ReturnType<typeof vi.fn>;
+    mockGetStatus.mockRejectedValue(new Error('Network error'));
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(bootMessage('slow')));
+
+    mockGetStatus.mockResolvedValue({
+      is_first_run: false,
+      current_step: 'Complete',
+      agents_detected: [],
+      scan_paths_set: true,
+      repos_detected: [],
+      default_scan_path: '/home',
+    });
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
   });
 
   it('proceeds to the dashboard when setup/status HANGS but the backend is reachable', async () => {
@@ -266,24 +268,25 @@ describe('App', () => {
     expect(screen.queryByText('Cannot connect to backend')).toBeNull();
   });
 
-  it('shows the error screen when setup/status hangs AND the backend is unreachable', async () => {
+  it('keeps the loading screen when setup/status hangs AND the backend is unreachable', async () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {})); // hang
     // configApi.getLanguage rejects by default (beforeEach) → backend down.
     render(<App />);
-    await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(bootMessage('slow')));
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 
-  it('retries connection when clicking Retry on API error screen', async () => {
+  it('retries at once when the user clicks Retry under a slow start', async () => {
     const mockGetStatus = setupApi.getStatus as ReturnType<typeof vi.fn>;
     mockGetStatus.mockRejectedValue(new Error('Network error'));
-
     render(<App />);
+    await waitFor(() => expect(screen.getByRole('button', { name: bootMessage('retry') })).toBeDefined());
+    // Automatic retries out of the way: from here only the click can retry.
+    setRetryDelay(60_000);
+    await act(() => new Promise(resolve => setTimeout(resolve, 50)));
+    const callsBeforeClick = mockGetStatus.mock.calls.length;
 
-    await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
-
-    // Manual retry: success
-    mockGetStatus.mockResolvedValueOnce({
+    mockGetStatus.mockResolvedValue({
       is_first_run: false,
       current_step: 'Complete',
       agents_detected: [],
@@ -291,8 +294,9 @@ describe('App', () => {
       repos_detected: [],
       default_scan_path: '/home',
     });
-
-    fireEvent.click(screen.getByText('Retry'));
+    expect(screen.queryByTestId('dashboard')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: bootMessage('retry') }));
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
+    expect(mockGetStatus.mock.calls.length).toBe(callsBeforeClick + 1);
   });
 });

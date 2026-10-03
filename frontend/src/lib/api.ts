@@ -251,6 +251,7 @@ import type {
   ProviderQuotaState,
 } from '../types/generated';
 import { ApiRequestError } from './apiRequestError';
+import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { AgentFilesPolicy, ProjectAgentFiles } from '../types/generated';
 import type {
@@ -679,15 +680,22 @@ async function api<T>(
   if (hasBody) headers['Content-Type'] = 'application/json';
 
   const execute = async (): Promise<T> => {
-    const res = await fetch(`${_apiBase}/api${path}`, {
-      method,
-      headers,
-      body: hasBody ? JSON.stringify(body) : undefined,
-      signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${_apiBase}/api${path}`, {
+        method,
+        headers,
+        body: hasBody ? JSON.stringify(body) : undefined,
+        signal,
+      });
+    } catch (error) {
+      if (looksLikeBackendDown(error)) reportBackendSuspect();
+      throw error;
+    }
 
     const contentType = res.headers.get('content-type') ?? '';
     if (!contentType.includes('application/json')) {
+      if (looksLikeBackendDown(undefined, res.status)) reportBackendSuspect();
       // 0.8.5 — when axum's `Json<T>` extractor rejects a request
       // (missing field, unknown enum variant, type mismatch), it
       // returns 422 with `Content-Type: text/plain` and the actual

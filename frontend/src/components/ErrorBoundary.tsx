@@ -1,5 +1,6 @@
 import { Component } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
+import { finishBootScreen } from '../lib/bootScreen';
 
 interface Props {
   children: ReactNode;
@@ -34,6 +35,8 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('Uncaught error:', error, info);
+    // An error must never stay hidden under the start-up screen.
+    finishBootScreen();
   }
 
   render() {
