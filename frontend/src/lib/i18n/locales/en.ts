@@ -988,6 +988,7 @@ const en: TranslationDict = {
   'disc.question.invalidEmpty': 'The block is empty.',
   'disc.question.invalidTooLong': 'The block is over 24 000 bytes: the limit counts bytes, not characters.',
   'disc.question.invalidJson': 'The block is not valid JSON.',
+  'disc.question.invalidUnclosedFence': 'The block is not closed: the closing ``` is followed by more text on the same line. The JSON is valid; put the closing ``` on a line of its own.',
   'disc.question.invalidUnknownField': 'One unknown field is enough to have the whole block refused: check the field names.',
   'disc.question.invalidVersionString': '“version” must be the number 1, not the text "1".',
   'disc.question.invalidVersion': '“version” must be 1.',

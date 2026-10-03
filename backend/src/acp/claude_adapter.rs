@@ -340,6 +340,7 @@ impl AcpTransport for ClaudeAcpAdapter {
         let mut failure: Option<String> = None;
         // Input of the tool call in progress, streamed as partial JSON.
         let mut tool_input: Option<String> = None;
+        let mut text_blocks = crate::agents::runner::TextBlockJoiner::default();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
@@ -362,6 +363,7 @@ impl AcpTransport for ClaudeAcpAdapter {
                     }
                     match parse_claude_stream_line(&line) {
                         StreamJsonEvent::Text(text) => {
+                            let text = text_blocks.join(text);
                             let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
                         }
                         StreamJsonEvent::Usage {
@@ -388,6 +390,7 @@ impl AcpTransport for ClaudeAcpAdapter {
                             }
                         }
                         StreamJsonEvent::ToolEnd => {
+                            text_blocks.block_ended();
                             let target = tool_input.take().and_then(|input| {
                                 crate::agents::activity::tool_input_target(&input)
                             });

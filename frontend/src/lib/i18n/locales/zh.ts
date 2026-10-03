@@ -990,6 +990,7 @@ const zh: TranslationDict = {
   "disc.question.invalidEmpty": "该块为空。",
   "disc.question.invalidTooLong": "该块超过 24 000 字节：限制按字节计算，而非字符。",
   "disc.question.invalidJson": "该块不是有效的 JSON。",
+  "disc.question.invalidUnclosedFence": "该块未闭合：结尾的 ``` 后面同一行还有其他文字。JSON 本身有效；请把结尾的 ``` 单独放在一行。",
   "disc.question.invalidUnknownField": "一个未知字段就足以让整个块被拒绝：请检查字段名称。",
   "disc.question.invalidVersionString": "version 必须是数字 1，而不是文本 1。",
   "disc.question.invalidVersion": "version 必须为 1。",

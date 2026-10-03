@@ -1370,6 +1370,7 @@ pub async fn generate_summary_on_demand(
     .map_err(|e| format!("agent start failed: {}", e))?;
 
     let mut out = String::new();
+    let mut text_blocks = runner::TextBlockJoiner::default();
     // Stream-json reports token counts inline via the `result` event.
     // We accumulate them as we go so the `tokens_used` returned to the
     // agent reflects the actual eco-tier cost of THIS summary call —
@@ -1382,7 +1383,8 @@ pub async fn generate_summary_on_demand(
     while let Some(line) = process.next_line().await {
         if is_stream_json {
             match runner::parse_claude_stream_line(&line) {
-                runner::StreamJsonEvent::Text(text) => out.push_str(&text),
+                runner::StreamJsonEvent::Text(text) => out.push_str(&text_blocks.join(text)),
+                runner::StreamJsonEvent::ToolEnd => text_blocks.block_ended(),
                 runner::StreamJsonEvent::Usage {
                     input_tokens,
                     output_tokens,

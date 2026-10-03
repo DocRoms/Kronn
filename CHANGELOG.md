@@ -823,6 +823,15 @@ Release notes for 0.9.3 and earlier are available in the
   update banner only offers a version whose installer exists for your
   platform. See `docs/operations/releasing.md`.
 
+- A question card written correctly is no longer refused as "not valid JSON"
+  (#223). Claude Code's text blocks were joined with no separator, so the next
+  block — a turn a Stop hook relaunched, or the text after a tool call — was
+  glued to the closing fence of a `kronn-question`, which then never closed.
+  Each new block now starts on a line of its own, in the stored reply as in
+  the live stream, in discussions, orchestration, workflows and the ACP
+  adapter. A fence that is really left open is now named as such rather than
+  as invalid JSON.
+
 - A discussion no longer says its connection was interrupted while the agent
   is fine (#220). The "Realtime connection interrupted — reconnecting" banner
   showed on every WebSocket close, even one that reconnected within a second;

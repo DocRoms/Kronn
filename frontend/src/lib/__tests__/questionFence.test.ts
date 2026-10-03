@@ -45,6 +45,15 @@ describe('findFenceProblem', () => {
     }))).toBeNull();
   });
 
+  it('says the fence is not closed when text was glued after its closing backticks', () => {
+    // #223 — the JSON was valid; the closing fence shared its line with the
+    // next turn, so markdown never closed the block.
+    const body = `${JSON.stringify(valid)}\n\`\`\`Je ne modifie pas docs/css-style-guide.md.`;
+    expect(findFenceProblem(body)).toEqual({ key: 'disc.question.invalidUnclosedFence' });
+    // Glued text after invalid JSON is still invalid JSON.
+    expect(findFenceProblem('{pas du json\n```suite')).toEqual({ key: 'disc.question.invalidJson' });
+  });
+
   it('catches a block that is not JSON at all', () => {
     expect(findFenceProblem('{pas du json')).toEqual({ key: 'disc.question.invalidJson' });
     expect(findFenceProblem('[1, 2]')).toEqual({ key: 'disc.question.invalidJson' });
