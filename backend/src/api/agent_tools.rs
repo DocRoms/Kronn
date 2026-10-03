@@ -79,6 +79,8 @@ pub struct KronnToolExecutor {
     /// catalogue to `AUDIT_TOOLS` — an audit has no discussion to scope a
     /// workspace to and no business with the plan, the REST plugins or the web.
     audit_workspace: Option<std::path::PathBuf>,
+    /// The audit step's own target file, to refuse writing another step's.
+    audit_step_target: Option<String>,
 }
 
 impl KronnToolExecutor {
@@ -95,6 +97,7 @@ impl KronnToolExecutor {
             worker_room: false,
             worker_scope: None,
             audit_workspace: None,
+            audit_step_target: None,
         }
     }
 
@@ -119,6 +122,7 @@ impl KronnToolExecutor {
             worker_room: false,
             worker_scope: None,
             audit_workspace: None,
+            audit_step_target: None,
         })
     }
 
@@ -146,6 +150,7 @@ impl KronnToolExecutor {
             worker_room: true,
             worker_scope,
             audit_workspace: None,
+            audit_step_target: None,
         })
     }
 
@@ -170,6 +175,7 @@ impl KronnToolExecutor {
             worker_room: false,
             worker_scope: None,
             audit_workspace: None,
+            audit_step_target: None,
         })
     }
 
@@ -182,9 +188,51 @@ impl KronnToolExecutor {
     /// canonicalised against it and refused when it leaves it, exactly as for a
     /// discussion (KT-338). The catalogue is `AUDIT_TOOLS`: no shell, no web, no
     /// commit, nothing that reaches beyond the project.
+    /// An audit step writes its own document; another step's target is that
+    /// step's to write. Without this, a model filling `docs/AGENTS.md` also
+    /// filled three later documents, and those steps then failed for having
+    /// nothing to rewrite (run O6). The consolidation step reviews every
+    /// document and stays free.
+    fn foreign_step_target_refusal(&self, call: &ToolCall) -> Option<String> {
+        let own = self.audit_step_target.as_deref()?;
+        if own == "docs/decisions.md" || own == "REVIEW" {
+            return None;
+        }
+        if !matches!(
+            call.name.as_str(),
+            "write_file" | "edit_file" | "edit_lines" | "insert_after_line"
+        ) {
+            return None;
+        }
+        let path = call.arguments.get("path").and_then(|p| p.as_str())?;
+        let normalized = normalized_rel(path);
+        if normalized == own {
+            return None;
+        }
+        let owner = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+            .iter()
+            .position(|step| step.target_file == normalized)?;
+        Some(format!(
+            "`{normalized}` is the document of audit step {}; this step writes `{own}`. \
+             Leave `{normalized}` to its own step and write only `{own}` (and the detail \
+             files this step's instructions name).",
+            owner + 1
+        ))
+    }
+
     pub fn audit_arc(
         state: AppState,
         workspace: std::path::PathBuf,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        Self::audit_arc_for_step(state, workspace, None)
+    }
+
+    /// An audit executor that knows which step it serves: it refuses writes to
+    /// the target file of another step of the chain.
+    pub fn audit_arc_for_step(
+        state: AppState,
+        workspace: std::path::PathBuf,
+        step_target: Option<&str>,
     ) -> std::sync::Arc<dyn ToolExecutor> {
         std::sync::Arc::new(Self {
             state,
@@ -198,8 +246,22 @@ impl KronnToolExecutor {
             worker_room: false,
             worker_scope: None,
             audit_workspace: Some(workspace),
+            audit_step_target: step_target.map(str::to_string),
         })
     }
+}
+
+/// A workspace path as the audit pipeline names its targets.
+fn normalized_rel(path: &str) -> &str {
+    path.trim().trim_start_matches("./").trim_start_matches('/')
+}
+
+/// A PEM or OpenSSH private key block, the header alone being enough.
+fn holds_private_key(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("-----BEGIN ") && line.ends_with("PRIVATE KEY-----")
+    })
 }
 
 /// The tools an audit step hands an HTTP agent: read the project, write its
@@ -1491,6 +1553,9 @@ impl ToolExecutor for KronnToolExecutor {
         // A model can name a tool it was never offered. In an audit the catalogue
         // is the whole contract, so anything outside it is refused before dispatch
         // reaches a handler that would honour it (`api_call`, plan writes…).
+        if let Some(refusal) = self.foreign_step_target_refusal(call) {
+            return fail(call, refusal);
+        }
         if self.audit_workspace.is_some() && !AUDIT_TOOLS.contains(&call.name.as_str()) {
             return fail(
                 call,
@@ -3245,6 +3310,21 @@ impl KronnToolExecutor {
                     let as_count = |field: &str| count_arg(call, field).map(|value| value as usize);
                     match ws::read_file_payload(&root, path, as_count("offset"), as_count("limit"))
                     {
+                        // An audit may run on a hosted model: a private key read
+                        // into its context leaves the machine. Its path is the finding.
+                        Ok(payload)
+                            if self.audit_workspace.is_some()
+                                && payload["text"].as_str().is_some_and(holds_private_key) =>
+                        {
+                            fail(
+                                call,
+                                format!(
+                                    "`{path}` holds a private key. Its content is never read during \
+                                     an audit: report the path as the finding (a private key committed \
+                                     to the repository) without quoting any of it."
+                                ),
+                            )
+                        }
                         Ok(payload) => ok(call, payload),
                         Err(message) => fail(call, message),
                     }
@@ -3257,11 +3337,22 @@ impl KronnToolExecutor {
                 let Some(content) = call.arguments["content"].as_str() else {
                     return fail(call, "missing required field `content`");
                 };
+                // An audit step is the only writer of its own document, and Kronn
+                // itself rewrites that document between attempts (citation repair),
+                // so a receipt the model kept goes stale; once the write window has
+                // withdrawn read_file it could not get a fresh one (run O7, step 8).
+                let own_receipt = (call.arguments["expected_sha256"].as_str().is_none()
+                    && self.audit_step_target.as_deref() == Some(normalized_rel(path)))
+                .then(|| std::fs::read(root.join(normalized_rel(path))).ok())
+                .flatten()
+                .map(|bytes| ws::content_sha256(&bytes));
                 match ws::write_file_payload_with_receipt(
                     &root,
                     path,
                     content,
-                    call.arguments["expected_sha256"].as_str(),
+                    call.arguments["expected_sha256"]
+                        .as_str()
+                        .or(own_receipt.as_deref()),
                 ) {
                     Ok(payload) => ok(call, payload),
                     Err(message) => fail(call, message),

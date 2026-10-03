@@ -2713,6 +2713,27 @@ mod tests {
     }
 
     #[test]
+    fn resize_num_ctx_grows_the_output_budget_with_the_window() {
+        // KT-967 — measured on runs s27 and s35: num_predict stayed at the
+        // first-turn 1909 while num_ctx grew to 65536, so the write_file
+        // holding a whole document was cut off ("done_reason": "length").
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 65536, None);
+        let first = body["options"]["num_predict"].as_i64().unwrap();
+        body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "role": "tool", "tool_call_id": "c1", "name": "read_file",
+                "content": "x".repeat(120_000),
+            }));
+        resize_ollama_num_ctx(&mut body, 65536);
+        let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
+        let num_predict = body["options"]["num_predict"].as_i64().unwrap();
+        assert!(num_predict > first, "{first} -> {num_predict}");
+        assert_eq!(Some(num_predict), num_predict_for(num_ctx, None));
+    }
+
+    #[test]
     fn resize_num_ctx_respects_the_cap() {
         let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 8192, None);
         let big = "x".repeat(200_000);
@@ -7222,6 +7243,432 @@ mod tests {
         }
     }
 
+    /// Audit executor whose reads fail on any path containing `missing` and
+    /// whose directory listing always fails; writes always succeed.
+    struct AuditStuckReaderTools {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for AuditStuckReaderTools {
+        fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+            crate::agents::tools::ToolRunMode::Audit
+        }
+
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            ["read_file", "list_files", "write_file"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function", "function": {
+                            "name": name, "description": name,
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                        }
+                    })
+                })
+                .collect()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            let path = call.arguments["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{}:{path}", call.name));
+            let ok = match call.name.as_str() {
+                "read_file" => !path.contains("missing"),
+                "list_files" => false,
+                _ => true,
+            };
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content: if ok {
+                    serde_json::json!({ "content": format!("{} ok for {path}", call.name) })
+                } else {
+                    serde_json::json!({ "error": format!("{} failed for {path}", call.name) })
+                },
+                ok,
+            }
+        }
+    }
+
+    fn declared_names(body: &serde_json::Value) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// KT-967 — a local model stuck on failing reads used to lose every tool,
+    /// writers included, so the audit step could never write its file. The
+    /// forced convergence must leave an audit its writers.
+    #[tokio::test]
+    async fn audit_convergence_keeps_the_writers_so_the_step_can_deliver() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wrote = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (turn_for_mock, wrote_for_mock) = (turn.clone(), wrote.clone());
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let call = |name: &str, path: &str| {
+                    ResponseTemplate::new(200).set_body_string(sse(&[&format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"c{current}","function":{{"name":"{name}","arguments":"{{\"path\":\"{path}\"}}"}}}}]}}}}]}}"#
+                    )]))
+                };
+                // As observed with qwen3.8 on run O1: it keeps asking for
+                // read_file even after Kronn withdrew it.
+                if !names.is_empty() && names != ["write_file"] {
+                    call("read_file", &format!("missing-{current}.md"))
+                } else if names == ["write_file"]
+                    && !wrote_for_mock.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    call("write_file", "docs/glossary.md")
+                } else {
+                    ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"Glossary written; unverified terms marked unknown."}}]}"#,
+                    ]))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "fill docs/glossary.md",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(AuditStuckReaderTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let mut out = String::new();
+        while let Some(line) = process.next_line().await {
+            out.push_str(&line);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+
+        let calls = seen.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"write_file:docs/glossary.md".to_string()),
+            "the deliverable must still be writable after convergence: {calls:?}"
+        );
+        assert!(status.success(), "{out:?}");
+        assert!(out.contains("Glossary written"), "{out:?}");
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(captured.contains("forced tool convergence"), "{captured}");
+
+        let requests = server.received_requests().await.expect("requests");
+        let converged: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .filter(|body: &serde_json::Value| declared_names(body) == ["write_file"])
+            .collect();
+        assert!(
+            !converged.is_empty(),
+            "convergence must keep write_file only"
+        );
+        assert!(converged[0]["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.iter().any(|message| message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Write your deliverable now")))));
+    }
+
+    /// KT-967 — a native Ollama audit that keeps exploring successfully used
+    /// to hit its round ceiling with the file unwritten. Before the ceiling
+    /// only the writers must remain, and the write must go through.
+    #[tokio::test]
+    async fn audit_still_exploring_near_its_ceiling_gets_a_write_window() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wrote = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (turn_for_mock, wrote_for_mock) = (turn.clone(), wrote.clone());
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let call = |name: &str, path: String| {
+                    ResponseTemplate::new(200).set_body_string(format!(
+                        "{{\"message\":{{\"content\":\"\",\"tool_calls\":[{{\"function\":{{\"name\":\"{name}\",\"arguments\":{{\"path\":\"{path}\"}}}}}}]}},\"done\":false}}\n\
+                         {{\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}}\n"
+                    ))
+                };
+                if names == ["write_file"] {
+                    if !wrote_for_mock.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return call("write_file", "docs/AGENTS.md".into());
+                    }
+                } else if !names.is_empty() {
+                    // Always one more distinct, successful observation.
+                    let tool = if current % 2 == 0 { "read_file" } else { "search_text" };
+                    return call(tool, format!("src/file-{current}.js"));
+                }
+                ResponseTemplate::new(200).set_body_string(
+                    "{\"message\":{\"content\":\"AGENTS.md written.\"},\"done\":false}\n\
+                     {\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}\n",
+                )
+            })
+            .mount(&server)
+            .await;
+
+        struct ExploringAuditTools {
+            seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::agents::tools::ToolExecutor for ExploringAuditTools {
+            fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+                crate::agents::tools::ToolRunMode::Audit
+            }
+            fn catalogue(&self) -> Vec<serde_json::Value> {
+                ["read_file", "search_text", "write_file"]
+                    .into_iter()
+                    .map(|name| {
+                        serde_json::json!({"type": "function", "function": {
+                            "name": name, "description": name,
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                        }})
+                    })
+                    .collect()
+            }
+            async fn execute(
+                &self,
+                call: &crate::agents::tools::ToolCall,
+            ) -> crate::agents::tools::ToolOutcome {
+                let path = call.arguments["path"].as_str().unwrap_or_default();
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{path}", call.name));
+                crate::agents::tools::ToolOutcome {
+                    call: call.clone(),
+                    content: serde_json::json!({ "content": format!("ok {path}") }),
+                    ok: true,
+                }
+            }
+        }
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "fill docs/AGENTS.md",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(ExploringAuditTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let mut out = String::new();
+        while let Some(line) = process.next_line().await {
+            out.push_str(&line);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+
+        let calls = seen.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"write_file:docs/AGENTS.md".to_string()),
+            "the deliverable must be written before the ceiling: {} calls",
+            calls.len()
+        );
+        assert!(status.success(), "{out:?}");
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(captured.contains("audit write window opened"), "{captured}");
+    }
+
+    /// KT-967 — on run O4, qwen3.8 wrote docs/AGENTS.md seven times in its
+    /// write window and never stopped; the ceiling then failed a step whose
+    /// file was complete. A written deliverable ends the step at the ceiling.
+    #[tokio::test]
+    async fn audit_that_keeps_rewriting_its_deliverable_ends_at_the_ceiling_as_delivered() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let turn_for_mock = turn.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let (tool, path) = if names == ["write_file"] {
+                    ("write_file", format!("docs/AGENTS-{current}.md"))
+                } else {
+                    ("read_file", format!("missing-{current}.md"))
+                };
+                ResponseTemplate::new(200).set_body_string(format!(
+                    "{{\"message\":{{\"content\":\"\",\"tool_calls\":[{{\"function\":{{\"name\":\"{tool}\",\"arguments\":{{\"path\":\"{path}\"}}}}}}]}},\"done\":false}}\n\
+                     {{\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}}\n"
+                ))
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "fill docs/AGENTS.md",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(AuditStuckReaderTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        while process.next_line().await.is_some() {}
+        let status = process.child.wait().await.expect("lifeline");
+
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("write_file:")));
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(status.success(), "{captured}");
+        assert!(
+            captured.contains("wrote its audit deliverable and was stopped"),
+            "{captured}"
+        );
+    }
+
+    /// KT-967 — one failing path repeated verbatim is refused, but an audit
+    /// keeps `read_file` for the other files it still has to read.
+    #[tokio::test]
+    async fn audit_repeated_failing_read_keeps_read_file_declared() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let still_declared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (turn_for_mock, declared_for_mock) = (turn.clone(), still_declared.clone());
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let read = |path: &str| {
+                    ResponseTemplate::new(200).set_body_string(sse(&[&format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"r{current}","function":{{"name":"read_file","arguments":"{{\"path\":\"{path}\"}}"}}}}]}}}}]}}"#
+                    )]))
+                };
+                match current {
+                    0..=2 => read("missing.md"),
+                    3 => {
+                        declared_for_mock.store(
+                            declared_names(&body).iter().any(|name| name == "read_file"),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        read("package.json")
+                    }
+                    _ => ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"Read package.json."}}]}"#,
+                    ])),
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "read the manifest",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(AuditStuckReaderTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        while process.next_line().await.is_some() {}
+        let status = process.child.wait().await.expect("lifeline");
+
+        assert!(status.success());
+        assert!(
+            still_declared.load(std::sync::atomic::Ordering::SeqCst),
+            "a refused repeat must not withdraw read_file from an audit"
+        );
+        assert!(seen
+            .lock()
+            .unwrap()
+            .contains(&"read_file:package.json".to_string()));
+    }
+
     /// MSG-09618d74 — varying arguments and alternating tool names used to
     /// evade exact-call deduplication until the 50-round hard cap. Repeated
     /// error-only rounds must now open the circuits and yield a bounded partial
@@ -11658,6 +12105,7 @@ sleep 3600
                 input_tokens: 3,
                 output_tokens: 5,
                 prompt_cache: PromptCacheUsage::default(),
+                ..AgentUsage::default()
             })),
             stderr_task: None,
             http_cancel: None,
@@ -13809,6 +14257,11 @@ sleep 3600
         assert_eq!(process.reported_token_usage(), Some(312));
         assert_eq!(usage.prompt_cache.cached_prompt_tokens, Some(40));
         assert_eq!(usage.prompt_cache.cache_write_prompt_tokens, None);
+        // KT-994 — the card shows what an HTTP agent is doing, as for a CLI.
+        assert_eq!(
+            process.tool_activity_probe().read(),
+            Some(("read_file · docs/result.md".to_string(), 1))
+        );
     }
 
     #[test]

@@ -44,12 +44,14 @@ interface BriefingFormProps {
   agent: AgentType;
   /** Reasoning level selected alongside the briefing/audit agent. */
   tier: ModelTier;
+  /** KT-977 — `false` saves the answers only: no review discussion is created. */
+  review?: boolean;
   /** Toast emitter — same shape as the rest of the dashboard. The
    * required (non-optional) kind matches Dashboard's stricter signature. */
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
 }
 
-export function BriefingForm({ projectId, onClose, onSaved, agent, tier, toast }: BriefingFormProps) {
+export function BriefingForm({ projectId, onClose, onSaved, agent, tier, review = true, toast }: BriefingFormProps) {
   const { t } = useT();
   const [form, setForm] = useState({
     purpose: '',
@@ -81,6 +83,12 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, toast }
     try {
       // 1. Save the answers — writes `docs/briefing.md` + DB notes.
       await projectsApi.saveBriefing(projectId, form);
+      if (!review) {
+        toast(t('briefing.savedOnlyToast'), 'success');
+        onSaved(null);
+        onClose();
+        return;
+      }
       // 2. Spawn the AI review discussion. The backend now sees the
       //    pre-filled briefing notes and switches to a short
       //    "review + clarify" prompt instead of re-asking the 6 Qs.
@@ -187,7 +195,7 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, tier, toast }
         <button type="submit" className="briefing-form-submit" disabled={submitting}>
           {submitting
             ? <><Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('common.saving')}</>
-            : <><Save size={11} /> {t('briefing.saveAndReviewBtn')}</>}
+            : <><Save size={11} /> {review ? t('briefing.saveAndReviewBtn') : t('briefing.saveOnlyBtn')}</>}
         </button>
       </div>
     </form>

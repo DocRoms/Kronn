@@ -144,6 +144,9 @@ pub struct ToolCallFragment {
     /// Raw argument text. Kept unparsed because a slice of a JSON object is
     /// not valid JSON on its own — parsing happens once, after merging.
     pub arguments_delta: String,
+    /// The arguments arrived as a whole object: a finished call (Ollama), never
+    /// a slice to merge with another fragment of the same index.
+    pub complete: bool,
 }
 
 /// Decode a provider's `tool_calls` array into fragments.
@@ -167,6 +170,7 @@ pub(crate) fn parse_tool_calls(raw: &Value) -> Vec<ToolCallFragment> {
                     // uniform and the final parse sees valid JSON.
                     other => other.to_string(),
                 },
+                complete: f["arguments"].is_object(),
             }
         })
         .collect()
@@ -177,12 +181,26 @@ pub(crate) fn parse_tool_calls(raw: &Value) -> Vec<ToolCallFragment> {
 pub(crate) struct ToolCallAccumulator {
     /// Keyed by wire index so out-of-order frames still land correctly.
     parts: std::collections::BTreeMap<usize, (Option<String>, Option<String>, String)>,
+    /// Finished calls seen so far, each given its own slot after the streamed ones.
+    complete_calls: usize,
 }
+
+/// Slots for finished calls start here, clear of any wire index.
+const COMPLETE_CALL_SLOT: usize = usize::MAX / 2;
 
 impl ToolCallAccumulator {
     pub fn push(&mut self, fragments: Vec<ToolCallFragment>) {
         for f in fragments {
-            let slot = self.parts.entry(f.index).or_default();
+            // Ollama sends each parallel call whole, in its own frame, and puts
+            // no index where the OpenAI stream does: two such calls both read
+            // index 0, merged into `{..}{..}`, and degraded to `{}`.
+            let key = if f.complete {
+                self.complete_calls += 1;
+                COMPLETE_CALL_SLOT + self.complete_calls
+            } else {
+                f.index
+            };
+            let slot = self.parts.entry(key).or_default();
             if f.id.is_some() {
                 slot.0 = f.id;
             }
@@ -210,7 +228,12 @@ impl ToolCallAccumulator {
                     serde_json::from_str(trimmed).unwrap_or_else(|_| json!({}))
                 };
                 Some(ToolCall {
-                    id: id.unwrap_or_else(|| format!("call_{index}")),
+                    id: id.unwrap_or_else(|| {
+                        format!(
+                            "call_{}",
+                            index.checked_sub(COMPLETE_CALL_SLOT + 1).unwrap_or(index)
+                        )
+                    }),
                     name,
                     arguments,
                 })
@@ -385,6 +408,22 @@ mod tests {
             acc.push(parse_tool_calls(f));
         }
         acc.finish()
+    }
+
+    #[test]
+    fn ollama_parallel_calls_in_separate_frames_keep_their_arguments() {
+        // Frames as Ollama 0.34 streams them (recorded raw): one finished call
+        // per frame, the index inside `function`, none on the item.
+        let frame = |id: &str, path: &str| json!([{ "id": id, "function": { "index": 0, "name": "read_file", "arguments": { "path": path } } }]);
+        let calls = collect(&[
+            frame("call_a", "docs/AGENTS.md"),
+            frame("call_b", "docs/glossary.md"),
+        ]);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[0].arguments, json!({ "path": "docs/AGENTS.md" }));
+        assert_eq!(calls[1].id, "call_b");
+        assert_eq!(calls[1].arguments, json!({ "path": "docs/glossary.md" }));
     }
 
     #[test]

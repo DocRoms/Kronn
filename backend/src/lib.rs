@@ -124,8 +124,26 @@ impl AuditTracker {
                 total_tokens_so_far: None,
                 current_tool: None,
                 current_tool_call_count: None,
+                agent: None,
+                tier: None,
+                connection_id: None,
             },
         );
+    }
+
+    /// Record who runs the audit, for any client polling its progress.
+    pub fn set_auditor(
+        &mut self,
+        project_id: &str,
+        agent: crate::models::AgentType,
+        tier: crate::models::ModelTier,
+        connection_id: Option<String>,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.agent = Some(agent);
+            entry.tier = Some(tier);
+            entry.connection_id = connection_id;
+        }
     }
 
     /// 0.8.3 — update the live-chip state on every step_progress
@@ -155,6 +173,15 @@ impl AuditTracker {
                 entry.current_tool_call_count =
                     Some(entry.current_tool_call_count.unwrap_or(0) + 1);
             }
+        }
+    }
+
+    /// An HTTP agent's tool activity: it reports its last tool and running
+    /// count rather than one event per call, so both are set, not bumped.
+    pub fn set_tool_activity(&mut self, project_id: &str, tool: String, calls: u32) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.current_tool = Some(tool);
+            entry.current_tool_call_count = Some(calls);
         }
     }
 
@@ -1051,6 +1078,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         // 0.8.3 (#288) — fleet-wide view of every running audit.
         .route("/api/audit-status", get(api::audit::audit_status_all))
+        .route("/api/audit/steps", get(api::audit::audit_steps))
         // 0.8.3 (#311) — last resumable audit run for a project. Drives
         // the "Reprendre Step N/10" button on the ProjectCard when an
         // earlier run was interrupted (rate-limit, crash, network blip).
@@ -2407,6 +2435,31 @@ mod audit_tracker_tests {
                 "first tool in new step → counter = 1"
             );
         }
+    }
+
+    #[test]
+    fn a_running_audit_says_who_audits_and_what_an_http_agent_does() {
+        // KT-994 — any client polling the progress (a card mounted after the
+        // launch, a reloaded page) can show the agent, tier, connection and
+        // the HTTP agent's current tool.
+        let mut t = AuditTracker::default();
+        t.start_progress("p-who", 16, "full_audit");
+        let silent = serde_json::to_value(t.get_progress("p-who").unwrap()).unwrap();
+        assert!(silent.get("agent").is_none() && silent.get("connection_id").is_none());
+
+        t.set_auditor(
+            "p-who",
+            crate::models::AgentType::Custom,
+            crate::models::ModelTier::Reasoning,
+            Some("conn-openrouter".into()),
+        );
+        t.set_tool_activity("p-who", "read_file · package.json".into(), 7);
+        let shown = serde_json::to_value(t.get_progress("p-who").unwrap()).unwrap();
+        assert_eq!(shown["agent"], "Custom");
+        assert_eq!(shown["tier"], "reasoning");
+        assert_eq!(shown["connection_id"], "conn-openrouter");
+        assert_eq!(shown["current_tool"], "read_file · package.json");
+        assert_eq!(shown["current_tool_call_count"], 7);
     }
 
     #[test]

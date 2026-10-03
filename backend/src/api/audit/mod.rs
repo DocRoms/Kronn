@@ -664,7 +664,7 @@ If NOT satisfied, emit a TD finding. These do NOT count against any cap.\n\n\
 - No REAL `.env*` file is tracked (`git ls-files -- '*.env*' '.env*'` — pathspec listing, no grep) — `.env.example`/`.env.dist`/`.env.sample` are legitimate templates and NOT findings. Tracking status and file NAMES are the ONLY safe signals you may collect.\n\
 - **Secret VALUES are out of your scope entirely.** You may not open, grep, or otherwise inspect file contents for secret-looking values — any command whose output could echo a matched line would pull the secret into your context, which leaves the machine. For the value-scan sub-dimension, write exactly `Not evaluated safely (requires Kronn's local secret scanner)` — NEVER `verified absent`/`verified clean` on a scan you did not safely run.\n\
 - CI YAML / docker-compose credential hygiene: `Not evaluated safely (requires Kronn's local secret scanner)` — proving the absence of a hardcoded credential means reading the very content that could contain it. You may only note the SAFE structural facts: which workflow/compose files exist, and whether they use `secrets:`/`env_file:` — established EXCLUSIVELY via `grep -lE 'secrets:|env_file:' <files>` (filename-only output, zero lines, zero context; `-l` is the ONLY grep flag allowed near credential material).\n\
-- No private keys or certs in repo (`*.pem`, `*.key`, `*.p12`, `id_rsa*`).\n\
+- No private keys or certs in repo (`*.pem`, `*.key`, `*.p12`, `id_rsa*`). A key often has no extension: list `**/*.pub` — for each `X.pub`, a tracked `X` beside it is the private half — and every file under a `.ssh/` directory. Report their PATHS only, never open them.\n\
 - `git log --all -S 'BEGIN PRIVATE KEY' --name-only --format='%h %ad'` returns nothing recent (last 12 months) — metadata only, NEVER `-p` (a patch dump would pull the key itself into your context).\n\n\
 \
 **EXFILTRATION GUARD (absolute)**: you run with filesystem access and your context leaves the machine. NEVER open, quote, print or write the VALUE of any secret, key or token — in your output, in docs/, in TDs, anywhere. Findings carry file + line + pattern type only.\n\n\
@@ -1153,6 +1153,24 @@ This dimension may not apply to this project. Assess applicability in ≤ 5 tool
 static site with no DB layer). If NOT applicable: write your index file with the single \
 line `Not applicable: <one-sentence reason>` and STOP — no findings, no TD files.\n";
 
+/// The prompt of one audit step, dated: a model cannot know today's date, and
+/// a step that names it in its own words (a TD file name) must still get it.
+pub(crate) fn dated_step_prompt(
+    gate: &str,
+    step_prompt: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let today = now.format("%Y-%m-%d").to_string();
+    let today_compact = now.format("%Y%m%d").to_string();
+    format!(
+        "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}{}",
+        PROMPT_PREAMBLE, gate, step_prompt
+    )
+    .replace("YYYYMMDD=today", &format!("YYYYMMDD={today_compact}"))
+    .replace("today's date (YYYY-MM-DD)", &today)
+    .replace("set to today's date", &format!("set to {today}"))
+}
+
 /// 0.9.0 — the chained audit: a Full run = the 9 foundation steps PLUS
 /// every focused sub-audit appended, so one launch covers everything and
 /// the single validation discussion at the end confirms the WHOLE TD set.
@@ -1225,18 +1243,15 @@ pub(crate) fn partial_selectable(step: &AnalysisStep) -> bool {
 ///
 /// Two kinds of agent can: a CLI with its own filesystem, and an HTTP agent
 /// whose file tools Kronn executes on its behalf (KT-338), scoped to the
-/// project by `agent_launch` (KT-924). Ollama and LiteLLM are the HTTP agents
-/// admitted: NVIDIA is a hosted service the user has not been asked to send a
-/// whole repository to, and `Custom` needs a named connection the audit has no
-/// way to select. The refusal therefore stays for an agent with no file tools
-/// Kronn can scope to the project, and `audit_refusal_message` names who is
-/// accepted.
+/// project by `agent_launch` (KT-924). Every HTTP agent is admitted (KT-980):
+/// sending the repository to a hosted provider is the user's choice, warned
+/// about in the UI. A `Custom` agent is only launched with a validated named
+/// connection (`AuditAgentLauncher::for_request`).
 ///
 /// ALLOWLIST, not denylist (Codex A4 v2): a new/unknown variant must force
-/// a compiler decision here instead of being audit-capable by default —
-/// `Custom`'s runner is a bare `echo` that exits 0, the exact silent no-op
-/// this gate exists to stop. Mirrored by the UI's `canRunAudit`, enforced
-/// here because MCP/bridge callers bypass the UI entirely.
+/// a compiler decision here instead of being audit-capable by default.
+/// Mirrored by the UI's `canRunAudit`, enforced here because MCP/bridge
+/// callers bypass the UI entirely.
 pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
     use crate::models::AgentType;
     match agent {
@@ -1247,15 +1262,17 @@ pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
         | AgentType::Kiro
         | AgentType::CopilotCli
         | AgentType::Ollama
-        | AgentType::LiteLlm => true,
-        AgentType::Vibe | AgentType::Nvidia | AgentType::Custom => false,
+        | AgentType::LiteLlm
+        | AgentType::Nvidia
+        | AgentType::Custom => true,
+        AgentType::Vibe => false,
     }
 }
 
 /// The agents `agent_can_audit` admits, for the refusal message. Kept beside the
 /// predicate and pinned to it by a test, so the message cannot name an agent the
 /// gate refuses or forget one it accepts.
-const AUDIT_AGENTS: [crate::models::AgentType; 8] = [
+const AUDIT_AGENTS: [crate::models::AgentType; 10] = [
     crate::models::AgentType::ClaudeCode,
     crate::models::AgentType::Codex,
     crate::models::AgentType::OpenCode,
@@ -1264,6 +1281,8 @@ const AUDIT_AGENTS: [crate::models::AgentType; 8] = [
     crate::models::AgentType::CopilotCli,
     crate::models::AgentType::Ollama,
     crate::models::AgentType::LiteLlm,
+    crate::models::AgentType::Nvidia,
+    crate::models::AgentType::Custom,
 ];
 
 /// Why `agent` was refused, and who would have been accepted. One wording for the
@@ -1887,11 +1906,11 @@ mod prompt_tests {
             // project by `agent_launch`: they no longer lack a filesystem.
             (AgentType::Ollama, true),
             (AgentType::LiteLlm, true),
-            // Vibe is API-only with no file tools; NVIDIA is hosted and was never
-            // offered the project; Custom needs a connection the audit cannot pick.
+            // KT-980 — any HTTP provider, at the user's choice; Custom with a
+            // named connection. Vibe is API-only with no file tools.
+            (AgentType::Nvidia, true),
+            (AgentType::Custom, true),
             (AgentType::Vibe, false),
-            (AgentType::Nvidia, false),
-            (AgentType::Custom, false),
         ]
     }
 
@@ -2435,6 +2454,43 @@ mod prompt_tests {
                 body.contains(token),
                 "template must expose {token}, cited by the step 1 prompt"
             );
+        }
+    }
+
+    #[test]
+    fn the_security_checklist_finds_keys_without_an_extension() {
+        // A/B s10 on qwen3.6:35b, 3 runs per arm: without this hint 0/3 found
+        // `.ssh/vr-v2njs01-s` and 0/3 `security/devlpt-nodeapi`; with it 3/3 and 2/3.
+        let steps = assemble_chained_steps(crate::models::AuditKind::Full);
+        let security = steps
+            .iter()
+            .find(|step| step.target_file == "docs/inconsistencies-security.md")
+            .unwrap();
+        assert!(security.prompt.contains("list `**/*.pub`"));
+        assert!(security
+            .prompt
+            .contains("every file under a `.ssh/` directory"));
+        assert!(security.prompt.contains("never open them"));
+    }
+
+    #[test]
+    fn every_step_prompt_carries_the_date_and_no_unresolved_today() {
+        // Run O6: step 8 named its TD files 20250113 — "with today's date"
+        // matched none of the substitutions and the date was never given.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-03T01:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (index, step) in assemble_chained_steps(crate::models::AuditKind::Full)
+            .iter()
+            .enumerate()
+        {
+            let prompt = dated_step_prompt("", step.prompt, now);
+            assert!(
+                prompt.starts_with("Today's date is 2026-10-03 (YYYYMMDD: 20261003)."),
+                "step {}",
+                index + 1
+            );
+            assert!(!prompt.contains("YYYYMMDD=today"), "step {}", index + 1);
         }
     }
 

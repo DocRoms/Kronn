@@ -1,4 +1,4 @@
-import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult } from '../types/generated';
+import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
@@ -1092,6 +1092,8 @@ export const projects = {
    * cumulative_tokens, cli_success + the optional step_warning. Empty
    * Vec for legacy runs (pre-0.8.4) or runs with no recorded steps.
    */
+  /** KT-977 — the Full audit's steps in run order, known before any run. */
+  auditSteps: () => api<AuditStepInfo[]>('GET', '/audit/steps'),
   auditRunSteps: (runId: string) =>
     api<Array<{
       audit_run_id: string;
@@ -1250,7 +1252,7 @@ export const projects = {
   /** Stream a partial re-audit for stale sections via SSE */
   partialAuditStream: async (
     id: string,
-    req: { agent: AgentType; tier?: ModelTier; steps: number[] },
+    req: { agent: AgentType; tier?: ModelTier; steps: number[]; connection_id?: string },
     handlers: {
       onStepStart: (step: number, total: number, file: string) => void;
       onChunk: (text: string, step: number) => void;

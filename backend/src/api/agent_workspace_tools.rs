@@ -85,7 +85,7 @@ pub(crate) const RUST_SYNTAX_REFUSAL_PREFIX: &str = "Rust syntax validation refu
 /// Hashing the bytes already read matters: hashing the path in a second I/O
 /// would let a concurrent writer make the receipt describe different content
 /// from the text returned to the model.
-fn content_sha256(bytes: &[u8]) -> String {
+pub(crate) fn content_sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

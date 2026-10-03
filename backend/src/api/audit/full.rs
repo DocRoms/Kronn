@@ -25,7 +25,7 @@ use super::helpers::{
     compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills, partial_run_block,
     remove_bootstrap_block,
 };
-use super::{detach_sse_stream, SseStream, PROMPT_PREAMBLE};
+use super::{detach_sse_stream, SseStream};
 
 /// POST /api/projects/:id/full-audit
 /// Unified endpoint: install template + run the assembled audit chain + create validation discussion.
@@ -254,7 +254,17 @@ pub async fn full_audit(
     let agent_label = format!("{:?}", agent_type);
     // Snapshot the HTTP provider settings once for the whole run (a no-op for a
     // CLI agent): every step resolves the same models and endpoints.
-    let agent_launcher = super::agent_launch::AuditAgentLauncher::new(&state, &agent_type).await;
+    let agent_launcher = match super::agent_launch::AuditAgentLauncher::for_request(
+        &state,
+        &agent_type,
+        req.connection_id.as_deref(),
+    )
+    .await
+    {
+        Ok(launcher) => launcher,
+        Err(error) => return sse_error(error),
+    };
+    let audit_connection_id = agent_launcher.connection_id();
 
     let tokens = {
         let config = state.config.read().await;
@@ -511,6 +521,7 @@ pub async fn full_audit(
         // even when the SSE client (browser tab) went away.
         if let Ok(mut t) = audit_tracker.lock() {
             t.start_progress(&project_id, total_steps as u32, "full_audit");
+            t.set_auditor(&project_id, agent_type.clone(), audit_tier, audit_connection_id.clone());
             // Phase 1 starts here; advance_step will update to "auditing"
             // once the assembled step chain begins. The intermediate installing
             // phase is visible by checking step_index == 0.
@@ -1005,15 +1016,11 @@ pub async fn full_audit(
             }
 
             let today = Utc::now().format("%Y-%m-%d").to_string();
-            let today_compact = Utc::now().format("%Y%m%d").to_string();
             // Chained sub-audit steps get the relevance gate FIRST — a
             // dimension foreign to the project must cost one line, not a
             // full agent pass.
             let gate = super::gate_for_step(step, first_chained_step);
-            let mut full_prompt = format!("{}\n\n{}{}", PROMPT_PREAMBLE, gate, analysis_step.prompt)
-                .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
-                .replace("today's date (YYYY-MM-DD)", &today)
-                .replace("set to today's date", &format!("set to {}", today));
+            let mut full_prompt = super::dated_step_prompt(gate, analysis_step.prompt, Utc::now());
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
@@ -1174,6 +1181,7 @@ pub async fn full_audit(
                 &attempt_prompt,
                 &tokens,
                 attempt_cancel.clone(),
+                analysis_step.target_file,
             ).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation — of a direct CLI
@@ -1191,6 +1199,14 @@ pub async fn full_audit(
                     }
 
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                    // An HTTP agent's tool activity, for the card's live chips.
+                    let _tool_activity = (!is_stream_json).then(|| {
+                        super::agent_launch::ToolActivityMirror::start(
+                            process.tool_activity_probe(),
+                            audit_tracker.clone(),
+                            project_id.clone(),
+                        )
+                    });
                     // 0.8.3 (#309) — Zombie audit detection.
                     //
                     // The naive `while let Some(line) = process.next_line().await`
@@ -1482,6 +1498,13 @@ pub async fn full_audit(
                     // step_done so the overall audit summary is honest.
                     // The file is NEVER overwritten — re-running the
                     // step is the only repair path.
+                    if cli_success {
+                        crate::api::audit::validation::fill_step_owned_placeholders(
+                            &project_path,
+                            analysis_step.target_file,
+                            &chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                        );
+                    }
                     let (mut success, mut warning) = crate::api::audit::validation::validate_step_output(
                         cli_success,
                         &project_path,
@@ -2325,7 +2348,7 @@ pub async fn full_audit(
             "Validation audit AI".to_string()
         };
         let discussion = Discussion {
-            connection_id: None,
+            connection_id: audit_connection_id.clone(),
             awaiting_agent: false,
             agent_running: false,
             id: discussion_id.clone(),

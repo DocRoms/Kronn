@@ -15,6 +15,29 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The project card's Audit tab is now a timeline (KT-977): briefing,
+  template, the audit's steps grouped as the pipeline runs them (documentation
+  core, specialised audits, consolidation), validation, validated. Every step
+  shows, before it runs, the file it writes and what it covers (from the new
+  read-only `GET /api/audit/steps`, built from the chain the pipeline runs),
+  then its status, a readable reason when it failed or was interrupted, its
+  duration and when it last ran. A resumed run is shown whole: its steps are
+  merged with the run it continued. A failed group resumes from its own button,
+  and the timeline says that the consolidation reruns after it. The agent panel
+  groups installed CLIs (recommended), HTTP agents and local models, shows the
+  model of each level (⚡ Eco, 🎯 Standard, 🧠 Advanced, the recommended one)
+  and warns about lower levels, local slowness and data sent to an HTTP
+  provider. The briefing is filled in and saved from the timeline without
+  opening a discussion, and a note explains what changed in the audit.
+
+- Any HTTP agent can now run an audit, at the user's choice (KT-980): NVIDIA
+  and named connections such as OpenRouter join Ollama and LiteLLM. Full and
+  partial audit requests take an optional `connection_id`; the audit uses that
+  connection's endpoint, key and model for the chosen level, and its
+  validation discussion keeps the connection. A `Custom` agent without a
+  connection is refused by name. Vibe, which has no file tools, still cannot
+  audit.
+
 - The Automation page lists the skills. "Skills" is a fifth type in the
   sidebar Filter, with its count, next to Workflows, Quick APIs, Quick Prompts
   and Quick Execs, and covers the built-in skills as well as the ones you
@@ -316,6 +339,59 @@ Release notes for 0.9.3 and earlier are available in the
   steps it carried over, so resuming it again no longer replays the whole
   chain, and a step that was started but never finished is no longer mistaken
   for a successful one (KT-931).
+
+- The project card follows an audit it did not launch, or one still running
+  after a page reload (KT-994). The card used to miss it: the launch button
+  stayed active (a second audit could start over the first), the running step
+  showed as interrupted and the agent panel stayed editable. During an audit
+  the panel now shows who runs it (agent, tier, model) and cannot change, the
+  button reads "Audit running…", and the briefing waits for the end. An HTTP
+  agent's activity shows as it happens (`read_file · package.json (12)`), as a
+  CLI's did. Each step shows its tokens. A partial audit marks the step it
+  runs, keeps the other results and counts once finished.
+
+- A native Ollama audit can write its documents again (KT-967). Five Kronn
+  defects kept a local model from producing an audit step. The main one: the
+  output budget (`num_predict`) was sized once, on the small first-turn
+  window (about 1,900 tokens), and never followed the window as it grew, so a
+  `write_file` holding a whole document was cut off and, since Ollama only
+  emits a completed tool call, nothing was written. The model seemed to
+  announce its write and stop. The output budget now follows the window. In
+  an audit, forced convergence also keeps the write tools, a repeated read
+  stays refused without withdrawing `read_file`, the last eight rounds (or
+  the last quarter of the context) keep only the writers, and a step that
+  wrote its document is no longer failed for reaching the round ceiling. On
+  the same audit step, recorded raw, qwen3.8:27b-mlx and qwen3.6:35b-mlx both
+  went from failing to writing a complete, cited document.
+  A full audit on qwen3.6:35b-mlx then completed 7 of its 16 steps. Most of
+  the failures traced back to Kronn, and these are fixed:
+  - Two tool calls that Ollama sent in parallel were merged into one call with
+    no arguments. The model got "missing required field `path`" and copied the
+    empty call from its own history. Each call now keeps its own arguments.
+  - Filling `docs/AGENTS.md`, the model also wrote four later steps' documents,
+    and those steps found nothing to rewrite. An audit step now writes only its
+    own document (the consolidation step reviews them all).
+  - The date reached the model through three exact phrasings, and step 8
+    matched none, so its TD files were dated 2025. Every step prompt now
+    states today's date, and a `{{DATE}}` left alone in a finished document is
+    filled by Kronn.
+  - Diagnostics now say what to fix: a forgotten field is named instead of the
+    file being called an untouched template, a cited directory (with or
+    without a line) is reported as a directory rather than a missing path, a
+    comment written inside a citation marker is told to move outside it, and
+    a link written from the repository root names the link to write from the
+    document's folder.
+  - Between two attempts Kronn rewrote a step's document itself, so the
+    receipt the model held went stale, and the final write window had already
+    withdrawn `read_file`: the model could no longer write its own document.
+    A step now rewrites its own document without a receipt; every other file
+    keeps the requirement.
+  - The security step looked for keys by extension only (`*.pem`, `id_rsa*`).
+    It now also treats the file beside an `X.pub`, and anything under `.ssh/`,
+    as a key: committed keys were found in 0 of 3 runs before, 3 of 3 after.
+    During an audit, `read_file` refuses a file holding a private key, so the
+    key never reaches the model, which on a hosted model would mean leaving the
+    machine.
 
 - Codex, launched by Kronn in a discussion or a room, can use Kronn's own
   tools again (KT-953). Kronn starts Codex non-interactively, so a tool left on

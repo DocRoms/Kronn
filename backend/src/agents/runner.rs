@@ -43,6 +43,8 @@ const MAX_WEB_FETCH_CALLS: usize = 120;
 const MAX_API_ENUMERATION_CALLS: usize = 60;
 const MAX_ERRORS_PER_TOOL: usize = 3;
 const MAX_ERROR_ONLY_TOOL_ROUNDS: usize = 6;
+// Rounds an audit keeps, before its ceiling, to write its deliverable.
+const AUDIT_WRITE_RESERVE_ROUNDS: usize = 8;
 const ACP_DIAGNOSTIC_MAX_CHARS: usize = 1_024;
 const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
 // The window a worker gets to gather evidence before it must turn it into a
@@ -676,16 +678,50 @@ fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -
     // the observed 47-call paid loop. Exact duplicate reads are still stopped
     // separately after one replay, and the context-sized round cap remains.
     match (run_mode, name) {
-        (
-            crate::agents::tools::ToolRunMode::Audit,
-            "write_file" | "edit_file" | "edit_lines" | "insert_after_line",
-        ) => MAX_AUDIT_WRITE_CALLS,
+        (crate::agents::tools::ToolRunMode::Audit, name) if is_audit_deliverable_tool(name) => {
+            MAX_AUDIT_WRITE_CALLS
+        }
         (crate::agents::tools::ToolRunMode::Audit, "search_text") => MAX_AUDIT_SEARCH_CALLS,
         (_, "read_file") => MAX_READ_FILE_CALLS,
         (_, "web_fetch") => MAX_WEB_FETCH_CALLS,
         (_, "api_call" | "qa_run") => MAX_API_ENUMERATION_CALLS,
         (crate::agents::tools::ToolRunMode::Worker, "search_text") => MAX_WORKER_SEARCH_TEXT_CALLS,
         _ => MAX_CALLS_PER_TOOL,
+    }
+}
+
+/// An audit step's deliverable is a file: these are the only tools that can
+/// produce it, so convergence must never take them away.
+fn is_audit_deliverable_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit_file" | "edit_lines" | "insert_after_line"
+    )
+}
+
+/// Ends tool exploration. Outside audits the catalogue goes away so prose is
+/// the only move left; an audit keeps its writers, minus any already refused.
+fn withdraw_tools_for_convergence(
+    body: &mut serde_json::Value,
+    audit_writers: &[serde_json::Value],
+    withdrawn: &std::collections::HashSet<String>,
+) {
+    let writers = audit_writers
+        .iter()
+        .filter(|tool| {
+            tool.pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| !withdrawn.contains(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+    if writers.is_empty() {
+        map.remove("tools");
+    } else {
+        map.insert("tools".into(), serde_json::Value::Array(writers));
     }
 }
 
@@ -1648,11 +1684,43 @@ pub struct AgentProcess {
     token_fragments: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Reads an HTTP agent's tool activity from outside its run.
+#[derive(Clone)]
+pub struct ToolActivityProbe(Arc<Mutex<AgentUsage>>);
+
+impl ToolActivityProbe {
+    /// The last tool called and the running count, `None` before the first call.
+    pub fn read(&self) -> Option<(String, u32)> {
+        let usage = self.0.lock().ok()?;
+        usage.last_tool.clone().map(|tool| (tool, usage.tool_calls))
+    }
+}
+
+/// `read_file · src/main.rs`: the tool, and the path it works on when it has one.
+fn tool_activity_label(call: &crate::agents::tools::ToolCall) -> String {
+    match ["path", "pattern", "query"]
+        .iter()
+        .find_map(|key| call.arguments.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(target) => {
+            let target: String = target.chars().take(80).collect();
+            format!("{} · {target}", call.name)
+        }
+        None => call.name.clone(),
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct AgentUsage {
     input_tokens: u64,
     output_tokens: u64,
     prompt_cache: PromptCacheUsage,
+    /// The last native tool an HTTP agent called (with its path when it has
+    /// one) and how many it has called: what a CLI's stream-json shows.
+    last_tool: Option<String>,
+    tool_calls: u32,
 }
 
 /// Prompt-cache tokens a runtime reported beside its input and output.
@@ -1731,7 +1799,7 @@ impl AgentProcess {
     }
 
     pub fn reported_token_usage(&self) -> Option<u64> {
-        let usage = *self.usage.lock().unwrap();
+        let usage = self.usage.lock().unwrap().clone();
         let total = usage.input_tokens.saturating_add(usage.output_tokens);
         (total > 0).then_some(total)
     }
@@ -1744,8 +1812,14 @@ impl AgentProcess {
     /// cost is computed from. `None` when nothing was reported. Each agent
     /// states its input differently (Codex includes the cached share, Claude
     /// excludes it), so the caller resolves that with the agent type.
+    /// A handle that reads this run's tool activity while the run goes on:
+    /// an HTTP agent can call tools for minutes without a line of text.
+    pub fn tool_activity_probe(&self) -> ToolActivityProbe {
+        ToolActivityProbe(self.usage.clone())
+    }
+
     pub fn reported_usage_counters(&self) -> Option<ReportedUsage> {
-        let usage = *self.usage.lock().unwrap();
+        let usage = self.usage.lock().unwrap().clone();
         (usage.input_tokens.saturating_add(usage.output_tokens) > 0).then_some(ReportedUsage {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -4644,6 +4718,7 @@ async fn run_acp_session(
                             input_tokens,
                             output_tokens,
                             prompt_cache,
+                            ..AgentUsage::default()
                         };
                     }
                     AcpSessionEvent::NativeSessionId(conversation_id) => {
@@ -6577,13 +6652,16 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
 pub(crate) fn resize_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
     let est = estimated_chat_history_tokens(body);
     let sized = est.clamp(OLLAMA_NUM_CTX_FLOOR, ctx_cap.max(OLLAMA_NUM_CTX_FLOOR));
-    if body["options"]["num_ctx"]
+    let num_ctx = body["options"]["num_ctx"]
         .as_u64()
-        .is_some_and(|cur| cur >= sized)
-    {
-        return;
+        .map_or(sized, |cur| cur.max(sized));
+    body["options"]["num_ctx"] = serde_json::json!(num_ctx);
+    // The output budget follows the window. Sized once on the small first-turn
+    // window, it capped every later turn at ~1.9k tokens: a whole document in
+    // one write_file was cut off and the model never wrote it (KT-967).
+    if let Some(num_predict) = ollama_num_predict(num_ctx) {
+        body["options"]["num_predict"] = serde_json::json!(num_predict);
     }
-    body["options"]["num_ctx"] = serde_json::json!(sized);
 }
 
 /// Point file-capable agents at the project document; inline it otherwise.
@@ -7921,9 +7999,21 @@ async fn start_ollama_http_with_idle(
     // Keep reader declarations for restoration in every run mode.
     let mut progress_reader_seed: Vec<serde_json::Value> = Vec::new();
     let mut workspace_reader_seed: Vec<serde_json::Value> = Vec::new();
+    let mut audit_writer_seed: Vec<serde_json::Value> = Vec::new();
     if let Some(exec) = executor.as_ref() {
         let catalogue = exec.catalogue();
         progress_reader_seed = progress_reader_declarations(&catalogue);
+        if tool_run_mode == crate::agents::tools::ToolRunMode::Audit {
+            audit_writer_seed = catalogue
+                .iter()
+                .filter(|tool| {
+                    tool.pointer("/function/name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_audit_deliverable_tool)
+                })
+                .cloned()
+                .collect();
+        }
         workspace_reader_seed = catalogue
             .iter()
             .filter(|tool| {
@@ -8286,6 +8376,9 @@ async fn start_ollama_http_with_idle(
         // with none of the work, though the tools HAD run.
         let mut emitted_text = false;
         let mut asked_for_answer = false;
+        let mut audit_deliverable_written = false;
+        // Set once Kronn has told an audit to write now (window or convergence).
+        let mut audit_write_phase = false;
         let ok = loop {
             http_turn_index = http_turn_index.saturating_add(1);
             let current_http_turn = http_turn_index;
@@ -8615,11 +8708,17 @@ async fn start_ollama_http_with_idle(
                     provider_attempt,
                 );
             }
-            if forced_synthesis && !calls.is_empty() && !got_error {
+            if forced_synthesis
+                && !calls.is_empty()
+                && !got_error
+                && declared_tools_for_turn.is_empty()
+            {
                 // The model ignored a tool-free synthesis turn and emitted another
                 // tool call anyway. Do not give it 40 more chances: return one
                 // bounded, honest diagnostic instead of ending as a generic agent
-                // error after the global cap.
+                // error after the global cap. An audit that kept its writers is
+                // not tool-free: stray calls are refused below and the ceiling
+                // still bounds it.
                 let diagnostic = tool_convergence_diagnostic(
                     &calls_per_tool,
                     &errors_per_tool,
@@ -9243,6 +9342,21 @@ async fn start_ollama_http_with_idle(
                     );
                 }
             } else if turn > round_cap {
+                // A model told to write that did write, then kept rewriting, has
+                // delivered: the step validator judges the file, not the loop.
+                if audit_write_phase && audit_deliverable_written {
+                    tracing::info!(
+                        target: "kronn::agent::tools",
+                        turn, round_cap,
+                        "audit deliverable written — ending at the round ceiling"
+                    );
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(format!(
+                            "{backend} wrote its audit deliverable and was stopped at the {round_cap}-round ceiling"
+                        ));
+                    }
+                    break true;
+                }
                 if tool_run_mode == crate::agents::tools::ToolRunMode::Audit {
                     ceiling_report.rounds = Some(round_cap);
                     ceiling_report.publish(&stderr_clone);
@@ -9573,7 +9687,12 @@ async fn start_ollama_http_with_idle(
                                 tool = %call.name, turn, repeats = *repeats,
                                 "identical tool call repeated after replay — refusing and forcing synthesis"
                             );
-                            withdrawn_tools.insert(call.name.clone());
+                            // An audit reads many files: one bad path repeated
+                            // must not cost it the tool for the whole step.
+                            // This signature stays refused; budgets still bound it.
+                            if tool_run_mode != crate::agents::tools::ToolRunMode::Audit {
+                                withdrawn_tools.insert(call.name.clone());
+                            }
                             let refusal = crate::agents::tools::ToolOutcome {
                                 call: call.clone(),
                                 ok: false,
@@ -9636,6 +9755,7 @@ async fn start_ollama_http_with_idle(
                 if edit_tool {
                     if outcome.ok {
                         successful_edit_this_turn = true;
+                        audit_deliverable_written = true;
                         repair_edit_succeeded = true;
                         if let Some(path) =
                             call.arguments.get("path").and_then(|path| path.as_str())
@@ -9879,6 +9999,10 @@ async fn start_ollama_http_with_idle(
                     tool = %call.name, ok = outcome.ok, turn,
                     "HTTP agent tool call"
                 );
+                if let Ok(mut usage) = task_usage.lock() {
+                    usage.last_tool = Some(tool_activity_label(call));
+                    usage.tool_calls = usage.tool_calls.saturating_add(1);
+                }
                 if let Ok(mut se) = stderr_clone.lock() {
                     se.push(trace_line(&outcome));
                 }
@@ -10380,26 +10504,35 @@ async fn start_ollama_http_with_idle(
                 && nothing_left_to_call)
                 || error_loop_exhausted
             {
-                if let Some(map) = body.as_object_mut() {
-                    map.remove("tools");
-                }
+                withdraw_tools_for_convergence(&mut body, &audit_writer_seed, &withdrawn);
+                let writers_kept = body.get("tools").is_some();
+                audit_write_phase |= writers_kept && !audit_writer_seed.is_empty();
                 let diagnostic = tool_convergence_diagnostic(
                     &calls_per_tool,
                     &errors_per_tool,
                     &refusals_per_tool,
                 );
                 if !forced_synthesis {
+                    let content = if writers_kept {
+                        format!(
+                            "Kronn stopped a non-progressing tool loop: {diagnostic}. \
+                             Reading and search tools are no longer available. Write \
+                             your deliverable now with the write tools still declared, \
+                             using only the evidence already obtained: mark what you \
+                             could not verify as unknown instead of guessing, and \
+                             mention the failed tools only once."
+                        )
+                    } else {
+                        format!(
+                            "Kronn stopped a non-progressing tool loop: {diagnostic}. \
+                             Do not call any more tools. Answer now with the useful \
+                             evidence already obtained, clearly separate confirmed \
+                             facts from missing information, and mention the failed \
+                             tools only once in a concise limitation note."
+                        )
+                    };
                     if let Some(messages) = body["messages"].as_array_mut() {
-                        messages.push(serde_json::json!({
-                            "role": "user",
-                            "content": format!(
-                                "Kronn stopped a non-progressing tool loop: {diagnostic}. \
-                                 Do not call any more tools. Answer now with the useful \
-                                 evidence already obtained, clearly separate confirmed \
-                                 facts from missing information, and mention the failed \
-                                 tools only once in a concise limitation note."
-                            ),
-                        }));
+                        messages.push(serde_json::json!({ "role": "user", "content": content }));
                     }
                     forced_synthesis = true;
                 }
@@ -10415,6 +10548,41 @@ async fn start_ollama_http_with_idle(
                     se.push(format!(
                         "{backend} forced tool convergence after {consecutive_error_only_rounds} error-only rounds: {diagnostic}; useful_results={useful_tool_results}"
                     ));
+                }
+            }
+            // An audit that is still exploring when its rounds or context run out
+            // fails at the ceiling with its file unwritten. Keep a few rounds in
+            // reserve for the only output that counts: the deliverable.
+            if !forced_synthesis
+                && !audit_writer_seed.is_empty()
+                && (turn.saturating_add(AUDIT_WRITE_RESERVE_ROUNDS) >= round_cap
+                    || worker_context_pressure(&body, ctx_cap, WORKER_CONTEXT_PRESSURE_PERCENT)
+                        .is_some())
+            {
+                withdraw_tools_for_convergence(&mut body, &audit_writer_seed, &withdrawn);
+                if body.get("tools").is_some() {
+                    if let Some(messages) = body["messages"].as_array_mut() {
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": "This audit step is close to its round or context limit. \
+                                        Reading and search tools are no longer available. Write \
+                                        your deliverable now with the write tools still declared, \
+                                        using only the evidence already obtained: mark what you \
+                                        could not verify as unknown instead of guessing.",
+                        }));
+                    }
+                    audit_write_phase = true;
+                    forced_synthesis = true;
+                    tracing::info!(
+                        target: "kronn::agent::tools",
+                        turn, round_cap,
+                        "audit write window — only the deliverable writers remain"
+                    );
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(format!(
+                            "{backend} audit write window opened at turn {turn} of {round_cap}"
+                        ));
+                    }
                 }
             }
             // The messages just grew by the tool results: the window sized for turn

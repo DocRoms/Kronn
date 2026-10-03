@@ -954,6 +954,18 @@ pub struct AuditProgress {
     /// confused the user during the 8-min Step 8 of the Full audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool_call_count: Option<u32>,
+    /// Who is auditing (KT-994): the card freezes its agent panel on this
+    /// choice while the audit runs, whichever client launched it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent: Option<AgentType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tier: Option<crate::models::ModelTier>,
+    /// The named external connection, for an HTTP agent that uses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
 }
 
 /// One row in the `audit_runs` table — one record per audit invocation.
@@ -1332,6 +1344,11 @@ impl AuditKind {
 #[ts(export)]
 pub struct LaunchAuditRequest {
     pub agent: AgentType,
+    /// KT-980 — the named external API connection an HTTP agent uses. Required
+    /// for a `Custom` agent; for LiteLLM or NVIDIA it picks one of several.
+    #[serde(default)]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
     /// Model capability selected by the shared agent picker. Missing values
     /// keep the historical audit behaviour (Reasoning).
     #[serde(default)]
@@ -1521,11 +1538,25 @@ pub struct DriftSection {
 #[ts(export)]
 pub struct PartialAuditRequest {
     pub agent: AgentType,
+    /// KT-980 — the named external API connection an HTTP agent uses. Required
+    /// for a `Custom` agent; for LiteLLM or NVIDIA it picks one of several.
+    #[serde(default)]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
     /// Model capability selected by the shared agent picker. Missing values
     /// keep the historical partial-audit behaviour (Reasoning).
     #[serde(default)]
     pub tier: Option<crate::models::ModelTier>,
     pub steps: Vec<usize>,
+}
+
+/// KT-977 — one step of the Full audit, known before any run: lets the UI
+/// say what a step not yet run will produce.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AuditStepInfo {
+    pub index: u32,
+    pub target_file: String,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

@@ -8,16 +8,18 @@ const AUDIT_AGENT_TYPES = new Set<AgentDetection['agent_type']>([
   'GeminiCli',
   'Kiro',
   'CopilotCli',
-  // KT-924 — HTTP agents whose native file tools Kronn executes, scoped to the
-  // project directory. Not NVIDIA (hosted, never offered the repository) nor
-  // Custom (needs a named connection an audit cannot select).
+  // HTTP agents whose file tools Kronn runs scoped to the project (KT-924).
+  // Every provider is the user's choice, with a data-transfer warning
+  // (KT-980); Custom only runs with a named connection.
   'Ollama',
   'LiteLlm',
+  'Nvidia',
+  'Custom',
 ]);
 
 /**
  * Agents that can run audits, which write `docs/` and therefore need to reach
- * the project's files: a CLI through its own filesystem, Ollama and LiteLLM
+ * the project's files: a CLI through its own filesystem, an HTTP agent
  * through Kronn's native file tools. This positive allowlist mirrors the
  * backend's `agent_can_audit`: an unknown agent is not audit-capable by default.
  */
