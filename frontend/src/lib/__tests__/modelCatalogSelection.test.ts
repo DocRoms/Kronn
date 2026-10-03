@@ -65,6 +65,27 @@ describe('catalogue selection contract', () => {
     }]);
   });
 
+  it.each([
+    ['not_found', 'modelCatalog.reason.not_found'],
+    ['access_denied', 'modelCatalog.reason.access_denied'],
+  ] as const)('flags a listed model the proxy refuses to serve (%s) in the selector, with its reason and detail (KT-941)', (reason, key) => {
+    const detail = 'Not found or access denied (HTTP 404): choose another model.';
+    const target = view([
+      entry('vertex_ai/claude-sonnet-5', { availability: 'unavailable', unavailable_reason: reason, unavailable_detail: detail }),
+      entry('claude-sonnet-4-6'),
+    ]);
+    const options = catalogModelOptions(target, 'claude-sonnet-4-6', (k, ...args) => [k, ...args].join(' '), () => '');
+    const flagged = options.find(option => option.value === 'vertex_ai/claude-sonnet-5')!;
+    // Visible in the list, not selectable, and the reason is in the label.
+    expect(flagged.label).toBe(`vertex_ai/claude-sonnet-5 — modelCatalog.unavailable (${key})`);
+    expect(flagged.disabled).toBe(true);
+    expect(flagged.description).toContain(detail);
+    // The model that answers stays an ordinary, selectable option.
+    const healthy = options.find(option => option.value === 'claude-sonnet-4-6')!;
+    expect(healthy.label).toBe('claude-sonnet-4-6');
+    expect(healthy.disabled).toBe(false);
+  });
+
   it('includes exact ID, alias, reasoning, freshness, unavailable reason, cost and privacy metadata', () => {
     const unavailable = entry('exact/id', {
       display_name: 'Technical name', display_alias: 'Alias', reasoning_modes: ['high'],

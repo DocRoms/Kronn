@@ -1020,7 +1020,17 @@ export const projects = {
    * grafts a stale selector kind onto a resumed run.
    */
   auditResumable: (id: string) =>
-    api<{ id: string; kind: AuditKind; last_completed_step: number; started_at: string } | null>(
+    api<{
+      id: string;
+      kind: AuditKind;
+      /** KT-931 — the NUMBER of steps that succeeded, not a position in the
+       *  chain: a step that failed in the middle leaves later ones done. */
+      last_completed_step: number;
+      /** KT-931 — the steps a resume re-runs (failed or never run), 1-based.
+       *  Absent from a backend that predates it. */
+      steps_to_redo?: number[];
+      started_at: string;
+    } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
   /**
@@ -1373,7 +1383,9 @@ export const projects = {
        * — a coherent `done interrupted` still follows. */
       onWarning?: (message: string) => void;
       onValidationCreated: (discussionId: string) => void;
-      onDone: (discussionId: string | null, templateWasInstalled: boolean) => void;
+      /** `status` is `complete` or `interrupted`. An interrupted run may still
+       * carry a `discussionId` (KT-931): the validation of its successful steps. */
+      onDone: (discussionId: string | null, templateWasInstalled: boolean, status?: string) => void;
       /** TERMINAL: the stream is over after this fires — onDone is sealed
        * and never follows (no double cleanup). */
       onError: (error: string) => void;
@@ -1381,8 +1393,13 @@ export const projects = {
     signal?: AbortSignal,
   ) => {
     let finished = false;
-    const done = (discId: string | null, tmpl: boolean) => {
-      if (!finished) { finished = true; handlers.onDone(discId, tmpl); }
+    const done = (discId: string | null, tmpl: boolean, status?: string) => {
+      if (finished) return;
+      finished = true;
+      // The status is only passed when the backend sent one: callers and
+      // tests that predate it keep seeing the two-argument call.
+      if (status === undefined) handlers.onDone(discId, tmpl);
+      else handlers.onDone(discId, tmpl, status);
     };
     // Terminal error: seal `finished` so the stream-close onDone is a no-op
     // — onError owns the cleanup, a second callback would double the toasts.
@@ -1473,7 +1490,7 @@ export const projects = {
             case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
             case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
             case 'validation_created': handlers.onValidationCreated(p.discussion_id as string); break;
-            case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
+            case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false, p.status); break;
             case 'error': fail(p.error ?? 'Unknown error'); break;
           }
         },
@@ -3048,10 +3065,25 @@ export interface UpsertExternalApiConnection {
   api_key?: string | null;
 }
 
+/** What one tier's model answered to a real one-token call (KT-941). */
+export interface ExternalApiTierCheck {
+  tier: 'economy' | 'default' | 'reasoning';
+  model: string;
+  ok: boolean;
+  status: 'ok' | 'not_found' | 'access_denied' | 'http_error' | 'timeout' | 'transport_error';
+  http_status?: number | null;
+  /** Generic, never the upstream body or the key. */
+  hint?: string | null;
+}
+
 export interface ExternalApiConnectionTestResult {
   ok: boolean;
-  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'billing_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
+  /** `model_error`: the connection works but a tier's model does not answer
+   * (see `tier_checks`); `ok` stays true so the pickers keep their catalogue. */
+  status: 'success' | 'model_error' | 'invalid_url' | 'credential_required' | 'auth_error' | 'billing_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
   models: string[];
+  /** One entry per tier verified by the test, for a LiteLLM connection. */
+  tier_checks?: ExternalApiTierCheck[];
   /** Capability-bearing union from provider-specific catalogue routes. Older
    * backends omit it; callers keep `models` as the chat-only fallback. */
   catalog?: Array<{
@@ -3180,7 +3212,11 @@ export const externalApi = {
   reveal: (id: string) =>
     api<string>('POST', `/external-api/connections/${id}/reveal`),
   remove: (id: string) => api<null>('DELETE', `/external-api/connections/${id}`),
-  test: (body: { endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[] }) =>
+  test: (body: {
+    endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[];
+    /** The model of each tier: a LiteLLM test calls each one and answers per tier. */
+    tier_models?: Array<{ tier: ExternalApiTierCheck['tier']; model: string }>;
+  }) =>
     api<ExternalApiConnectionTestResult>('POST', '/external-api/connections/test', body),
 };
 

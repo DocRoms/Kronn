@@ -22,6 +22,80 @@ speaks its own native `/api/chat`. The choice is made once, explicitly, by
 `http_transport::resolve_chat_codec` — there is no per-connection codec
 override today.
 
+## Repository mutations and audit usage
+
+After a successful workspace mutation, HTTP runs invalidate their cached file,
+search and Git observations. This applies to audit and general runs as well as
+orchestration workers. Non-worker runs restore readers withdrawn
+for repetition only; exhausted call budgets and open error circuits still
+apply, and effectful calls remain cached. Workers retain their separate bounded
+finalization policy. This prevents a post-edit verification from receiving the
+pre-edit file or a repetition refusal (KT-948).
+[src: file: backend/src/agents/runner.rs:9750]
+
+The HTTP runner also publishes structured input/output and reported cache-token
+counters through `AgentProcess`, which Full and partial audits consume. Each
+provider response contributes once, even when a stream repeats cumulative usage
+frames. Unreported usage stays unknown. Sums cover reported values only; they
+are not an independent billing reconciliation.
+[src: file: backend/src/agents/runner.rs:8380]
+[src: file: backend/src/api/audit/full.rs:1276]
+[src: file: backend/src/api/audit/drift.rs:599]
+
+Audit executors have a separate bounded policy: 64 calls per file mutation tool
+(`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
+`search_text`. Other budgets, context-sized round caps,
+timeouts, identical-call protection and error circuits remain active. When an
+artifact check fails after a ceiling, the step warning records the ceiling
+alongside the missing-output reason. Reaching a search ceiling alone does not
+fail an otherwise valid artifact (KT-951).
+[src: file: backend/src/agents/runner.rs:681]
+[src: file: backend/src/api/audit/validation.rs:102]
+
+Full audits check changed documents against the final documentary gate during
+each step. Comma-bundled file references (including a repeated `file:` prefix)
+are split only when every individual path and line resolves; documents containing
+human-owned sections and fenced examples are excluded from this automatic edit.
+Originals are saved by content hash under
+`docs/.kronn-citation-originals/*.bak`. Remaining blockers receive at most two
+agent correction attempts, with existing human-section protection. Invalid
+paths and ranges still block validation. Retry usage is included in the step
+total (KT-952).
+[src: file: backend/src/api/audit/document_repair.rs:1]
+[src: file: backend/src/api/audit/full.rs:1122]
+
+An incomplete dimension-coverage matrix also receives targeted feedback in a
+Full audit after the agent exits successfully. This shares the same three-attempt
+budget as documentary correction; it does not add another retry budget. Resume
+recomputes the matrix failure from the current index before its first attempt.
+Invalid tables remain blocking, provider errors do not trigger this correction,
+and existing TD files and human sections remain protected (KT-956).
+[src: file: backend/src/api/audit/validation.rs:95]
+[src: file: backend/src/api/audit/full.rs:1143]
+
+A failed provider launch finalizes the step with its error and elapsed time.
+If a corrective attempt had already consumed tokens, that usage remains in the
+persisted step and its terminal SSE event; an unmeasured launch stays unknown.
+[src: file: backend/src/api/audit/full.rs:1784]
+
+A provider error during a step also survives in its persisted warning and SSE
+recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
+evidence that tool calling is unsupported. Only typed status metadata enters
+this diagnostic; provider response bodies and endpoint URLs are excluded.
+Partial files remain in place. This failure does not automatically retry the
+request after tool execution or replay that effect (KT-955).
+[src: file: backend/src/agents/http_diagnostics.rs:1]
+[src: file: backend/src/api/audit/validation.rs:95]
+[src: file: backend/src/agents/runner.rs:10430]
+
+The final gate also invalidates the relevant step rows so Resume names earlier
+documents that failed after their agent returned success. Recovery rechecks the
+actual files, including runs made before this fix. Auxiliary documents with no
+durable writer attribution are explicitly assigned to the founding step's
+repair prompt. A corrected reference establishes existence, not factual truth.
+[src: file: backend/src/api/audit/document_repair.rs:26]
+[src: file: backend/src/db/audit_runs.rs:620]
+
 ## Pre-dispatch capability check
 
 If a named connection's live catalogue (Settings → test a connection) tags a
@@ -117,3 +191,43 @@ under an unrelated agent.
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.
   [src: url: https://mimo.mi.com/docs/en-US/api/guidance/error-codes]
+
+
+## Discussion attachments (KT-946)
+
+Ordinary HTTP discussion turns load the room's image attachments separately
+from its text context. A model with the catalogue capability `vision` receives
+OpenAI `image_url` data-URL parts (LiteLLM, NVIDIA and named connections), or
+Ollama `images` base64 values. Settings → model catalogue exposes **Vision
+(read images)** independently of the `image` generation capability. Provider
+image-input declarations also populate it; without a catalogue declaration,
+Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
+model. A missing declaration never causes an image to be sent speculatively.
+[src: file: backend/src/agents/vision.rs:1]
+[src: file: backend/src/api/discussions/streaming.rs:1757]
+
+Every withheld image is named in the model's context with an explicit instruction
+not to describe its contents, and a way for the user to supply the information.
+PNG, JPEG, GIF and WebP are supported. The eight most recent attachments are
+eligible, bounded to 5 MiB per transmitted image and 12 MiB in total before
+base64. Uploads up to 10 MiB that exceed the transmission limit are decoded
+under allocation/dimension limits and downscaled to PNG, preserving the original
+file. Failed decoding or remaining limits produce the same explicit withholding
+notice. Transmission/downscaling counts are logged without the image payload.
+Prompt estimates count a bounded image allowance instead of base64 text bytes.
+[src: file: backend/src/agents/vision.rs:1]
+
+`read_file` accepts only file paths registered to the current discussion, even
+without a project. This exception grants no directory listing or writing rights;
+`.kronn/context-files` remains read-only inside a project too. Symlink
+attachments are refused. Unrelated files outside the workspace keep the existing
+refusal. Images are never returned as lossy text by `read_file`.
+[src: file: backend/src/api/agent_tools.rs:3159]
+[src: file: backend/src/api/agent_workspace_tools.rs:1226]
+
+CLI agents retain the existing attachment prompt: an image's path and an
+instruction to inspect it with their own image/file tools before describing it.
+Kronn does not claim that every CLI/model can decode every format. The HTTP
+image parts described here apply to ordinary discussion turns; workflow Agent
+steps do not implicitly import attachments from an unrelated discussion.
+[src: file: backend/src/core/context_files.rs:544]

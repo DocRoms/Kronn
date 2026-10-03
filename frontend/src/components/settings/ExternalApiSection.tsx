@@ -137,6 +137,20 @@ function toPayload(form: FormState): UpsertExternalApiConnection {
   };
 }
 
+/** The model of each tier, for a LiteLLM test to call and answer per tier. */
+function tierModelsForProbe(
+  connection: Pick<FormState, 'economy_model' | 'default_model' | 'reasoning_model'>,
+): Array<{ tier: Tier; model: string }> {
+  return TIERS
+    .map(tier => ({
+      tier,
+      model: (tier === 'economy'
+        ? connection.economy_model
+        : tier === 'default' ? connection.default_model : connection.reasoning_model).trim(),
+    }))
+    .filter(entry => entry.model);
+}
+
 function modelsForProbe(connection: Pick<FormState, 'origin_preset' | 'economy_model' | 'default_model' | 'reasoning_model'>): string[] {
   // Every preset, not just the two with a public catalogue: probing a model
   // the operator never configured is what made a working LiteLLM proxy report
@@ -362,6 +376,12 @@ function ConnectionForm({
                       : { ...prev, reasoning_model: next },
                 );
               const available = catalogModels('chat');
+              // What a real call to THIS model answered (LiteLLM test). A
+              // verdict on another model — the tier was changed since — is not
+              // this model's.
+              const tierCheck = testResult?.tier_checks?.find(
+                entry => entry.tier === tier && entry.model === value,
+              );
               const models = [...new Set([
                 value,
                 ...available.map(model => model.id),
@@ -392,12 +412,18 @@ function ConnectionForm({
                     testId={`ext-api-tier-${tier}`}
                   />
                   {value ? (
-                    <small className="set-hint" data-testid={`ext-api-tier-status-${tier}`}>
-                      {testResult?.ok !== true
-                        ? t('config.extApi.modelUnverified')
-                        : available.some(model => model.id === value)
-                          ? t('config.extApi.testedCatalog')
-                          : t('config.extApi.modelAbsent')}
+                    <small
+                      className={tierCheck && !tierCheck.ok ? 'set-hint set-ext-api-tier-check-failed' : 'set-hint'}
+                      data-testid={`ext-api-tier-status-${tier}`}
+                      data-tier-check={tierCheck?.status}
+                    >
+                      {tierCheck
+                        ? t(`config.extApi.tierCheck.${tierCheck.status}`, tierCheck.http_status ?? '')
+                        : testResult?.ok !== true
+                          ? t('config.extApi.modelUnverified')
+                          : available.some(model => model.id === value)
+                            ? t('config.extApi.testedCatalog')
+                            : t('config.extApi.modelAbsent')}
                     </small>
                   ) : null}
                   {value && modelCostSuffix ? (
@@ -577,6 +603,8 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
         api_key: form.keyTouched ? form.api_key : null,
         origin_preset: form.origin_preset,
         ...(models.length > 0 ? { models } : {}),
+        ...(models.length > 0 && form.origin_preset === 'lite_llm'
+          ? { tier_models: tierModelsForProbe(form) } : {}),
         ...(editingId ? { connection_id: editingId } : {}),
       });
       if (draftTestGenerationRef.current === generation) {
@@ -624,6 +652,14 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
         connection_id: connection.id,
         origin_preset: connection.origin_preset,
         ...(models.length > 0 ? { models } : {}),
+        ...(models.length > 0 && connection.origin_preset === 'lite_llm'
+          ? {
+            tier_models: tierModelsForProbe({
+              economy_model: connection.economy_model ?? '',
+              default_model: connection.default_model ?? '',
+              reasoning_model: connection.reasoning_model ?? '',
+            }),
+          } : {}),
       });
       if (savedTestGenerationRef.current === generation) {
         setSavedTests(prev => ({ ...prev, [connection.id]: result }));
@@ -757,6 +793,20 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
             <code title={models[tier] ?? t('config.defaultModel')}>
               {models[tier] ?? t('config.defaultModel')}
             </code>
+            {(() => {
+              const check = savedTests[c.id]?.tier_checks?.find(
+                entry => entry.tier === tier && entry.model === models[tier],
+              );
+              return check ? (
+                <small
+                  className={check.ok ? 'set-hint' : 'set-hint set-ext-api-tier-check-failed'}
+                  data-testid={`ext-api-saved-tier-status-${tier}-${c.id}`}
+                  data-tier-check={check.status}
+                >
+                  {t(`config.extApi.tierCheck.${check.status}`, check.http_status ?? '')}
+                </small>
+              ) : null;
+            })()}
           </div>
         ))}
         {mediaSlots.length > 0 && (

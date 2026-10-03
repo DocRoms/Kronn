@@ -11,6 +11,33 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Fixed
+
+- Testing a LiteLLM connection no longer fails with "Could not persist the
+  saved connection's model catalog" (KT-939). A LiteLLM proxy lists a model once
+  per deployment; the second copy broke the catalogue's unique key and the whole
+  refresh rolled back, leaving the model pickers empty. A model listed twice is
+  now stored once.
+
+- A Full audit in which a step fails no longer invalidates the whole run.
+  Until now one failed step — often for an outside reason, such as the Mac going
+  to sleep — left the run Interrupted with no validation discussion, even when
+  the other fifteen documents existed. The run still ends Interrupted (only a
+  complete run can be validated and earn the Validated badge), but it now gets a
+  validation discussion for the steps that succeeded, which names the steps to
+  redo and tells the agent not to validate their documents — unless the step
+  that failed is the one that writes `docs/AGENTS.md`, the entry point every
+  other document hangs off: without it there is nothing to validate, so the run
+  stays Interrupted with no discussion and the Resume button still names that
+  step to redo. The documentary check that refuses a run with an invented link
+  still applies. The progress is now the exact number of steps that succeeded,
+  the ones after a failure included — a run that lost step 5 of 16 reads 15/16,
+  no longer 4 or 16. The Resume button names the steps it will run ("Resume —
+  redo step(s) 5"), and a resume runs only those: a resumed run now records the
+  steps it carried over, so resuming it again no longer replays the whole
+  chain, and a step that was started but never finished is no longer mistaken
+  for a successful one (KT-931).
+
 ## [0.14.2] - 2026-09-30
 
 ### Added
@@ -292,6 +319,85 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- HTTP audits can write more than twelve findings and their index within a
+  dedicated bounded budget. A missing artifact after a tool ceiling now keeps
+  that cause in its persisted warning (KT-951). Full audits correct verifiable
+  bundled citations, retain originals, and retry remaining documentary blockers
+  at most twice. Resume includes previously successful steps whose documents
+  failed the final gate; invented paths and invalid lines still prevent
+  validation, and human sections remain protected (KT-952).
+
+- An HTTP audit interrupted by a provider error now keeps that cause in the
+  step recap alongside any missing-output warning. A 429 identifies a rate
+  limit or exhausted quota and no longer suggests incompatible tools. Provider
+  bodies stay out of this diagnostic and partial files are preserved. This
+  failure does not automatically retry the request or replay tool effects
+  (KT-955).
+
+- A Full audit gives the model the exact error when its dimension-coverage
+  table is incomplete, using the existing limit of two corrective attempts.
+  Resume recomputes that feedback from the saved index. The table must still
+  pass every check; provider failures do not trigger this correction, and
+  earlier TD files and human-owned sections are preserved (KT-956).
+
+- HTTP audits and discussions can read fresh repository content after writing
+  it. Previously only orchestration workers invalidated cached observations;
+  an audit could receive a pre-edit file or lose its reader as a repeated call.
+  Successful mutations now invalidate those observations and restore readers
+  withdrawn for repetition, while call ceilings, error circuits and cached
+  write effects remain enforced. HTTP token counters also reach the audit's
+  per-step telemetry, summing each provider response once and preserving
+  unknown usage instead of showing zero (KT-948).
+
+- Images attached to a discussion now reach HTTP vision models as image input:
+  OpenAI-compatible connections receive data-URL parts and Ollama receives
+  native image arrays. The model is explicitly told when an image cannot be
+  seen (unknown capability, unreadable file, unsupported format or request
+  limit), instead of receiving only a path and guessing its content. The model
+  catalogue exposes an independent Vision capability and imports image-input
+  declarations separately from image generation. Large uploads are downscaled
+  for transmission without changing the original. A discussion's own attached
+  files are readable outside the workspace, while attachment edits and reads
+  of unrelated outside files remain refused (KT-946).
+
+- Agent instruction templates now defer language and test requirements to the
+  project's parameters. New adapter files no longer copy an English language
+  default, and re-auditing an existing managed block removes its unconditional
+  English rule while preserving user content. The testing checklist follows
+  the configured test policy, and links to Project parameters reach a real
+  Markdown heading.
+
+- The context a local Ollama model is given on a Mac is computed from the model
+  and no longer cut from the installed RAM (KT-943). The ceiling used to be one
+  slice per RAM size — 65,536 tokens on a 64 GB Mac, for every model — which is
+  four times too prudent for `qwen3.8:27b-mlx`: only 16 of its 64 layers cache
+  anything (the others keep a constant state), so a token costs its cache 64 KiB,
+  and 262,144 tokens take 16 GB next to its 18.2 GB of weights, inside the
+  roughly 48 GB macOS lets the GPU use. With nothing configured, the ceiling is
+  now the smaller of the model's own window and what the GPU budget
+  (`iogpu.wired_limit_mb` when set, else 75 % of memory) leaves once the weights
+  and a safety margin (10 %, at least 2 GB) are taken, over the cost of a token
+  of cache. That cost comes from the model itself — `/api/show` for a GGUF
+  model, the `config.json` in Ollama's store for an MLX one, whose `/api/show`
+  does not say — counting only the layers with full attention, and follows
+  `OLLAMA_KV_CACHE_TYPE` (q8_0, q4_0) when the server sets it. That model now
+  runs at its whole 262,144 on 64 GB, about 76,000 on 32 GB, and a dense 70B at
+  about 19,000 on 64 GB. When anything is missing — the attention shape, the
+  weights, a cache type Kronn cannot price, a model with a sliding window — the
+  RAM slice applies exactly as before, and so does it off Apple Silicon. A
+  Settings override and `KRONN_OLLAMA_NUM_CTX_CAP` still win, and the ceiling of
+  a native MLX task worker stays at 32,768. The model list says where the figure
+  comes from — "model estimate (weights + cache)" next to "model window",
+  "machine memory" and the others — and a run held below the model's window
+  names it in its notice. See
+  [Ollama local models](docs/operations/ollama-local-models.md#the-ceiling-is-computed-per-model-kt-943).
+
+- A native backend that relocates its data directory (`KRONN_DATA_DIR`) keeps
+  listening on its configured host instead of `0.0.0.0` (KT-936). The variable
+  used to stand in for "running in Docker", so such a backend was refused at
+  boot by the LAN guard unless `KRONN_HOST=127.0.0.1` was set. Only a real
+  container binds every interface now.
+
 - The model list of Config shows the models OpenCode declares in a project
   too, and a launch runs the model you chose (KT-928). OpenCode builds its
   model list per working directory — its user-level config plus the
@@ -512,6 +618,82 @@ Release notes for 0.9.3 and earlier are available in the
   replies. The `session_budget` signal reports the four traffic counters and
   the cache share beside its `traffic_tokens` axis; the axis itself still counts
   cache reads, as it was calibrated to.
+- A model that goes silent now fails the run instead of freezing it, and
+  stopping a run frees the model (KT-932). On 30/09 a laptop slept in the middle
+  of a generation: Ollama was idle when it woke, but OpenCode kept an open,
+  mute connection to it and the step stayed frozen until the process was killed
+  by hand — the 600 s limit on event streams only covers what Kronn sends to the
+  browser. ACP agents and the native HTTP agents (Ollama, LiteLLM, NVIDIA,
+  external API) now carry an inactivity watchdog on the model's own output.
+  Progress restarts it — every chunk of an HTTP stream, every frame of an ACP
+  agent, a reasoning chunk that shows nothing included — so a slow model that
+  keeps talking is never cut; a silence of the full delay fails the run with a
+  message saying what stopped, for how long, how far it had got and what Kronn
+  did about it, and cancels the generation. The delay is the discussion's
+  **Agent inactivity timeout** (Config › Server) or the step's
+  `stall_timeout_secs`, and never less than 15 minutes in a discussion, so the
+  first token of a large model loaded cold gets through; anywhere else it is 15
+  minutes. A stalled step is recognised as a stall by its `on_timeout` routing,
+  as before. A request that is not streamed (constrained JSON) has nothing to
+  watch while it runs and keeps only its own timeout. Stopping an agent — Stop,
+  a cancel, a kill — closes its connection to the model, which is what makes
+  Ollama stop generating instead of finishing for nobody while the next request
+  queues behind it: the HTTP stream is dropped, and an ACP agent is cancelled
+  and shut down with its whole process group. Both are covered by tests against
+  a simulated Ollama that watches the connection. A long but silent ACP tool
+  call — OpenCode running `cargo test` or a build — is not mistaken for a dead
+  model: while a tool call is open the watchdog measures silence against a
+  bound of its own, eight times the model's delay, and hands the clock back to
+  the model the instant a terminal update closes the call; a tool call that
+  never closes is still cut, by its own bound, with a reason naming the tool.
+  See [Agent timeouts](docs/architecture/overview.md).
+- A tool call the model wrote badly no longer ends an Ollama turn, and the
+  failure no longer blames the context window (KT-942). Ollama reads the tool
+  call itself — Qwen writes it as XML — and when the text is malformed it ends
+  the stream with an error such as `XML syntax error on line 13: element
+  <parameter> closed by </function>`; Kronn took that for fatal and stopped the
+  turn, with the note about the context window (« Kronn is running it at 65536 —
+  raise it with `KRONN_OLLAMA_NUM_CTX_CAP` ») ahead of it, pointing at a setting
+  that had nothing to do with it. The same request is now sent again, at most
+  twice: generation is stochastic and a second try usually yields a valid call.
+  Nothing is added to the prompt. Nothing ran for the refused call, so the
+  replay is safe after earlier tool rounds too — the tools already run are not
+  run again — and each replay is written to the run's retry trace. If the model
+  keeps writing an unreadable call, the turn still fails, visibly, and the
+  message now says the model produced an unreadable tool call instead of
+  leading with the context note. Covered by tests against a simulated Ollama
+  that refuses the call once, after a tool round, and every time.
+
+- A LiteLLM model the proxy lists but cannot serve is now caught by the test,
+  marked in the catalogue, and explained in the discussion (KT-941). On 01/10
+  the proxy listed 96 models and Kronn showed all 96 as available, yet every
+  `vertex_ai/…` one answered a 404 ("Publisher model … was not found or your
+  project does not have access") and one a 401 ("Not allowed … due to tags
+  configuration"): a connection whose default was `vertex_ai/claude-sonnet-5`
+  failed every turn, and the error was the proxy's raw, nested and escaped
+  JSON, which named no model and said nothing to do. **Test** now sends a
+  one-token call to the model chosen for each tier — economy, default,
+  reasoning — and shows, under each selector and on the connection card,
+  whether that model answers or is not found, refused by the proxy, failing or
+  too slow. The connection stays usable when one tier fails: the pickers keep
+  the catalogue so another model can be chosen. A bare 401 on every model is
+  still reported as a rejected key, not as three refused models, and neither
+  the upstream body nor the key is ever in the result. A model that answers a
+  real call with a 404, or a 401/403 naming the proxy's own allow-list, is
+  marked unavailable in the model catalogue with its reason (not found, access
+  denied) and its HTTP code — whether it was found by Test or by a turn that
+  failed — and the selectors show it as unavailable with that reason. Being
+  listed again does not clear it; a successful call does (the next Test of that
+  model, or Retry on the LiteLLM card). A flagged model is refused up front,
+  naming it, instead of re-sending a call that cannot succeed, and Kronn never
+  runs another model in its place. The discussion now reads "Model “X” is not
+  accessible through this proxy (HTTP 404: not found or access denied). Choose
+  another model in Config › Agents › LiteLLM." (in the discussion's language),
+  with the proxy's raw answer under *Technical details*. That sentence had never
+  appeared for a real error: Kronn read the status of `LiteLLM error 404: …` as
+  `404:` and found none, so every provider error skipped the model diagnostics
+  and surfaced as the raw body; the status is now read correctly, for every HTTP
+  agent.
 
 ## [0.14.1] - 2026-09-26
 

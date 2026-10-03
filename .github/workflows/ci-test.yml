@@ -174,7 +174,8 @@ jobs:
   test-backend-coverage:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The instrumented run already took 25-30 min; the floor itself is unchanged.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: backend
@@ -716,7 +717,9 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The macOS lib-test rebuild alone took 29m13s in run 36912793272.
+    # Leave room for all three required suites and the post-job cache save.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}
     defaults:
       run:
         working-directory: backend

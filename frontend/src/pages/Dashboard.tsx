@@ -373,12 +373,18 @@ export function Dashboard({ onReset }: DashboardProps) {
     if (msg.status === 'complete') {
       toast(t('audit.finishedToast', projName), 'success');
     } else {
-      // Stream-end interruptions have no warned step — show where it
-      // stopped instead of an unactionable '?'.
+      // Stream-end interruptions have no warned step — show how many steps
+      // succeeded instead of an unactionable '?'.
       const warned = msg.warned_steps.length > 0
         ? msg.warned_steps.join(', ')
         : `${msg.last_completed_step}/${msg.total_steps}`;
-      toast(t('audit.finishedWarnToast', projName, warned), 'warning');
+      // KT-931 — an interrupted run that still carries a validation
+      // discussion had steps succeed: those are being validated, only the
+      // failed ones are left to resume. Without one, validation was skipped.
+      toast(
+        t(msg.discussion_id ? 'audit.finishedPartialToast' : 'audit.finishedWarnToast', projName, warned),
+        'warning',
+      );
     }
     refetch();
     // The completed audit just created a validation discussion (and its

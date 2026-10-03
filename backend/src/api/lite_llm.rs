@@ -19,6 +19,108 @@ use axum::{extract::State, Json};
 const PROVIDER: &str = "litellm";
 const MODEL_NOT_IN_CATALOGUE: &str = "kronn:model-not-in-catalogue";
 
+/// Phrases a LiteLLM proxy uses when it refuses a model for THIS key or team
+/// (allow-list, tag routing, entitlements) rather than rejecting the key.
+/// Matched case-insensitively, and only on a 401/403 — "Method not allowed" is
+/// a 405 and never reaches here.
+const MODEL_DENIAL_MARKERS: [&str; 4] = [
+    "not allowed",
+    "tags configuration",
+    "access to model",
+    "access to the model",
+];
+
+/// What a non-2xx answer to a chat call says about the MODEL, as opposed to the
+/// credential, the payload or the network (KT-941).
+///
+/// A LiteLLM proxy lists every alias it was configured with, whether or not
+/// the upstream project can serve it: on 01/10 all 96 listed models were
+/// "available" while every `vertex_ai/…` one answered 404, and one answered a
+/// 401 "Not allowed … due to tags configuration". Both mean "this alias will
+/// never answer for you", which is worth remembering. Deliberately NOT
+/// classified: 400/422 (could be the payload), 429, 5xx (transient) and a
+/// plain 401/403 (the key itself may be wrong).
+pub(crate) fn classify_model_failure(status: u16, body: &str) -> Option<ModelUnavailableReason> {
+    match status {
+        404 | 410 => Some(ModelUnavailableReason::NotFound),
+        401 | 403 => {
+            let body = body.to_ascii_lowercase();
+            MODEL_DENIAL_MARKERS
+                .iter()
+                .any(|marker| body.contains(marker))
+                .then_some(ModelUnavailableReason::AccessDenied)
+        }
+        _ => None,
+    }
+}
+
+/// Human-readable catalogue detail for a flagged model. Carries the status and
+/// the way out, never the provider's body (which can echo account metadata).
+pub(crate) fn model_failure_detail(reason: ModelUnavailableReason, status: u16) -> String {
+    match reason {
+        ModelUnavailableReason::AccessDenied => format!(
+            "Access denied (HTTP {status}): the proxy lists this model but refuses it for this key or project. Choose another model, or test the connection again once access is fixed."
+        ),
+        _ => format!(
+            "Not found or access denied (HTTP {status}): the proxy lists this model but its upstream deployment does not answer. Choose another model, or test the connection again once the proxy is fixed."
+        ),
+    }
+}
+
+/// Remember, in the model catalogue, that `model` is listed by the proxy but
+/// refused a real call. Returns whether the answer was a model-level verdict
+/// and an entry was flagged: selectors then show it as unavailable and the
+/// catalogue preflight refuses it instead of re-sending a call that cannot
+/// succeed, or quietly running another model.
+pub(crate) async fn flag_unreachable_model(
+    db: &crate::db::Database,
+    runtime_target_id: &str,
+    model: &str,
+    status: u16,
+    body: &str,
+) -> bool {
+    let Some(reason) = classify_model_failure(status, body) else {
+        return false;
+    };
+    let target = runtime_target_id.to_string();
+    let model = model.to_string();
+    let detail = model_failure_detail(reason, status);
+    let flagged = db
+        .with_conn(move |conn| {
+            crate::db::model_catalog::mark_unavailable(conn, &target, &model, reason, Some(&detail))
+        })
+        .await
+        .unwrap_or(false);
+    if flagged {
+        let _ = crate::core::model_catalog::refresh_runtime_cache(db).await;
+    }
+    flagged
+}
+
+/// The counterpart of [`flag_unreachable_model`]: the model just answered.
+pub(crate) async fn clear_unreachable_model(
+    db: &crate::db::Database,
+    runtime_target_id: &str,
+    model: &str,
+) -> bool {
+    let target = runtime_target_id.to_string();
+    let model = model.to_string();
+    let cleared = db
+        .with_conn(move |conn| crate::db::model_catalog::clear_model_failure(conn, &target, &model))
+        .await
+        .unwrap_or(false);
+    if cleared {
+        let _ = crate::core::model_catalog::refresh_runtime_cache(db).await;
+    }
+    cleared
+}
+
+/// Catalogue namespace of the single, un-named LiteLLM configured in the card.
+/// Named connections have their own `http:<id>` namespace.
+fn legacy_runtime_target() -> String {
+    crate::db::model_catalog::agent_runtime_target_id(&AgentType::LiteLlm)
+}
+
 /// Public accessor for the runner, which already holds the saved endpoint and
 /// only needs the fallback chain applied.
 pub fn resolve_base_url_pub(stored: Option<&str>) -> String {
@@ -436,6 +538,8 @@ pub async fn retry_model(
                     )?)
                 })
                 .await;
+            // The catalogue flag follows the same verdict as the failure memory.
+            clear_unreachable_model(&state.db, &legacy_runtime_target(), &model).await;
             Json(ApiResponse::ok(LiteLlmModelRetryResponse {
                 healthy: true,
                 failure: None,
@@ -443,6 +547,7 @@ pub async fn retry_model(
         }
         ModelRetryProbe::CatalogueUnavailable(error) => Json(ApiResponse::err(error)),
         outcome => {
+            let from_model_call = matches!(outcome, ModelRetryProbe::ModelFailed(..));
             let (status, error) = match outcome {
                 ModelRetryProbe::NotInCatalogue => (410, MODEL_NOT_IN_CATALOGUE.to_string()),
                 ModelRetryProbe::ModelFailed(status, error) => (status, error),
@@ -466,6 +571,10 @@ pub async fn retry_model(
                     Ok(())
                 })
                 .await;
+            if from_model_call {
+                flag_unreachable_model(&state.db, &legacy_runtime_target(), &model, status, &error)
+                    .await;
+            }
             let endpoint_for_db = endpoint.clone();
             let model_for_db = model.clone();
             let failure = state
@@ -540,6 +649,137 @@ mod tests {
         assert_eq!(cfg.tokens.active_key_for(PROVIDER), Some("sk-two"));
         upsert_key(&mut cfg, "");
         assert_eq!(cfg.tokens.active_key_for(PROVIDER), None);
+    }
+
+    // ── KT-941 — a listed model that cannot be served ────────────────────
+
+    #[test]
+    fn a_not_found_or_a_proxy_allow_list_refusal_is_a_verdict_on_the_model() {
+        use ModelUnavailableReason::{AccessDenied, NotFound};
+        let vertex_404 = "Publisher Model `projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-5` was not found or your project does not have access to it.";
+        assert_eq!(classify_model_failure(404, vertex_404), Some(NotFound));
+        assert_eq!(classify_model_failure(404, ""), Some(NotFound));
+        assert_eq!(classify_model_failure(410, "retired"), Some(NotFound));
+        // The 01/10 case: `vertex_ai/claude-fable-5` answered 401, not 404.
+        assert_eq!(
+            classify_model_failure(
+                401,
+                "Not allowed to access model due to tags configuration. Model=vertex_ai/claude-fable-5"
+            ),
+            Some(AccessDenied)
+        );
+        assert_eq!(
+            classify_model_failure(
+                403,
+                "Key not allowed to access model. This key can only access models=['gpt-5.1']"
+            ),
+            Some(AccessDenied)
+        );
+    }
+
+    #[test]
+    fn a_rejected_key_a_bad_payload_or_a_flaky_upstream_is_not_held_against_the_model() {
+        // A wrong key fails every model the same way; flagging them all would
+        // empty the catalogue over one typo.
+        assert_eq!(
+            classify_model_failure(
+                401,
+                "Authentication Error, Invalid proxy server token passed"
+            ),
+            None
+        );
+        assert_eq!(classify_model_failure(403, "Forbidden"), None);
+        assert_eq!(classify_model_failure(401, ""), None);
+        // Ambiguous or transient: 400/422 may be the payload, 429/5xx pass.
+        for status in [400, 408, 422, 429, 500, 502, 503] {
+            assert_eq!(
+                classify_model_failure(status, "not allowed"),
+                None,
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_call_flags_the_model_in_the_catalogue_and_a_good_one_clears_it() {
+        use crate::models::{AgentType, ModelAvailability};
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                "http:conn",
+                &AgentType::LiteLlm,
+                &["vertex_ai/claude-sonnet-5", "claude-sonnet-4-6"].map(|id| {
+                    crate::db::model_catalog::DiscoveredModel {
+                        model_id: id.into(),
+                        display_name: id.into(),
+                        resolved_model: None,
+                        description: None,
+                        capabilities: vec![],
+                        reasoning_modes: vec![],
+                        default_reasoning_mode: None,
+                    }
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        async fn entry(db: &crate::db::Database, id: &str) -> crate::models::CatalogModelEntry {
+            let id = id.to_string();
+            db.with_read_conn(move |conn| {
+                Ok(crate::db::model_catalog::get(conn, "http:conn", &id)?.unwrap())
+            })
+            .await
+            .unwrap()
+        }
+
+        // A bad key says nothing about the model.
+        assert!(
+            !flag_unreachable_model(
+                &db,
+                "http:conn",
+                "vertex_ai/claude-sonnet-5",
+                401,
+                "Invalid proxy server token"
+            )
+            .await
+        );
+        assert_eq!(
+            entry(&db, "vertex_ai/claude-sonnet-5").await.availability,
+            ModelAvailability::Available
+        );
+
+        assert!(
+            flag_unreachable_model(
+                &db,
+                "http:conn",
+                "vertex_ai/claude-sonnet-5",
+                404,
+                "was not found or your project does not have access"
+            )
+            .await
+        );
+        let flagged = entry(&db, "vertex_ai/claude-sonnet-5").await;
+        assert_eq!(flagged.availability, ModelAvailability::Unavailable);
+        assert_eq!(
+            flagged.unavailable_reason,
+            Some(ModelUnavailableReason::NotFound)
+        );
+        let detail = flagged.unavailable_detail.unwrap();
+        assert!(detail.contains("HTTP 404"), "{detail}");
+        assert!(detail.contains("Choose another model"), "{detail}");
+        assert!(!detail.contains("project does not have access"), "{detail}");
+        assert_eq!(
+            entry(&db, "claude-sonnet-4-6").await.availability,
+            ModelAvailability::Available
+        );
+
+        assert!(clear_unreachable_model(&db, "http:conn", "vertex_ai/claude-sonnet-5").await);
+        assert_eq!(
+            entry(&db, "vertex_ai/claude-sonnet-5").await.availability,
+            ModelAvailability::Available
+        );
     }
 
     #[tokio::test]

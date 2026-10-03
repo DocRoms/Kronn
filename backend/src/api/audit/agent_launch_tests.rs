@@ -10,6 +10,10 @@ use std::sync::{Arc, Mutex};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[cfg(unix)]
+#[path = "coverage_repair_tests.rs"]
+mod coverage_repair_tests;
+
 fn sse(frames: &[String]) -> String {
     frames
         .iter()
@@ -181,6 +185,373 @@ async fn an_http_audit_step_writes_inside_the_project_and_is_refused_outside() {
     assert!(!results[0].contains("refused"), "{}", results[0]);
     assert!(results[1].contains("refused"), "{}", results[1]);
     assert!(results[2].contains("refused"), "{}", results[2]);
+}
+
+#[tokio::test]
+async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
+    let mut calls: Vec<_> = (1..=16)
+        .map(|n| {
+            (
+                "write_file",
+                json!({
+                    "path":format!("docs/tech-debt/TD-{n}.md"), "content":format!("# Finding {n}\n")
+                }),
+            )
+        })
+        .collect();
+    let index = (1..=16)
+        .map(|n| format!("- [TD-{n}](tech-debt/TD-{n}.md)\n"))
+        .collect::<String>();
+    calls.push((
+        "write_file",
+        json!({"path":"docs/index.md","content":index}),
+    ));
+    let (server, _) = provider(
+        tool_calls(&calls),
+        text("All findings and their index were written."),
+    )
+    .await;
+    let state = litellm_state(&server.uri()).await;
+    let project = tempfile::tempdir().unwrap();
+    assert!(
+        run_step(
+            &state,
+            project.path(),
+            "Write sixteen findings and their index"
+        )
+        .await
+        .0
+    );
+    assert_eq!(
+        std::fs::read_dir(project.path().join("docs/tech-debt"))
+            .unwrap()
+            .count(),
+        16
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("docs/index.md")).unwrap(),
+        index
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
+    use axum::response::IntoResponse;
+    for reference in ["code.rs:1", "invented.rs:1"] {
+        let correct = reference == "code.rs:1";
+        use sha2::{Digest, Sha256};
+        let human = "<!-- kronn:section name=\"decision\" owner=\"human\" -->\nHuman decision remains.\n<!-- kronn:section:end -->\n";
+        let original = format!("# Finding\n[src: file: invented.rs:1]\n{human}");
+        let receipt: String = Sha256::digest(original.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let (server, requests) = provider(
+            tool_calls(&[
+                ("read_file", json!({"path":"docs/tech-debt/TD-repair.md"})),
+                (
+                    "write_file",
+                    json!({
+                        "path":"docs/tech-debt/TD-repair.md",
+                        "expected_sha256":receipt,
+                        "content":format!("# Finding\n\nVerified source [src: file: {reference}]\n")
+                    }),
+                ),
+            ]),
+            text("The documented reference is corrected."),
+        )
+        .await;
+        let state = litellm_state(&server.uri()).await;
+        let project = tempfile::tempdir().unwrap();
+        project_among_others(&state, project.path(), false).await;
+        std::fs::create_dir_all(project.path().join("docs/tech-debt")).unwrap();
+        std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
+        std::fs::write(
+            project
+                .path()
+                .join("docs/conventions/agents-md-format-v1.md"),
+            "# Format\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("docs/AGENTS.md"),
+            format!("# Project\n{}", "Established documentation.\n".repeat(500)),
+        )
+        .unwrap();
+        std::fs::write(project.path().join("code.rs"), "actual source\n").unwrap();
+        std::fs::write(
+            project.path().join("docs/tech-debt/TD-repair.md"),
+            format!("# Finding\n[src: file: invented.rs:1]\n{human}"),
+        )
+        .unwrap();
+        let total =
+            crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+        state
+            .db
+            .with_conn(move |conn| {
+                use crate::db::audit_runs as runs;
+                let now = chrono::Utc::now() - chrono::Duration::hours(1);
+                runs::insert_running(conn, "before-repair", PROJECT_ID, "Full", "LiteLlm", now)?;
+                for step in 1..=total {
+                    runs::insert_audit_step_start(conn, "before-repair", step, "doc", now)?;
+                    runs::finalize_audit_step(
+                        conn,
+                        "before-repair",
+                        step,
+                        now,
+                        10,
+                        &runs::StepTokens::UNKNOWN,
+                        None,
+                        true,
+                        None,
+                        false,
+                    )?;
+                }
+                runs::update_last_completed_step(conn, "before-repair", total)?;
+                runs::mark_interrupted(conn, "before-repair", "final documentary gate failed")
+            })
+            .await
+            .unwrap();
+        let response = crate::api::audit::full::full_audit(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(PROJECT_ID.into()),
+            axum::Json(crate::models::LaunchAuditRequest {
+                agent: AgentType::LiteLlm,
+                tier: Some(ModelTier::Reasoning),
+                kind: None,
+                custom_prompt: None,
+                resume_run_id: Some("before-repair".into()),
+            }),
+        )
+        .await
+        .into_response();
+        let stream = sse_body(response).await;
+        let done = sse_events(&stream, "done").pop().expect("terminal outcome");
+        assert_eq!(
+            done["status"],
+            if correct { "complete" } else { "interrupted" },
+            "{stream}"
+        );
+        assert_eq!(
+            done["steps_to_redo"],
+            if correct { json!([]) } else { json!([1]) },
+            "{stream}"
+        );
+        assert_eq!(
+            done["discussion_id"].is_string(),
+            correct,
+            "validation requires a clean gate: {stream}"
+        );
+        if !correct {
+            assert_eq!(
+                sse_events(&stream, "step_retry").len(),
+                2,
+                "exactly two corrective retries: {stream}"
+            );
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                4,
+                "one tool response and three bounded attempts"
+            );
+        }
+        assert_eq!(
+            sse_events(&stream, "step_start").len(),
+            1,
+            "only the owning recovery step reruns"
+        );
+        let repaired =
+            std::fs::read_to_string(project.path().join("docs/tech-debt/TD-repair.md")).unwrap();
+        assert!(
+            repaired.contains(human.trim_end()),
+            "human section restored before validation: {repaired:?}"
+        );
+        assert_eq!(repaired.contains("invented.rs"), !correct);
+        assert!(
+            std::fs::read_dir(project.path().join("docs/.kronn-citation-originals"))
+                .unwrap()
+                .any(
+                    |entry| std::fs::read_to_string(entry.unwrap().path()).unwrap()
+                        == format!("# Finding\n[src: file: invented.rs:1]\n{human}")
+                ),
+            "the original survives correction"
+        );
+        assert!(requests.lock().unwrap()[0]
+            .to_string()
+            .contains("targeted correction required"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn http_start_failure_during_documentary_retry_persists_error_and_prior_usage() {
+    assert_http_failure_is_persisted(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn http_failure_after_write_persists_status_and_preserves_partial_files_without_replay() {
+    assert_http_failure_is_persisted(true).await;
+}
+
+#[cfg(unix)]
+async fn assert_http_failure_is_persisted(after_write: bool) {
+    use axum::response::IntoResponse;
+    let server = MockServer::start().await;
+    let requests = Arc::new(Mutex::new(0));
+    let seen = requests.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut seen = seen.lock().unwrap();
+            *seen += 1;
+            if *seen == 1 {
+                ResponseTemplate::new(200).set_body_string(sse(&[
+                    if after_write {
+                        tool_calls(&[("write_file", json!({
+                            "path":"docs/tech-debt/TD-partial.md",
+                            "content":"# Partial finding\nWork completed before the provider failure.\n",
+                        }))])
+                    } else {
+                        text("The documentation is unchanged.")
+                    },
+                    json!({"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":7}})
+                        .to_string(),
+                ]))
+            } else {
+                ResponseTemplate::new(if after_write { 429 } else { 401 })
+                    .set_body_json(json!({"error":{"message":"provider unavailable: private-provider-body"}}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let state = litellm_state(&server.uri()).await;
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    std::fs::create_dir_all(project.path().join("docs/tech-debt")).unwrap();
+    std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
+    std::fs::write(
+        project
+            .path()
+            .join("docs/conventions/agents-md-format-v1.md"),
+        "# Format\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("docs/AGENTS.md"),
+        format!("# Project\n{}", "Established documentation.\n".repeat(500)),
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("docs/tech-debt/TD-repair.md"),
+        "# Finding\n[src: file: invented.rs:1]\n",
+    )
+    .unwrap();
+    let total =
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let now = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(
+                conn,
+                "before-unavailable",
+                PROJECT_ID,
+                "Full",
+                "LiteLlm",
+                now,
+            )?;
+            for step in 1..=total {
+                runs::insert_audit_step_start(conn, "before-unavailable", step, "doc", now)?;
+                runs::finalize_audit_step(
+                    conn,
+                    "before-unavailable",
+                    step,
+                    now,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    true,
+                    None,
+                    false,
+                )?;
+            }
+            runs::update_last_completed_step(conn, "before-unavailable", total)?;
+            runs::mark_interrupted(conn, "before-unavailable", "documentary gate failed")
+        })
+        .await
+        .unwrap();
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.into()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::LiteLlm,
+            tier: Some(ModelTier::Reasoning),
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("before-unavailable".into()),
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+    let done = sse_events(&stream, "done").pop().expect("terminal outcome");
+    assert_eq!(done["status"], "interrupted", "{stream}");
+    assert_eq!(done["steps_to_redo"], json!([1]), "{stream}");
+    assert!(!done["discussion_id"].is_string());
+    assert_eq!(
+        sse_events(&stream, "step_retry").len(),
+        usize::from(!after_write)
+    );
+    assert_eq!(
+        sse_events(&stream, "step_error").len(),
+        usize::from(!after_write)
+    );
+    assert_eq!(*requests.lock().unwrap(), 2);
+    let step_done = sse_events(&stream, "step_done");
+    assert_eq!(step_done.len(), 1);
+    assert_eq!(
+        step_done[0]["tokens"], 20,
+        "usage survives a failed retry: {stream}"
+    );
+    let run_id = done["audit_run_id"].as_str().unwrap().to_owned();
+    let steps = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::list_audit_steps(conn, &run_id))
+        .await
+        .unwrap();
+    let failed = steps.iter().find(|s| s.step_index == 1).unwrap();
+    assert!(!failed.cli_success);
+    assert!(
+        failed.ended_at.is_some(),
+        "a terminal launch error is finalized"
+    );
+    assert_eq!(failed.step_tokens, Some(20));
+    let warning = failed.step_warning.as_deref().unwrap();
+    assert!(
+        warning.contains(if after_write { "429" } else { "401" }),
+        "{warning}"
+    );
+    if after_write {
+        assert!(
+            warning.contains("rate limit") && warning.contains("Partial files are preserved"),
+            "{warning}"
+        );
+        assert!(!warning.contains("private-provider-body"));
+        let warnings = sse_events(&stream, "step_warning");
+        assert!(warnings
+            .iter()
+            .any(|w| w["reason"].as_str().is_some_and(|r| r.contains("429"))));
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("docs/tech-debt/TD-partial.md")).unwrap(),
+            "# Partial finding\nWork completed before the provider failure.\n"
+        );
+    }
+    assert_eq!(
+        crate::api::audit::full::already_succeeded_step_indices(&steps).len(),
+        total as usize - 1
+    );
 }
 
 #[tokio::test]
@@ -706,4 +1077,302 @@ fn no_static_audit_prompt_carries_the_retired_companion_pool() {
         assert!(!prompt.contains("Suggested companion repos"));
         assert!(!prompt.contains("Other Kronn projects"));
     }
+}
+
+// ── KT-931 — a failed step no longer voids the run ───────────────────────────
+//
+// The real `full_audit` pipeline, resuming a run that lost ONE step (the bench
+// run A1: 15 of 16 steps done, the fifth failed for an external cause) on the
+// scripted `claude`. The agent writes nothing, so the resumed step fails its
+// gates again — exactly the case where the run used to end with no validation
+// at all while the 15 documents of the other steps existed.
+
+/// The `data:` payloads of every `event: <name>` frame in an SSE body.
+#[cfg(unix)]
+fn sse_events(body: &str, name: &str) -> Vec<Value> {
+    let header = format!("event: {name}\n");
+    body.split("\n\n")
+        .filter_map(|frame| frame.trim_start().strip_prefix(header.as_str()))
+        .filter_map(|rest| rest.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str(data).ok())
+        .collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_validated() {
+    use axum::response::IntoResponse;
+    let tools = tempfile::tempdir().unwrap();
+    let (fixture, log) = recording_claude(tools.path());
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    let _route = route_claude(project.path(), &fixture);
+    // The 15 carried steps wrote their documents in the predecessor run; the
+    // project already has its docs, so no raw template is installed over them
+    // (whose unrewritten links the invented-path guard would, rightly, refuse).
+    std::fs::create_dir_all(project.path().join("docs/conventions")).unwrap();
+    std::fs::write(
+        project.path().join("docs/AGENTS.md"),
+        "# Audited project\n\nWritten by the predecessor run.\n",
+    )
+    .unwrap();
+    // The anti-hallucination section every run (re)writes into docs/AGENTS.md
+    // links to this convention.
+    std::fs::write(
+        project
+            .path()
+            .join("docs/conventions/agents-md-format-v1.md"),
+        "# AGENTS.md format\n\nThe format of the entry file.\n",
+    )
+    .unwrap();
+
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let total = chain.len() as u32;
+    let failed_step = 5u32;
+
+    // The interrupted predecessor: every step finished, the fifth unsuccessfully.
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let started = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(conn, "run-prev", PROJECT_ID, "Full", "ClaudeCode", started)?;
+            let mut succeeded = 0;
+            for step in 1..=total {
+                let label = format!("docs/step-{step}.md");
+                runs::insert_audit_step_start(conn, "run-prev", step, &label, started)?;
+                let ok = step != failed_step;
+                runs::finalize_audit_step(
+                    conn,
+                    "run-prev",
+                    step,
+                    started,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    ok,
+                    (!ok).then_some("Mac went to sleep"),
+                    false,
+                )?;
+                if ok {
+                    succeeded += 1;
+                    runs::update_last_completed_step(conn, "run-prev", succeeded)?;
+                }
+            }
+            runs::mark_interrupted(conn, "run-prev", "warned steps: [5]")
+        })
+        .await
+        .unwrap();
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("run-prev".into()),
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+    assert!(
+        !stream.contains("event: error"),
+        "the resume must run: {stream}"
+    );
+
+    // A resume re-runs ONLY the failed step: one agent turn, 15 steps skipped.
+    let step_prompts = recorded_turns(&log)
+        .into_iter()
+        .filter(|turn| turn.contains(BRIEFING_MARKER))
+        .count();
+    assert_eq!(
+        step_prompts, 1,
+        "only step {failed_step} may reach the agent: {stream}"
+    );
+    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 1);
+    let started = sse_events(&stream, "step_start");
+    assert_eq!(started.len(), 1, "{stream}");
+    assert_eq!(started[0]["step"], failed_step);
+
+    // The step failed again, yet the run is not voided: it is validated for
+    // the 15 steps that succeeded and names the one to redo.
+    let done = sse_events(&stream, "done")
+        .pop()
+        .expect("a terminal done event");
+    assert_eq!(done["status"], "interrupted", "{done}");
+    assert_eq!(done["last_completed_step"], total - 1, "{done}");
+    assert_eq!(done["steps_to_redo"], json!([failed_step]), "{done}");
+    let discussion_id = done["discussion_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a partial run must create its validation discussion: {stream}"))
+        .to_string();
+    assert!(stream.contains("event: validation_created"), "{stream}");
+
+    let (run, discussion, resumed_steps) = state
+        .db
+        .with_conn(move |conn| {
+            let run = crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("no audit run recorded"))?;
+            let discussion = crate::db::discussions::get_discussion(conn, &discussion_id)?;
+            let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+            Ok((run, discussion, steps))
+        })
+        .await
+        .unwrap();
+    assert_ne!(run.id, "run-prev");
+    assert_eq!(run.status, "Interrupted");
+    assert_eq!(
+        run.last_completed_step,
+        total - 1,
+        "the progress counts every success"
+    );
+    assert_eq!(
+        run.validation_discussion_id,
+        done["discussion_id"].as_str().map(str::to_string)
+    );
+    let prompt = &discussion.expect("the discussion is persisted").messages[0].content;
+    assert!(
+        prompt.contains(&format!("{failed_step}/{total}")),
+        "the validation lists the step to redo: {prompt}"
+    );
+
+    // The resumed run recorded what it carried over: a second resume still
+    // only has the failed step to run.
+    let still_done = crate::api::audit::full::already_succeeded_step_indices(&resumed_steps);
+    let expected: std::collections::HashSet<u32> =
+        (1..=total).filter(|step| *step != failed_step).collect();
+    assert_eq!(still_done, expected);
+}
+
+// KT-931 review (Romuald) — the founding step (step 1, the one producing
+// `docs/AGENTS.md`) gates the partial validation: if IT is the one that
+// failed, the other 15 successes get no validation discussion, only a
+// resumable run naming step 1 to redo.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
+    use axum::response::IntoResponse;
+    let tools = tempfile::tempdir().unwrap();
+    let (fixture, log) = recording_claude(tools.path());
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    let _route = route_claude(project.path(), &fixture);
+    // Step 1 (the founding step) never wrote `docs/AGENTS.md`: no entry
+    // point exists on disk, same as in the predecessor run. The `docs/`
+    // directory itself exists (steps 2..=16 "succeeded" and would have
+    // written into it), so the documentary-optimization gate has
+    // something to resolve against and doesn't block on its own.
+    std::fs::create_dir_all(project.path().join("docs")).unwrap();
+
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let total = chain.len() as u32;
+    let founding_step = 1u32;
+
+    // The interrupted predecessor: every step finished, the founding one
+    // unsuccessfully.
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let started = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(conn, "run-prev", PROJECT_ID, "Full", "ClaudeCode", started)?;
+            let mut succeeded = 0;
+            for step in 1..=total {
+                let label = format!("docs/step-{step}.md");
+                runs::insert_audit_step_start(conn, "run-prev", step, &label, started)?;
+                let ok = step != founding_step;
+                runs::finalize_audit_step(
+                    conn,
+                    "run-prev",
+                    step,
+                    started,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    ok,
+                    (!ok).then_some("Mac went to sleep"),
+                    false,
+                )?;
+                if ok {
+                    succeeded += 1;
+                    runs::update_last_completed_step(conn, "run-prev", succeeded)?;
+                }
+            }
+            runs::mark_interrupted(conn, "run-prev", "warned steps: [1]")
+        })
+        .await
+        .unwrap();
+
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent: AgentType::ClaudeCode,
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("run-prev".into()),
+        }),
+    )
+    .await
+    .into_response();
+    let stream = sse_body(response).await;
+    assert!(
+        !stream.contains("event: error"),
+        "the resume must run: {stream}"
+    );
+
+    // A resume re-runs ONLY the founding step: one agent turn, the rest skipped.
+    let step_prompts = recorded_turns(&log)
+        .into_iter()
+        .filter(|turn| turn.contains(BRIEFING_MARKER))
+        .count();
+    assert_eq!(
+        step_prompts, 1,
+        "only step {founding_step} may reach the agent: {stream}"
+    );
+    assert_eq!(sse_events(&stream, "step_skipped").len() as u32, total - 1);
+
+    // The founding step fails again: no validation discussion is created,
+    // even though 15 other steps succeeded.
+    let done = sse_events(&stream, "done")
+        .pop()
+        .expect("a terminal done event");
+    assert_eq!(done["status"], "interrupted", "{done}");
+    assert_eq!(done["last_completed_step"], total - 1, "{done}");
+    assert_eq!(done["steps_to_redo"], json!([founding_step]), "{done}");
+    assert!(
+        done["discussion_id"].is_null(),
+        "no entry point, no validation: {done}"
+    );
+    assert!(!stream.contains("event: validation_created"), "{stream}");
+
+    let run = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("no audit run recorded"))
+        })
+        .await
+        .unwrap();
+    assert_ne!(run.id, "run-prev");
+    assert_eq!(run.status, "Interrupted");
+    assert_eq!(
+        run.last_completed_step,
+        total - 1,
+        "the progress still counts every success"
+    );
+    assert!(
+        run.validation_discussion_id.is_none(),
+        "the run must link no validation discussion"
+    );
 }

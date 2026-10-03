@@ -734,16 +734,17 @@ kind: string, agent_type: string, started_at: string, ended_at?: string | null, 
  * the SSE stream ended before the executed chain completed, without an
  * explicit cancel — typically a rate-limit, claude crash, or
  * network blip. The frontend treats `Interrupted` specifically:
- * it shows a dynamic resume button for `last_completed_step + 1`
+ * it shows a dynamic resume button naming the steps still to redo
  * instead of a fresh "Lancer".
  */
 status: string,
 /**
- * 0.8.3 (#311) — last successfully completed step (1-based,
- * matches the executed step-chain indexing). 0 = no step done yet.
- * A chained Full currently completes at 16. Set on every `step_done` where
- * `validate_step_output` returns success=true. Drives
- * the resume mechanism: on resume we start at `this + 1`.
+ * 0.8.3 (#311) — how many steps of the executed chain succeeded
+ * (KT-931: a count, not the index of the last one — a step that failed
+ * in the middle leaves the ones after it done). 0 = no step done yet.
+ * A chained Full currently completes at 16. Raised on every `step_done`
+ * where `validate_step_output` returns success=true; the steps a resume
+ * re-runs come from `audit_run_steps`, not from this figure.
  */
 last_completed_step: number,
 /**
@@ -1213,7 +1214,8 @@ last_checked_at: string, created_at: string, updated_at: string, };
 export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: AgentType, model_id?: string | null, reason: ModelUnavailableReason, detail: string, last_checked_at: string,
 /**
  * Machine-readable recommended next step (`"configure_manual_model"`,
- * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`). The frontend
+ * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`,
+ * `"choose_another_model"`). The frontend
  * maps this to the recheck/settings shortcut; it is deliberately not a
  * prose sentence so i18n stays centralized in the frontend dictionaries.
  */
@@ -4405,7 +4407,7 @@ export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierC
  * not confirm it. Shared verbatim across the catalog, preflight diagnostics
  * and audit history so the UI never has to parse a provider-specific string.
  */
-export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported";
+export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported" | "not_found" | "access_denied";
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -4653,8 +4655,11 @@ context_ceiling: number,
 context_override: number | null,
 /**
  * Why `context_ceiling` is what it is: "operator_override" |
- * "model_override" | "model_window" | "machine_ceiling" |
- * "portable_fallback". A string, not the internal enum — this crosses
+ * "model_override" | "model_window" | "model_estimate" |
+ * "machine_ceiling" | "portable_fallback". `model_estimate` is computed
+ * for this model from its weights and the cost of its cache per token;
+ * `machine_ceiling` is the coarse band of installed memory, used while
+ * nothing is known of the model. A string, not the internal enum — this crosses
  * into the API surface and a frontend has no reason to know Rust
  * variant names.
  */

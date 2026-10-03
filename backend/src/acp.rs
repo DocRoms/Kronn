@@ -466,6 +466,12 @@ pub enum AcpSessionEvent {
     ToolCall {
         name: String,
     },
+    /// The tool call most recently announced reached a terminal status
+    /// (`completed`, `failed` or `cancelled`). KT-932's watchdog spends a
+    /// tool call's own, much wider bound on it rather than the model's own
+    /// inactivity delay; this is what hands the clock back to the model the
+    /// moment the tool is actually done.
+    ToolCallEnded,
     /// The informative input of the latest `ToolCall`, once that input is complete.
     ToolTarget(String),
     Usage {
@@ -473,6 +479,12 @@ pub enum AcpSessionEvent {
         output_tokens: u64,
         prompt_cache: crate::agents::runner::PromptCacheUsage,
     },
+    /// A frame from the agent that carries nothing to show — a reasoning chunk,
+    /// a plan, a status update. It is proof of life and nothing else: without
+    /// it, a model thinking for ten minutes before it answers looks exactly like
+    /// one whose connection died, and KT-932's inactivity watchdog cannot tell
+    /// them apart.
+    Activity,
     Completed,
 }
 
@@ -1170,13 +1182,22 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                 }
             }
             if update.get("toolCallId").is_some() || update.get("toolCall").is_some() {
-                events.push(AcpSessionEvent::ToolCall {
-                    name: update
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .to_owned(),
-                });
+                // KT-932 — a `tool_call`/`tool_call_update` that has reached a
+                // terminal status is the tool ending, not another sign that it
+                // is still running: the watchdog must hand the clock back to
+                // the model, not restart the tool's own wider bound again.
+                let status = update.get("status").and_then(Value::as_str);
+                if matches!(status, Some("completed" | "failed" | "cancelled")) {
+                    events.push(AcpSessionEvent::ToolCallEnded);
+                } else {
+                    events.push(AcpSessionEvent::ToolCall {
+                        name: update
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool")
+                            .to_owned(),
+                    });
+                }
             }
             if let Some(usage) = update.get("usage") {
                 events.push(AcpSessionEvent::Usage {
@@ -1367,7 +1388,14 @@ impl AcpTransport for AcpJsonRpcTransport {
                 }
                 received = notifications.recv() => match received {
                     Ok(frame) => {
-                        for event in events_from_notifications(vec![frame], &target.session_id) {
+                        let derived = events_from_notifications(vec![frame], &target.session_id);
+                        // A frame is progress even when it says nothing the
+                        // reader can see; tell the host so it is not mistaken
+                        // for silence.
+                        if derived.is_empty() {
+                            let _ = events.send(AcpSessionEvent::Activity).await;
+                        }
+                        for event in derived {
                             let _ = events.send(event).await;
                         }
                     }
@@ -2384,6 +2412,54 @@ mod tests {
                     prompt_cache: Default::default(),
                 },
             ]
+        );
+    }
+
+    /// KT-932 follow-up — a `tool_call_update` reaching a terminal status is
+    /// the tool ending, a distinct event from every other update on it (which
+    /// still just prove the tool call is alive).
+    #[test]
+    fn a_tool_call_update_with_a_terminal_status_ends_it() {
+        for status in ["completed", "failed", "cancelled"] {
+            let events = events_from_notifications(
+                vec![json!({"params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": status,
+                }}})],
+                "s1",
+            );
+            assert_eq!(events, vec![AcpSessionEvent::ToolCallEnded], "{status}");
+        }
+
+        for status in ["pending", "in_progress"] {
+            let events = events_from_notifications(
+                vec![json!({"params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": status,
+                    "title": "read_file",
+                }}})],
+                "s1",
+            );
+            assert_eq!(
+                events,
+                vec![AcpSessionEvent::ToolCall {
+                    name: "read_file".into()
+                }],
+                "{status} is still the tool call in progress, not its end"
+            );
+        }
+
+        // No status at all (the initial `tool_call` announcement in most
+        // fixtures): still the call starting, never its end.
+        let events = events_from_notifications(
+            vec![json!({"params": {"sessionId": "s1", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "cargo test",
+            }}})],
+            "s1",
+        );
+        assert_eq!(
+            events,
+            vec![AcpSessionEvent::ToolCall {
+                name: "cargo test".into()
+            }]
         );
     }
 

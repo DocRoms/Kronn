@@ -246,6 +246,61 @@ pub(crate) fn run_scope_block(run_td_ids: &[String], language: &str) -> String {
     }
 }
 
+/// KT-931 — scope block for the validation discussion of a PARTIAL run: some
+/// steps failed (or never ran), the others did succeed. It names the steps to
+/// redo, so the user — and the agent — know the documents behind them are stale
+/// or absent and are not what is being validated. `steps_to_redo` carries the
+/// 1-based step and its target file. `no_run_tds` is true when the successful
+/// steps produced no TD: without an explicit instruction the TD phases would
+/// fall back to reading every TD on disk, those of previous audits included.
+pub(crate) fn partial_run_block(
+    steps_to_redo: &[(u32, String)],
+    total_steps: u32,
+    no_run_tds: bool,
+    language: &str,
+) -> String {
+    if steps_to_redo.is_empty() {
+        return String::new();
+    }
+    let list = steps_to_redo
+        .iter()
+        .map(|(step, file)| format!("- {step}/{total_steps} — `{file}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let redo = steps_to_redo.len();
+    let done = (total_steps as usize).saturating_sub(redo);
+    let (title, intro, rule, resume, no_tds) = match language {
+        "en" => (
+            "## PARTIAL RUN — steps to redo",
+            format!("This run is PARTIAL: {done} of {total_steps} steps succeeded, {redo} did not (failed or never ran):"),
+            "This validation covers ONLY the successful steps. The documents behind the steps to redo are stale or missing: do not validate them, do not fix them, do not quote them as a reference.",
+            "Tell the user in your first message which steps are left. Resuming the audit (\"Resume\" on the project card) re-runs ONLY those steps; the project stays un-validated until a complete run is validated.",
+            "No TD came from the successful steps: skip the TD review phases and emit no TD card.",
+        ),
+        "es" => (
+            "## RUN PARCIAL — pasos por rehacer",
+            format!("Este run es PARCIAL: {done} de {total_steps} pasos tuvieron exito, {redo} no (fallaron o no se ejecutaron):"),
+            "Esta validacion cubre SOLO los pasos exitosos. Los documentos de los pasos por rehacer estan obsoletos o ausentes: no los valides, no los corrijas, no los cites como referencia.",
+            "Dile al usuario en tu primer mensaje que pasos faltan. Reanudar la auditoria (\"Reanudar\" en la tarjeta del proyecto) relanza SOLO esos pasos; el proyecto sigue sin validar hasta que se valide un run completo.",
+            "Ningun TD proviene de los pasos exitosos: omite las fases de revision de TDs y no emitas ninguna tarjeta TD.",
+        ),
+        _ => (
+            "## RUN PARTIEL — étapes à refaire",
+            format!("Ce run est PARTIEL : {done} étapes sur {total_steps} ont réussi, {redo} non (échec ou jamais exécutées) :"),
+            "Cette validation porte UNIQUEMENT sur les étapes réussies. Les documents des étapes à refaire sont périmés ou absents : ne les valide pas, ne les corrige pas, ne les cite pas comme référence.",
+            "Dis à l'utilisateur dans ton premier message quelles étapes restent. Reprendre l'audit (« Reprendre » sur la carte du projet) relance UNIQUEMENT ces étapes ; le projet reste non validé tant qu'un run complet n'est pas validé.",
+            "Aucun TD ne vient des étapes réussies : saute les phases de revue des TDs et n'émets aucune carte TD.",
+        ),
+    };
+    let mut block = format!("{title}\n{intro}\n{list}\n\n{rule}\n{resume}\n");
+    if no_run_tds {
+        block.push_str(no_tds);
+        block.push('\n');
+    }
+    block.push('\n');
+    block
+}
+
 /// 0.8.4 (#287) — sub-audit validation prompt. Shorter than the Full
 /// version: a sub-audit only writes ONE index file + a handful of TD
 /// detail files, so Phase 1 (autonomous doc fix-up across 10 files)
@@ -1403,6 +1458,44 @@ mod compute_audit_info_tests {
         assert!(report.contains("Audit replacement."));
         assert!(docs
             .join("reports/2026-09-27-human-section-diff-docs-coding-rules.md")
+            .is_file());
+    }
+
+    /// KT-933: the on-disk restore catches the two ways an audit used to turn
+    /// a human section into an "example" without changing a byte of it —
+    /// fencing it, and documenting `section:end` inside it.
+    #[test]
+    fn protect_restores_a_fence_wrapped_human_section_and_one_with_a_quoted_closer() {
+        let dir = tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        let team = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let howto = "<!-- kronn:section name=\"howto\" owner=\"human\" -->\nClose a section with:\n```\n<!-- kronn:section:end -->\n```\nRule after the example.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{team}\n\n{howto}\n");
+        fs::write(docs.join("AGENTS.md"), &pre).unwrap();
+        let snapshot = capture_human_owned_sections(dir.path()).unwrap();
+
+        // Audit: fences the first section, rewrites the rule after the example.
+        let post = pre
+            .replace(team, &format!("```\n{team}\n```"))
+            .replace("Rule after the example.", "Agent-made rule.");
+        fs::write(docs.join("AGENTS.md"), &post).unwrap();
+        let restored = protect_human_owned_sections(dir.path(), &snapshot, "2026-10-01").unwrap();
+
+        assert_eq!(restored, 2, "both sections are flagged");
+        let target = fs::read_to_string(docs.join("AGENTS.md")).unwrap();
+        assert!(
+            target.contains(howto),
+            "quoted-closer section restored whole"
+        );
+        assert!(!target.contains("Agent-made rule."));
+        assert!(
+            crate::api::audit::anti_hallu_enforce::enforce_human_owned_sections(&pre, &target)
+                .is_none(),
+            "every human section is live and intact again:\n{target}"
+        );
+        assert!(docs
+            .join("reports/2026-10-01-human-section-diff-docs-AGENTS.md")
             .is_file());
     }
 

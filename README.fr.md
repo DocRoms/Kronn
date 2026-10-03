@@ -63,6 +63,11 @@
   apparaissent dans les sélecteurs. La carte Ollama replie son bloc de
   téléchargement, signale qu'un modèle installé a une mise à jour et propose
   d'abord les versions MLX sur Apple Silicon.
+- **Des audits et des modèles locaux plus fiables :** une étape d'audit ratée
+  n'invalide plus le run (les étapes réussies sont validées, une reprise ne
+  refait que ce qui a échoué), les sections que vous possédez restent
+  intactes, un modèle local qui se tait est arrêté avec une raison claire, et
+  tester une connexion LiteLLM fonctionne de nouveau.
 - **Des prompts qui restent privés :** aucun prompt envoyé à un modèle ne liste
   vos autres projets Kronn ; seuls les dépôts liés à un projet sont nommés.
 - **Des rooms qui s'ouvrent toujours :** un CLI que le bridge ne sait pas

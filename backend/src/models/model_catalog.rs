@@ -62,6 +62,14 @@ pub enum ModelUnavailableReason {
     /// This runtime has no live discovery path implemented; only cache,
     /// manual or migrated entries can exist for it.
     Unsupported,
+    /// The model is listed by the runtime but an actual call answered
+    /// not-found (HTTP 404/410): the upstream deployment behind the alias
+    /// does not exist for this project or region (KT-941).
+    NotFound,
+    /// The model is listed by the runtime but an actual call was refused for
+    /// this account or key — the proxy's own allow-list, tags or entitlements
+    /// (KT-941). Not a verdict on the credential itself.
+    AccessDenied,
 }
 
 /// Coarse, catalog-driven cost classification. Never inferred from a
@@ -291,7 +299,8 @@ pub struct CatalogPreflightFailure {
     pub detail: String,
     pub last_checked_at: DateTime<Utc>,
     /// Machine-readable recommended next step (`"configure_manual_model"`,
-    /// `"recheck_catalog"`, `"install_cli"`, `"authenticate"`). The frontend
+    /// `"recheck_catalog"`, `"install_cli"`, `"authenticate"`,
+    /// `"choose_another_model"`). The frontend
     /// maps this to the recheck/settings shortcut; it is deliberately not a
     /// prose sentence so i18n stays centralized in the frontend dictionaries.
     pub recommended_action: String,

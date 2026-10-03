@@ -2512,6 +2512,63 @@ mod tests {
         );
     }
 
+    /// KT-943 — the same model on the same machine once its attention shape and
+    /// its weights are known: a discussion gets the model's whole window instead
+    /// of the memory band, and a worker is still held at the MLX ceiling.
+    #[test]
+    fn once_its_cache_cost_is_known_qwen38_mlx_gets_its_whole_window_on_a_64_gb_mac() {
+        use crate::agents::ollama_memory::{
+            ceiling_for_model, gpu_budget_bytes, kv_shape_from_config, CeilingInputs, KvCacheType,
+        };
+        use crate::agents::tools::ToolRunMode;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MODEL: &str = "qwen3.8:27b-mlx";
+        const TRAINED: u64 = 262_144;
+
+        // The `config.json` of the model: 16 of its 64 layers cache anything.
+        let layer_types: Vec<&str> = (1..=64)
+            .map(|n| {
+                if n % 4 == 0 {
+                    "full_attention"
+                } else {
+                    "linear_attention"
+                }
+            })
+            .collect();
+        let shape = kv_shape_from_config(&serde_json::json!({
+            "text_config": {
+                "num_hidden_layers": 64,
+                "full_attention_interval": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "layer_types": layer_types,
+            }
+        }));
+        let ceiling = ceiling_for_model(&CeilingInputs {
+            total_ram_bytes: Some(64 * GIB),
+            gpu_budget_bytes: Some(gpu_budget_bytes(64 * GIB, None)),
+            weights_bytes: Some(18_200_000_000),
+            measured_kv_bytes_per_token: None,
+            shape,
+            kv_cache_type: Some(KvCacheType::F16),
+        });
+        let resolved = resolve_ctx_cap_within(None, Some(TRAINED), ceiling);
+        assert_eq!(resolved.value, TRAINED, "the band said 65,536");
+        assert_eq!(resolved.origin, CtxCapOrigin::ModelWindow);
+
+        let policy = worker_exploration_policy(MODEL, Some("safetensors"), false, true);
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::General, policy),
+            TRAINED,
+            "a discussion runs at the model's whole window"
+        );
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::Worker, policy),
+            32_768,
+            "a worker is still held at the MLX ceiling"
+        );
+    }
+
     /// What `qwen3.8:27b-mlx` is given on a 64 GB Mac, by each rule that can
     /// decide it, computed by the functions a run calls. A discussion is not a
     /// worker: the 32K MLX ceiling exists for a worker's long exploration and
@@ -5547,7 +5604,7 @@ mod tests {
                     .as_array()
                     .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
                 if after_tool {
-                    ResponseTemplate::new(503).set_body_string("temporarily unavailable")
+                    ResponseTemplate::new(429).set_body_string("quota exhausted; private-provider-body")
                 } else {
                     ResponseTemplate::new(200).set_body_string(sse(&[
                         r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"write-1","function":{"name":"write_file","arguments":"{}"}}]}}]}"#,
@@ -5598,6 +5655,314 @@ mod tests {
                 .any(|line| line.starts_with("[provider-retry:")),
             "no retry trace should exist after an external effect"
         );
+        let trace = process.captured_stderr();
+        assert!(
+            !trace
+                .iter()
+                .any(|line| line
+                    .contains("verify that this route/model supports native tool calling")),
+            "a 429 is not evidence of unsupported tools: {trace:?}"
+        );
+        let warning = crate::api::audit::validation::with_http_diagnostics(
+            false,
+            Some(crate::api::audit::validation::StepValidationWarning {
+                reason: "Expected audit index is incomplete".into(),
+                repaired: false,
+            }),
+            &trace,
+        )
+        .expect("the audit retains its provider failure");
+        assert!(warning.reason.contains("429"), "{}", warning.reason);
+        assert!(warning.reason.contains("rate limit"), "{}", warning.reason);
+        assert!(warning.reason.contains("index is incomplete"));
+        assert!(!warning.reason.contains("private-provider-body"));
+    }
+
+    /// KT-942 — the exact text observed in production, and the failures that
+    /// must keep their own handling.
+    const UNREADABLE_TOOL_CALL: &str =
+        "XML syntax error on line 13: element <parameter> closed by </function>";
+
+    #[test]
+    fn unreadable_tool_call_failure_is_told_apart_from_other_stream_errors() {
+        assert!(is_unreadable_tool_call_failure(UNREADABLE_TOOL_CALL));
+        assert!(is_unreadable_tool_call_failure(
+            "Ollama error: XML syntax error on line 2: unexpected EOF"
+        ));
+        assert!(is_unreadable_tool_call_failure(
+            "error parsing tool call: raw='<function=x>'"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "model runner has unexpectedly stopped"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "ResourceExhausted: Worker local total request limit reached (22/16)"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "the prompt outgrew the context window"
+        ));
+        assert_eq!(
+            provider_failure_label(None, UNREADABLE_TOOL_CALL),
+            "unreadable tool call"
+        );
+    }
+
+    /// Mounts `/api/show` and an `/api/chat` that fails with the tool-parser error
+    /// on its first `failures` requests, then answers normally. `/api/show`
+    /// returns no context size, so the run carries the portable-fallback context
+    /// note — the one that used to lead the failure.
+    async fn ollama_failing_tool_parser(
+        failures: usize,
+    ) -> (
+        wiremock::MockServer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chats_for_mock = chats.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = chats_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < failures {
+                    ResponseTemplate::new(200).set_body_string(format!(
+                        "{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"recovered answer\"},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                    )
+                }
+            })
+            .mount(&server)
+            .await;
+        (server, chats)
+    }
+
+    async fn drain(process: &mut AgentProcess) -> (String, bool) {
+        let mut out = String::new();
+        while let Some(chunk) = process.next_line().await {
+            out.push_str(&chunk);
+        }
+        let success = process.child.wait().await.expect("lifeline").success();
+        (out, success)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_is_replayed_and_the_turn_succeeds() {
+        let (server, chats) = ollama_failing_tool_parser(1).await;
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(success, "the second attempt produced a valid call: {out:?}");
+        assert!(out.contains("recovered answer"), "{out:?}");
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one refusal, one replay of the same request"
+        );
+        let trace = process.stderr_capture.lock().unwrap().join("\n");
+        assert!(
+            trace.contains("attempt 1/3 failed (unreadable tool call); retrying attempt 2/3")
+                && trace.contains("completed on attempt 2/3"),
+            "every replay must be journalled: {trace}"
+        );
+        assert!(
+            !trace.contains("could not read a tool call"),
+            "a recovered turn owes no failure message: {trace}"
+        );
+    }
+
+    /// The replay is a pure model invocation: nothing ran for the refused call,
+    /// and the results of earlier rounds are already in the request. A tool must
+    /// therefore not run again, nor the turn be lost because one had run.
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_after_a_tool_ran_is_replayed_without_rerunning_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refused_after_tool = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (chats_for_mock, refused_for_mock) = (chats.clone(), refused_after_tool.clone());
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |request: &wiremock::Request| {
+                use std::sync::atomic::Ordering::SeqCst;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let after_tool = body["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
+                chats_for_mock.fetch_add(1, SeqCst);
+                if !after_tool {
+                    return ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"mcp_list\",\"arguments\":{}}}]},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}\n",
+                    );
+                }
+                if refused_for_mock.fetch_add(1, SeqCst) == 0 {
+                    return ResponseTemplate::new(200).set_body_string(format!(
+                        "{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ));
+                }
+                ResponseTemplate::new(200).set_body_string(
+                    "{\"message\":{\"content\":\"2 servers\"},\"done\":false}\n\
+                     {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                )
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "which servers?",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(
+            success,
+            "the replay after the tool round must succeed: {out:?}"
+        );
+        assert!(out.contains("2 servers"), "{out:?}");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &["mcp_list".to_string()],
+            "the tool ran once; the replay re-sent a request, not the call"
+        );
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "tool request, refused follow-up, replayed follow-up"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_that_never_clears_stops_at_the_cap_and_says_so() {
+        let (server, chats) = ollama_failing_tool_parser(usize::MAX).await;
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(
+            !success,
+            "past the cap the failure stays a failure: {out:?}"
+        );
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            HTTP_PROVIDER_MAX_ATTEMPTS,
+            "the original request plus at most two replays"
+        );
+        let lines = process.stderr_capture.lock().unwrap().clone();
+        let head = lines.first().expect("a failure always says something");
+        assert!(
+            head.contains("unreadable tool call") && head.contains("test-model"),
+            "the message leads with the real cause: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("KRONN_OLLAMA_NUM_CTX_CAP")
+                    || line.contains("portable fallback")),
+            "the context note is not the cause and must not appear: {lines:?}"
+        );
+        let trace = lines.join("\n");
+        assert!(
+            trace.contains("attempt 1/3 failed (unreadable tool call); retrying attempt 2/3")
+                && trace
+                    .contains("attempt 2/3 failed (unreadable tool call); retrying attempt 3/3")
+                && trace
+                    .contains("attempt 3/3 failed (unreadable tool call); retry budget exhausted"),
+            "each replay and the exhausted budget are journalled: {trace}"
+        );
+        assert!(
+            trace.contains(UNREADABLE_TOOL_CALL),
+            "the parser's own error stays visible: {trace}"
+        );
+    }
+
+    /// The terminal message replaces the context note rather than sitting behind it.
+    #[test]
+    fn an_unreadable_tool_call_failure_takes_the_place_of_the_context_note() {
+        let note = "qwen3.8:27b-mlx supports a 262144-token context; Kronn is running it at 65536";
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(vec![
+            note.to_string(),
+            "Ollama error: XML syntax error on line 13".to_string(),
+        ]));
+        record_unreadable_tool_call_failure(&stderr, "Ollama", "qwen3.8:27b-mlx", Some(note), 3);
+        let lines = stderr.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("unreadable tool call"), "{lines:?}");
+        assert!(!lines.iter().any(|line| line == note), "{lines:?}");
     }
 
     /// The Ollama wire, which the LiteLLM test above does NOT cover. This is
@@ -9793,7 +10158,9 @@ Suite de la réponse.";
             .mount(&server)
             .await;
 
-        let limit = ollama_model_ctx_limit(&server.uri(), "qwen3-slow-load").await;
+        let limit = ollama_model_profile(&server.uri(), "qwen3-slow-load")
+            .await
+            .and_then(|profile| profile.context_length());
 
         assert_eq!(
             limit,
@@ -9820,7 +10187,9 @@ Suite de la réponse.";
             .mount(&server)
             .await;
 
-        let limit = ollama_model_ctx_limit(&server.uri(), "qwen3-always-down").await;
+        let limit = ollama_model_profile(&server.uri(), "qwen3-always-down")
+            .await
+            .and_then(|profile| profile.context_length());
 
         assert_eq!(limit, None, "a persistent failure still falls back");
         assert_eq!(
@@ -10051,6 +10420,8 @@ Suite de la réponse.";
             OllamaModelProfile {
                 context_length: Some(262144),
                 storage_format: Some("safetensors".into()),
+                kv_shape: None,
+                vision: crate::agents::vision::ImageSupport::Unknown,
             }
         );
 
@@ -10059,6 +10430,8 @@ Suite de la réponse.";
             OllamaModelProfile {
                 context_length: None,
                 storage_format: None,
+                kv_shape: None,
+                vision: crate::agents::vision::ImageSupport::Unknown,
             }
         );
     }
@@ -13109,6 +13482,333 @@ sleep 3600
         let before = body["tools"].as_array().unwrap().len();
         restore_tool_declarations(&mut body, &readers);
         assert_eq!(body["tools"].as_array().unwrap().len(), before);
+    }
+
+    struct AuditMutationTools {
+        revision: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for AuditMutationTools {
+        fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+            crate::agents::tools::ToolRunMode::Audit
+        }
+
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            ["read_file", "write_file"].into_iter().map(|name| serde_json::json!({
+                "type": "function", "function": {
+                    "name": name, "description": name,
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                }
+            })).collect()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            if call.name == "write_file" {
+                self.revision
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                ok: true,
+                content: serde_json::json!({"revision": self.revision.load(std::sync::atomic::Ordering::SeqCst)}),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_reads_new_content_after_a_write_even_when_reader_was_withdrawn() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for initial_reads in [1, 3] {
+            let server = MockServer::start().await;
+            let round = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = Arc::new(Mutex::new(None));
+            let captured = observed.clone();
+            Mock::given(method("POST")).and(path("/v1/chat/completions"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let final_read_id = format!("c{}", initial_reads + 3);
+                    if let Some(message) = body["messages"].as_array().unwrap().iter()
+                        .find(|m| m["role"] == "tool" && m["tool_call_id"] == final_read_id) {
+                        *captured.lock().unwrap() = Some(serde_json::from_str::<serde_json::Value>(message["content"].as_str().unwrap()).unwrap());
+                    }
+                    let tool = if n < initial_reads || n == initial_reads + 1 || n == initial_reads + 3 {
+                        Some("read_file")
+                    } else if n == initial_reads || n == initial_reads + 2 {
+                        Some("write_file")
+                    } else { None };
+                    let tool = tool.filter(|name| body["tools"].as_array().is_some_and(|tools|
+                        tools.iter().any(|t| t["function"]["name"] == *name)));
+                    let frame = match tool {
+                        Some(name) => serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                            "index":0,"id":format!("c{n}"),"function":{"name":name,"arguments":"{\"path\":\"docs/result.md\"}"}
+                        }]}}]}),
+                        None => serde_json::json!({"choices":[{"index":0,"delta":{"content":"done"}}]}),
+                    };
+                    ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string()]))
+                }).mount(&server).await;
+            let executor = Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut process = start_ollama_http(
+                &AgentType::LiteLlm,
+                "write then verify the audit document",
+                "",
+                "test-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(executor.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(
+                process.reported_usage_counters(),
+                None,
+                "missing provider usage stays unknown"
+            );
+            assert_eq!(
+                executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "an identical write must remain cached, even after a read refresh"
+            );
+            let observed = observed
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("post-write read reached the provider");
+            let result = observed.get("result").unwrap_or(&observed);
+            assert_eq!(
+                result["revision"], 1,
+                "fresh content after {initial_reads} initial reads: {observed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_structured_usage_sums_turns_and_preserves_unknown_cache() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let round = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let frame = if n == 0 {
+                    serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                        "index":0,"id":"r1","function":{"name":"read_file","arguments":"{\"path\":\"docs/result.md\"}"}
+                    }]}}]})
+                } else { serde_json::json!({"choices":[{"index":0,"delta":{"content":"done"}}]}) };
+                // Repeated cumulative frames for one response count only once.
+                let usage = if n == 0 {
+                    serde_json::json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":40}}})
+                } else { serde_json::json!({"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":7}}) };
+                ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string(), &usage.to_string(), &usage.to_string()]))
+            }).expect(2).mount(&server).await;
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "read the audit document",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+        let usage = process
+            .reported_usage_counters()
+            .expect("HTTP usage must reach audit consumers");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (300, 12));
+        assert_eq!(process.reported_token_usage(), Some(312));
+        assert_eq!(usage.prompt_cache.cached_prompt_tokens, Some(40));
+        assert_eq!(usage.prompt_cache.cache_write_prompt_tokens, None);
+    }
+
+    #[test]
+    fn http_audit_reader_restoration_preserves_call_ceilings_and_error_circuits() {
+        use crate::agents::tools::{CeilingAllowance, ToolRunMode};
+        let withdrawn = ["read_file", "git_status", "git_diff", "api_call"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let circuits = ["git_status"].into_iter().map(str::to_string).collect();
+        let counts = std::collections::HashMap::from([("read_file".into(), MAX_READ_FILE_CALLS)]);
+        let restored = observation_readers_to_restore(
+            &withdrawn,
+            &circuits,
+            &counts,
+            ToolRunMode::General,
+            &CeilingAllowance::default(),
+            is_workspace_observation_tool,
+        );
+        assert_eq!(
+            restored,
+            vec!["git_diff"],
+            "only a repetition-withdrawn reader below its ceiling returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_audit_writes_many_findings_and_index_on_both_wires() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for agent in [AgentType::LiteLlm, AgentType::Ollama] {
+            let server = MockServer::start().await;
+            let openai = agent == AgentType::LiteLlm;
+            let round = std::sync::atomic::AtomicUsize::new(0);
+            Mock::given(method("POST"))
+                .and(path(if openai {
+                    "/v1/chat/completions"
+                } else {
+                    "/api/chat"
+                }))
+                .respond_with(move |_: &wiremock::Request| {
+                    let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let arguments = serde_json::json!({"path": if n == 16 {
+                        "docs/index.md".to_string()
+                    } else { format!("docs/TD-{n}.md") }});
+                    let call = serde_json::json!({"index":0,"id":format!("w{n}"),"function":{
+                        "name":"write_file", "arguments": if openai {
+                            serde_json::Value::String(arguments.to_string())
+                        } else { arguments }
+                    }});
+                    let delta = if n < 17 {
+                        serde_json::json!({"tool_calls":[call]})
+                    } else {
+                        serde_json::json!({"content":"done"})
+                    };
+                    let wire = if openai {
+                        sse(&[
+                            &serde_json::json!({"choices":[{"index":0,"delta":delta}]}).to_string()
+                        ])
+                    } else {
+                        format!(
+                            "{}\n{}\n",
+                            serde_json::json!({"message":delta,"done":false}),
+                            serde_json::json!({"done":true})
+                        )
+                    };
+                    ResponseTemplate::new(200).set_body_string(wire)
+                })
+                .mount(&server)
+                .await;
+            let executor = Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut process = start_ollama_http(
+                &agent,
+                "write sixteen findings then their index",
+                "",
+                "test-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(executor.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(
+                executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+                17,
+                "{agent:?}: every finding and the final index must execute"
+            );
+            assert!(parse_ceiling_report(&process.captured_stderr()).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_write_budget_stays_bounded_and_reports_its_cause() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let round = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let delta = if n == 0 {
+                    let calls: Vec<_> = (0..=MAX_AUDIT_WRITE_CALLS).map(|i|
+                        serde_json::json!({"index":i,"id":format!("w{i}"),"function":{
+                            "name":"write_file","arguments":serde_json::json!({"path":format!("docs/TD-{i}.md")}).to_string()
+                        }})).collect();
+                    serde_json::json!({"tool_calls":calls})
+                } else { serde_json::json!({"content":"Partial output; index still missing"}) };
+                ResponseTemplate::new(200).set_body_string(sse(&[
+                    &serde_json::json!({"choices":[{"index":0,"delta":delta}]}).to_string()
+                ]))
+            }).mount(&server).await;
+        let executor = Arc::new(AuditMutationTools {
+            revision: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "write findings",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(executor.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+        assert_eq!(
+            executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_AUDIT_WRITE_CALLS
+        );
+        let report = parse_ceiling_report(&process.captured_stderr())
+            .expect("audit telemetry without a human grant");
+        assert_eq!(report.tools[0].tool, "write_file");
+        assert_eq!(report.tools[0].limit, MAX_AUDIT_WRITE_CALLS);
+        assert_eq!(report.tools[0].refused, 1);
+        assert_eq!(
+            max_calls_for_tool("write_file", crate::agents::tools::ToolRunMode::General),
+            12
+        );
+        assert_eq!(
+            max_calls_for_tool("write_file", crate::agents::tools::ToolRunMode::Worker),
+            12
+        );
     }
 
     /// Un exécuteur de plan minimal : `task_get` rend un numéro de révision,

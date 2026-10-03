@@ -58,7 +58,10 @@ is strictly opt-in by presence.
 - **`curated="human"`** — owned by a person, free-form, never validated.
 - **`owner="human"`** — never rewritten by a full or partial audit. A re-audit
   restores the original block and records its proposal as a dated diff. The
-  legacy `curated="human"` spelling receives the same protection.
+  legacy `curated="human"` spelling receives the same protection. This holds for
+  the audit's own STEP 0 too (the `anti-hallu` section included), and a
+  `kronn:section` marker inside a fenced code block (``` or `~~~`) is an example,
+  never a boundary: it neither opens nor closes a protected section.
 - **Asymmetric conversion** — a human may convert a `curated="ai"` section to
   `curated="human"`. The reverse never happens automatically: human authority outranks AI,
   never the other way around.

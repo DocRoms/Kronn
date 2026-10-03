@@ -11,7 +11,7 @@ import AuditRecapPanel from './AuditRecapPanel';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
-  saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
+  saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint, formatStepList,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
 import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
@@ -557,7 +557,7 @@ export function ProjectCard({
   // each audit completion/error so the "Lancer l'audit" button can
   // flip to the dynamic resume CTA when an Interrupted run is on file
   // for this project. `null` = no resumable run; otherwise the row.
-  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; started_at: string } | null>(null);
+  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string } | null>(null);
   useEffect(() => {
     let cancelled = false;
     projectsApi.auditResumable(proj.id).then(row => {
@@ -1023,7 +1023,7 @@ export function ProjectCard({
         // cleanup — a coherent done still follows.
         onWarning: (message) => { toast(t('audit.streamWarning', message), 'error'); },
         onValidationCreated: () => {},
-        onDone: (discussionId) => {
+        onDone: (discussionId, _templateWasInstalled, status) => {
           auditActiveRef.current = false;
           setAuditActive(false);
           setAuditAbortController(null);
@@ -1032,7 +1032,10 @@ export function ProjectCard({
           onRefetch();
           onRefetchDiscussions();
           if (discussionId) {
-            toast(t('audit.fullAuditDone'), 'success');
+            // KT-931 — an interrupted run carries a discussion too (the
+            // validation of its successful steps): not "Audit complete!",
+            // the failed-steps toast already told the user what is left.
+            if (status !== 'interrupted') toast(t('audit.fullAuditDone'), 'success');
             onAutoRunDiscussion(discussionId);
             onNavigate('discussions');
           }
@@ -1366,7 +1369,12 @@ export function ProjectCard({
       disabled={auditAgents.length === 0}
     >
       <Play size={12} /> {resumableAudit
-        ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
+        // KT-931 — `last_completed_step` counts the steps that succeeded, so
+        // "+ 1" no longer points at the next step to run: name the ones a
+        // resume re-runs (a backend without the list keeps the old wording).
+        ? (resumableAudit.steps_to_redo && resumableAudit.steps_to_redo.length > 0
+          ? t('audit.resumeRedoSteps', formatStepList(resumableAudit.steps_to_redo))
+          : t('audit.resumeFromStep', resumableAudit.last_completed_step + 1))
         : t('audit.startFullAudit')}
     </button>
   );

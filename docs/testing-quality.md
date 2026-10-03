@@ -174,16 +174,24 @@ any blocking functional or quality gate.
 [src: user: 2026-08-31: escalation reports GitHub Actions runs 33378197164 and 33378199511 with cargo test 11m58, pre-test overhead 4m13, post-test staging 1m17]
 [src: commit: 87d41331]
 
-Every ordinary job in the CI workflow has a 30-minute technical timeout. The
-only bounded exception is `test-backend`, whose 35-minute ceiling lets a
-one-time compiled-cache miss finish its post-job upload; verified hot runs stay
-subject to the independent 15-minute SLO. The required aggregate always runs,
+Ordinary jobs in the CI workflow have a 30-minute technical timeout.
+`test-backend` has 35 minutes to let a compiled-cache miss finish its post-job
+upload; verified hot runs stay subject to the independent 15-minute SLO.
+Coverage and E2E have 45 minutes for their instrumented and release builds.
+The macOS portability job also has 45 minutes: its lib-test rebuild took
+29m13s in [run 36912793272](https://github.com/DocRoms/Kronn/actions/runs/36912793272/job/110539336655),
+then the first suite passed as the former 30-minute limit cancelled the job,
+leaving the maintenance and durable-cleanup suites unexecuted. The additional
+budget covers all three suites and cache saving; Windows retains 30 minutes.
+The required aggregate always runs,
 includes `require-ci-label`, and fails when the label is removed or any other
 gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
 [src: file: .github/workflows/ci-test.yml:37-59] [src: file: .github/workflows/ci-test.yml:750-778]
+
+[src: file: .github/workflows/ci-test.yml:719]
 
 ## Test placement
 

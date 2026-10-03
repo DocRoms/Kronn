@@ -1,7 +1,7 @@
 # Workflow — process conventions
 
 Four short, focused files — one process each. Split so an agent loads only
-the one it needs (see the Tier 2 table in [`../AGENTS.md`](../AGENTS.md)),
+the one it needs (see the T2 table in [`../AGENTS.md`](../AGENTS.md)),
 instead of one long "how we work" document nobody fully reads.
 
 - [commits.md](commits.md) — commit message convention.

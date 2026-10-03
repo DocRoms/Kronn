@@ -338,21 +338,94 @@ Kronn resolves a ceiling independently for each model, in this order:
 
 1. `KRONN_OLLAMA_NUM_CTX_CAP` — process-global break-glass override;
 2. the persistent override for the exact model tag, configured through Kronn;
-3. the model's trained window from Ollama `/api/show`, capped by the local
-   machine's RAM tier;
+3. the model's trained window from Ollama `/api/show`, capped by what this
+   machine can hold **of this model** — its weights plus the cost of its cache
+   per token, computed from its own metadata (KT-943, see
+   [The ceiling is computed per model](#the-ceiling-is-computed-per-model-kt-943)) —
+   or, while those are unknown, by the coarse band of installed RAM;
 4. a conservative portable fallback when the model window cannot be learned.
 
 The model list exposes the trained window, the resolved **ceiling** and its
-origin. A ceiling is not necessarily the `num_ctx` sent for one short,
+origin (`context_origin`): `operator_override`, `model_override`,
+`model_window` (the model's own window, in full), `model_estimate` (held below
+its window by what this machine holds of this model), `machine_ceiling` (held
+below it by the coarse RAM band, nothing being known of the model) or
+`portable_fallback`. Settings shows it next to the ceiling, under "Decided by".
+A ceiling is not necessarily the `num_ctx` sent for one short,
 tool-free prompt: Kronn may request less. A run that declares tools requests the
 ceiling up front because tool results grow the conversation after model load.
 The dedicated `kronn::ollama` event records the requested `num_ctx`, trained
 window and resolution origin. The portable fallback is also announced in the
 run output; it must never look like a fact about the model.
 
-An override above the advertised model window or RAM-derived ceiling is
+An override above the advertised model window or the machine's ceiling is
 accepted with all applicable warnings, but impossible/fat-finger values are
 bounded. The saved value is per model and survives restart.
+
+### The ceiling is computed per model (KT-943)
+
+The model estimate uses local GPU and model-store facts only when the Ollama
+endpoint is loopback. Remote endpoints retain the existing memory-band fallback;
+a local model with the same name does not describe the remote server. Attention
+patterns with sliding/chunked caches are left to that fallback until their
+additional memory can be accounted for.
+[src: file: backend/src/agents/ollama_memory.rs:354]
+
+Until 0.14.2 the machine's part of the ceiling was one slice of installed RAM,
+whatever the model: 65,536 tokens on 64 GiB. What one token of context costs
+differs by an order of magnitude between models, so the slice was four times
+too prudent for `qwen3.8:27b-mlx` and not prudent enough for a dense 70B. When
+nothing is configured the ceiling is now
+
+```text
+min(trained window, (GPU budget − weights − margin) / KV bytes per token)
+```
+
+| Input | Where Kronn reads it |
+|---|---|
+| Weights | the model's `size` in `/api/tags` |
+| KV bytes per token | layers whose cache grows with the context × 2 × KV heads × `head_dim` × bytes per value. GGUF: `/api/show` (`<arch>.block_count`, `attention.head_count_kv`, `attention.key_length`…). MLX (safetensors): `/api/show` gives neither the KV head count nor `head_dim`, so the `config.json` layer of the model's manifest in Ollama's store is read (`OLLAMA_MODELS`, then `~/.ollama/models`, then `/usr/share/ollama/.ollama/models` on Linux) |
+| Layers that cache | `layer_types` (`full_attention` only), else `full_attention_interval`, else every layer. Linear-attention layers hold a constant state and add nothing per token |
+| Bytes per value | `OLLAMA_KV_CACHE_TYPE`, from Kronn's own environment then from `launchctl getenv`: f16 = 2, q8_0 = 34/32, q4_0 = 18/32 (ggml block layouts). Unset means f16 |
+| GPU budget | `sysctl iogpu.wired_limit_mb` when set (never above installed RAM), else 75 % of installed RAM — Apple Silicon, Kronn running natively |
+| Margin | 10 % of the budget for prefill buffers and activations, never less than 2 GiB |
+| Cost measured on the server | once the model has been loaded at two different windows, the observed slope replaces the computed cost |
+
+The arithmetic is in `ceiling_for_model`
+[src: file: backend/src/agents/ollama_memory.rs:272]; the readers of the model's
+shape are `kv_shape_from_config`
+[src: file: backend/src/agents/ollama_memory.rs:132] and `kv_shape_from_show`
+[src: file: backend/src/agents/ollama_memory.rs:154].
+
+`qwen3.8:27b-mlx` (measured on the model's own `config.json`): 64 layers, one
+in four with full attention, so 16 layers × 2 × 4 KV heads × 256 × 2 bytes =
+**64 KiB per token** — 4 GiB at 65,536 tokens, 8 GiB at 131,072, 16 GiB at
+262,144 — and 18.2 GB of weights. On a 64 GiB Mac the budget is about 48 GiB, so
+about 28 GB is left for cache: roughly 430,000 tokens, more than the model's
+262,144, which is therefore used in full (`model_window`). On 32 GiB the same
+model gets about 76,000 tokens (`model_estimate`); on 16 GiB its weights do not
+fit the budget and it gets the 2,048 floor. A dense 70B (320 KiB per token,
+40 GB of weights) gets about 19,000 on 64 GiB. The tests compute exactly these
+figures
+[src: file: backend/src/agents/ollama_memory_test.rs:385].
+
+**Nothing is invented.** If the weights, the attention shape or the machine's
+memory is missing — a `config.json` Kronn cannot read, a sliding-window or
+latent-attention model, an `OLLAMA_KV_CACHE_TYPE` Kronn cannot price, a layer
+kind it does not know — the coarse band applies exactly as before, with origin
+`machine_ceiling`
+[src: file: backend/src/agents/ollama_memory_test.rs:535]. Off Apple Silicon, or
+where the GPU budget cannot be read, the rule is the previous one: the band,
+tightened by a cost measured on the running server. That includes Kronn in a
+Linux container, which sees the container VM's memory and not the Mac's and
+would otherwise size a window against the wrong machine.
+
+The estimate counts weights, cache and margin against **installed** memory, not
+free memory (free memory changes minute to minute and would make two identical
+runs differ). It does not know what else the machine is running: lower it with
+the per-model override or `KRONN_OLLAMA_NUM_CTX_CAP` if the Mac is shared with
+other heavy work, raise it if you know the memory is there. The `Task worker`
+ceiling for native MLX below is unchanged.
 
 ### What `qwen3.8:27b-mlx` gets on a 64 GB Mac (KT-929)
 
@@ -362,35 +435,40 @@ gets depends on who runs the model, not only on the machine:
 
 | Rule | Window | Where |
 |---|---|---|
-| Memory band for 64 GiB, weights and cache cost not yet known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:4940] |
-| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` |
-| Discussion principal (`ToolRunMode::General`) | 65,536, requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:216] |
-| Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:93] |
+| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:5047] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:5212] |
+| Same window, weights and attention shape known (KT-943) | 262,144, the whole window, origin `model_window` | `ceiling_for_model` [src: file: backend/src/agents/ollama_memory.rs:272] |
+| Discussion principal (`ToolRunMode::General`) | the ceiling above — 262,144 once the model's shape is known, else 65,536 — requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:221] |
+| Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:98] |
 | Per-model override (Settings), any value from 2,048 to 1,048,576 | the override, for a discussion; a worker is still held at 32,768 or below | `resolve_ctx_cap_for_model` |
 | `KRONN_OLLAMA_NUM_CTX_CAP` | that number, for both | `resolve_ctx_cap_for_model` |
 
 These rows are computed by the functions a run calls, and the test pins them, the
 override cases included
-[src: file: backend/src/agents/runner_test.rs:2520]. They are not an observation of
-a running Ollama: the band, the trained window and the 64 GiB are inputs, and
-`GET /api/ollama/models` (`context_ceiling`, `context_origin`) and the
-`kronn::ollama` log line give what a given machine actually resolved. Once the
-model has been loaded at two different windows, the exact figure the machine can
-hold (70 % of memory minus the weights, over the measured cache cost per token)
-replaces the band
-[src: file: backend/src/agents/runner.rs:5208].
+[src: file: backend/src/agents/runner_test.rs:2577], and the KT-943 row beside
+them [src: file: backend/src/agents/runner_test.rs:2519]. They are not an
+observation of a running Ollama: the band, the trained window and the 64 GiB are
+inputs, and `GET /api/ollama/models` (`context_ceiling`, `context_origin`) and
+the `kronn::ollama` log line give what a given machine actually resolved. Once
+the model has been loaded at two different windows, the cache cost measured on
+the server replaces the computed one in the formula of KT-943 (and, off Apple
+Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
+weights, over that cost)
+[src: file: backend/src/agents/runner.rs:5325].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
-Mac is at 65,536 unless a per-model override or the environment variable says
-otherwise. That is the one thing this section could not read: the override map
-of the machine that produced the discussion. `ollama_context_overrides` in the
-Kronn configuration, or `context_origin: "model_override"` in the model list, says
-whether the discussion was at 65,536 or at a number somebody chose.
+Mac is at the ceiling resolved above — the model's whole 262,144 when its
+metadata is readable, 65,536 when it is not — unless a per-model override or the
+environment variable says otherwise. That is the one thing this section could not
+read: the override map of the machine that produced the discussion.
+`ollama_context_overrides` in the Kronn configuration, or
+`context_origin: "model_override"` in the model list, says whether the discussion
+was at the computed ceiling or at a number somebody chose.
 
-No cap was changed. The worker ceiling is there because a nominal 65K slot cost
+The worker ceiling is unchanged. It is there because a nominal 65K slot cost
 31 GB and produced no first tool call in seventeen minutes (comment at
 `MLX_WORKER_EFFECTIVE_CTX_CAP`), which is evidence against raising it. The
-discussion's 65,536 is already above what the failing case needed once `api_call`
+discussion's 65,536 was already above what the failing case needed once `api_call`
 can select: a 198 KB answer, the full catalogue and a 32,768-token window ended at
 19,319 estimated tokens (see
 [HTTP-agent capabilities](../architecture/http-agent-capabilities.md#asking-for-part-of-an-api-response-kt-929)).

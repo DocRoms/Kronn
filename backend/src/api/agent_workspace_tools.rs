@@ -726,7 +726,9 @@ pub fn tool_definitions() -> Vec<Value> {
                                 endings, so copied anchors stay byte-exact. `next_offset` is where you COULD \
                                 continue, not where you should: stop as soon as you have what you \
                                 came for. To find something rather than survey a file, use \
-                                `search_text` — reading a large file end to end costs the turn.",
+                                `search_text` — reading a large file end to end costs the turn. \
+                                A file attached to this discussion is also readable, read-only, \
+                                by the path it was announced under.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1219,6 +1221,111 @@ pub fn read_file_payload(
         "next_offset": next_offset,
         "text": text,
     }))
+}
+
+/// The directory name Kronn stores every attachment under, whichever root it
+/// picked (`<project>/.kronn/context-files/` or `<data dir>/context-files/`).
+const ATTACHMENT_DIR_NAME: &str = "context-files";
+
+/// Could `requested` name an attached file? Cheap syntactic filter so an ordinary
+/// workspace read (`src/main.rs`) never costs a database lookup: attachments are
+/// announced by absolute path, by bare file name, or by their in-project
+/// `.kronn/context-files/` path.
+pub fn could_reference_attachment(requested: &str) -> bool {
+    let requested = requested.trim();
+    Path::new(requested).is_absolute()
+        || !requested.contains(['/', '\\'])
+        || requested.starts_with(".kronn/context-files/")
+}
+
+/// Which of this discussion's attachments `requested` names, if any. `attachments`
+/// are `(filename, disk_path)` rows of THIS discussion — the caller supplies only
+/// its own — so a path that is not one of them matches nothing, however it is
+/// spelled: this is a lookup in a closed list, never a path the model can build.
+pub fn match_attachment<'a>(
+    attachments: &'a [(String, String)],
+    requested: &str,
+) -> Option<&'a str> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    attachments
+        .iter()
+        .map(|(_, disk_path)| disk_path.as_str())
+        .find(|disk_path| {
+            let name = Path::new(disk_path)
+                .file_name()
+                .and_then(|name| name.to_str());
+            *disk_path == requested
+                || name.is_some_and(|name| name == requested)
+                || requested
+                    .strip_prefix(".kronn/context-files/")
+                    .is_some_and(|rest| Some(rest) == name)
+        })
+}
+
+/// Read one attached file, read-only (KT-946).
+///
+/// An attachment is stored where Kronn put it — in the project's
+/// `.kronn/context-files/`, or in the data directory when the discussion has no
+/// project — and that is rarely inside the workspace the file tools are scoped
+/// to. Refusing it as "outside the workspace" left a discussion's own files
+/// unreadable by the agent they were attached for. This is the one door through
+/// which they can be read, and it is narrow on purpose:
+///
+/// * the caller passes a `disk_path` taken from THIS discussion's own rows;
+/// * the file is canonicalised and must be a regular file inside a
+///   `context-files` directory — a row pointing anywhere else is refused, so a
+///   damaged or forged row cannot turn this into an arbitrary-file read;
+/// * only reading exists here: no write, edit or listing reaches it, and the
+///   payload carries no revision receipt an edit could be built on;
+/// * an image is refused with an explanation instead of being returned as lossy
+///   text, which is the garbage a model would otherwise "describe".
+pub fn read_attachment_payload(
+    disk_path: &str,
+    requested: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    if std::fs::symlink_metadata(disk_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(Refusal::OutsideWorkspace(requested.to_string()).message());
+    }
+    let canonical = Path::new(disk_path).canonicalize().map_err(|_| {
+        format!(
+            "the attachment `{requested}` is no longer on disk; ask the user to attach it again"
+        )
+    })?;
+    let in_attachment_dir = canonical
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == ATTACHMENT_DIR_NAME);
+    if !canonical.is_file() || !in_attachment_dir {
+        return Err(Refusal::OutsideWorkspace(requested.to_string()).message());
+    }
+    let (Some(directory), Some(name)) = (
+        canonical.parent(),
+        canonical.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return Err(Refusal::OutsideWorkspace(requested.to_string()).message());
+    };
+    if crate::core::context_files::is_image(name) {
+        return Err(format!(
+            "`{requested}` is an image attached to this discussion; it cannot be read as text. \
+             A model that can see receives attached images with the user's message. If you \
+             cannot see it, do not describe it: ask the user to describe it, or to switch to a \
+             model that accepts images."
+        ));
+    }
+    let mut payload = read_file_payload(directory, name, offset, limit)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("path".into(), json!(requested));
+        // No receipt: an attachment is never edited.
+        object.remove("content_sha256");
+        object.insert("attachment".into(), json!(true));
+        object.insert("read_only".into(), json!(true));
+    }
+    Ok(payload)
 }
 
 /// Create a file without overwriting an existing path.

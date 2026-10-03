@@ -105,6 +105,28 @@ export function loadAuditCheckpoint(
   }
 }
 
+/**
+ * KT-931 — the steps a resume will re-run, as the resume button names them:
+ * `5`, `5, 9`, `4, 5` and `5–16` (three or more consecutive steps fold into a
+ * range, so a run that stopped early reads "5–16", not a sixteen-number list).
+ */
+export function formatStepList(steps: readonly number[]): string {
+  const sorted = [...new Set(steps)].sort((a, b) => a - b);
+  const parts: string[] = [];
+  let start = 0;
+  while (start < sorted.length) {
+    let end = start;
+    while (end + 1 < sorted.length && sorted[end + 1] === sorted[end] + 1) end += 1;
+    parts.push(
+      end - start >= 2
+        ? `${sorted[start]}–${sorted[end]}`
+        : sorted.slice(start, end + 1).join(', '),
+    );
+    start = end + 1;
+  }
+  return parts.join(', ');
+}
+
 /** Drop the checkpoint — called on done / error / cancel. */
 export function clearAuditCheckpoint(projectId: string): void {
   if (!projectId) return;

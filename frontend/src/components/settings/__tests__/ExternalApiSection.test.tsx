@@ -934,4 +934,119 @@ describe('ExternalApiSection', () => {
     expect(screen.queryByTestId('ext-api-conn-media-video-c-img')).toBeNull();
   });
 
+  // ── KT-941 — "Test" verifies the models chosen for each tier ──────────
+  describe('LiteLLM tier verification', () => {
+    const verified = {
+      ok: true,
+      status: 'model_error',
+      models: ['gemini-3.6-flash', 'vertex_ai/claude-sonnet-5', 'vertex_ai/claude-fable-5'],
+      catalog: ['gemini-3.6-flash', 'vertex_ai/claude-sonnet-5', 'vertex_ai/claude-fable-5']
+        .map(id => ({ id, display_name: id, capabilities: ['chat'] })),
+      hint: 'The default model vertex_ai/claude-sonnet-5 does not answer.',
+      tier_checks: [
+        { tier: 'economy', model: 'gemini-3.6-flash', ok: true, status: 'ok', http_status: null },
+        { tier: 'default', model: 'vertex_ai/claude-sonnet-5', ok: false, status: 'not_found', http_status: 404 },
+        { tier: 'reasoning', model: 'vertex_ai/claude-fable-5', ok: false, status: 'access_denied', http_status: 401 },
+      ],
+    };
+    const saved = conn({
+      id: 'euronews',
+      display_name: 'Euronews proxy',
+      endpoint: 'http://litellm.stg.euronews.internal',
+      origin_preset: 'lite_llm',
+      has_credential: true,
+      economy_model: 'gemini-3.6-flash',
+      default_model: 'vertex_ai/claude-sonnet-5',
+      reasoning_model: 'vertex_ai/claude-fable-5',
+    });
+
+    it('sends the model of each tier and shows, per tier, whether it answers', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+
+      // First test: the catalogue only — the saved choices must not be called
+      // against a connection that has not been validated yet.
+      testMock.mockResolvedValueOnce({ ...verified, status: 'success', tier_checks: [], hint: null });
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled());
+      expect(testMock.mock.calls[0][0]).not.toHaveProperty('tier_models');
+
+      // Second test: each tier's model is verified.
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(testMock).toHaveBeenCalledTimes(2));
+      expect(testMock).toHaveBeenLastCalledWith(expect.objectContaining({
+        origin_preset: 'lite_llm',
+        connection_id: 'euronews',
+        tier_models: [
+          { tier: 'economy', model: 'gemini-3.6-flash' },
+          { tier: 'default', model: 'vertex_ai/claude-sonnet-5' },
+          { tier: 'reasoning', model: 'vertex_ai/claude-fable-5' },
+        ],
+      }));
+
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveAttribute('data-tier-check', 'not_found'));
+      expect(screen.getByTestId('ext-api-tier-status-economy')).toHaveAttribute('data-tier-check', 'ok');
+      expect(screen.getByTestId('ext-api-tier-status-economy')).toHaveTextContent('config.extApi.tierCheck.ok');
+      expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.tierCheck.not_found:404');
+      expect(screen.getByTestId('ext-api-tier-status-reasoning')).toHaveTextContent('config.extApi.tierCheck.access_denied:401');
+      expect(screen.getByTestId('ext-api-tier-status-default')).toHaveClass('set-ext-api-tier-check-failed');
+      expect(screen.getByTestId('ext-api-tier-status-economy')).not.toHaveClass('set-ext-api-tier-check-failed');
+      // The connection itself works: the pickers stay open so another model
+      // can be chosen — a failed tier must not lock the operator out.
+      expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled();
+    });
+
+    it('drops a tier verdict as soon as that tier is given another model', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveAttribute('data-tier-check', 'not_found'));
+
+      chooseTier('ext-api-tier-default', 'gemini-3.6-flash');
+      // The verdict belonged to the previous model; the new one is unverified.
+      expect(screen.getByTestId('ext-api-tier-status-default')).not.toHaveAttribute('data-tier-check');
+      expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.testedCatalog');
+      expect(screen.getByTestId('ext-api-tier-status-reasoning')).toHaveAttribute('data-tier-check', 'access_denied');
+    });
+
+    it('shows the same per-tier verdicts on the saved connection card', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+
+      fireEvent.click(await screen.findByTestId('ext-api-test-saved-euronews'));
+      await waitFor(() => expect(testMock).toHaveBeenCalledWith(expect.objectContaining({
+        connection_id: 'euronews',
+        tier_models: [
+          { tier: 'economy', model: 'gemini-3.6-flash' },
+          { tier: 'default', model: 'vertex_ai/claude-sonnet-5' },
+          { tier: 'reasoning', model: 'vertex_ai/claude-fable-5' },
+        ],
+      })));
+      expect(await screen.findByTestId('ext-api-saved-tier-status-default-euronews')).toHaveAttribute('data-tier-check', 'not_found');
+      expect(screen.getByTestId('ext-api-saved-tier-status-economy-euronews')).toHaveAttribute('data-tier-check', 'ok');
+      expect(screen.getByTestId('ext-api-saved-tier-status-reasoning-euronews')).toHaveTextContent('config.extApi.tierCheck.access_denied:401');
+      expect(screen.getByTestId('ext-api-saved-test-result-euronews')).toHaveAttribute('data-status', 'model_error');
+    });
+
+    it('keeps the earlier payload for every other preset', async () => {
+      listMock.mockResolvedValue([conn({
+        id: 'nv', endpoint: 'https://integrate.api.nvidia.com', origin_preset: 'nvidia',
+        has_credential: true, default_model: 'nvidia/model',
+      })]);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-test-saved-nv'));
+      await waitFor(() => expect(testMock).toHaveBeenCalledWith({
+        endpoint: 'https://integrate.api.nvidia.com',
+        api_key: null,
+        connection_id: 'nv',
+        origin_preset: 'nvidia',
+        models: ['nvidia/model'],
+      }));
+    });
+  });
 });

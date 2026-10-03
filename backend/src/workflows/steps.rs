@@ -1162,6 +1162,10 @@ async fn run_agent_with_timeout(
             // value for the initial HTTP request too instead of the discussion
             // Settings budget or a transport-only constant.
             http_request_timeout: Some(stall_timeout),
+            // KT-932 — the same delay, but measured against the model's real
+            // progress (bytes, ACP frames) and ending with the generation
+            // cancelled on the model server, not just the step abandoned.
+            idle_timeout: Some(stall_timeout),
             ollama_format: ollama_format.as_ref(),
             // Explicit per-step model (from the wizard's model picker) — now
             // actually consumed at run time, not just stamped for display.

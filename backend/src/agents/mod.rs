@@ -22,14 +22,18 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
 pub mod activity;
 pub mod chat_codec;
 pub(crate) mod generation_settings;
+pub(crate) mod http_diagnostics;
+pub mod idle_watchdog;
 pub mod media_asset_url;
 pub mod media_capabilities;
 pub mod media_codec;
 pub mod media_runner;
 pub mod media_worker;
+pub(crate) mod ollama_memory;
 pub mod provenance;
 pub mod runner;
 pub mod tools;
+pub mod vision;
 
 /// Cache for runtime probe results (npx availability).
 /// Key: binary name, Value: (available, probed_at)

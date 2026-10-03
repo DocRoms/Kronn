@@ -192,7 +192,7 @@ value-free audit event. See
 
 **CORS**: restricted to configured `ServerConfig.domain` or `localhost:3140`/`localhost:3141`. Built via `build_cors()` in `lib.rs`.
 
-**Docker host binding**: `main.rs` detects `KRONN_DATA_DIR` env var → binds to `0.0.0.0` (needed for nginx container). Otherwise uses `config.server.host` (default `127.0.0.1`).
+**Docker host binding**: `KRONN_HOST` wins when set; otherwise a real container (`core::env::is_docker`) binds `0.0.0.0` (needed for nginx), and everything else, a native install with a relocated `KRONN_DATA_DIR` included, uses `config.server.host` (default `127.0.0.1`) — `core::net_expose::resolve_bind_host`.
 
 **Agent concurrency**: `ServerConfig.max_concurrent_agents` (1–20, default 5)
 caps the aggregate machine-local pool (CLI processes plus Ollama inference).
@@ -213,6 +213,41 @@ timeout notice.
 [src: file: backend/src/models/setup.rs:113-122]
 [src: file: backend/src/api/discussions/streaming.rs:1609-1622]
 [src: file: backend/src/api/discussions/orchestration.rs:242-259]
+
+**Model inactivity watchdog (KT-932)**: the stall timeout above watches what the
+consumer reads; it cannot see a model whose connection is open and mute, nor
+tell a model that is loading from one that is gone. The runner therefore also
+watches the model's own output — `AgentStartConfig.idle_timeout`, enforced by
+`agents/idle_watchdog.rs`. Native HTTP agents bound the wait for the first
+response headers (weights loading, prompt being read) and every read of the
+stream; an ACP turn is bounded by a progress clock that every event of the
+agent restarts, including `AcpSessionEvent::Activity`, which the native
+transport emits for a frame that shows nothing (a reasoning chunk, a plan).
+Progress restarts the clock, so only a silence ends a run, never a long
+generation. On expiry the run fails with an explicit `Agent stalled (no output
+for Ns): …` reason (the wording `workflows::steps::is_stall_error` and
+`on_timeout` already match) and the generation is cancelled: the HTTP response
+is dropped, which closes the connection and makes Ollama abandon the
+generation; an ACP session is cancelled, then its agent is shut down with its
+whole process group (KT-927), which closes the agent's own connection. The delay
+is `None` → `DEFAULT_IDLE_TIMEOUT` (15 min, sized for the first token of a large
+local model loaded cold); discussions pass `max(agent_stall_timeout_min, 15
+min)` and workflow steps pass their `stall_timeout_secs`, so the operator's
+existing setting is the knob. A request that is not streamed (`format` set,
+`stream: false`) answers once at the end, so it has no progress to watch and
+only its own request timeout. An ACP tool call in progress (a build, a test
+run) emits no frame for as long as it runs, well past the model's own delay;
+while one is open (`tool_call` seen, no terminal `tool_call_update` yet — status
+`completed`/`failed`/`cancelled`) the watchdog measures silence against
+`idle_watchdog::tool_execution_timeout`, 8× the model's own delay, instead, and
+hands the clock back to the model — a fresh window, not the time already spent
+— the instant a terminal update closes the call. A tool call that never closes
+is still cut, by its own (wider) bound, with a reason naming the tool instead
+of accusing the model of a silence it never had.
+[src: file: backend/src/agents/idle_watchdog.rs]
+[src: file: backend/src/agents/runner.rs]
+[src: file: backend/src/agents/runner_idle_test.rs]
+[src: file: backend/src/acp.rs]
 
 **Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
 
@@ -583,7 +618,8 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - **Template install** (`POST /api/projects/:id/install-template`): copies `docs/` skeleton + redirectors (CLAUDE.md, .cursorrules, etc.) non-destructively, injects bootstrap prompt block (`KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
 - **AI audit** (`POST /api/projects/:id/full-audit`): SSE-streamed chained analysis — 9 foundation steps (`ANALYSIS_STEPS`) then the 7 focused sub-audits, 16 steps total under a single per-project lease. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Resume is by `resume_run_id` (server-derived kind + contiguous checkpoint). The legacy `/ai-audit` route was removed in 0.9.0. **Detached runs**: full, specialized and partial audit producers run independently of their SSE subscribers, so closing the interface or MCP bridge does not stop them. A backend restart still interrupts a running audit; boot reconciliation preserves its persisted checkpoint, and `audit_status` reports whether a `resume_run_id` is available. `[src: file: backend/src/api/audit/mod.rs:43-54]` `[src: file: backend/src/api/audit/full.rs:2246-2248]` `[src: file: backend/src/api/audit/drift.rs:964-970]` `[src: file: backend/src/db/audit_runs.rs:440-455]` `[src: file: backend/scripts/disc-introspection-mcp.py:10278-10306]`
 - **What an agent prompt names about other repos (KT-926)**: a prompt goes to the model provider, which may be a remote service, so the only repo besides the project at hand that a Kronn prompt names is one the user explicitly linked to it (`Project.linked_repos`, a voluntary declaration). No prompt carries the list of the machine's other Kronn projects (name + absolute path): not a Full or partial audit step, not the audit's validation and briefing discussions, not any other discussion, orchestration round or workflow Agent step. The candidate-pool block (`format_kronn_projects_universe_for_prompt`), its wiring (`compute_companion_context`, the `extra_context` argument of `execute_step` and `build_step_prompt`) and its instructions — read another repo's `docs/AGENTS.md`, write a `## Suggested companion repos` section into the audited repo's own `docs/AGENTS.md` — are gone; what an audit records about neighbouring repos comes from what the audited repo says (manifests, compose files, `.gitmodules`, imports). A linked repo is named inline in every Full / partial audit step (`format_linked_repos_for_prompt`) and, for discussions and workflow Agent steps, read from `docs/linked-repos.md` (pull, not inlined — 0.8.4 #295). Pinned by running the real entry points on a scripted `claude` with three other projects registered and reading the prompt it was handed: both audit pipelines `[src: file: backend/src/api/audit/agent_launch_tests.rs]`, discussions including the audit briefing and validation `[src: file: backend/src/api/discussions/companion_privacy_tests.rs]`, a workflow Agent step `[src: file: backend/src/workflows/runner.rs]`, over the shared fixture `[src: file: backend/src/api/other_projects_fixture.rs]`. An earlier audit's `## Suggested companion repos` section in a `docs/AGENTS.md` is left as it is.
-- **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt — inserted in the SAME transaction as the run's `Completed` status (a validation discussion exists iff the run completed), with the agent spawned only after that commit. The AI asks questions about ambiguities/TODOs, updates `docs/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
+- **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt — inserted in the SAME transaction as the run's terminal status, with the agent spawned only after that commit. The AI asks questions about ambiguities/TODOs, updates `docs/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
+- **Partial validation (KT-931)**: a Full run some of whose steps failed still gets this validation discussion, for the steps that succeeded — it just stays `Interrupted` (only a run where every step succeeded can earn the Validated badge), and the prompt's leading block names the steps a resume will redo. The one gate: the founding step (`docs/AGENTS.md`'s own step, step 1 of the chain, found by its `target_file` rather than a hard-coded index) must itself have succeeded — without the entry point the documentation has nowhere to start from, so that case gets no validation discussion at all, only the usual resumable-run checkpoint. A run where nothing succeeded, or whose documentary-optimization pass found an invented link, also gets none. `[src: file: backend/src/api/audit/full.rs:2428-2539]`
 - **Completion detection**: the prompt instructs the AI to include `KRONN:VALIDATION_COMPLETE` in its final message. Frontend detects this in the last agent message and shows a green banner with "Marquer l'audit comme valide" button — only in the discussion view.
 - **Mark validated** (`POST /api/projects/:id/validate-audit`): injects `<!-- KRONN:VALIDATED:YYYY-MM-DD -->` at end of `docs/AGENTS.md`.
 

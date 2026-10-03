@@ -2266,7 +2266,12 @@ filename src/main.rs
                 .current_dir(repo.path())
                 .output()
                 .unwrap();
-            assert!(output.status.success());
+            assert!(
+                output.status.success(),
+                "empty history commit {index} failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let first = run_git_status_page(repo.path(), 0, 40).unwrap();

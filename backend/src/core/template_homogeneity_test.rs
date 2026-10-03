@@ -76,14 +76,14 @@ mod tests {
 
         /// Strings that every instruction file must contain (after stripping
         /// frontmatter). KT-841 — redirectors are now a PURE pointer to
-        /// `docs/AGENTS.md`: the project header stays (name/stack/language),
+        /// `docs/AGENTS.md`: the project header stays (name/stack),
         /// but there is no local "## Critical rules" section any more —
         /// that content lives ONLY in `docs/AGENTS.md` (single source of
         /// truth), reached via `## More context`.
         const REQUIRED: &[&str] = &[
             "{{PROJECT_NAME}}",
             "{{STACK_SUMMARY}}",
-            "{{PROJECT_LANGUAGE}}",
+            "Working language: see `docs/AGENTS.md`.",
             "## More context",
             "docs/AGENTS.md",
         ];
@@ -95,6 +95,7 @@ mod tests {
             "## Critical rules",
             "{{DO_NOT_1}}",
             "{{DO_NOT_2}}",
+            "{{PROJECT_LANGUAGE}}",
             "DO NOT guess",
             "DO NOT edit auto-generated",
             "DO NOT skip tests",

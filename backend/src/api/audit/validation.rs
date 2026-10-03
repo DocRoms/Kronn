@@ -90,6 +90,73 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
+const COVERAGE_WARNING_PREFIX: &str = "dimension coverage incomplete";
+
+/// Recompute the coverage failure from the current index, including on resume.
+/// This is feedback for the agent, never a relaxation or an in-place repair.
+pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
+    if target_file != "docs/inconsistencies-tech-debt.md" {
+        return None;
+    }
+    let (_, warning) = validate_step_output(true, project_path, target_file);
+    let reason = warning?.reason;
+    // Missing/truncated output or an unfilled template still needs the full
+    // step prompt; a matrix-only instruction would leave its index unfinished.
+    if !reason.starts_with(COVERAGE_WARNING_PREFIX) {
+        return None;
+    }
+    Some(format!(
+        "## Coverage matrix — targeted correction required\n\n\
+         Read `{target_file}` and correct this current failure: {reason}.\n\n\
+         Keep all ten dimension rows and THREE cells per row: Dimension | Outcome | Evidence / reason. \
+         An N/A outcome must also have a nonempty evidence/reason cell supported by the actual repository. \
+         Preserve the existing TD detail files, index entries and human-owned sections. \
+         Correct this matrix only; do not repeat the entire audit or invent supporting evidence.\n"
+    ))
+}
+
+/// Retain safe provider and tool-budget causes alongside the artifact failure.
+/// A recovered ceiling or negotiated provider fallback does not fail a good step.
+pub(crate) fn with_http_diagnostics(
+    success: bool,
+    warning: Option<StepValidationWarning>,
+    stderr: &[String],
+) -> Option<StepValidationWarning> {
+    if success {
+        return warning;
+    }
+    let mut causes = Vec::new();
+    if let Some(summary) = crate::agents::http_diagnostics::failure_summary(stderr) {
+        causes.push(summary);
+    }
+    if let Some(report) = crate::agents::runner::parse_ceiling_report(stderr) {
+        let mut limits: Vec<_> = report
+            .tools
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{}: {} calls ({} refused)",
+                    hit.tool, hit.limit, hit.refused
+                )
+            })
+            .collect();
+        if let Some(rounds) = report.rounds {
+            limits.push(format!("{rounds} tool rounds"));
+        }
+        causes.push(format!("HTTP tool budget reached: {}", limits.join(", ")));
+    }
+    if causes.is_empty() {
+        return warning;
+    }
+    let reason = warning
+        .map(|w| w.reason)
+        .unwrap_or_else(|| "Agent did not complete the audit step".into());
+    Some(StepValidationWarning {
+        reason: format!("{reason}. {}. Partial files are preserved; resume this step to finish the missing output.", causes.join(". ")),
+        repaired: false,
+    })
+}
+
 /// Check that a step's target file is plausibly filled. If it's
 /// missing or suspiciously small, the step FAILS with a warning —
 /// the file itself is never modified. Returns `(success,
@@ -223,7 +290,7 @@ pub fn validate_step_output(
                     false,
                     Some(StepValidationWarning {
                         reason: format!(
-                            "dimension coverage incomplete in `{}`: {} (Step 8 will be re-run)",
+                            "{COVERAGE_WARNING_PREFIX} in `{}`: {} (Step 8 will be re-run)",
                             target_file, reason
                         ),
                         repaired: false,
@@ -744,6 +811,56 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn coverage_feedback_rechecks_the_index_without_modifying_it() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        let project = project.as_path();
+        assert!(coverage_repair_feedback(project, target).is_none());
+        let malformed = valid_coverage_matrix().replace(
+            "| Accessibility | N/A: no web surface | CLI binary only |",
+            "| Accessibility | N/A: no web surface |",
+        );
+        std::fs::write(project.join(target), &malformed).unwrap();
+        let feedback = coverage_repair_feedback(project, target).unwrap();
+        assert!(
+            feedback.contains("Accessibility")
+                && feedback.contains("evidence/reason cell is empty")
+        );
+        assert!(feedback.contains("THREE cells") && feedback.contains("human-owned"));
+        assert_eq!(
+            std::fs::read_to_string(project.join(target)).unwrap(),
+            malformed
+        );
+        assert!(coverage_repair_feedback(project, "docs/AGENTS.md").is_none());
+        std::fs::write(
+            project.join(target),
+            format!("{malformed}\n{{{{PROJECT_NAME}}}}\n"),
+        )
+        .unwrap();
+        assert!(
+            coverage_repair_feedback(project, target).is_none(),
+            "an unfilled template needs the whole step, not only its matrix"
+        );
+        std::fs::write(project.join(target), valid_coverage_matrix()).unwrap();
+        assert!(
+            coverage_repair_feedback(project, target).is_none(),
+            "a corrected index must not carry stale feedback"
+        );
+    }
+
+    #[test]
     fn coverage_matrix_embellished_dimension_label_passes() {
         // Regression (2026-06-03 self-inflicted Step-8-red on DOCROMS_WEB):
         // the agent wrote `Accessibility (a11y)` as the row label. An exact
@@ -1069,5 +1186,30 @@ mod tests {
                 .exists(),
             "no sidecar noise either"
         );
+    }
+
+    #[test]
+    fn failed_artifact_retains_http_budget_cause_but_recovered_search_does_not_fail() {
+        let trace = vec![format!(
+            "{}{}",
+            crate::agents::runner::CEILING_TRACE_PREFIX,
+            serde_json::json!({"version":1,"tools":[{"tool":"write_file","limit":64,
+                "refused":1,"refused_calls":["sensitive output must not be copied"]}]})
+        )];
+        let warning = with_http_diagnostics(
+            false,
+            Some(StepValidationWarning {
+                reason: "docs/index.md is missing or empty".into(),
+                repaired: false,
+            }),
+            &trace,
+        )
+        .unwrap();
+        assert!(warning.reason.contains("docs/index.md is missing"));
+        assert!(warning.reason.contains("write_file: 64 calls"));
+        assert!(warning.reason.contains("resume this step"));
+        assert!(!warning.reason.contains("sensitive output"));
+        assert!(with_http_diagnostics(true, None, &trace).is_none());
+        assert!(with_http_diagnostics(false, None, &[]).is_none());
     }
 }

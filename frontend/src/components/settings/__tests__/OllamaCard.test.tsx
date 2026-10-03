@@ -200,6 +200,21 @@ describe('OllamaCard — per-model context policy', () => {
     expect(ceilingMetric?.textContent?.replace(/\D/g, '')).toBe('8192');
   });
 
+  it('names a ceiling computed from the model itself, apart from the coarse machine band (KT-943)', async () => {
+    ollama.models.mockResolvedValue({
+      models: [installedModel('qwen3.8:27b-mlx', {
+        advertised_context: 262_144,
+        context_ceiling: 131_072,
+        context_origin: 'model_estimate',
+      })],
+    });
+    await mountCard();
+
+    expect(screen.getByText('ollama.contextOrigin.model_estimate')).toBeTruthy();
+    expect(screen.queryByText('ollama.contextOrigin.machine_ceiling')).toBeNull();
+    expect(screen.queryByText('ollama.contextFallbackWarning')).toBeNull();
+  });
+
   it('persists a bounded override and refreshes the effective projection', async () => {
     const initial = installedModel('qwen3:8b');
     const overridden = installedModel('qwen3:8b', {

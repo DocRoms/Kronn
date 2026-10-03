@@ -51,7 +51,7 @@
 ### HTTP 502 Bad Gateway in Docker
 - **Symptom**: Frontend loads but all API calls fail with 502.
 - **Cause**: Backend bound to `127.0.0.1` instead of `0.0.0.0`. In Docker, nginx is in a separate container and cannot reach `127.0.0.1` (loopback).
-- **Fix**: Backend detects Docker via `KRONN_DATA_DIR` env var and forces `0.0.0.0` binding. If still failing, check that `KRONN_DATA_DIR` is set in `docker-compose.yml`.
+- **Fix**: Backend detects a real container (`KRONN_IN_DOCKER`, `/.dockerenv` or `/run/.containerenv`) and binds `0.0.0.0`. If still failing, check that `KRONN_IN_DOCKER=1` is set in `docker-compose.yml`. `KRONN_DATA_DIR` alone no longer changes the bind address (KT-936).
 
 ### HTTP 401 Unauthorized after upgrade
 - **Symptom**: All API calls return 401 after upgrading from a version that auto-generated auth tokens.

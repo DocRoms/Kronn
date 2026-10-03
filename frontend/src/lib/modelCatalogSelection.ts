@@ -86,9 +86,14 @@ export function catalogModelOptions(
       const provenance = catalogModelProvenance(model, target);
       const cliDefault = target?.runtime_target_id === 'agent:claude-code' && model.model_id === 'default';
       const replacement = target?.alerts?.find(alert => alert.model_id === model.model_id)?.replacement;
+      // A model the provider lists but refuses to serve (KT-941) says why in
+      // the label itself: "listed" and "usable" are not the same thing.
+      const refusal = unavailable
+        && (model.unavailable_reason === 'not_found' || model.unavailable_reason === 'access_denied')
+        ? ` (${t(`modelCatalog.reason.${model.unavailable_reason}`)})` : '';
       return {
         value: model.model_id,
-        label: `${model.display_alias ?? model.display_name}${cliDefault ? ` — ${t('modelCatalog.cliDefault')}` : ''}${unavailable ? ` — ${t('modelCatalog.unavailable')}` : ''}`,
+        label: `${model.display_alias ?? model.display_name}${cliDefault ? ` — ${t('modelCatalog.cliDefault')}` : ''}${unavailable ? ` — ${t('modelCatalog.unavailable')}${refusal}` : ''}`,
         keywords: `${model.model_id} ${model.display_name} ${model.resolved_model ?? ''} ${model.description ?? ''} ${replacement ?? ''} ${model.reasoning_modes.join(' ')}`,
         description: [
           model.model_id,
