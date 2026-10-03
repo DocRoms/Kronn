@@ -7836,6 +7836,166 @@ Suite de la réponse.";
         );
     }
 
+    /// Runs a stand-in binary named `program` through the real `try_spawn` and
+    /// returns what it saw of the auto-memory switch.
+    #[cfg(unix)]
+    async fn auto_memory_switch_seen_by(
+        program: &str,
+        discussion_id: Option<&str>,
+        worker: Option<&TaskWorkerBridgeContext>,
+        room_agent: Option<&RoomAgentBridgeContext>,
+        workflow_step: Option<&WorkflowStepBridgeContext>,
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(program);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s' \"${CLAUDE_CODE_DISABLE_AUTO_MEMORY-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let child = try_spawn(
+            path.to_str().unwrap(),
+            None,
+            &[],
+            dir.path(),
+            "ANTHROPIC_API_KEY",
+            None,
+            SpawnIo::Direct(None),
+            discussion_id,
+            worker,
+            room_agent,
+            workflow_step,
+        )
+        .expect("the stand-in binary starts");
+        let output = child.wait_with_output().await.expect("the child exits");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn worker_context() -> TaskWorkerBridgeContext {
+        TaskWorkerBridgeContext {
+            execution_id: "exec".into(),
+            discussion_id: "disc".into(),
+            agent_type: "ClaudeCode".into(),
+            dispatch_job_id: "job".into(),
+            source_message_id: "msg".into(),
+        }
+    }
+
+    fn room_agent_context() -> RoomAgentBridgeContext {
+        RoomAgentBridgeContext {
+            discussion_id: "disc".into(),
+            agent_type: "ClaudeCode".into(),
+            dispatch_job_id: "job".into(),
+            source_message_id: "msg".into(),
+        }
+    }
+
+    fn workflow_step_context() -> WorkflowStepBridgeContext {
+        WorkflowStepBridgeContext {
+            discussion_id: "disc".into(),
+            run_id: "run".into(),
+            step_key: "step".into(),
+            capability: "capability".into(),
+        }
+    }
+
+    /// The opt-in must never reach a step, a principal or a worker, so these
+    /// three hold whatever the operator's environment says.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn claude_step_principal_and_worker_launch_without_the_workstation_memory() {
+        let previous = std::env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
+        for opt_in in [None, Some("1")] {
+            match opt_in {
+                Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+                None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+            }
+            let worker = worker_context();
+            let principal = room_agent_context();
+            let step = workflow_step_context();
+            let roomless_step = auto_memory_switch_seen_by("claude", None, None, None, None).await;
+            let in_step =
+                auto_memory_switch_seen_by("claude", Some("disc"), None, None, Some(&step)).await;
+            let as_principal =
+                auto_memory_switch_seen_by("claude", Some("disc"), None, Some(&principal), None)
+                    .await;
+            let as_worker =
+                auto_memory_switch_seen_by("claude", Some("disc"), Some(&worker), None, None).await;
+            for (mode, seen) in [
+                ("roomless workflow step", roomless_step),
+                ("workflow step", in_step),
+                ("task_exec principal", as_principal),
+                ("task worker", as_worker),
+            ] {
+                assert_eq!(
+                    seen, "1",
+                    "{mode} (opt-in {opt_in:?}) must not load MEMORY.md"
+                );
+            }
+        }
+        match previous {
+            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn claude_native_discussion_drops_the_workstation_memory_unless_opted_in() {
+        let previous = std::env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
+        std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY");
+        assert_eq!(
+            auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
+            "1",
+            "off by default"
+        );
+        std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", "1");
+        assert_eq!(
+            auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
+            "unset",
+            "the operator keeps it for a native discussion"
+        );
+        match previous {
+            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_memory_switch_is_only_set_for_claude_code() {
+        // Another CLI inherits the parent's value untouched: Kronn neither sets
+        // nor clears it (a session launched by Kronn already carries it).
+        let inherited =
+            std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY").unwrap_or_else(|_| "unset".into());
+        assert_eq!(
+            auto_memory_switch_seen_by("codex", Some("disc"), None, None, None).await,
+            inherited
+        );
+    }
+
+    #[test]
+    fn the_opt_in_keeps_the_memory_for_a_bare_discussion_turn_only() {
+        let worker = worker_context();
+        let principal = room_agent_context();
+        let step = workflow_step_context();
+        let kept = |worker, principal, step| {
+            claude_auto_memory_kept(true, Some("d"), worker, principal, step)
+        };
+        assert!(kept(None, None, None));
+        assert!(!claude_auto_memory_kept(false, Some("d"), None, None, None));
+        assert!(!claude_auto_memory_kept(true, None, None, None, None));
+        assert!(!kept(Some(&worker), None, None));
+        assert!(!kept(None, Some(&principal), None));
+        assert!(!kept(None, None, Some(&step)));
+    }
+
     #[test]
     fn codex_task_worker_forces_workspace_write_despite_full_access() {
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(

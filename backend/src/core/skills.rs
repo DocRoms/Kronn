@@ -186,7 +186,7 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
 
-fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
+pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
     let trimmed = raw.trim_start();
     if !trimmed.starts_with("---") {
         tracing::warn!("Skill '{}' missing YAML frontmatter", id);
@@ -364,6 +364,18 @@ fn strip_yaml_scalar(s: &str) -> String {
 fn custom_skills_dir() -> Option<PathBuf> {
     let config_dir = crate::core::config::config_dir().ok()?;
     Some(config_dir.join("skills"))
+}
+
+/// When a custom skill's file last changed: the Kronn-side date of a skill,
+/// which carries no `updated_at` of its own. `None` for builtin skills.
+pub fn custom_skill_modified_at(id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let slug = id.strip_prefix("custom-")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return None;
+    }
+    let path = custom_skills_dir()?.join(format!("{slug}.md"));
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.into())
 }
 
 /// List all available skills (builtin + custom).

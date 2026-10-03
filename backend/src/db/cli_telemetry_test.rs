@@ -651,6 +651,50 @@ fn a_measured_runaway_session_is_told_to_rotate() {
 }
 
 #[test]
+fn the_budget_signal_tells_the_cache_from_the_real_input() {
+    // KT-894: the traffic axis counts cache reads on purpose, but a verdict that
+    // hides they were 98% of it reads as billions of fresh tokens.
+    let conn = test_db();
+    let pk = session(&conn, "ClaudeCode", "cli-a");
+    upsert(&conn, &row(pk)).unwrap();
+    let out = assess_session(
+        &conn,
+        pk,
+        &crate::core::session_budget::SessionBudget::default(),
+    )
+    .unwrap();
+    let traffic = out.traffic.expect("the row carries its four counters");
+    assert_eq!(traffic.cache_read_tokens, Some(4_077_307_836));
+    assert_eq!(traffic.input_tokens, Some(16_826));
+    assert_eq!(traffic.total(), Some(4_143_787_451));
+    assert!(out.reason.contains("cache reads"), "{}", out.reason);
+}
+
+#[test]
+fn a_vendor_without_a_cache_breakdown_reports_the_cache_as_absent_in_the_signal() {
+    let conn = test_db();
+    let pk = session(&conn, "Codex", "cli-c");
+    upsert(
+        &conn,
+        &CliSessionTelemetry {
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            ..row(pk)
+        },
+    )
+    .unwrap();
+    let out = assess_session(
+        &conn,
+        pk,
+        &crate::core::session_budget::SessionBudget::default(),
+    )
+    .unwrap();
+    let traffic = out.traffic.unwrap();
+    assert_eq!(traffic.cache_read_tokens, None, "absent became zero");
+    assert_eq!(traffic.cache_read_share(), None);
+}
+
+#[test]
 fn active_time_ignores_a_fifteen_hour_pause_and_stays_under_the_cap() {
     let conn = test_db();
     let pk = session(&conn, "ClaudeCode", "cli-a");

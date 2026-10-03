@@ -957,7 +957,12 @@ export type BudgetAssessment = { verdict: BudgetVerdict, axes: Array<BudgetAxis>
 /**
  * Why, in one sentence, for whoever reads it in a log or a tooltip.
  */
-reason: string, };
+reason: string,
+/**
+ * The traffic axis with the cache told apart from the real input. `None`
+ * when the caller had no counters to split (see `assess`).
+ */
+traffic: TrafficBreakdown | null, };
 
 /**
  * One axis of the assessment, kept separate so a report can name WHICH ceiling
@@ -1468,9 +1473,12 @@ recorded_usd: number,
  */
 has_recorded: boolean,
 /**
- * Sum of pricing-table estimates computed here (never persisted), for
- * tokens that had no recorded cost at all. Always a genuine,
- * freshly-computed estimate — never a relabeled recorded amount.
+ * Sum of pricing estimates computed here (never persisted), for tokens
+ * that had no recorded cost at all. Always a genuine, freshly-computed
+ * estimate — never a relabeled recorded amount. Only local inference
+ * (Ollama, free whatever the split) qualifies: a bare token total cannot
+ * be priced, because the cache-read / input / output split is what the
+ * price depends on (KT-894).
  */
 estimated_usd: number,
 /**
@@ -1478,10 +1486,11 @@ estimated_usd: number,
  */
 has_estimate: boolean,
 /**
- * Token count with neither a recorded cost nor a pricing-table entry
- * (e.g. OpenCode, Nvidia, Custom, LiteLLM, or a run with no agent
- * attribution at all). Non-zero means `recorded_usd + estimated_usd`
- * is a partial total, not a complete one.
+ * Token count with neither a recorded cost nor a way to price it: every
+ * cloud agent's rows that were persisted without a cost (their detailed
+ * counters were not reported, or the served model has no confirmed rate),
+ * plus a run with no agent attribution at all. Non-zero means
+ * `recorded_usd + estimated_usd` is a partial total, not a complete one.
  */
 unknown_cost_tokens: number, };
 
@@ -2745,6 +2754,20 @@ export type DiscussionTokenCost = { disc_id: string,
  */
 in_app_tokens: number, in_app_messages: number,
 /**
+ * `in_app_tokens` with the prompt cache told apart from the real input
+ * (KT-894): for Codex the total INCLUDES the cache reads, which were 98.6% of
+ * one 25M-token run. Covers only the replies that reported their counters —
+ * `messages` says how many — and is `None` when none did, which is unknown,
+ * not "all of it was input".
+ */
+in_app_breakdown: InAppTokenBreakdown | null,
+/**
+ * Why some in-app replies carry no cost, when they do not: a total without
+ * counters, or a served model with no confirmed rate. Empty when every reply
+ * that consumed tokens was priced.
+ */
+in_app_cost_unknown_reasons: Array<string>,
+/**
  * The CLI side: traffic the vendors reported for the sessions joined here.
  * `None` when nothing was measured — never 0, because an unmeasured session
  * is unknown, not free.
@@ -3364,7 +3387,12 @@ imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
 
-export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string, };
+export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
+/**
+ * Replace the Kronn copy even when it holds edits the repository does
+ * not have. Without it such an import is refused.
+ */
+overwrite_kronn_changes?: boolean, };
 
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
@@ -3389,6 +3417,31 @@ export type ImportResult = { warnings: Array<string>, invalid_paths: Array<strin
  * unattached (the user picks a project later via the wizard).
  */
 export type ImportWorkflowRequest = { content: string, project_id?: string | null, };
+
+/**
+ * A discussion's in-app tokens with the cache told apart from the real input.
+ *
+ * Covers only the replies that reported their counters: `messages` says how
+ * many, so a reader can compare it with the reply count beside it instead of
+ * assuming these figures are the whole total.
+ */
+export type InAppTokenBreakdown = {
+/**
+ * Replies counted in the figures below.
+ */
+messages: number,
+/**
+ * Input that was neither served from cache nor written to it.
+ */
+input_tokens: number,
+/**
+ * Input served from the prompt cache. Reported by every reply counted.
+ */
+cache_read_tokens: number,
+/**
+ * Sum over the replies that reported a cache write only; `None` when none did.
+ */
+cache_write_tokens: number | null, output_tokens: number, };
 
 /**
  * Durable snapshot of the text already emitted by an in-flight agent.
@@ -5196,7 +5249,36 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
-export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, };
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, adr_level: ResourceAdrLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean,
+/**
+ * Real unified diff of the resource's main file (the rendered HTML for
+ * an artifact). Present only for `repository_newer`, `kronn_newer` and
+ * `conflict`; `file_diffs` carries every file.
+ */
+diff?: string,
+/**
+ * One unified diff per differing file — an artifact's `artifact.yaml`
+ * and `index.html` each get their own entry.
+ */
+file_diffs: Array<RepositoryResourceFileDiff>,
+/**
+ * Field-by-field diff of the resource definition (trigger, commands,
+ * agents, models…). Populated for workflow, Quick API and Quick Exec,
+ * for the same three states as `diff`.
+ */
+field_diff: Array<RepositoryResourceFieldDiff>, repository_paths: Array<string>,
+/**
+ * Every path publishing this resource would write, including the
+ * shared scaffold (`kronn/INDEX.md`, `kronn/kronn.toml`, the router
+ * skill) and `docs/AGENTS.md` when its Kronn line is still missing.
+ * Empty for a repository-only resource: there is nothing to publish.
+ */
+write_preview: Array<string>, required_secrets: Array<RequiredSecretStatus>, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string,
+/**
+ * First 8 characters of the content hash of each side, so two versions
+ * can be told apart at a glance. Absent when that side has no file.
+ */
+repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
 
@@ -5208,13 +5290,76 @@ export type ProjectRepositoryResourceMutation = { kind: ProjectRepositoryResourc
  * Read-only projection of the skills, automations and artifacts attached to a
  * project and their alignment with the repository's `kronn/` directory.
  */
-export type ProjectRepositoryResources = { kronn_exists: boolean, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>, };
+export type ProjectRepositoryResources = { kronn_exists: boolean,
+/**
+ * Native skill folders found in the repository, `kronn/skills` included.
+ */
+skill_roots: Array<ProjectSkillRoot>, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>,
+/**
+ * Whether a publish can write into this repository right now, and why
+ * not otherwise (e.g. a `kronn` file occupying the directory slot).
+ */
+can_write_repository: boolean, can_write_repository_reason?: RepositoryWriteBlocker,
+/**
+ * Repository-relative paths Kronn wrote (per `kronn.lock`) that `git
+ * status` reports as modified or untracked — the banner's "N files
+ * changed, not committed" count.
+ */
+uncommitted_managed_paths: Array<string>, };
 
-export type ProjectRepositoryResourceStatus = "not_published" | "up_to_date" | "repository_modified" | "kronn_modified" | "conflict";
+/**
+ * Synchronization state between the repository and Kronn's database for one
+ * resource, following the same vocabulary for every kind (skills included).
+ * Exactly one is true at a time so the UI shows exactly one primary action.
+ */
+export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
 
-export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null, status?: ProjectRepositoryResourceStatus | null, approval_required: boolean, approved: boolean, diff?: string, repository_paths: Array<string>, publication_path: string, };
+export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null,
+/**
+ * Always defined: a skill only in Kronn's catalog (suggested or not) is
+ * `kronn_only`, one found only in a repository folder is `repository_only`
+ * (`native_skill` when Kronn has no counterpart at all).
+ */
+status: ProjectRepositoryResourceStatus,
+/**
+ * Proposed for this repository from its detected stack, not attached to
+ * it: never an item to process, only a suggestion to attach.
+ */
+suggested: boolean,
+/**
+ * What triggered the suggestion, as the detected file name (`Dockerfile`,
+ * `Cargo.toml`…) — the UI words it in the reader's language.
+ */
+suggested_reason?: string, approval_required: boolean, approved: boolean, diff?: string,
+/**
+ * One unified diff per differing file, for the same states as `diff`.
+ */
+file_diffs: Array<RepositoryResourceFileDiff>, repository_paths: Array<string>,
+/**
+ * True when this slug is present under more than one native skill root
+ * (`.claude/skills`, `.agents/skills`…) and those copies are not
+ * byte-identical — the UI must not silently pick one.
+ */
+repository_paths_diverge: boolean, publication_path: string,
+/**
+ * Every path publishing this skill would write, `docs/AGENTS.md`
+ * included when its Kronn line is still missing.
+ */
+write_preview: Array<string>,
+/**
+ * True once "Use in Kronn" attached this native skill by path reference
+ * (read-only, tracked at the source, no `kronn.lock` entry).
+ */
+referenced: boolean, required_secrets: Array<RequiredSecretStatus>, adr_level: ResourceAdrLevel, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string,
+/**
+ * First 8 characters of the content hash of each side, so two versions
+ * can be told apart at a glance. Absent when that side has no file.
+ */
+repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
+
+export type ProjectSkillRoot = { path: string, skill_count: number, };
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
 
@@ -5351,7 +5496,13 @@ export type ProposeResult = { accepted: boolean, reason: string | null, warnings
  * Read-only quota state shown to a human in Agent settings.  Re-arming is a
  * separate human-only HTTP action; it is intentionally absent from agent tools.
  */
-export type ProviderQuotaState = { provider: AgentType, blocked: boolean, };
+export type ProviderQuotaState = { provider: AgentType, blocked: boolean,
+/**
+ * UTC instant (RFC 3339) at which the provider's own refusal said the
+ * quota resets, when it said so. Shown as "rearmable at HH:MM"; nothing
+ * re-arms automatically on it (KT-593).
+ */
+reset_at: string | null, };
 
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost: CostAggregate, };
 
@@ -5651,7 +5802,53 @@ unmeasured: Array<string>,
  */
 messages_stamped: number, };
 
+/**
+ * A native `SKILL.md` found outside `kronn/` (`.claude/skills`,
+ * `.agents/skills`…), addressed by its repository-relative path.
+ */
+export type RepositoryNativeSkillRequest = { relative_path: string,
+/**
+ * "Copy into Kronn" only: replace an existing Kronn copy that differs
+ * from the repository file. Without it, that copy is never overwritten.
+ */
+overwrite_kronn_changes?: boolean, };
+
+/**
+ * One differing field between the repository and Kronn definitions of a
+ * resource, addressed by a dotted path into the resource JSON (e.g.
+ * `steps.0.agent`). Either side may be absent when the field only exists on
+ * one of them.
+ */
+export type RepositoryResourceFieldDiff = { field: string, repository?: any, kronn?: any, };
+
+/**
+ * The unified diff (repository side against Kronn side) of one file a
+ * resource is written to.
+ */
+export type RepositoryResourceFileDiff = { path: string, diff: string, };
+
+/**
+ * Why Kronn cannot write into a repository right now — a code the UI
+ * translates, never a raw error message.
+ */
+export type RepositoryWriteBlocker = "kronn_path_is_file" | "repository_read_only" | "repository_unreadable";
+
 export type RepoSource = { id: string, label: string, provider: string, };
+
+/**
+ * A secret name a resource requires (`secret://NAME` in its file, listed in
+ * `kronn/kronn.toml`), with whether Kronn's encrypted store holds it: the
+ * name is a stored env key of a config this project can use. Names only —
+ * no value is ever read.
+ */
+export type RequiredSecretStatus = { name: string, configured: boolean, };
+
+/**
+ * ADR-005 portability tier. Deliberately serialized as the literal `N0` /
+ * `N1` / `N2` used throughout the ADR and `kronn/INDEX.md`, not
+ * `snake_case`, so the API value matches the vocabulary humans read.
+ */
+export type ResourceAdrLevel = "N0" | "N1" | "N2";
 
 /**
  * One timestamped response from a vendor transcript, as the bridge reports it.
@@ -6949,7 +7146,24 @@ export type TaskExecutionStatus = "Pending" | "Provisioning" | "Blocked" | "Work
 
 export type TaskExecutionTelemetryMode = "boundary_only" | "unavailable";
 
-export type TaskExecutionUsage = { duration_ms: number, in_app_tokens: number, in_app_messages: number, in_app_cost_usd: number | null, in_app_cost_is_partial: boolean, cli_traffic_tokens: number | null, cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured: number, cli_sessions_unmeasured: number, http: TaskExecutionHttpUsage | null, };
+export type TaskExecutionUsage = { duration_ms: number,
+/**
+ * Total reported by the agents, cache reads included for Codex.
+ */
+in_app_tokens: number, in_app_messages: number,
+/**
+ * `in_app_tokens` split into real input, cache and output — for the replies
+ * that reported those counters only (KT-894). `None` when none did.
+ */
+in_app_breakdown: InAppTokenBreakdown | null,
+/**
+ * `None` is unknown, never free.
+ */
+in_app_cost_usd: number | null, in_app_cost_is_partial: boolean,
+/**
+ * Why replies have no cost, when they do not (see `DiscussionTokenCost`).
+ */
+in_app_cost_unknown_reasons: Array<string>, cli_traffic_tokens: number | null, cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured: number, cli_sessions_unmeasured: number, http: TaskExecutionHttpUsage | null, };
 
 /**
  * One recorded validation run (ADR §6). `exit_code` IS the verdict.
@@ -7198,6 +7412,22 @@ export type TourDemoDiscussionResponse = { discussion_id: string, created: boole
 prompt: string, };
 
 export type TrackerSourceConfig = { "type": "GitHub", owner: string, repo: string, };
+
+/**
+ * What the `traffic_tokens` axis is made of, kept apart — KT-894.
+ *
+ * The axis deliberately counts cache reads (they are the cost of a long
+ * thread), which makes it a poor answer to "how much did this session really
+ * read?": one measured session was 98.4% cache reads. Reporting the four
+ * counters beside the axis lets a reader tell a session that streamed a huge
+ * cached transcript from one that pushed a huge amount of fresh input. A
+ * counter the vendor does not publish is `None`, never zero.
+ */
+export type TrafficBreakdown = {
+/**
+ * Input that was neither read from the cache nor written to it.
+ */
+input_tokens: number | null, cache_write_tokens: number | null, cache_read_tokens: number | null, output_tokens: number | null, };
 
 export type TransformDataConfig = {
 /**

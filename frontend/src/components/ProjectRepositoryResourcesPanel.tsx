@@ -1,27 +1,51 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, Download, FileCode2, FolderTree, Loader2, Package, ShieldCheck, Upload, Workflow, Zap } from 'lucide-react';
+import { AlertTriangle, ArrowRightLeft, ChevronDown, ChevronRight, GitBranch, Loader2, Package, RefreshCw, Search, Workflow, Zap, FolderTree, Lock } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import {
+  readProjectRepositoryCatalogOpen,
   readProjectRepositoryResourcesTab,
+  rememberProjectRepositoryCatalogOpen,
   rememberProjectRepositoryResourcesTab,
   type ProjectRepositoryResourcesTab,
 } from '../lib/projectRepositoryResourcesTab';
+import { removeFromKronn } from '../lib/repositoryResourceExecution';
+import type { TransferKind, TransferPlan } from '../lib/repositoryResourceEffects';
+import {
+  alignExcludedCount,
+  alignLines,
+  attachedSkillIds,
+  attentionItems,
+  buildRows,
+  matchesPresence,
+  matchesQuery,
+  writesRepository,
+  type AlignLine,
+  type AttentionItem,
+  type PresenceFilter,
+  type RepositoryRows,
+  type ResourceRow,
+} from '../lib/repositoryResourceRows';
 import { userError } from '../lib/userError';
 import type {
-  ProjectRepositoryResource,
   ProjectRepositoryResourceKind,
-  ProjectRepositoryResourceLevel,
   ProjectRepositoryResourceStatus,
   ProjectRepositoryResources,
-  ProjectRepositorySkill,
-  ProjectRepositorySkillProvenance,
 } from '../types/generated';
+import { RepositoryResourceAlign } from './RepositoryResourceAlign';
+import { RepositoryResourceApprove } from './RepositoryResourceApprove';
+import { RepositoryResourceCompare } from './RepositoryResourceCompare';
+import { RepositoryResourceRow, type RowMenuAction } from './RepositoryResourceRow';
+import { RepositoryResourceTransfer } from './RepositoryResourceTransfer';
 import './ProjectRepositoryResourcesPanel.css';
 
 interface Props {
   projectId: string;
+  /** Called with the number of items waiting for a decision, once known. */
+  onAttentionChange?: (count: number) => void;
+  onOpenGit?: () => void;
+  onAddKey?: () => void;
 }
 
 const AUTOMATION_KINDS: ProjectRepositoryResourceKind[] = [
@@ -31,154 +55,152 @@ const AUTOMATION_KINDS: ProjectRepositoryResourceKind[] = [
   'quick_api',
 ];
 
+const TAB_ICON = { skills: Zap, automation: Workflow, artifacts: Package } as const;
+const FILTERS: PresenceFilter[] = ['all', 'repository', 'kronn', 'both'];
+const ATTENTION_VISIBLE = 5;
+
 const STATUS_MARKER: Record<ProjectRepositoryResourceStatus, string> = {
-  not_published: '+',
+  kronn_only: '+',
   up_to_date: '',
-  repository_modified: '~',
-  kronn_modified: '~',
+  repository_only: '~',
+  repository_newer: '~',
+  kronn_newer: '~',
   conflict: '!',
+  approval_required: '',
+  native_skill: '',
 };
 
-const resourceKey = (resource: ProjectRepositoryResource) => `${resource.kind}:${resource.id}`;
-const skillKey = (skill: ProjectRepositorySkill) => `skill:${skill.id}`;
-const skillIsPublished = (skill: ProjectRepositorySkill) => (
-  skill.repository_paths.includes(skill.publication_path)
+const ATTENTION_SENTENCE: Partial<Record<ResourceRow['state'], string>> = {
+  conflict: 'conflict',
+  approval_required: 'approval',
+  repository_newer: 'repositoryNewer',
+  kronn_newer: 'kronnNewer',
+  repository_only: 'repositoryOnly',
+  native_skill: 'nativeSkill',
+};
+
+/** Whether a row's file is already part of kronn/ — the preview tree's "included" set. */
+const includedByDefault = (row: ResourceRow) => (
+  row.state !== 'kronn_only'
+  && row.state !== 'native_skill'
+  && row.state !== 'catalog'
+  && !(row.attachOnly && !row.paths.includes(row.targetPath))
 );
 
-type ResourceAction = (
-  projectId: string,
-  mode: 'publish' | 'import' | 'approve',
-  kind: ProjectRepositoryResourceKind,
-  id: string,
-  slug: string,
-  overwrite?: boolean,
-) => Promise<unknown>;
+type Sheet = { type: 'compare' | 'approve'; key: string };
 
-export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
+export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, onOpenGit, onAddKey }: Props) {
   const { t } = useT();
   const [data, setData] = useState<ProjectRepositoryResources | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<ProjectRepositoryResourcesTab>(
     readProjectRepositoryResourcesTab,
   );
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<PresenceFilter>('all');
+  const [attentionOpen, setAttentionOpen] = useState(false);
+  const [transfer, setTransfer] = useState<TransferPlan | null>(null);
+  const [sheet, setSheet] = useState<Sheet | null>(null);
+  const [alignOpen, setAlignOpen] = useState(false);
+  // Folded by default, and remembered per project once someone opens it.
+  const [catalogOpenByProject, setCatalogOpenByProject] = useState<Record<string, boolean>>({});
+  const catalogOpenStored = catalogOpenByProject[projectId] ?? readProjectRepositoryCatalogOpen(projectId);
 
   const applyResult = useCallback((result: ProjectRepositoryResources) => {
     setData(result);
-    setSelected(new Set([
-      ...result.resources
-        .filter(resource => resource.status !== 'not_published')
-        .map(resourceKey),
-      ...result.skills_present
-        .filter(skill => skillIsPublished(skill) || (skill.status && skill.status !== 'not_published'))
-        .map(skillKey),
-    ]));
+    const rows = buildRows(result);
+    setSelected(new Set(
+      [...rows.skills, ...rows.automation, ...rows.artifacts]
+        .filter(includedByDefault)
+        .map(row => row.key),
+    ));
   }, []);
 
   useEffect(() => {
     let active = true;
     setData(null);
-    setError(null);
+    setLoadError(null);
+    setActionError(null);
     projectsApi.repositoryResources(projectId).then(result => {
       if (!active) return;
       applyResult(result);
     }).catch(reason => {
-      if (active) setError(userError(reason));
+      if (active) setLoadError(userError(reason));
     });
     return () => { active = false; };
   }, [projectId, applyResult]);
 
-  const runAction: ResourceAction = useAsyncGuard(async (
-    targetProjectId,
-    mode,
-    kind,
-    id,
-    slug,
-    overwrite = false,
-  ) => {
-    const key = `${mode}:${kind}:${id}`;
-    setBusyKey(key);
-    setError(null);
-    try {
-      if (mode === 'publish') {
-        await projectsApi.publishRepositoryResource(targetProjectId, {
-          kind,
-          id,
-          overwrite_repository_changes: overwrite,
-        });
-      } else if (mode === 'import') {
-        await projectsApi.importRepositoryResource(targetProjectId, { kind, slug });
-      } else {
-        await projectsApi.approveRepositoryResource(targetProjectId, { kind, id });
-      }
-      applyResult(await projectsApi.repositoryResources(targetProjectId));
-    } catch (reason) {
-      setError(userError(reason));
-    } finally {
-      setBusyKey(null);
-    }
-  });
+  const rows: RepositoryRows | null = useMemo(() => (data ? buildRows(data) : null), [data]);
+  const attentionAll: AttentionItem[] = useMemo(() => (rows ? attentionItems(rows) : []), [rows]);
+  const attentionTotal = attentionAll.length;
+  const loaded = data !== null;
 
-  const automationResources = useMemo(
-    () => data?.resources.filter(resource => resource.kind !== 'artifact') ?? [],
-    [data],
-  );
-  const artifacts = useMemo(
-    () => data?.resources.filter(resource => resource.kind === 'artifact') ?? [],
-    [data],
-  );
-  const tree = useMemo(() => {
-    if (!data) return [];
-    return [
-      ...data.resources.flatMap(resource => resource.repository_paths.map(path => ({
-        key: resourceKey(resource),
-        id: resource.id,
-        path,
-        status: resource.status as ProjectRepositoryResourceStatus | undefined,
-      }))),
-      ...data.skills_present.map(skill => ({
-        key: skillKey(skill),
-        id: skill.id,
-        path: skill.publication_path,
-        status: skill.status,
-      })),
-    ];
-  }, [data]);
-  const repositoryScaffoldIncluded = Boolean(data?.kronn_exists || selected.size > 0);
-  const selectedForPublication = data ? [
-    ...data.resources
-      .filter(resource => resource.status === 'not_published' && selected.has(resourceKey(resource)))
-      .map(resource => ({ kind: resource.kind, id: resource.id, slug: resource.slug })),
-    ...data.skills_present
-      .filter(skill => skill.status === 'not_published' && selected.has(skillKey(skill)))
-      .map(skill => ({ kind: 'skill' as const, id: skill.id, slug: skill.slug })),
-  ] : [];
+  useEffect(() => {
+    if (loaded) onAttentionChange?.(attentionTotal);
+  }, [loaded, attentionTotal, onAttentionChange]);
 
-  const publishSelected = useAsyncGuard(async (
+  const canWrite = data?.can_write_repository !== false;
+  const kronnExists = Boolean(data?.kronn_exists);
+
+  const runTask = useAsyncGuard(async (
     targetProjectId: string,
-    resources: Array<{ kind: ProjectRepositoryResourceKind; id: string; slug: string }>,
+    busy: string,
+    task: () => Promise<unknown>,
   ) => {
-    setBusyKey('publish:selected');
-    setError(null);
+    setBusyKey(busy);
+    setActionError(null);
     try {
-      for (const resource of resources) {
-        await projectsApi.publishRepositoryResource(targetProjectId, {
-          kind: resource.kind,
-          id: resource.id,
-          overwrite_repository_changes: false,
-        });
-      }
+      await task();
       applyResult(await projectsApi.repositoryResources(targetProjectId));
+      return true;
     } catch (reason) {
-      setError(userError(reason));
+      setActionError(userError(reason));
+      try {
+        applyResult(await projectsApi.repositoryResources(targetProjectId));
+      } catch {
+        // The failure above is the one worth showing.
+      }
+      return false;
     } finally {
       setBusyKey(null);
     }
   });
+
+  const refresh = useAsyncGuard(async (targetProjectId: string) => {
+    setActionError(null);
+    try {
+      applyResult(await projectsApi.repositoryResources(targetProjectId));
+    } catch (reason) {
+      setActionError(userError(reason));
+    }
+  });
+
+  // The suggestions come from the files found in the repository each time the
+  // listing is read, so reading it again is what runs the detection again.
+  const redetect = useAsyncGuard(async (targetProjectId: string) => {
+    setBusyKey('detect');
+    setActionError(null);
+    try {
+      setData(await projectsApi.repositoryResources(targetProjectId));
+    } catch (reason) {
+      setActionError(userError(reason));
+    } finally {
+      setBusyKey(null);
+    }
+  });
+
+  const toggleCatalog = () => {
+    const next = !catalogOpenStored;
+    setCatalogOpenByProject(current => ({ ...current, [projectId]: next }));
+    rememberProjectRepositoryCatalogOpen(projectId, next);
+  };
 
   const selectTab = (tab: ProjectRepositoryResourcesTab) => {
     setActiveTab(tab);
+    setFilter('all');
     rememberProjectRepositoryResourcesTab(tab);
   };
   const toggleSelected = (key: string) => setSelected(current => {
@@ -187,90 +209,446 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
     return next;
   });
 
-  if (error) return <div className="project-repository-resources-error"><AlertTriangle size={15} /> {t('projects.repositoryResources.error')}: {error}</div>;
-  if (!data) return <div className="project-repository-resources-loading"><Loader2 size={15} className="animate-spin" /> {t('projects.repositoryResources.loading')}</div>;
+  const tree = useMemo(() => {
+    if (!data) return [];
+    return [
+      ...data.resources.flatMap(resource => resource.repository_paths.map(path => ({
+        key: `${resource.kind}:${resource.id}`,
+        id: resource.id,
+        path,
+        status: resource.status as ProjectRepositoryResourceStatus | undefined,
+      }))),
+      ...data.skills_present.filter(skill => !skill.suggested).map(skill => ({
+        key: `skill:${skill.id}`,
+        id: skill.id,
+        path: skill.publication_path,
+        status: skill.status,
+      })),
+    ];
+  }, [data]);
 
-  const tabs: Array<{ id: ProjectRepositoryResourcesTab; icon: typeof Zap; count: number }> = [
-    { id: 'skills', icon: Zap, count: data.skills_present.length },
-    { id: 'automation', icon: Workflow, count: automationResources.length },
-    { id: 'artifacts', icon: Package, count: artifacts.length },
+  if (loadError) return <div className="project-repository-resources-error"><AlertTriangle size={15} /> {t('projects.repositoryResources.error')}: {loadError}</div>;
+  if (!data || !rows) return <div className="project-repository-resources-loading"><Loader2 size={15} className="animate-spin" /> {t('projects.repositoryResources.loading')}</div>;
+
+  const transferTask = (plan: TransferPlan, nativePath?: string) => async () => {
+    const [row] = plan.rows;
+    switch (plan.kind) {
+      case 'publish':
+      case 'update_repository':
+        await projectsApi.publishRepositoryResource(projectId, {
+          kind: row.kind, id: row.id, overwrite_repository_changes: false,
+        });
+        break;
+      case 'import':
+      case 'update_kronn':
+        await projectsApi.importRepositoryResource(projectId, {
+          kind: row.kind, slug: row.slug, overwrite_kronn_changes: false,
+        });
+        break;
+      case 'use_native':
+        await projectsApi.useNativeSkill(projectId, { relative_path: nativePath ?? row.paths[0] });
+        break;
+      case 'copy_native':
+        await projectsApi.copyNativeSkill(projectId, { relative_path: nativePath ?? row.paths[0] });
+        break;
+      case 'attach':
+        await projectsApi.setDefaultSkills(projectId, [...attachedSkillIds(data), row.id]);
+        break;
+      case 'publish_selected':
+        for (const item of plan.rows) {
+          await projectsApi.publishRepositoryResource(projectId, {
+            kind: item.kind, id: item.id, overwrite_repository_changes: false,
+          });
+        }
+        break;
+    }
+  };
+
+  const confirmTransfer = async (plan: TransferPlan, nativePath?: string) => {
+    await runTask(projectId, `${plan.kind}:${plan.rows[0].key}`, transferTask(plan, nativePath));
+    setTransfer(null);
+  };
+
+  const startAction = (row: ResourceRow) => {
+    if (row.primary === 'compare' || row.primary === 'approve') {
+      setSheet({ type: row.primary, key: row.key });
+    } else if (row.primary === 'view') {
+      setSheet({ type: 'compare', key: row.key });
+    } else {
+      setTransfer({ kind: row.primary as TransferKind, rows: [row] });
+    }
+  };
+
+  const onMenu = (row: ResourceRow, action: RowMenuAction) => {
+    if (action === 'copy_native') setTransfer({ kind: 'copy_native', rows: [row] });
+    else setSheet({ type: 'compare', key: row.key });
+  };
+
+  const keepSide = async (row: ResourceRow, side: 'repository' | 'kronn') => {
+    const done = await runTask(projectId, `keep:${row.key}`, async () => {
+      if (side === 'repository') {
+        await projectsApi.importRepositoryResource(projectId, {
+          kind: row.kind, slug: row.slug, overwrite_kronn_changes: true,
+        });
+      } else {
+        await projectsApi.publishRepositoryResource(projectId, {
+          kind: row.kind, id: row.id, overwrite_repository_changes: true,
+        });
+      }
+    });
+    if (done) setSheet(null);
+  };
+
+  const approve = async (row: ResourceRow) => {
+    const done = await runTask(projectId, `approve:${row.key}`, () => (
+      projectsApi.approveRepositoryResource(projectId, { kind: row.kind, id: row.id })
+    ));
+    if (done) setSheet(null);
+  };
+
+  const reject = async (row: ResourceRow) => {
+    const done = await runTask(projectId, `reject:${row.key}`, () => removeFromKronn(row.kind, row.id));
+    if (done) setSheet(null);
+  };
+
+  const alignAll = async (lines: AlignLine[]) => {
+    await runTask(projectId, 'align', async () => {
+      for (const { row, direction } of lines) {
+        if (direction === 'to_kronn') {
+          await projectsApi.importRepositoryResource(projectId, {
+            kind: row.kind, slug: row.slug, overwrite_kronn_changes: false,
+          });
+        } else {
+          await projectsApi.publishRepositoryResource(projectId, {
+            kind: row.kind, id: row.id, overwrite_repository_changes: false,
+          });
+        }
+      }
+    });
+    setAlignOpen(false);
+  };
+
+  const nativeSkillRoots = data.skill_roots ?? [];
+  const uncommitted = data.uncommitted_managed_paths ?? [];
+  const repositoryScaffoldIncluded = Boolean(data.kronn_exists || selected.size > 0);
+  const attention = attentionAll.filter(item => item.row.group === activeTab);
+  const allLines = alignLines(rows, activeTab);
+  const lineCount = allLines.filter(line => line.direction === 'to_kronn' || canWrite).length;
+  const excludedCount = alignExcludedCount(rows, activeTab);
+  const selectedForPublication = [...rows.skills, ...rows.automation, ...rows.artifacts]
+    .filter(row => row.state === 'kronn_only' && !row.suggested && selected.has(row.key));
+  const sheetRow = sheet
+    ? [...rows.skills, ...rows.automation, ...rows.artifacts].find(row => row.key === sheet.key)
+    : undefined;
+  const attentionByTab = (tab: ProjectRepositoryResourcesTab) => attentionAll.filter(item => item.row.group === tab).length;
+  const visibleAttention = attentionOpen ? attention : attention.slice(0, ATTENTION_VISIBLE);
+
+  const tabs: Array<{ id: ProjectRepositoryResourcesTab; count: number }> = [
+    { id: 'skills', count: rows.skills.filter(row => !row.suggested).length },
+    { id: 'automation', count: rows.automation.length },
+    { id: 'artifacts', count: rows.artifacts.length },
   ];
+
+  const tabRows = activeTab === 'skills'
+    ? [...rows.skills, ...rows.catalog]
+    : activeTab === 'automation' ? rows.automation : rows.artifacts;
+  const searched = tabRows.filter(row => matchesQuery(row, query));
+  const visibleRows = searched.filter(row => matchesPresence(row, filter));
+  const visibleSet = new Set(visibleRows.map(row => row.key));
+  // A search or the "Kronn only" filter must find what is folded away.
+  const searching = query.trim() !== '' || filter === 'kronn';
+  const catalogOpen = searching || catalogOpenStored;
+  const showBulk = selectedForPublication.length > 0 || allLines.length > 0;
+
+  const sections: Array<{ id: string; title: string; kind?: string; rows: ResourceRow[] }> = [];
+  if (activeTab === 'skills') {
+    sections.push(
+      { id: 'present', title: t('projects.repositoryResources.skills.present'), rows: rows.skills.filter(row => !row.suggested && visibleSet.has(row.key)) },
+      { id: 'suggested', title: t('projects.repositoryResources.skills.suggested'), rows: rows.skills.filter(row => row.suggested && visibleSet.has(row.key)) },
+      { id: 'available', title: t('projects.repositoryResources.skills.available'), rows: rows.catalog.filter(row => visibleSet.has(row.key)) },
+    );
+  } else if (activeTab === 'automation') {
+    AUTOMATION_KINDS.forEach(kind => {
+      sections.push({
+        id: kind,
+        kind,
+        title: t(`projects.repositoryResources.kind.${kind}`),
+        rows: rows.automation.filter(row => row.kind === kind && visibleSet.has(row.key)),
+      });
+    });
+  } else {
+    sections.push({ id: 'artifacts', title: t('projects.repositoryResources.kind.artifact'), rows: rows.artifacts.filter(row => visibleSet.has(row.key)) });
+  }
+
+  const emptyKey = activeTab === 'skills'
+    ? 'projects.repositoryResources.emptySkills'
+    : activeTab === 'automation'
+      ? 'projects.repositoryResources.emptyAutomation'
+      : 'projects.repositoryResources.emptyArtifacts';
 
   return (
     <section className="project-repository-resources" data-project-view="resources">
       <div className="project-repository-resources-tabs" role="tablist" aria-label={t('projects.repositoryResources.tabs')}>
-        {tabs.map(({ id, icon: Icon, count }) => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === id}
-            data-active={activeTab === id}
-            onClick={() => selectTab(id)}
-          >
-            <Icon size={14} aria-hidden="true" />
-            {t(`projects.repositoryResources.tab.${id}`)}
-            <span>{count}</span>
-          </button>
-        ))}
+        {tabs.map(({ id, count }) => {
+          const Icon = TAB_ICON[id];
+          const todo = attentionByTab(id);
+          return (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === id}
+              data-active={activeTab === id}
+              onClick={() => selectTab(id)}
+            >
+              <Icon size={14} aria-hidden="true" />
+              {t(`projects.repositoryResources.tab.${id}`)}
+              <span className="rr-count">{count}</span>
+              {todo > 0 && (
+                <span
+                  className="rr-todo"
+                  role="status"
+                  title={t('projects.repositoryResources.tab.todo', todo)}
+                  aria-label={t('projects.repositoryResources.tab.todo', todo)}
+                >
+                  <AlertTriangle size={10} aria-hidden="true" />
+                  {todo}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
-      {!data.kronn_exists && (
-        <div className="project-repository-resources-banner" role="status">
-          <FolderTree size={16} /> {t('projects.repositoryResources.kronnMissing')}
+
+      {!data.kronn_exists && canWrite && (
+        <details className="rr-share" data-testid="repository-share">
+          <summary>
+            <FolderTree size={12} aria-hidden="true" />
+            <span>{t('projects.repositoryResources.share.title')}</span>
+            <small>{t('projects.repositoryResources.share.missing')}</small>
+          </summary>
+          <div className="rr-share-body">
+            <p>{t('projects.repositoryResources.share.purpose')}</p>
+            <p>{t('projects.repositoryResources.share.approval')}</p>
+            <p>{t('projects.repositoryResources.share.subprojects')}</p>
+          </div>
+        </details>
+      )}
+      {!canWrite && (
+        <div className="project-repository-resources-banner" data-tone="secondary" role="status" data-banner="write-disabled">
+          <Lock size={14} aria-hidden="true" />
+          <div>
+            <strong>{t('projects.repositoryResources.banner.writeDisabled.title')}</strong>
+            <p>{t('projects.repositoryResources.banner.writeDisabled.body')}</p>
+            {data.can_write_repository_reason && (
+              <p>{t(`projects.repositoryResources.banner.writeDisabled.reason.${data.can_write_repository_reason}`)}</p>
+            )}
+          </div>
         </div>
       )}
-      {selectedForPublication.length > 0 && (
-        <div className="project-repository-resources-actions">
-          <button
-            type="button"
-            disabled={busyKey !== null}
-            onClick={() => publishSelected(projectId, selectedForPublication)}
-          >
-            {busyKey === 'publish:selected' ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-            {t('projects.repositoryResources.publishSelected', selectedForPublication.length)}
-          </button>
+      {uncommitted.length > 0 && (
+        <div className="project-repository-resources-banner" role="status" data-banner="uncommitted">
+          <GitBranch size={16} aria-hidden="true" />
+          <span>{t('projects.repositoryResources.banner.uncommitted', uncommitted.length)}</span>
+          {onOpenGit && (
+            <button type="button" className="rr-link" onClick={onOpenGit}>
+              {t('projects.repositoryResources.banner.openGit')}
+            </button>
+          )}
         </div>
       )}
+      {actionError && (
+        <div className="project-repository-resources-banner" data-tone="error" role="alert">
+          <AlertTriangle size={16} aria-hidden="true" />
+          <span>{actionError}</span>
+        </div>
+      )}
+
+      {attention.length > 0 && (
+        <section className="rr-attention" aria-label={t('projects.repositoryResources.attention.title')} data-testid="repository-attention">
+          <h3>
+            {t('projects.repositoryResources.attention.title')} <span>{attention.length}</span>
+          </h3>
+          <ul>
+            {visibleAttention.map(({ row, reason }) => (
+              <li key={row.key} data-reason={reason}>
+                <span>
+                  {t(`projects.repositoryResources.attention.${ATTENTION_SENTENCE[row.state]}`, row.name)}
+                </span>
+                <button
+                  type="button"
+                  className="rr-action"
+                  data-action={row.primary}
+                  disabled={busyKey !== null || (writesRepository(row.primary) && !canWrite)}
+                  onClick={() => startAction(row)}
+                >
+                  {t(`projects.repositoryResources.action.${row.primary}`)}
+                </button>
+              </li>
+            ))}
+          </ul>
+          {attention.length > ATTENTION_VISIBLE && (
+            <button type="button" className="rr-link" onClick={() => setAttentionOpen(open => !open)}>
+              {attentionOpen
+                ? t('projects.repositoryResources.attention.less')
+                : t('projects.repositoryResources.attention.more', attention.length - ATTENTION_VISIBLE)}
+            </button>
+          )}
+        </section>
+      )}
+
       <div className="project-repository-resources-columns">
         <div className="project-repository-resources-list" role="tabpanel">
           {activeTab === 'skills' && (
-            <SkillsTab
-              present={data.skills_present}
-              available={data.skills_available}
-              selected={selected}
-              onToggle={toggleSelected}
-              onAction={runAction}
-              projectId={projectId}
-              busyKey={busyKey}
-              t={t}
-            />
+            <div className="project-repository-skill-roots" data-testid="project-skill-roots">
+              <strong>{t('projects.repositoryResources.skillRoots.title')}</strong>
+              {nativeSkillRoots.length === 0 ? (
+                <span>{t('projects.repositoryResources.skillRoots.none')}</span>
+              ) : (
+                <ul>
+                  {nativeSkillRoots.map(root => (
+                    <li key={root.path}>
+                      <code>{root.path}/</code>
+                      <span>{t('projects.repositoryResources.skillRoots.count', root.skill_count)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
-          {activeTab === 'automation' && (
-            <AutomationTab
-              resources={automationResources}
-              selected={selected}
-              onToggle={toggleSelected}
-              onAction={runAction}
-              projectId={projectId}
-              busyKey={busyKey}
-              t={t}
-            />
-          )}
-          {activeTab === 'artifacts' && (
-            <ResourceList
-              resources={artifacts}
-              selected={selected}
-              onToggle={toggleSelected}
-              onAction={runAction}
-              projectId={projectId}
-              busyKey={busyKey}
-              emptyKey="projects.repositoryResources.emptyArtifacts"
-              t={t}
-            />
+
+          <div className="rr-toolbar">
+            <label className="rr-search">
+              <Search size={14} aria-hidden="true" />
+              <input
+                type="search"
+                value={query}
+                placeholder={t('projects.repositoryResources.search')}
+                aria-label={t('projects.repositoryResources.search')}
+                onChange={event => setQuery(event.target.value)}
+              />
+            </label>
+            <div className="rr-filters" role="group" aria-label={t('projects.repositoryResources.filters')}>
+              {FILTERS.map(option => (
+                <button
+                  key={option}
+                  type="button"
+                  className="rr-chip"
+                  aria-pressed={filter === option}
+                  onClick={() => setFilter(option)}
+                >
+                  {t(`projects.repositoryResources.filter.${option}`)}
+                  <span>{searched.filter(row => matchesPresence(row, option)).length}</span>
+                </button>
+              ))}
+            </div>
+            {showBulk && (
+              <div className="rr-bulk">
+                {selectedForPublication.length > 0 && (
+                  <button
+                    type="button"
+                    className="rr-button"
+                    disabled={busyKey !== null || !canWrite}
+                    title={canWrite ? undefined : t('projects.repositoryResources.banner.writeDisabled.title')}
+                    onClick={() => setTransfer({ kind: 'publish_selected', rows: selectedForPublication })}
+                  >
+                    {busyKey?.startsWith('publish_selected') && <Loader2 size={14} className="animate-spin" aria-hidden="true" />}
+                    {t('projects.repositoryResources.publishSelected', selectedForPublication.length)}
+                  </button>
+                )}
+                {allLines.length > 0 && (
+                  <button
+                    type="button"
+                    className="rr-button"
+                    data-testid="align-all"
+                    disabled={busyKey !== null || lineCount === 0}
+                    title={lineCount === 0
+                      ? t('projects.repositoryResources.banner.writeDisabled.title')
+                      : undefined}
+                    onClick={() => setAlignOpen(true)}
+                  >
+                    <ArrowRightLeft size={14} aria-hidden="true" />
+                    {t('projects.repositoryResources.alignAll', lineCount)}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {tabRows.length === 0 ? (
+            <p>{t(emptyKey)}</p>
+          ) : visibleRows.length === 0 ? (
+            <p>{t('projects.repositoryResources.emptyFiltered')}</p>
+          ) : (
+            <div className="rr-table" role="table" aria-label={t(`projects.repositoryResources.tab.${activeTab}`)}>
+              <div className="rr-head" role="row">
+                <span role="columnheader" aria-hidden="true" />
+                <span role="columnheader">{t('projects.repositoryResources.columns.repository')}</span>
+                <span role="columnheader">{t('projects.repositoryResources.columns.sync')}</span>
+                <span role="columnheader">{t('projects.repositoryResources.columns.kronn')}</span>
+                <span role="columnheader">{t('projects.repositoryResources.columns.action')}</span>
+              </div>
+              {sections.filter(section => section.rows.length > 0).map(section => {
+                const folds = section.id === 'available';
+                const open = !folds || catalogOpen;
+                return (
+                  <div key={section.id} role="rowgroup" aria-label={section.title} data-resource-kind={section.kind}>
+                    {(activeTab !== 'artifacts') && (
+                      <h3 role="presentation" data-folds={folds || undefined}>
+                        {folds ? (
+                          <button
+                            type="button"
+                            className="rr-section-toggle"
+                            aria-expanded={open}
+                            disabled={searching}
+                            onClick={toggleCatalog}
+                          >
+                            {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+                            <span>{section.title}</span>
+                            <span className="rr-section-count">{section.rows.length}</span>
+                          </button>
+                        ) : (
+                          <>{section.title} <span>{section.rows.length}</span></>
+                        )}
+                      </h3>
+                    )}
+                    {section.id === 'suggested' && (
+                      <div className="rr-section-hint" role="presentation">
+                        <span>{t('projects.repositoryResources.skills.suggestedHint')}</span>
+                        <button
+                          type="button"
+                          className="rr-link"
+                          disabled={busyKey !== null}
+                          onClick={() => { void redetect(projectId); }}
+                        >
+                          {busyKey === 'detect' && <Loader2 size={12} className="animate-spin" aria-hidden="true" />}
+                          {busyKey !== 'detect' && <RefreshCw size={12} aria-hidden="true" />}
+                          {t('projects.repositoryResources.skills.redetect')}
+                        </button>
+                      </div>
+                    )}
+                    {open && section.rows.map(row => (
+                      <RepositoryResourceRow
+                        key={row.key}
+                        row={row}
+                        checked={selected.has(row.key)}
+                        busy={busyKey?.endsWith(row.key) ?? false}
+                        canWrite={canWrite}
+                        onToggle={() => toggleSelected(row.key)}
+                        onOpen={() => setSheet({ type: 'compare', key: row.key })}
+                        onPrimary={() => startAction(row)}
+                        onMenu={action => onMenu(row, action)}
+                      />
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
-        <div className="project-repository-resources-tree">
-          <h3>{t('projects.repositoryResources.preview')}</h3>
+
+        <details className="project-repository-resources-tree" data-testid="repository-preview">
+          <summary>{t('projects.repositoryResources.preview')}</summary>
           <div
             className="project-repository-tree-root"
             data-excluded={!repositoryScaffoldIncluded || undefined}
@@ -307,203 +685,51 @@ export function ProjectRepositoryResourcesPanel({ projectId }: Props) {
             <span>! {t('projects.repositoryResources.legend.conflict')}</span>
             <span className="project-repository-resources-excluded">{t('projects.repositoryResources.legend.excluded')}</span>
           </div>
-        </div>
+        </details>
       </div>
+
+      {transfer && (
+        <RepositoryResourceTransfer
+          plan={transfer}
+          kronnExists={kronnExists}
+          busy={busyKey !== null}
+          onConfirm={nativePath => { void confirmTransfer(transfer, nativePath); }}
+          onCancel={() => setTransfer(null)}
+        />
+      )}
+      {sheet?.type === 'compare' && sheetRow && (
+        <RepositoryResourceCompare
+          row={sheetRow}
+          canWrite={canWrite}
+          busy={busyKey !== null}
+          onKeepRepository={() => { void keepSide(sheetRow, 'repository'); }}
+          onKeepKronn={() => { void keepSide(sheetRow, 'kronn'); }}
+          onRefresh={() => { void refresh(projectId); }}
+          onPrimary={() => { setSheet(null); startAction(sheetRow); }}
+          onClose={() => setSheet(null)}
+        />
+      )}
+      {sheet?.type === 'approve' && sheetRow && (
+        <RepositoryResourceApprove
+          row={sheetRow}
+          busy={busyKey !== null}
+          onApprove={() => { void approve(sheetRow); }}
+          onReject={() => { void reject(sheetRow); }}
+          onAddKey={onAddKey}
+          onClose={() => setSheet(null)}
+        />
+      )}
+      {alignOpen && (
+        <RepositoryResourceAlign
+          lines={allLines}
+          excludedCount={excludedCount}
+          canWrite={canWrite}
+          kronnExists={kronnExists}
+          busy={busyKey !== null}
+          onConfirm={lines => { void alignAll(lines); }}
+          onCancel={() => setAlignOpen(false)}
+        />
+      )}
     </section>
   );
 }
-
-type Translate = (key: string, ...args: Array<string | number>) => string;
-
-interface ResourceListProps {
-  resources: ProjectRepositoryResource[];
-  selected: Set<string>;
-  onToggle: (key: string) => void;
-  onAction: ResourceAction;
-  projectId: string;
-  busyKey: string | null;
-  emptyKey: string;
-  t: Translate;
-}
-
-function ResourceList({ resources, selected, onToggle, onAction, projectId, busyKey, emptyKey, t }: ResourceListProps) {
-  if (resources.length === 0) return <p>{t(emptyKey)}</p>;
-  return <>{resources.map(resource => (
-    <ResourceRow
-      key={resourceKey(resource)}
-      resource={resource}
-      checked={selected.has(resourceKey(resource))}
-      onToggle={() => onToggle(resourceKey(resource))}
-      onAction={onAction}
-      projectId={projectId}
-      busyKey={busyKey}
-      t={t}
-    />
-  ))}</>;
-}
-
-function ResourceRow({ resource, checked, onToggle, onAction, projectId, busyKey, t }: {
-  resource: ProjectRepositoryResource;
-  checked: boolean;
-  onToggle: () => void;
-  onAction: ResourceAction;
-  projectId: string;
-  busyKey: string | null;
-  t: Translate;
-}) {
-  const actionBusy = busyKey?.endsWith(`:${resource.kind}:${resource.id}`) ?? false;
-  return (
-    <div className="project-repository-resource-row">
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={resource.status !== 'not_published'}
-        onChange={onToggle}
-        aria-label={t('projects.repositoryResources.include', resource.name)}
-      />
-      <FileCode2 size={15} aria-hidden="true" />
-      <span className="project-repository-resource-copy">
-        <strong>{resource.name}</strong>
-        <span>{kindLabel(t, resource.kind)} · {levelLabel(t, resource.level)}</span>
-      </span>
-      <span className="project-repository-resource-status" data-status={resource.status}>
-        {resource.status === 'up_to_date' && <Check size={12} aria-hidden="true" />}
-        {statusLabel(t, resource.status)}
-      </span>
-      <ResourceActions
-        status={resource.status}
-        approvalRequired={resource.approval_required}
-        diff={resource.diff}
-        busy={actionBusy}
-        onAction={(mode, overwrite) => onAction(projectId, mode, resource.kind, resource.id, resource.slug, overwrite)}
-        t={t}
-      />
-    </div>
-  );
-}
-
-function AutomationTab({ resources, selected, onToggle, onAction, projectId, busyKey, t }: Omit<ResourceListProps, 'emptyKey'>) {
-  if (resources.length === 0) return <p>{t('projects.repositoryResources.emptyAutomation')}</p>;
-  return <div className="project-repository-resource-groups">
-    {AUTOMATION_KINDS.map(kind => {
-      const group = resources.filter(resource => resource.kind === kind);
-      if (group.length === 0) return null;
-      return <section key={kind} data-resource-kind={kind}>
-        <h3>{kindLabel(t, kind)} <span>{group.length}</span></h3>
-        <ResourceList resources={group} selected={selected} onToggle={onToggle} onAction={onAction} projectId={projectId} busyKey={busyKey} emptyKey="" t={t} />
-      </section>;
-    })}
-  </div>;
-}
-
-function SkillsTab({ present, available, selected, onToggle, onAction, projectId, busyKey, t }: {
-  present: ProjectRepositorySkill[];
-  available: ProjectRepositorySkill[];
-  selected: Set<string>;
-  onToggle: (key: string) => void;
-  onAction: ResourceAction;
-  projectId: string;
-  busyKey: string | null;
-  t: Translate;
-}) {
-  return <div className="project-repository-skill-groups">
-    <section>
-      <h3>{t('projects.repositoryResources.skills.present')} <span>{present.length}</span></h3>
-      {present.length === 0 && <p>{t('projects.repositoryResources.emptySkills')}</p>}
-      {present.map(skill => {
-        const key = skillKey(skill);
-        const published = skillIsPublished(skill);
-        return <div key={key} className="project-repository-resource-row">
-          <input
-            type="checkbox"
-            checked={selected.has(key)}
-            disabled={published}
-            onChange={() => onToggle(key)}
-            aria-label={t('projects.repositoryResources.include', skill.name)}
-          />
-          <Zap size={15} aria-hidden="true" />
-          <span className="project-repository-resource-copy">
-            <strong>{skill.name}</strong>
-            <span>{provenanceLabel(t, skill.provenance)} · {levelLabel(t, 'usable_without_kronn')}</span>
-            {skill.description && <small>{skill.description}</small>}
-          </span>
-          {skill.status && (
-            <span className="project-repository-resource-status" data-status={skill.status}>
-              {skill.status === 'up_to_date' && <Check size={12} aria-hidden="true" />}
-              {statusLabel(t, skill.status)}
-            </span>
-          )}
-          {skill.status && (
-            <ResourceActions
-              status={skill.status}
-              approvalRequired={skill.approval_required}
-              diff={skill.diff}
-              busy={busyKey?.endsWith(`:skill:${skill.id}`) ?? false}
-              onAction={(mode, overwrite) => onAction(projectId, mode, 'skill', skill.id, skill.slug, overwrite)}
-              t={t}
-            />
-          )}
-        </div>;
-      })}
-    </section>
-    <section>
-      <h3>{t('projects.repositoryResources.skills.available')} <span>{available.length}</span></h3>
-      {available.length === 0 && <p>{t('projects.repositoryResources.emptyAvailableSkills')}</p>}
-      {available.map(skill => (
-        <div key={skillKey(skill)} className="project-repository-resource-row project-repository-skill-available">
-          <Zap size={15} aria-hidden="true" />
-          <span className="project-repository-resource-copy">
-            <strong>{skill.name}</strong>
-            <span>{provenanceLabel(t, skill.provenance)}</span>
-            {skill.description && <small>{skill.description}</small>}
-          </span>
-        </div>
-      ))}
-    </section>
-  </div>;
-}
-
-function ResourceActions({ status, approvalRequired, diff, busy, onAction, t }: {
-  status: ProjectRepositoryResourceStatus;
-  approvalRequired: boolean;
-  diff?: string;
-  busy: boolean;
-  onAction: (mode: 'publish' | 'import' | 'approve', overwrite?: boolean) => Promise<unknown>;
-  t: Translate;
-}) {
-  return <div className="project-repository-resource-actions">
-    {busy && <Loader2 size={13} className="animate-spin" aria-label={t('common.loading')} />}
-    {!busy && status === 'repository_modified' && (
-      <button type="button" onClick={() => onAction('import')}>
-        <Download size={12} /> {t('projects.repositoryResources.import')}
-      </button>
-    )}
-    {!busy && status === 'kronn_modified' && (
-      <button type="button" onClick={() => onAction('publish')}>
-        <Upload size={12} /> {t('projects.repositoryResources.publish')}
-      </button>
-    )}
-    {!busy && status === 'conflict' && <>
-      <details>
-        <summary>{t('projects.repositoryResources.showDiff')}</summary>
-        <pre>{diff}</pre>
-      </details>
-      <button type="button" onClick={() => onAction('import')}>
-        <Download size={12} /> {t('projects.repositoryResources.keepRepository')}
-      </button>
-      <button type="button" onClick={() => onAction('publish', true)}>
-        <Upload size={12} /> {t('projects.repositoryResources.keepKronn')}
-      </button>
-    </>}
-    {!busy && approvalRequired && status === 'up_to_date' && (
-      <button type="button" onClick={() => onAction('approve')}>
-        <ShieldCheck size={12} /> {t('projects.repositoryResources.approve')}
-      </button>
-    )}
-  </div>;
-}
-
-const kindLabel = (t: Translate, kind: ProjectRepositoryResourceKind) => t(`projects.repositoryResources.kind.${kind}`);
-const levelLabel = (t: Translate, level: ProjectRepositoryResourceLevel) => t(`projects.repositoryResources.level.${level}`);
-const statusLabel = (t: Translate, status: ProjectRepositoryResourceStatus) => t(`projects.repositoryResources.status.${status}`);
-const provenanceLabel = (t: Translate, provenance: ProjectRepositorySkillProvenance) => t(`projects.repositoryResources.provenance.${provenance}`);

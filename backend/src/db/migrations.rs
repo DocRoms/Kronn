@@ -771,6 +771,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "200_repository_resource_alignment",
         include_str!("sql/200_repository_resource_alignment.sql"),
     ),
+    (
+        "201_project_skill_references",
+        include_str!("sql/201_project_skill_references.sql"),
+    ),
+    (
+        "202_provider_quota_reset_at",
+        include_str!("sql/202_provider_quota_reset_at.sql"),
+    ),
+    (
+        "203_message_usage",
+        include_str!("sql/203_message_usage.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

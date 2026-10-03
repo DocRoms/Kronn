@@ -26,16 +26,20 @@ pub struct CostAggregate {
     /// True once at least one token in this group had a persisted, non-null
     /// cost folded into `recorded_usd`.
     pub has_recorded: bool,
-    /// Sum of pricing-table estimates computed here (never persisted), for
-    /// tokens that had no recorded cost at all. Always a genuine,
-    /// freshly-computed estimate — never a relabeled recorded amount.
+    /// Sum of pricing estimates computed here (never persisted), for tokens
+    /// that had no recorded cost at all. Always a genuine, freshly-computed
+    /// estimate — never a relabeled recorded amount. Only local inference
+    /// (Ollama, free whatever the split) qualifies: a bare token total cannot
+    /// be priced, because the cache-read / input / output split is what the
+    /// price depends on (KT-894).
     pub estimated_usd: f64,
     /// True once at least one token's cost came from `estimated_usd`.
     pub has_estimate: bool,
-    /// Token count with neither a recorded cost nor a pricing-table entry
-    /// (e.g. OpenCode, Nvidia, Custom, LiteLLM, or a run with no agent
-    /// attribution at all). Non-zero means `recorded_usd + estimated_usd`
-    /// is a partial total, not a complete one.
+    /// Token count with neither a recorded cost nor a way to price it: every
+    /// cloud agent's rows that were persisted without a cost (their detailed
+    /// counters were not reported, or the served model has no confirmed rate),
+    /// plus a run with no agent attribution at all. Non-zero means
+    /// `recorded_usd + estimated_usd` is a partial total, not a complete one.
     pub unknown_cost_tokens: u64,
 }
 
@@ -57,9 +61,10 @@ impl CostAggregate {
     ///
     /// `messages.cost_usd` is not exclusively a real measurement for any
     /// agent, including ClaudeCode: the ingest path
-    /// (`discussions/streaming.rs`) falls back to this same pricing table
-    /// whenever the agent's own reported cost isn't available, and the DB
-    /// stores no column distinguishing the two cases. So a non-null
+    /// (`discussions/streaming.rs`) computes it from the detailed counters
+    /// and the served model's rates whenever the agent's own reported cost
+    /// isn't available (and, before KT-894, from a 60/40 split of the total),
+    /// and the DB stores no column distinguishing the cases. So a non-null
     /// `cost_usd` is folded into `recorded_usd` with unguaranteed
     /// provenance — never asserted "measured" — regardless of agent_type.
     pub fn add(
@@ -74,12 +79,16 @@ impl CostAggregate {
         }
         if unrecorded_tokens > 0 {
             let agent = agent_type.unwrap_or("");
-            match crate::core::pricing::estimate_cost(agent, unrecorded_tokens) {
-                Some(estimated) => {
+            // Only a token total is known here, never the counters a price is
+            // computed from, so this can price nothing but free local inference.
+            match crate::core::pricing::message_cost(agent, None, None) {
+                crate::core::pricing::CostOutcome::Known(estimated) => {
                     self.estimated_usd += estimated;
                     self.has_estimate = true;
                 }
-                None => self.unknown_cost_tokens += unrecorded_tokens,
+                crate::core::pricing::CostOutcome::Unknown(_) => {
+                    self.unknown_cost_tokens += unrecorded_tokens
+                }
             }
         }
     }
@@ -215,11 +224,31 @@ mod cost_aggregate_tests {
     }
 
     #[test]
-    fn missing_cost_with_known_pricing_is_an_estimate() {
+    fn missing_cost_with_only_a_token_total_is_unknown_never_a_split_guess() {
+        // KT-894: a bare total cannot be priced — the 60/40 guess billed a 98.6%
+        // cache-read run at the full input rate ($111 for ~$13).
+        for agent in [
+            "ClaudeCode",
+            "Codex",
+            "GeminiCli",
+            "Vibe",
+            "Kiro",
+            "CopilotCli",
+        ] {
+            let mut agg = CostAggregate::default();
+            agg.add(None, 25_261_395, Some(agent));
+            assert_eq!(agg.known_usd(), 0.0, "agent={agent}");
+            assert!(!agg.has_estimate, "agent={agent}");
+            assert!(!agg.has_recorded, "agent={agent}");
+            assert_eq!(agg.unknown_cost_tokens, 25_261_395, "agent={agent}");
+        }
+    }
+
+    #[test]
+    fn missing_cost_on_local_inference_is_an_estimated_zero() {
         let mut agg = CostAggregate::default();
-        agg.add(None, 100_000, Some("Codex"));
-        assert!(agg.estimated_usd > 0.0);
-        assert_eq!(agg.known_usd(), agg.estimated_usd);
+        agg.add(None, 100_000, Some("Ollama"));
+        assert_eq!(agg.estimated_usd, 0.0);
         assert!(agg.has_estimate);
         assert!(!agg.has_recorded);
         assert_eq!(agg.unknown_cost_tokens, 0);
@@ -269,7 +298,7 @@ mod cost_aggregate_tests {
         let mut recorded = CostAggregate::default();
         recorded.add(Some(1.0), 0, Some("ClaudeCode"));
         let mut estimated = CostAggregate::default();
-        estimated.add(None, 2000, Some("Codex"));
+        estimated.add(None, 2000, Some("Ollama"));
         let mut unknown = CostAggregate::default();
         unknown.add(None, 3000, Some("OpenCode"));
 

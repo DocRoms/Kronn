@@ -16,6 +16,7 @@ import type {
   ProjectRepositoryResourceMutation,
   ProjectRepositoryResources,
   PublishProjectRepositoryResourceRequest,
+  RepositoryNativeSkillRequest,
   ProjectDockerAction,
   ProjectDockerLogs,
   ProjectDockerRunningSummary,
@@ -906,6 +907,10 @@ export const projects = {
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/import`, request),
   approveRepositoryResource: (id: string, request: ApproveProjectRepositoryResourceRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/approve`, request),
+  useNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/use`, request),
+  copyNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/copy`, request),
   dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
   dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
   dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>

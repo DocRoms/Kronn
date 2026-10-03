@@ -3074,6 +3074,9 @@ async fn make_agent_stream_inner(
                     .map(|notice| format!("{notice}\n\n"))
                     .unwrap_or_default();
                 let mut stream_json_tokens: u64 = 0;
+                // Counters of the usage event that set `stream_json_tokens`, kept
+                // apart so the cost is computed from them and never from the total.
+                let mut stream_json_usage: Option<runner::ReportedUsage> = None;
                 let mut stream_json_cost: Option<f64> = None;
                 let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
@@ -3348,8 +3351,15 @@ async fn make_agent_stream_inner(
                                 input_tokens,
                                 output_tokens,
                                 cost_usd,
-                                ..
+                                prompt_cache,
                             } => {
+                                if input_tokens + output_tokens >= stream_json_tokens {
+                                    stream_json_usage = Some(runner::ReportedUsage {
+                                        input_tokens,
+                                        output_tokens,
+                                        prompt_cache,
+                                    });
+                                }
                                 stream_json_tokens =
                                     stream_json_tokens.max(input_tokens + output_tokens);
                                 if let Some(c) = cost_usd {
@@ -3760,6 +3770,13 @@ async fn make_agent_stream_inner(
 
                 lift_acp_tool_calls(&stderr_lines, &mut kronn_tool_calls, &mut native_tool_calls);
 
+                // The usage the token count below comes from, with its parts kept
+                // apart: the cost is computed from these counters, not the total.
+                let reported_usage = if stream_json_tokens > 0 {
+                    stream_json_usage
+                } else {
+                    process.reported_usage_counters()
+                };
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
                 } else if let Some(reported) = process.reported_token_usage() {
@@ -3807,20 +3824,39 @@ async fn make_agent_stream_inner(
                     crate::models::ModelTier::Reasoning => Some("reasoning".to_string()),
                     crate::models::ModelTier::Default => None, // Don't clutter with "default"
                 };
-                // Cost: use real cost from Claude Code if available, else estimate from pricing table
-                let cost_usd = stream_json_cost.or_else(|| {
-                    if tokens_used > 0 {
-                        {
-                            let at_str = serde_json::to_string(&agent_type)
-                                .unwrap_or_default()
-                                .trim_matches('"')
-                                .to_string();
-                            crate::core::pricing::estimate_cost(&at_str, tokens_used)
-                        }
-                    } else {
-                        None
-                    }
+                // Cost: the agent's own reported cost when it gives one, else the
+                // detailed counters priced at the rates of the model that served
+                // the reply. Never a total split by assumption: without counters
+                // or a confirmed rate the cost stays unknown (KT-894).
+                let at_str = serde_json::to_string(&agent_type)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_string();
+                let message_counters = reported_usage.and_then(|usage| {
+                    crate::core::pricing::TokenCounters::from_agent_report(
+                        &at_str,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.prompt_cache.cached_prompt_tokens,
+                        usage.prompt_cache.cache_write_prompt_tokens,
+                    )
                 });
+                let priced = crate::core::pricing::price_reply(
+                    &at_str,
+                    attempted_model.as_deref(),
+                    tokens_used,
+                    stream_json_cost,
+                    message_counters,
+                );
+                let cost_usd = priced.cost_usd;
+                if let Some(reason) = priced.cost_unknown {
+                    tracing::info!(
+                        discussion_id = %disc_id,
+                        agent = %at_str,
+                        reason = reason.reason(),
+                        "message cost unknown"
+                    );
+                }
 
                 // 0.8.7 anti-hallucination P2 — lint the finalized reply:
                 // niveau 0 heuristic + niveau 1 mechanical [src:] verification
@@ -3993,6 +4029,10 @@ async fn make_agent_stream_inner(
                 } else {
                     None
                 };
+                let usage_record = crate::db::message_usage::MessageUsage {
+                    counters: priced.counters,
+                    cost_unknown: priced.cost_unknown,
+                };
                 match state
                     .db
                     .with_conn(move |conn| {
@@ -4009,6 +4049,14 @@ async fn make_agent_stream_inner(
                                 handoff_paid_limit,
                                 checkpoint.as_ref(),
                             )?;
+                        // Best effort: the breakdown enriches the totals, and its
+                        // absence only means "not reported" — it must never cost
+                        // the reply it describes.
+                        if let Err(error) =
+                            crate::db::message_usage::record(conn, &msg.id, &usage_record)
+                        {
+                            tracing::warn!("Failed to record message usage: {error}");
+                        }
                         // Recorded with the message that carries the question:
                         // only this record lets an answer raise a budget.
                         if let Some((key, ceilings)) = ceiling_request.as_ref() {

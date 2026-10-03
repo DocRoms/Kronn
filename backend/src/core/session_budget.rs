@@ -119,6 +119,64 @@ impl BudgetAxis {
     }
 }
 
+/// What the `traffic_tokens` axis is made of, kept apart — KT-894.
+///
+/// The axis deliberately counts cache reads (they are the cost of a long
+/// thread), which makes it a poor answer to "how much did this session really
+/// read?": one measured session was 98.4% cache reads. Reporting the four
+/// counters beside the axis lets a reader tell a session that streamed a huge
+/// cached transcript from one that pushed a huge amount of fresh input. A
+/// counter the vendor does not publish is `None`, never zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TrafficBreakdown {
+    /// Input that was neither read from the cache nor written to it.
+    pub input_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+}
+
+impl TrafficBreakdown {
+    /// Everything the vendor reported, cache included — the `traffic_tokens`
+    /// axis. `None` when not one counter was measured.
+    pub fn total(&self) -> Option<i64> {
+        let parts = [
+            self.input_tokens,
+            self.cache_write_tokens,
+            self.cache_read_tokens,
+            self.output_tokens,
+        ];
+        if parts.iter().all(Option::is_none) {
+            return None;
+        }
+        Some(parts.iter().filter_map(|part| *part).sum())
+    }
+
+    /// Share of the traffic that was cache reads. `None` when the vendor does
+    /// not report cache reads, or nothing moved: a share of nothing is not 0%.
+    pub fn cache_read_share(&self) -> Option<f64> {
+        let total = self.total()?;
+        if total <= 0 {
+            return None;
+        }
+        Some(self.cache_read_tokens? as f64 / total as f64)
+    }
+
+    /// One clause telling the cache apart from the fresh input, for a reason.
+    fn describe(&self) -> Option<String> {
+        let share = self.cache_read_share()?;
+        let mut clause = format!("{:.0}% of that traffic is cache reads", share * 100.0);
+        if let Some(input) = self.input_tokens {
+            clause.push_str(&format!(", {input} tokens fresh input"));
+        }
+        if let Some(output) = self.output_tokens {
+            clause.push_str(&format!(", {output} output"));
+        }
+        Some(clause)
+    }
+}
+
 /// The whole assessment: a verdict, plus every axis so the reason is visible.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -127,6 +185,10 @@ pub struct BudgetAssessment {
     pub axes: Vec<BudgetAxis>,
     /// Why, in one sentence, for whoever reads it in a log or a tooltip.
     pub reason: String,
+    /// The traffic axis with the cache told apart from the real input. `None`
+    /// when the caller had no counters to split (see `assess`).
+    #[serde(default)]
+    pub traffic: Option<TrafficBreakdown>,
 }
 
 /// Assess a session against its budget.
@@ -139,6 +201,34 @@ pub struct BudgetAssessment {
 pub fn assess(
     budget: &SessionBudget,
     traffic_tokens: Option<i64>,
+    active_hours: Option<f64>,
+    turns: Option<i64>,
+) -> BudgetAssessment {
+    assess_with(budget, traffic_tokens, None, active_hours, turns)
+}
+
+/// `assess`, with the traffic axis fed from its four counters so the verdict
+/// carries the cache-versus-real-input split (KT-894). The axis itself is the
+/// same total: the ceilings were calibrated on it (KT-193).
+pub fn assess_traffic(
+    budget: &SessionBudget,
+    traffic: Option<TrafficBreakdown>,
+    active_hours: Option<f64>,
+    turns: Option<i64>,
+) -> BudgetAssessment {
+    assess_with(
+        budget,
+        traffic.and_then(|breakdown| breakdown.total()),
+        traffic,
+        active_hours,
+        turns,
+    )
+}
+
+fn assess_with(
+    budget: &SessionBudget,
+    traffic_tokens: Option<i64>,
+    traffic: Option<TrafficBreakdown>,
     active_hours: Option<f64>,
     turns: Option<i64>,
 ) -> BudgetAssessment {
@@ -172,6 +262,13 @@ pub fn assess(
         }
     }
 
+    // When the traffic axis is the one that fired, say what it is made of: a
+    // "rotate" over 98% cache reads is a different remedy from one over fresh input.
+    let traffic_note = culprit
+        .filter(|axis| axis.name == "traffic_tokens")
+        .and(traffic.as_ref())
+        .and_then(TrafficBreakdown::describe);
+
     let reason = match (verdict, culprit) {
         (BudgetVerdict::Ok, _) => "within every ceiling".to_string(),
         (BudgetVerdict::Unknown, Some(axis)) => format!(
@@ -194,10 +291,18 @@ pub fn assess(
         (verdict, None) => format!("{verdict:?} with no axis to explain it"),
     };
 
+    let reason = match traffic_note {
+        Some(note) if matches!(verdict, BudgetVerdict::Warn | BudgetVerdict::Rotate) => {
+            format!("{reason} ({note})")
+        }
+        _ => reason,
+    };
+
     BudgetAssessment {
         verdict,
         axes,
         reason,
+        traffic,
     }
 }
 

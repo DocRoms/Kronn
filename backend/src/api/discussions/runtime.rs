@@ -1097,6 +1097,9 @@ async fn fail_dispatch_job_with_outcome_kind(
                 }
                 let dispatch_id = job.id.clone();
                 let provider_for_db = provider.clone();
+                // The provider may have said when it resets (KT-838). Kept for
+                // display only: Kronn never re-arms on a guessed schedule.
+                let announced_reset = super::announced_quota_reset(error, chrono::Utc::now());
                 let escalation = state
                     .db
                     .with_conn(move |conn| {
@@ -1104,6 +1107,7 @@ async fn fail_dispatch_job_with_outcome_kind(
                             conn,
                             &dispatch_id,
                             &provider_for_db,
+                            announced_reset,
                         )
                     })
                     .await;

@@ -174,3 +174,126 @@ fn the_defaults_leave_ordinary_work_alone() {
     );
     assert_eq!(out.verdict, BudgetVerdict::Ok);
 }
+
+// ── the cache told apart from the real input — KT-894 ───────────────────
+
+/// The counters of the measured session KT-193 was calibrated on.
+fn measured_traffic() -> TrafficBreakdown {
+    TrafficBreakdown {
+        input_tokens: Some(16_826),
+        cache_write_tokens: Some(61_095_483),
+        cache_read_tokens: Some(4_077_307_836),
+        output_tokens: Some(5_367_306),
+    }
+}
+
+#[test]
+fn the_traffic_axis_still_counts_the_cache_but_reports_it_apart() {
+    let out = assess_traffic(
+        &SessionBudget::default(),
+        Some(measured_traffic()),
+        Some(1.0),
+        Some(2),
+    );
+    // The ceiling was calibrated on the total, cache reads included: unchanged.
+    let axis = out
+        .axes
+        .iter()
+        .find(|axis| axis.name == "traffic_tokens")
+        .unwrap();
+    assert_eq!(axis.current, Some(4_143_787_451.0));
+    assert_eq!(out.verdict, BudgetVerdict::Rotate);
+    // What changed: the split rides along, so 98% cache is not read as 4 billion
+    // fresh tokens.
+    let traffic = out.traffic.expect("the counters are reported apart");
+    assert_eq!(traffic.input_tokens, Some(16_826));
+    assert_eq!(traffic.cache_read_tokens, Some(4_077_307_836));
+    assert!(traffic.cache_read_share().unwrap() > 0.98);
+    assert!(
+        out.reason.contains("98% of that traffic is cache reads"),
+        "{}",
+        out.reason
+    );
+    assert!(
+        out.reason.contains("16826 tokens fresh input"),
+        "{}",
+        out.reason
+    );
+}
+
+#[test]
+fn an_unreported_cache_read_gives_no_share_and_no_invented_clause() {
+    // A vendor that publishes no cache breakdown (Vibe): the share is unknown,
+    // and the reason must not pretend otherwise.
+    let no_cache = TrafficBreakdown {
+        input_tokens: Some(900_000_000),
+        cache_write_tokens: None,
+        cache_read_tokens: None,
+        output_tokens: Some(200_000_000),
+    };
+    assert_eq!(no_cache.cache_read_share(), None);
+    let out = assess_traffic(
+        &SessionBudget::default(),
+        Some(no_cache),
+        Some(1.0),
+        Some(2),
+    );
+    assert_eq!(out.verdict, BudgetVerdict::Rotate);
+    assert!(!out.reason.contains("cache"), "{}", out.reason);
+    assert_eq!(out.traffic, Some(no_cache));
+}
+
+#[test]
+fn a_quiet_session_carries_the_split_without_it_changing_the_verdict() {
+    let quiet = TrafficBreakdown {
+        input_tokens: Some(10),
+        cache_write_tokens: Some(0),
+        cache_read_tokens: Some(90),
+        output_tokens: Some(5),
+    };
+    let out = assess_traffic(&budget(), Some(quiet), Some(1.0), Some(2));
+    assert_eq!(out.verdict, BudgetVerdict::Ok);
+    assert_eq!(out.reason, "within every ceiling");
+    assert_eq!(out.traffic, Some(quiet));
+}
+
+#[test]
+fn nothing_measured_is_unknown_and_reports_no_share() {
+    let nothing = TrafficBreakdown {
+        input_tokens: None,
+        cache_write_tokens: None,
+        cache_read_tokens: None,
+        output_tokens: None,
+    };
+    assert_eq!(nothing.total(), None);
+    assert_eq!(nothing.cache_read_share(), None);
+    let out = assess_traffic(&budget(), Some(nothing), Some(1.0), Some(2));
+    assert_eq!(out.verdict, BudgetVerdict::Unknown);
+    // No counters at all is the same as no telemetry row.
+    assert_eq!(
+        assess_traffic(&budget(), None, Some(1.0), Some(2)).verdict,
+        BudgetVerdict::Unknown
+    );
+}
+
+#[test]
+fn a_non_traffic_axis_never_borrows_the_cache_clause() {
+    // Turns fire, traffic is fine: the reason names turns, not cache reads.
+    let small = TrafficBreakdown {
+        input_tokens: Some(1),
+        cache_write_tokens: Some(0),
+        cache_read_tokens: Some(8),
+        output_tokens: Some(1),
+    };
+    let out = assess_traffic(&budget(), Some(small), Some(1.0), Some(100));
+    assert_eq!(out.verdict, BudgetVerdict::Rotate);
+    assert!(out.reason.contains("turns"), "{}", out.reason);
+    assert!(!out.reason.contains("cache reads"), "{}", out.reason);
+}
+
+#[test]
+fn the_plain_assessment_reports_no_split() {
+    // `assess` has only a total to work with: it must not invent a breakdown.
+    let out = assess(&budget(), Some(10), Some(1.0), Some(2));
+    assert_eq!(out.traffic, None);
+}

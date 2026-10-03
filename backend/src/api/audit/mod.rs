@@ -36,7 +36,9 @@ pub use validate::*;
 // `crate::api::audit::Foo`. The remaining `pub(crate)` helpers
 // (`build_validation_prompt`, `build_briefing_prompt`) stay
 // `super::helpers::name`-reachable for sub-modules without leaking.
-pub(crate) use helpers::{check_ai_dir_permissions, detect_project_skills};
+pub(crate) use helpers::{
+    check_ai_dir_permissions, detect_project_skill_markers, detect_project_skills,
+};
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 

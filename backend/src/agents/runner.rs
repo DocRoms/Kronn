@@ -1610,6 +1610,16 @@ pub struct PromptCacheUsage {
     pub cache_write_prompt_tokens: Option<u64>,
 }
 
+/// One run's reported usage, parts kept apart. `input_tokens` is as the agent
+/// reports it, so whether it already contains the cached share depends on the
+/// agent (see `core::pricing::TokenCounters::from_agent_report`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportedUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub prompt_cache: PromptCacheUsage,
+}
+
 impl PromptCacheUsage {
     /// Read Anthropic's `cache_read_input_tokens` / `cache_creation_input_tokens`.
     pub fn from_anthropic_usage(usage: &serde_json::Value) -> Self {
@@ -1675,6 +1685,19 @@ impl AgentProcess {
 
     pub fn reported_prompt_cache(&self) -> PromptCacheUsage {
         self.usage.lock().unwrap().prompt_cache
+    }
+
+    /// The structured transport's usage with its parts kept apart — what a
+    /// cost is computed from. `None` when nothing was reported. Each agent
+    /// states its input differently (Codex includes the cached share, Claude
+    /// excludes it), so the caller resolves that with the agent type.
+    pub fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        let usage = *self.usage.lock().unwrap();
+        (usage.input_tokens.saturating_add(usage.output_tokens) > 0).then_some(ReportedUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            prompt_cache: usage.prompt_cache,
+        })
     }
 
     /// Fix file ownership after agent execution.
@@ -10932,6 +10955,39 @@ fn looks_secret(value: &str) -> bool {
     crate::core::redact::redact_for_audit_artifact(value).1 > 0
 }
 
+/// Claude Code loads the workstation's own auto-memory (the user's interactive
+/// notes) into every session, ~8.8k tokens re-read on each call. `=1` keeps it
+/// for a native discussion turn; nothing else Kronn launches ever gets it.
+pub(crate) fn claude_auto_memory_opted_in() -> bool {
+    std::env::var("KRONN_CLAUDE_AUTO_MEMORY")
+        .as_deref()
+        .map(str::trim)
+        == Ok("1")
+}
+
+fn is_claude_code_launch(binary: &str, npx_package: Option<&str>) -> bool {
+    Path::new(binary)
+        .file_name()
+        .is_some_and(|name| name == "claude")
+        || npx_package == Some("@anthropic-ai/claude-code")
+}
+
+/// A native discussion turn carries a discussion and none of the step, room
+/// principal or worker capabilities.
+fn claude_auto_memory_kept(
+    opted_in: bool,
+    discussion_id: Option<&str>,
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
+) -> bool {
+    opted_in
+        && discussion_id.is_some()
+        && task_worker_context.is_none()
+        && room_agent_context.is_none()
+        && workflow_step_context.is_none()
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
@@ -11181,6 +11237,22 @@ pub(crate) fn try_spawn(
         cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
     } else {
         cmd.env_remove("CLAUDE_CODE_BUBBLEWRAP");
+    }
+    // `--setting-sources ""` does not stop the CLI from loading the auto-memory,
+    // so the switch is the environment. Removed when kept, so an inherited `=1`
+    // cannot override the opt-in.
+    if is_claude_code_launch(binary, npx_package) {
+        if claude_auto_memory_kept(
+            claude_auto_memory_opted_in(),
+            discussion_id,
+            task_worker_context,
+            room_agent_context,
+            workflow_step_context,
+        ) {
+            cmd.env_remove("CLAUDE_CODE_DISABLE_AUTO_MEMORY");
+        } else {
+            cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+        }
     }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.

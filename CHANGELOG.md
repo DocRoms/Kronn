@@ -11,6 +11,99 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- The project's repository resources (`GET /api/projects/:id/repository-resources`)
+  now describe both sides of every item. Its `status` is one of
+  `repository_only`, `kronn_only`, `up_to_date`, `repository_newer`,
+  `kronn_newer`, `conflict`, `approval_required` (or `native_skill` for a skill
+  found outside `kronn/`). Each item carries the repository date (last commit's
+  author and date, else the file's mtime), the Kronn date and `aligned_at`; its
+  `required_secrets` with whether Kronn's stored configs hold each name; its
+  ADR-005 level; a unified diff per file (`file_diffs`, the artifact's HTML
+  included) and, for workflows, Quick APIs and Quick Execs, a field-by-field
+  diff, both for the three states where the sides differ; and `write_preview`,
+  every path a publish would write, `docs/AGENTS.md` and the router skill
+  included. The listing also reports `can_write_repository` with its reason
+  and `uncommitted_managed_paths`.
+- A native skill outside `kronn/` can be used in Kronn without `kronn.lock`
+  (`POST .../repository-resources/skills/use`: a read-only reference to its
+  path) or copied into Kronn as a managed skill
+  (`POST .../repository-resources/skills/copy`, which writes nothing into the
+  repository and replaces an edited copy only with `overwrite_kronn_changes`).
+  The same skill under several skill folders is grouped by slug, every path
+  kept, and flagged when the copies differ.
+
+### Changed
+
+- `not_published`, `repository_modified` and `kronn_modified` are now
+  `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
+  only in the repository is `repository_only`. A resource that exists on both
+  sides but was never aligned is `up_to_date` when identical and `conflict`
+  otherwise. `approval_required` is a status of its own, and only for the
+  kinds Kronn can execute.
+- Importing a repository resource no longer silently replaces a Kronn copy
+  that holds edits the repository lacks: the import is refused unless the
+  request sets `overwrite_kronn_changes` (the "keep repository version" choice
+  on a conflict does).
+- The lock records `N2` rather than `N0` for a workflow or a Quick API, and
+  `N1` for prompts, skills and Quick Execs.
+- The router skill `.agents/skills/kronn/SKILL.md`, written on every
+  publication, now briefs an agent that opens the repository without Kronn:
+  what `kronn/` is (index, lock, levels N0/N1/N2), how to run a Quick Prompt, a
+  Quick Exec (secrets passed by name through the environment, never written)
+  and a skill by hand, what only Kronn can run (workflows, Quick APIs, living
+  artifacts), why and where to install Kronn (links from the README) and to
+  read a Quick Exec before running it. The file carries its model version
+  (`metadata.version`); a copy a human edited is still refused, not replaced.
+- Claude Code sessions launched by Kronn no longer load the workstation's
+  automatic memory (`MEMORY.md`): `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is set for
+  workflow Agent steps, `task_exec` principals and workers, about 8.8k fewer
+  tokens on the first call and on every re-read. A native discussion turn is off
+  by default too; start the backend with `KRONN_CLAUDE_AUTO_MEMORY=1` to keep it
+  there. See [Claude auto-memory](docs/operations/claude-auto-memory.md).
+
+### Fixed
+
+- The merge commit Kronn creates when it integrates a task branch now carries
+  the `Signed-off-by` of the configured git identity, so a repository that
+  enforces the DCO no longer turns the release PR red on it.
+- `task_exec_commit` (and `git_commit` for native workers) can finish a merge in
+  progress: when a worker integrates the target branch into its own, Kronn
+  commits the merge with both parents and the sign-off instead of failing on
+  git's "cannot do a partial commit during a merge". It refuses, without
+  touching the merge state, while a conflict is unresolved or a path outside the
+  merge and `files` is staged. The worker brief now says how to integrate the
+  target branch and never to erase `MERGE_HEAD`: a single-parent commit made
+  the target's files look added on both sides at integration.
+- One exhausted provider quota that escalated several executions no longer
+  keeps each of them from going back to that provider: reassigning one of them
+  to the same provider now counts as the human "the quota is back" signal for
+  the whole outage and re-arms it, so the others stop blocking whichever is
+  reassigned first. A new real quota failure blocks the provider again.
+- When the provider's refusal announces a reset time (Claude Code's
+  `resets 4:20pm (Europe/Paris)`), Settings → Agents now shows "Rearmable at
+  16:20" beside the re-arm button. It is a hint only; nothing re-arms
+  automatically. See [Provider quota re-arm](docs/operations/provider-quota-rearm.md).
+- The cost shown for an agent reply is no longer a guess. It was the reported
+  token total split 60/40 into input and output at one fixed rate per agent, so
+  a Codex run that was 98.6% cache reads (25.2M tokens, about $13.5 at API
+  rates) showed $111. The cost is now computed from the four counters the
+  runtime reports (input not served from cache, cache reads, cache writes,
+  output) at the rates of the model that served the reply, and Codex's
+  `cached_input_tokens` is now read. When the counters or the model's rate are
+  missing, the cost stays unknown, and the execution card says why (a total
+  only, a model with no confirmed rate). Rates cover the GPT-4.1 to GPT-5.6 and
+  Claude 3.5 to Fable 5.1 families, checked against LiteLLM's price list; a
+  model outside them is unpriced until its rate is confirmed. Replies
+  already stored keep their earlier cost.
+- The in-app token total no longer hides the cache. The discussion header and
+  the execution card show the real input, the cache reads and the output apart
+  once every reply reported them, and flag a split that covers only some
+  replies. The `session_budget` signal reports the four traffic counters and
+  the cache share beside its `traffic_tokens` axis; the axis itself still counts
+  cache reads, as it was calibrated to.
+
 ## [0.14.1] - 2026-09-26
 
 ### Added

@@ -49,7 +49,7 @@ pub fn upsert_alignment(
             repository_hash = excluded.repository_hash,
             database_hash = excluded.database_hash,
             aligned_at = excluded.aligned_at,
-            imported = excluded.imported",
+            imported = repository_resource_alignments.imported OR excluded.imported",
         rusqlite::params![
             project_key,
             kind,
@@ -157,5 +157,45 @@ mod tests {
         approve(&conn, "repo", "quick_exec", "lint", "db-a").unwrap();
         assert!(is_approved(&conn, "repo", "quick_exec", "lint", "db-a").unwrap());
         assert!(!is_approved(&conn, "repo", "quick_exec", "lint", "db-b").unwrap());
+    }
+
+    #[test]
+    fn imported_provenance_survives_later_publications_for_executable_resources() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+
+        for kind in ["workflow", "quick_prompt", "quick_api", "quick_exec"] {
+            upsert_alignment(
+                &conn,
+                "repo",
+                kind,
+                "deploy",
+                &format!("{kind}-1"),
+                "imported-repository-hash",
+                "imported-database-hash",
+                "2026-09-28T10:00:00Z",
+                true,
+            )
+            .unwrap();
+            upsert_alignment(
+                &conn,
+                "repo",
+                kind,
+                "deploy",
+                &format!("{kind}-1"),
+                "published-repository-hash",
+                "published-database-hash",
+                "2026-09-28T11:00:00Z",
+                false,
+            )
+            .unwrap();
+
+            let alignment = find_alignment(&conn, "repo", kind, "deploy")
+                .unwrap()
+                .unwrap();
+            assert!(alignment.imported, "{kind} lost its imported provenance");
+            assert_eq!(alignment.repository_hash, "published-repository-hash");
+            assert_eq!(alignment.database_hash, "published-database-hash");
+        }
     }
 }

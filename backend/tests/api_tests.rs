@@ -3206,7 +3206,7 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
     let resources = response["data"]["resources"].as_array().unwrap();
     assert_eq!(resources.len(), 1);
     assert_eq!(resources[0]["kind"], "artifact");
-    assert_eq!(resources[0]["status"], "not_published");
+    assert_eq!(resources[0]["status"], "kronn_only");
     assert_eq!(
         resources[0]["repository_paths"],
         serde_json::json!([
@@ -3219,6 +3219,7 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
 #[tokio::test]
 async fn repository_resource_publish_align_import_and_hash_approval_round_trip() {
     let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
     let project_directory = tempfile::TempDir::new().unwrap();
     state
         .db
@@ -3318,7 +3319,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     .await;
     assert_eq!(
         repository_changed["data"]["resources"][0]["status"],
-        "repository_modified"
+        "repository_newer"
     );
 
     state
@@ -3343,10 +3344,25 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         .unwrap()
         .contains("--- repository"));
 
-    let (_, imported) = post_json(
+    let (_, refused) = post_json(
         app.clone(),
         "/api/projects/portable-project/repository-resources/import",
         serde_json::json!({ "kind": "quick_exec", "slug": "deploy" }),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("confirm"),
+        "an import must not silently replace Kronn's edits: {refused}"
+    );
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/import",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "slug": "deploy",
+            "overwrite_kronn_changes": true,
+        }),
     )
     .await;
     assert_eq!(imported["success"], true, "{imported}");
@@ -3355,7 +3371,10 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         "/api/projects/portable-project/repository-resources",
     )
     .await;
-    assert_eq!(awaiting["data"]["resources"][0]["status"], "up_to_date");
+    assert_eq!(
+        awaiting["data"]["resources"][0]["status"],
+        "approval_required"
+    );
     assert_eq!(awaiting["data"]["resources"][0]["approval_required"], true);
 
     let (_, blocked) = post_json(
@@ -3370,6 +3389,68 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
         .unwrap()
         .contains("approved"));
 
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
+            item.description = "Changed after repository import".into();
+            item.command = "echo".into();
+            item.args = vec![r#"{"approved":true}"#.into()];
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, changed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    // An unapproved imported change surfaces as approval_required first.
+    assert_eq!(changed["data"]["resources"][0]["status"], "approval_required");
+    assert_eq!(changed["data"]["resources"][0]["approval_required"], true);
+
+    let (_, republished) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/publish",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "id": "qe-portable",
+            "overwrite_repository_changes": true,
+        }),
+    )
+    .await;
+    assert_eq!(republished["success"], true, "{republished}");
+    assert_eq!(republished["data"]["approved"], false, "{republished}");
+
+    let (_, republished_state) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(
+        republished_state["data"]["resources"][0]["status"],
+        "approval_required"
+    );
+    assert_eq!(
+        republished_state["data"]["resources"][0]["approval_required"],
+        true
+    );
+    assert_eq!(republished_state["data"]["resources"][0]["approved"], false);
+
+    let (_, republished_blocked) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(republished_blocked["data"]["success"], false);
+    assert!(republished_blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+
     let (_, approved) = post_json(
         app.clone(),
         "/api/projects/portable-project/repository-resources/approve",
@@ -3378,6 +3459,22 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     .await;
     assert_eq!(approved["success"], true, "{approved}");
     assert_eq!(approved["data"]["approved"], true);
+    let (_, settled) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(settled["data"]["resources"][0]["status"], "up_to_date");
+    assert_eq!(settled["data"]["resources"][0]["approval_required"], false);
+
+    let (_, accepted) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(accepted["data"]["success"], true, "{accepted}");
+    assert_eq!(accepted["data"]["data"]["approved"], true, "{accepted}");
 
     state
         .db
@@ -3769,12 +3866,15 @@ async fn project_repository_resources_classifies_repository_and_kronn_skills() {
         .find(|skill| skill["id"] == "python")
         .expect("attached Kronn-only skill");
     assert_eq!(attached["provenance"], "kronn");
-    assert_eq!(attached["status"], "not_published");
+    assert_eq!(attached["status"], "kronn_only");
     let detected = present
         .iter()
         .find(|skill| skill["id"] == "go")
         .expect("filesystem-detected skill");
-    assert_eq!(detected["provenance"], "repository");
+    // A detected skill is a Kronn suggestion, not a file of the repository.
+    assert_eq!(detected["provenance"], "kronn");
+    assert_eq!(detected["suggested"], true);
+    assert!(detected["suggested_reason"].is_string(), "{detected}");
     let repository_only = present
         .iter()
         .find(|skill| skill["slug"] == "repo-review")
@@ -6461,10 +6561,9 @@ async fn stats_tokens_mixed_known_and_unknown_totals_are_partial() {
 }
 
 #[tokio::test]
-async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
-    // A justified pricing-table estimate for a non-Claude agent must use
-    // that agent's own price, never Claude's — and must be flagged as an
-    // estimate, not presented as an exact measurement.
+async fn stats_tokens_a_bare_codex_total_is_unknown_not_priced_by_a_split() {
+    // A token total without its input/cache/output split has no honest price:
+    // it is counted as unknown, never estimated with any agent's table.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -6489,12 +6588,9 @@ async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
         .iter()
         .find(|p| p["provider"] == "OpenAI")
         .expect("Codex buckets into OpenAI");
-    assert_eq!(openai["cost"]["has_estimate"], true);
+    assert_eq!(openai["cost"]["has_estimate"], false);
     assert_eq!(openai["cost"]["has_recorded"], false);
-    let known = openai["cost"]["estimated_usd"].as_f64().unwrap();
-    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44 — well under
-    // Claude's 0.78 for the same token count, proving no cross-pricing.
-    assert!((known - 0.44).abs() < 0.01, "expected ~0.44, got {known}");
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 100000);
 }
 
 #[tokio::test]
@@ -6778,11 +6874,9 @@ async fn stats_tokens_recorded_zero_cost_stays_distinct_from_a_sibling_null_row(
 }
 
 #[tokio::test]
-async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and_estimated() {
-    // An agent WITH pricing-table coverage (Codex) can still have some rows
-    // recorded and others missing entirely. The missing sub-part must be
-    // priced with Codex's own table (estimated_usd), never folded into the
-    // recorded sum and never treated as fully covered by the recorded rows.
+async fn stats_tokens_a_missing_sub_part_stays_unknown_beside_the_recorded_rows() {
+    // Some Codex rows carry a cost and others only a total. The missing part
+    // is never folded into the recorded sum, nor priced by a guessed split.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -6815,15 +6909,8 @@ async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and
     assert_eq!(openai["tokens_used"], 101000);
     assert_eq!(openai["cost"]["recorded_usd"], 0.05);
     assert_eq!(openai["cost"]["has_recorded"], true);
-    assert_eq!(openai["cost"]["has_estimate"], true);
-    let estimated = openai["cost"]["estimated_usd"].as_f64().unwrap();
-    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44, computed only
-    // over the 100K missing tokens, not the 1K that were already recorded.
-    assert!(
-        (estimated - 0.44).abs() < 0.01,
-        "expected ~0.44, got {estimated}"
-    );
-    assert_eq!(openai["cost"]["unknown_cost_tokens"], 0);
+    assert_eq!(openai["cost"]["has_estimate"], false);
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 100000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

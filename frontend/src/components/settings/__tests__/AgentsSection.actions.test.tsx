@@ -272,6 +272,23 @@ describe('AgentsSection — provider quota re-arm', () => {
     await waitFor(() => expect(quotaStatesMock.mock.calls.length).toBeGreaterThanOrEqual(2));
   });
 
+  it('shows the reset time the provider announced next to the one-click re-arm (KT-838)', async () => {
+    const resetAt = '2026-09-27T14:20:00Z';
+    quotaStatesMock.mockResolvedValue([{ provider: 'Codex', blocked: true, reset_at: resetAt }]);
+    renderSection({ agents: [blockedCodex()] });
+    const expectedTime = new Date(resetAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const announced = await screen.findByTestId('agent-quota-reset-Codex');
+    expect(announced.textContent).toBe(`config.quotaRearmableAt:${expectedTime}`);
+    expect(screen.getByRole('button', { name: 'config.quotaRearm' })).toBeTruthy();
+  });
+
+  it('shows no reset time when the provider announced none', async () => {
+    quotaStatesMock.mockResolvedValue([{ provider: 'Codex', blocked: true, reset_at: null }]);
+    renderSection({ agents: [blockedCodex()] });
+    await screen.findByRole('button', { name: 'config.quotaRearm' });
+    expect(screen.queryByTestId('agent-quota-reset-Codex')).toBeNull();
+  });
+
   it('shows an error when the confirmed re-arm is rejected', async () => {
     quotaStatesMock.mockResolvedValue([{ provider: 'Codex', blocked: true }]);
     rearmQuotaMock.mockRejectedValue(new Error('quota re-arm denied'));

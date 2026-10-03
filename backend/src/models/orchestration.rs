@@ -1235,6 +1235,11 @@ pub struct TaskWorkerCatalogue {
 pub struct ProviderQuotaState {
     pub provider: AgentType,
     pub blocked: bool,
+    /// UTC instant (RFC 3339) at which the provider's own refusal said the
+    /// quota resets, when it said so. Shown as "rearmable at HH:MM"; nothing
+    /// re-arms automatically on it (KT-593).
+    #[serde(default)]
+    pub reset_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1378,10 +1383,19 @@ pub struct TaskExecutionHttpUsage {
 #[ts(export)]
 pub struct TaskExecutionUsage {
     pub duration_ms: i64,
+    /// Total reported by the agents, cache reads included for Codex.
     pub in_app_tokens: i64,
     pub in_app_messages: i64,
+    /// `in_app_tokens` split into real input, cache and output — for the replies
+    /// that reported those counters only (KT-894). `None` when none did.
+    #[serde(default)]
+    pub in_app_breakdown: Option<crate::db::message_usage::InAppTokenBreakdown>,
+    /// `None` is unknown, never free.
     pub in_app_cost_usd: Option<f64>,
     pub in_app_cost_is_partial: bool,
+    /// Why replies have no cost, when they do not (see `DiscussionTokenCost`).
+    #[serde(default)]
+    pub in_app_cost_unknown_reasons: Vec<String>,
     pub cli_traffic_tokens: Option<i64>,
     pub cli_billable_tokens: Option<i64>,
     pub cli_sessions: i64,

@@ -1712,7 +1712,7 @@ fn hard_quota_creates_an_immediate_human_wait_checkpoint() {
     )
     .unwrap();
 
-    let escalated = escalate_execution_for_dispatch_quota(&conn, "quota-dispatch", "Codex")
+    let escalated = escalate_execution_for_dispatch_quota(&conn, "quota-dispatch", "Codex", None)
         .unwrap()
         .expect("the dispatch belongs to an execution");
     assert_eq!(escalated.0, execution.id);
@@ -1988,8 +1988,114 @@ fn human_rearm_is_idempotent_isolated_and_a_new_quota_failure_blocks_again() {
     );
 
     let dispatch_id = attach_quota_dispatch(&conn, &codex, AgentType::Codex);
-    escalate_execution_for_dispatch_quota(&conn, &dispatch_id, "Codex").unwrap();
+    escalate_execution_for_dispatch_quota(&conn, &dispatch_id, "Codex", None).unwrap();
     assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn one_outage_escalating_two_executions_is_lifted_for_both_by_a_single_rearm() {
+    // KT-838: each real escalation takes the next generation, so the two
+    // executions of one outage carry different ones. Acknowledging the latest
+    // generation must lift both, in whichever order they were escalated.
+    let conn = setup();
+    let first = launch_working_execution_for(&conn, "t-outage-1", 1240, "ClaudeCode");
+    let second = launch_working_execution_for(&conn, "t-outage-2", 1241, "ClaudeCode");
+    let first_dispatch = attach_quota_dispatch(&conn, &first, AgentType::ClaudeCode);
+    let second_dispatch = attach_quota_dispatch(&conn, &second, AgentType::ClaudeCode);
+    escalate_execution_for_dispatch_quota(&conn, &first_dispatch, "ClaudeCode", None).unwrap();
+    escalate_execution_for_dispatch_quota(&conn, &second_dispatch, "ClaudeCode", None).unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    // Excluding one of the two is not enough — the other still blocks.
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", Some(&first)).unwrap());
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", Some(&second)).unwrap());
+
+    assert!(rearm_provider_quota(&conn, "ClaudeCode", "outage-over", "human", None).unwrap());
+    assert!(!provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    assert_eq!(
+        get_task_execution(&conn, &second).unwrap().unwrap().status,
+        TaskExecutionStatus::Escalated
+    );
+
+    // The next real failure is a newer generation than the acknowledgement.
+    escalate_execution_for_dispatch_quota(&conn, &first_dispatch, "ClaudeCode", None).unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+}
+
+#[test]
+fn only_the_provider_that_stopped_an_escalated_execution_counts_as_a_quota_retry() {
+    let conn = setup();
+    let quota = launch_working_execution_for(&conn, "t-retry-quota", 1242, "Codex");
+    let timeout = launch_working_execution_for(&conn, "t-retry-timeout", 1243, "Codex");
+    let working = launch_working_execution_for(&conn, "t-retry-working", 1244, "Codex");
+    escalate_with_reason(&conn, &quota, "quota_exhausted:Codex");
+    escalate_with_reason(&conn, &timeout, "activity_timeout");
+
+    assert!(is_quota_retry_on_same_provider(&conn, &quota, "Codex").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, &quota, "ClaudeCode").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, &timeout, "Codex").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, &working, "Codex").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, "unknown-exec", "Codex").unwrap());
+}
+
+#[test]
+fn a_rearm_inside_a_rolled_back_transaction_leaves_the_provider_blocked() {
+    // The reassignment re-arms inside its own transaction: if the handoff
+    // fails, the provider must be exactly as blocked as before.
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-rearm-rollback", 1245, "Codex");
+    escalate_with_reason(&conn, &exec_id, "quota_exhausted:Codex");
+
+    let transaction = conn.unchecked_transaction().unwrap();
+    assert!(rearm_provider_quota(&transaction, "Codex", "in-flight", "human", None).unwrap());
+    assert!(!provider_has_open_quota_exhaustion(&transaction, "Codex", None).unwrap());
+    drop(transaction);
+
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM provider_quota_rearm_events",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn an_announced_reset_is_kept_for_the_outage_and_dropped_once_it_has_passed() {
+    let conn = setup();
+    let stamp = |at: chrono::DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let dispatches = ["t-reset-1", "t-reset-2", "t-reset-3", "t-reset-4"]
+        .iter()
+        .enumerate()
+        .map(|(offset, task)| {
+            let exec =
+                launch_working_execution_for(&conn, task, 1250 + offset as i64, "ClaudeCode");
+            attach_quota_dispatch(&conn, &exec, AgentType::ClaudeCode)
+        })
+        .collect::<Vec<_>>();
+    let escalate = |dispatch: &str, reset: Option<chrono::DateTime<Utc>>| {
+        escalate_execution_for_dispatch_quota(&conn, dispatch, "ClaudeCode", reset).unwrap();
+        provider_quota_reset_at(&conn, "ClaudeCode").unwrap()
+    };
+    assert_eq!(provider_quota_reset_at(&conn, "ClaudeCode").unwrap(), None);
+
+    let soon = Utc::now() + chrono::Duration::hours(2);
+    assert_eq!(escalate(&dispatches[0], Some(soon)), Some(stamp(soon)));
+    // The same outage escalating a second execution whose refusal named no
+    // time keeps the announcement that is still ahead of us.
+    assert_eq!(escalate(&dispatches[1], None), Some(stamp(soon)));
+    // A refusal that names a time replaces it.
+    let later = Utc::now() + chrono::Duration::hours(5);
+    assert_eq!(escalate(&dispatches[2], Some(later)), Some(stamp(later)));
+    // Once the announced instant has passed, the outage it described is over.
+    conn.execute(
+        "UPDATE provider_quota_generations SET reset_at = ?1 WHERE provider = 'ClaudeCode'",
+        [stamp(Utc::now() - chrono::Duration::hours(1))],
+    )
+    .unwrap();
+    assert_eq!(escalate(&dispatches[3], None), None);
 }
 
 #[test]

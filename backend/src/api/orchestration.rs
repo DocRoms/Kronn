@@ -6691,6 +6691,41 @@ fn worker_brief_markdown(
         "Avant la livraison, appelle `git_commit` avec les seuls chemins relatifs réellement \
          modifiés et un message concis."
     };
+    // The one merge a worker is allowed: bringing the target branch INTO its own
+    // branch when the principal asks. A worker that meets git's refusal of a
+    // path-limited commit mid-merge otherwise erases MERGE_HEAD, and the
+    // single-parent commit it then makes turns into add/add conflicts at
+    // integration (KT-854).
+    let target_integration = if !can_run_shell {
+        String::new()
+    } else if mediated_host_commit {
+        "## Intégrer la branche cible\n\
+         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+         1. Lance `git merge --no-commit --no-ff <cible>` dans ton worktree.\n\
+         2. En cas de conflit, résous-le dans les fichiers.\n\
+         3. Appelle `task_exec_commit` avec les fichiers résolus et un message : Kronn termine \
+            la fusion avec ses deux parents et le sign-off. Sans conflit, nomme au moins un \
+            fichier que la fusion apporte ou que tu modifies.\n\
+         N'efface jamais `.git/MERGE_HEAD` et ne lance ni `git merge --abort` ni `git reset` \
+         pour recommiter à la main : un commit à un seul parent fait apparaître les fichiers de \
+         la cible comme « ajoutés des deux côtés » à l'intégration. Si `task_exec_commit` \
+         refuse (conflits non résolus, chemin indexé étranger), il n'a rien changé : corrige \
+         puis rappelle-le.\n\n"
+            .to_string()
+    } else {
+        "## Intégrer la branche cible\n\
+         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+         1. Lance `git merge --signoff <cible>` dans ton worktree.\n\
+         2. En cas de conflit, résous-le, `git add` les fichiers résolus, puis termine avec \
+            `git commit -s --no-edit` — sans chemin ni `-m` : git refuse un commit limité à des \
+            chemins pendant une fusion.\n\
+         N'efface jamais `.git/MERGE_HEAD` pour recommiter à la main : un commit à un seul \
+         parent fait apparaître les fichiers de la cible comme « ajoutés des deux côtés » à \
+         l'intégration.\n\n"
+            .to_string()
+    };
     format!(
         "# {reference} — {title}\n\n\
          ## Objectif\n{objective}\n\n\
@@ -6708,9 +6743,10 @@ fn worker_brief_markdown(
          {mechanical_scope}\
          ## Contraintes\n\
          - Travaille UNIQUEMENT dans ce worktree ; ne touche jamais un autre checkout.\n\
-         - Pas de `git push`, pas de force-push, pas de merge : l'intégration \
+         - Pas de `git push`, pas de force-push, pas de merge vers la cible : l'intégration \
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
+         {target_integration}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -6737,6 +6773,7 @@ fn worker_brief_markdown(
         mechanical_scope = mechanical_scope,
         human_arbitration = human_arbitration,
         parent_milestones = parent_milestones,
+        target_integration = target_integration,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -6922,8 +6959,9 @@ fn worker_project_refusal(
 /// KT-515 — refuse a native/HTTP worker whose provider has an open quota
 /// escalation (see `provider_has_open_quota_exhaustion`). A `cli` worker is
 /// untouched: its own joined-session presence already carries that signal.
-/// `exclude_exec_id` is forwarded verbatim so a reassignment of the exact
-/// execution that raised the escalation can retry the same provider.
+/// `exclude_exec_id` is forwarded verbatim so an execution is never refused by
+/// its own open row. A retry of the provider that stopped it skips this
+/// refusal altogether and re-arms instead (KT-838, `reassign_native_execution`).
 fn worker_quota_refusal(
     conn: &rusqlite::Connection,
     worker: &MessageTarget,
@@ -7579,6 +7617,8 @@ pub(crate) fn execution_detail(
                     disc_id: String::new(),
                     in_app_tokens: 0,
                     in_app_messages: 0,
+                    in_app_breakdown: None,
+                    in_app_cost_unknown_reasons: Vec::new(),
                     cli_traffic_tokens: None,
                     cli_billable_tokens: None,
                     cli_sessions: 0,
@@ -7613,6 +7653,8 @@ pub(crate) fn execution_detail(
             duration_ms,
             in_app_tokens: tokens.in_app_tokens,
             in_app_messages: tokens.in_app_messages,
+            in_app_breakdown: tokens.in_app_breakdown,
+            in_app_cost_unknown_reasons: tokens.in_app_cost_unknown_reasons,
             in_app_cost_usd,
             in_app_cost_is_partial,
             cli_traffic_tokens: tokens.cli_traffic_tokens,
@@ -8732,13 +8774,21 @@ pub(crate) async fn reassign_native_execution(
     let (view, replaced_dispatch_id) = state
         .db
         .with_conn(move |conn| {
+            // Retrying the very provider whose quota stopped this execution is
+            // the human's "the quota is back" signal (KT-838). It re-arms the
+            // whole quota generation below, so a second execution escalated by
+            // the same outage no longer keeps the provider refused, whichever
+            // of the two is reassigned first.
+            let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
+            let quota_retry =
+                crate::db::orchestration::is_quota_retry_on_same_provider(conn, &id, &provider)?;
             // Refuse tôt (KT-515): before starting the transaction, and before
             // creating any new dispatch/worktree, if the target provider still
-            // has an open quota escalation elsewhere. Excluding this exact
-            // execution lets the human explicitly retry the same provider that
-            // raised it once they know the quota is back.
-            if let Some(reason) = worker_quota_refusal(conn, &selection.target, Some(&id))? {
-                bail!("{}: {}", reason.code, reason.detail);
+            // has an open quota escalation elsewhere.
+            if !quota_retry {
+                if let Some(reason) = worker_quota_refusal(conn, &selection.target, Some(&id))? {
+                    bail!("{}: {}", reason.code, reason.detail);
+                }
             }
             let transaction = conn.unchecked_transaction()?;
             let replaced_dispatch_id =
@@ -8776,6 +8826,17 @@ pub(crate) async fn reassign_native_execution(
             let recovery = crate::db::orchestration::get_execution_recovery(&transaction, &id)?
                 .context("reassignment recovery row vanished")?;
             let generation = recovery.assignment_generation;
+            if quota_retry {
+                // Same transaction as the reassignment: a refused or failed
+                // handoff leaves the provider exactly as blocked as before.
+                crate::db::orchestration::rearm_provider_quota(
+                    &transaction,
+                    &provider,
+                    &format!("reassign:{id}:{generation}"),
+                    PlanningActorKind::Human.as_str(),
+                    Some(&format!("reassign:{id}")),
+                )?;
+            }
             let mut handoff = handoff_notice_with_context(
                 has_recorded_delivery(&transaction, &id)?,
                 Some(generation),
@@ -9718,6 +9779,19 @@ const CATALOGUED_PROVIDERS: [AgentType; 10] = [
 /// quota escalation (KT-515)? No live process is spawned — this is a bounded
 /// SQL preflight over already-recorded dispatch history.
 async fn bounded_provider_quota_state(state: &AppState) -> Vec<(AgentType, bool)> {
+    bounded_provider_quota_details(state)
+        .await
+        .into_iter()
+        .map(|quota| (quota.provider, quota.blocked))
+        .collect()
+}
+
+/// Same read as [`bounded_provider_quota_state`], plus the reset instant the
+/// provider announced (KT-838). It is only reported for a provider that is
+/// still blocked: once re-armed there is nothing left to wait for.
+async fn bounded_provider_quota_details(
+    state: &AppState,
+) -> Vec<crate::models::ProviderQuotaState> {
     state
         .db
         .with_read_conn(move |conn| {
@@ -9725,10 +9799,19 @@ async fn bounded_provider_quota_state(state: &AppState) -> Vec<(AgentType, bool)
                 .iter()
                 .map(|agent| {
                     let provider = crate::db::orchestration::agent_type_to_db(agent);
-                    let exhausted = crate::db::orchestration::provider_has_open_quota_exhaustion(
+                    let blocked = crate::db::orchestration::provider_has_open_quota_exhaustion(
                         conn, &provider, None,
                     )?;
-                    Ok((agent.clone(), exhausted))
+                    let reset_at = if blocked {
+                        crate::db::orchestration::provider_quota_reset_at(conn, &provider)?
+                    } else {
+                        None
+                    };
+                    Ok(crate::models::ProviderQuotaState {
+                        provider: agent.clone(),
+                        blocked,
+                        reset_at,
+                    })
                 })
                 .collect::<Result<Vec<_>>>()
         })
@@ -9875,12 +9958,9 @@ pub(crate) async fn target_aware_task_worker_catalogue_for_discussion(
 pub async fn provider_quota_states(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<crate::models::ProviderQuotaState>>> {
-    let states = bounded_provider_quota_state(&state)
-        .await
-        .into_iter()
-        .map(|(provider, blocked)| crate::models::ProviderQuotaState { provider, blocked })
-        .collect();
-    Json(ApiResponse::ok(states))
+    Json(ApiResponse::ok(
+        bounded_provider_quota_details(&state).await,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -12763,6 +12843,71 @@ mod tests {
         assert!(brief.contains("N'utilise pas `git commit`"), "{brief}");
         assert!(!brief.contains("opaque-dod-id"), "{brief}");
         assert!(!brief.contains("`head_sha` : le HEAD exact"), "{brief}");
+    }
+
+    /// KT-854: the brief says how to bring the target branch in without erasing
+    /// the merge state, for each way a worker can commit — and never tells a
+    /// worker without a shell to run a merge it cannot run.
+    #[test]
+    fn worker_brief_explains_how_to_integrate_the_target_without_erasing_merge_state() {
+        let brief_for = |can_run_shell: bool, native_delivery_projection: bool| {
+            worker_brief_markdown(
+                "KT-854",
+                "Intégration",
+                "Objectif",
+                &[],
+                "/wt/kt854",
+                "kronn/task/KT-854",
+                "abc1234",
+                can_run_shell,
+                native_delivery_projection,
+                None,
+            )
+        };
+
+        let mediated = brief_for(true, true);
+        for needle in [
+            "## Intégrer la branche cible",
+            "git merge --no-commit --no-ff <cible>",
+            "Appelle `task_exec_commit` avec les fichiers résolus",
+            "deux parents",
+            "N'efface jamais `.git/MERGE_HEAD`",
+            "ajoutés des deux côtés",
+        ] {
+            assert!(mediated.contains(needle), "missing `{needle}`: {mediated}");
+        }
+        assert!(
+            mediated.contains("pas de merge vers la cible"),
+            "the blanket merge ban must not contradict the integration section: {mediated}"
+        );
+
+        let self_committing = brief_for(true, false);
+        assert!(
+            self_committing.contains("## Intégrer la branche cible"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("git merge --signoff <cible>"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("git commit -s --no-edit"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("N'efface jamais `.git/MERGE_HEAD`"),
+            "{self_committing}"
+        );
+        assert!(
+            !self_committing.contains("task_exec_commit"),
+            "a worker that commits itself has no task_exec_commit: {self_committing}"
+        );
+
+        let no_shell = brief_for(false, true);
+        assert!(
+            !no_shell.contains("## Intégrer la branche cible"),
+            "{no_shell}"
+        );
     }
 
     #[test]
@@ -21488,15 +21633,26 @@ mod tests {
         project_id: &str,
         parent_id: &str,
     ) -> String {
+        seed_open_quota_escalation(db, project_id, parent_id, AgentType::Codex, 1).await
+    }
+
+    /// Same as above for any `provider`, at an explicit quota `generation`
+    /// (each real escalation of one provider takes the next one).
+    async fn seed_open_quota_escalation(
+        db: &Database,
+        project_id: &str,
+        parent_id: &str,
+        provider: AgentType,
+        generation: i64,
+    ) -> String {
         let project_id = project_id.to_string();
         let parent_id = parent_id.to_string();
         db.with_conn(move |conn| {
-            let poisoned = create_todo_task(conn, &project_id, "Codex poison");
+            let provider = crate::db::orchestration::agent_type_to_db(&provider);
+            let poisoned = create_todo_task(conn, &project_id, "Quota poison");
             let mut input =
                 crate::models::LaunchSingleTaskInput::new(&poisoned.summary.id, &parent_id);
-            input.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
-                &AgentType::Codex,
-            ));
+            input.worker_agent_type = Some(provider.clone());
             let execution =
                 crate::db::orchestration::launch_single_task(conn, &input, &backend_actor())?
                     .execution;
@@ -21523,20 +21679,21 @@ mod tests {
             )?;
             let now = chrono::Utc::now().to_rfc3339();
             conn.execute(
-                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES ('Codex', 1) \
-                 ON CONFLICT(provider) DO UPDATE SET latest_generation = MAX(latest_generation, 1)",
-                [],
+                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES (?1, ?2) \
+                 ON CONFLICT(provider) DO UPDATE SET \
+                     latest_generation = MAX(latest_generation, excluded.latest_generation)",
+                rusqlite::params![provider, generation],
             )?;
             conn.execute(
                 "INSERT INTO task_execution_recovery (
                      task_execution_id, recovery_action, recovery_reason, last_activity_at,
                      assignment_generation, watchdog_redispatches, human_wait_started_at,
                      pending, updated_at, quota_signal_generation
-                 ) VALUES (?1, 'await_human', 'quota_exhausted:Codex', ?2, 0, 0, ?2, 0, ?2, 1)
+                 ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3, ?4)
                  ON CONFLICT(task_execution_id) DO UPDATE SET
-                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?2,
+                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?3,
                      quota_signal_generation = excluded.quota_signal_generation",
-                rusqlite::params![execution.id, now],
+                rusqlite::params![execution.id, format!("quota_exhausted:{provider}"), now, generation],
             )?;
             Ok(execution.id)
         })
@@ -21661,6 +21818,280 @@ mod tests {
             Some("ClaudeCode"),
             "the refused reassignment must not have mutated the current worker"
         );
+    }
+
+    /// KT-838 — one Claude Code quota outage stops two executions. `initial` is
+    /// a real provisioned execution escalated exactly as a failing dispatch does
+    /// it; the sibling is escalated by the same outage, before or after it.
+    /// Every escalation of a provider takes the next quota generation.
+    async fn two_executions_escalated_by_one_claude_outage(
+        db: &Database,
+        repo: &Path,
+        sibling_first: bool,
+    ) -> (TaskExecution, String) {
+        let (task_ref, parent_id, project_id) = seed(db, repo).await;
+        let initial = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt838-shared-outage".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let mut sibling = None;
+        if sibling_first {
+            sibling = Some(
+                seed_open_quota_escalation(db, &project_id, &parent_id, AgentType::ClaudeCode, 1)
+                    .await,
+            );
+        }
+        let dispatch = initial.dispatch_job_id.clone().unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &dispatch,
+                "ClaudeCode",
+                None,
+            )
+        })
+        .await
+        .unwrap();
+        let sibling = match sibling {
+            Some(sibling) => sibling,
+            None => {
+                seed_open_quota_escalation(db, &project_id, &parent_id, AgentType::ClaudeCode, 2)
+                    .await
+            }
+        };
+        (initial, sibling)
+    }
+
+    async fn claude_quota_blocked(db: &Database) -> bool {
+        db.with_conn(|conn| {
+            crate::db::orchestration::provider_has_open_quota_exhaustion(conn, "ClaudeCode", None)
+        })
+        .await
+        .unwrap()
+    }
+
+    fn claude_selection() -> crate::models::CampaignWorkerSelection {
+        crate::models::CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::ClaudeCode),
+            model: None,
+            profile_id: None,
+        }
+    }
+
+    fn quota_test_state(db: &std::sync::Arc<Database>) -> AppState {
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    #[tokio::test]
+    async fn reassigning_one_quota_escalated_execution_to_the_same_provider_rearms_its_sibling() {
+        // Whichever of the two executions the human reassigns first, the answer
+        // must not depend on the order of the gestures.
+        for sibling_first in [false, true] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (initial, sibling) =
+                two_executions_escalated_by_one_claude_outage(&db, repo.path(), sibling_first)
+                    .await;
+            assert_eq!(
+                exec_of(&db, &initial.id).await.status,
+                TaskExecutionStatus::Escalated
+            );
+            assert!(
+                claude_quota_blocked(&db).await,
+                "two open escalations block the provider (sibling_first={sibling_first})"
+            );
+
+            let state = quota_test_state(&db);
+            reassign_native_execution(&state, &initial.id, claude_selection(), "the quota is back")
+                .await
+                .expect("retrying the provider that stopped the execution must pass");
+
+            assert_eq!(
+                exec_of(&db, &initial.id).await.status,
+                TaskExecutionStatus::Working
+            );
+            assert!(
+                !claude_quota_blocked(&db).await,
+                "the still-escalated sibling must stop blocking the provider (sibling_first={sibling_first})"
+            );
+            assert_eq!(
+                exec_of(&db, &sibling).await.status,
+                TaskExecutionStatus::Escalated,
+                "re-arming leaves the sibling's history untouched"
+            );
+            let audit = db
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*), MIN(actor_kind) FROM provider_quota_rearm_events \
+                         WHERE provider = 'ClaudeCode'",
+                        [],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(audit, (1, "human".to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_real_quota_failure_after_the_reassignment_rearm_blocks_the_provider_again() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (initial, _sibling) =
+            two_executions_escalated_by_one_claude_outage(&db, repo.path(), false).await;
+        let state = quota_test_state(&db);
+        reassign_native_execution(&state, &initial.id, claude_selection(), "the quota is back")
+            .await
+            .unwrap();
+        assert!(!claude_quota_blocked(&db).await);
+
+        // The provider refuses the replacement dispatch too: a fresh generation.
+        let replacement = exec_of(&db, &initial.id).await.dispatch_job_id.unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &replacement,
+                "ClaudeCode",
+                None,
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            claude_quota_blocked(&db).await,
+            "a new real failure is a new generation and must block again"
+        );
+        let refusal = db
+            .with_conn(|conn| worker_quota_refusal(conn, &native_worker(), None))
+            .await
+            .unwrap()
+            .expect("launch preflight refuses the provider again");
+        assert_eq!(refusal.code, "quota_exhausted");
+        let Json(states) = provider_quota_states(State(state)).await;
+        assert!(states
+            .data
+            .unwrap()
+            .iter()
+            .any(|quota| quota.provider == AgentType::ClaudeCode && quota.blocked));
+    }
+
+    #[tokio::test]
+    async fn retrying_a_different_provider_is_not_a_rearm_of_the_one_that_stopped_it() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (initial, _sibling) =
+            two_executions_escalated_by_one_claude_outage(&db, repo.path(), false).await;
+        let state = quota_test_state(&db);
+        reassign_native_execution(
+            &state,
+            &initial.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "use Codex instead",
+        )
+        .await
+        .unwrap();
+        assert!(
+            claude_quota_blocked(&db).await,
+            "moving to Codex says nothing about Claude's quota"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM provider_quota_rearm_events").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reset_time_the_provider_announced_is_persisted_and_served_until_rearmed() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt838-announced-reset".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The refusal, as Claude Code words it, two hours from now in Paris.
+        let now = chrono::Utc::now();
+        let wall_clock = (now + chrono::Duration::hours(2))
+            .with_timezone(&chrono_tz::Europe::Paris)
+            .format("%-I:%M%P");
+        let refusal = format!("You've hit your limit · resets {wall_clock} (Europe/Paris)");
+        let announced = crate::api::discussions::announced_quota_reset(&refusal, now)
+            .expect("the refusal names a reset time");
+        let dispatch = initial.dispatch_job_id.clone().unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &dispatch,
+                "ClaudeCode",
+                Some(announced),
+            )
+        })
+        .await
+        .unwrap();
+
+        let state = quota_test_state(&db);
+        let Json(response) = provider_quota_states(State(state.clone())).await;
+        let claude = response
+            .data
+            .unwrap()
+            .into_iter()
+            .find(|quota| quota.provider == AgentType::ClaudeCode)
+            .unwrap();
+        assert!(claude.blocked);
+        assert_eq!(
+            claude.reset_at.as_deref(),
+            Some(
+                announced
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    .as_str()
+            ),
+            "Settings > Agents is served the announced instant"
+        );
+
+        // Announcing a time never re-arms by itself: still blocked, and the
+        // human's reassignment is what clears both the block and the display.
+        assert!(claude_quota_blocked(&db).await);
+        reassign_native_execution(&state, &initial.id, claude_selection(), "the quota is back")
+            .await
+            .unwrap();
+        let Json(response) = provider_quota_states(State(state)).await;
+        let claude = response
+            .data
+            .unwrap()
+            .into_iter()
+            .find(|quota| quota.provider == AgentType::ClaudeCode)
+            .unwrap();
+        assert!(!claude.blocked);
+        assert_eq!(claude.reset_at, None);
     }
 
     #[tokio::test]

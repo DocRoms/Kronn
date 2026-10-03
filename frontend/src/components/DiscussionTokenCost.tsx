@@ -42,15 +42,55 @@ export function DiscussionTokenCost({ discussionId, t }: Props) {
   // Nothing to say at all: no agent replied and no CLI session was ever joined.
   if (!hasInApp && cost.cli_sessions === 0) return null;
 
+  // KT-894 — the reported total is not one unit across agents: Codex folds its
+  // cache reads INTO it (98.6% of one 25M-token run), Claude Code leaves them
+  // out. When every reply reported its counters, show the three parts apart
+  // instead of a total that means different things. When only some did, keep
+  // the total and say the split is partial, rather than pass a sub-sum off as it.
+  const split = cost.in_app_breakdown;
+  const splitCoversAll = split !== null && split.messages >= cost.in_app_messages;
+  const splitHint = split
+    ? t(
+        'disc.tokenCostInAppSplitHint',
+        compactTokens(split.input_tokens),
+        compactTokens(split.cache_read_tokens),
+        compactTokens(split.output_tokens),
+        String(split.messages),
+        String(cost.in_app_messages),
+      )
+    : t('disc.tokenCostInAppHint');
+
   return (
     <span className="disc-token-cost" data-testid="disc-token-cost">
       {hasInApp && (
         <span
           className="disc-token-cost-part"
           data-part="in-app"
-          title={t('disc.tokenCostInAppHint')}
+          title={splitHint}
         >
-          {t('disc.tokenCostInApp')}&nbsp;{compactTokens(cost.in_app_tokens)}
+          {t('disc.tokenCostInApp')}&nbsp;
+          {split && splitCoversAll ? (
+            <span data-testid="disc-token-cost-split">
+              {t(
+                'disc.tokenCostInAppSplit',
+                compactTokens(split.input_tokens),
+                compactTokens(split.cache_read_tokens),
+                compactTokens(split.output_tokens),
+              )}
+            </span>
+          ) : (
+            compactTokens(cost.in_app_tokens)
+          )}
+          {split && !splitCoversAll && (
+            <span className="disc-token-cost-partial" data-testid="disc-token-cost-split-partial">
+              {' '}
+              {t(
+                'disc.tokenCostInAppSplitPartial',
+                String(split.messages),
+                String(cost.in_app_messages),
+              )}
+            </span>
+          )}
         </span>
       )}
       {cost.cli_sessions > 0 && (

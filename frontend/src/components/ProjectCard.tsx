@@ -155,6 +155,11 @@ export function ProjectCard({
   );
   const [gitRevision, setGitRevision] = useState(0);
   const [projectTaskCount, setProjectTaskCount] = useState<number | null>(null);
+  const [resourcesAttention, setResourcesAttention] = useState<{ projectId: string; count: number } | null>(null);
+  const reportResourcesAttention = useCallback(
+    (count: number) => setResourcesAttention({ projectId: proj.id, count }),
+    [proj.id],
+  );
   const [visibleDiscussionCount, setVisibleDiscussionCount] = useState(10);
   const [discussionLoadAmount, setDiscussionLoadAmount] = useState<'10' | '50' | 'all'>('10');
   const [overviewGit, setOverviewGit] = useState<GitStatusResponse | null>(null);
@@ -1519,7 +1524,7 @@ export function ProjectCard({
               ['code', t('projects.master.tab.code'), Code2, undefined],
               ['docker', t('projects.master.tab.docker'), Container, undefined],
               ['git', t('projects.master.tab.git'), GitBranch, undefined],
-              ['resources', t('projects.master.tab.resources'), Package, undefined],
+              ['resources', t('projects.master.tab.resources'), Package, resourcesAttention?.projectId === proj.id && resourcesAttention.count > 0 ? resourcesAttention.count : undefined],
             ] as const).map(([view, label, Icon, count]) => (
               <button
                 key={view}
@@ -2494,7 +2499,12 @@ export function ProjectCard({
             </section>
           )}
           {detailMode && detailView === 'resources' && (
-            <ProjectRepositoryResourcesPanel projectId={proj.id} />
+            <ProjectRepositoryResourcesPanel
+              projectId={proj.id}
+              onAttentionChange={reportResourcesAttention}
+              onOpenGit={() => selectDetailView('git')}
+              onAddKey={() => onNavigate('mcps')}
+            />
           )}
           {detailMode && detailView === 'tasks' && (
             <section className="project-detail-section" data-project-view="tasks">
