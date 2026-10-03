@@ -300,6 +300,35 @@ static DETECT_ALL_CACHE: std::sync::LazyLock<Mutex<DetectAllCache>> =
 static DETECT_ALL_REFRESHED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
 
+/// Whether the last detection sweep found this agent installed. `true` while
+/// no sweep has completed, so a cold start never drops a CLI's files (KT-971).
+pub fn installed_or_unknown(agent: &AgentType) -> bool {
+    let cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match cache.value.as_ref() {
+        Some((detections, _)) => detections
+            .iter()
+            .any(|detection| &detection.agent_type == agent && detection.installed),
+        None => true,
+    }
+}
+
+/// Run `f` as if no detection sweep had completed yet, then restore the cache:
+/// for tests that need every CLI's files regardless of what ran before them.
+#[cfg(test)]
+pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
+    let saved = DETECT_ALL_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .value
+        .take();
+    let result = f();
+    DETECT_ALL_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .value = saved;
+    result
+}
+
 /// Cached agent-detection sweep. `detect_all` spawns `<binary> --version` for
 /// every installed agent on every call (~5s idle; under concurrent-agent load
 /// the subprocess spawns contend and the call can hang for tens of seconds).
@@ -1352,6 +1381,42 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn agent_files_follow_the_last_detection_and_never_a_cold_cache() {
+        // KT-971 — no sweep yet: every CLI keeps its files.
+        let saved = DETECT_ALL_CACHE.lock().unwrap().value.take();
+        assert!(installed_or_unknown(&AgentType::Kiro));
+
+        let detection = |agent: AgentType, installed: bool| {
+            let mut detection: AgentDetection = serde_json::from_value(serde_json::json!({
+                "name": format!("{agent:?}"), "agent_type": agent, "installed": installed,
+                "path": null, "version": null, "latest_version": null, "origin": "test",
+                "install_command": null, "host_managed": false, "host_label": null,
+                "runtime_available": installed, "auth_ready": null, "auth_setup_command": null,
+                "rtk_available": false, "rtk_hook_configured": false, "runtime_warning": null,
+            }))
+            .expect("a minimal detection");
+            detection.installed = installed;
+            detection
+        };
+        DETECT_ALL_CACHE.lock().unwrap().value = Some((
+            vec![
+                detection(AgentType::ClaudeCode, true),
+                detection(AgentType::Kiro, false),
+            ],
+            Instant::now(),
+        ));
+        assert!(installed_or_unknown(&AgentType::ClaudeCode));
+        assert!(!installed_or_unknown(&AgentType::Kiro));
+        assert!(
+            !installed_or_unknown(&AgentType::GeminiCli),
+            "not found = not installed"
+        );
+
+        DETECT_ALL_CACHE.lock().unwrap().value = saved;
+    }
 
     #[test]
     fn vibe_auth_is_delegated_to_the_cli_keyring() {

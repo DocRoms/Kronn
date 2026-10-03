@@ -3908,7 +3908,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             let worker_mcp = claude_task_worker_mcp_config(&project_root)?;
             insert_claude_mcp_config(&mut args, worker_mcp, true);
         } else {
-            let mcp_json = work_dir.join(".mcp.json");
+            // A project whose agent files live outside its repository (KT-971)
+            // keeps Claude's MCP config in Kronn's stand-in directory.
+            let mcp_json = crate::core::mcp_scanner::outside_agent_files_dir(config.project_path)
+                .map(|dir| dir.join(".mcp.json"))
+                .filter(|path| path.is_file())
+                .unwrap_or_else(|| work_dir.join(".mcp.json"));
             if mcp_json.exists() {
                 // Strict, so the agent gets exactly the servers Kronn declares
                 // — the ones its own UI lists — and nothing else. Without it
@@ -12117,6 +12122,8 @@ pub(crate) fn try_spawn(
     tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
 
     let mut cmd = async_cmd(&final_cmd);
+    // Under Docker, the MCP values the project's `.mcp.json` refers to (KT-964).
+    crate::core::mcp_secret_refs::apply_to(&mut cmd, std::path::Path::new(&effective_work_dir));
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
         .stdin(

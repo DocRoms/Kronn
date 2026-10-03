@@ -13,8 +13,8 @@
 //!   observe it directly).
 //! - `codex exec resume <thread_id> --json <prompt>` continues that thread —
 //!   but `--sandbox` is NOT accepted on `resume` (verified via `codex exec
-//!   resume --help`, unlike the top-level `codex exec`), so the sandbox
-//!   policy only applies to a session's first turn.
+//!   resume --help`, unlike the top-level `codex exec`), and a resumed turn
+//!   does not keep the first turn's mode, so it gets `-c sandbox_mode=...`.
 //!
 //! Codex cannot hand out a session id before the first turn runs (unlike
 //! Claude's `--session-id`), so `create_session` allocates Kronn's own
@@ -422,12 +422,16 @@ impl AcpTransport for CodexAcpAdapter {
                 serde_json::to_string(effort).unwrap_or_else(|_| "\"\"".into())
             ));
         }
-        // `--sandbox` is not accepted by `codex exec resume` (verified via
-        // `codex exec resume --help`): only the first turn of a thread can
-        // set it.
-        if known_thread.is_none() && self.launch.worker_context.is_none() {
+        // `codex exec resume` rejects `--sandbox` and does not keep the first
+        // turn's mode, so a resumed turn passes it as a config override.
+        if self.launch.worker_context.is_none() {
             if let Some(sandbox) = self.broker.session_policy().codex_sandbox {
-                args.push(format!("--sandbox={sandbox}"));
+                if known_thread.is_none() {
+                    args.push(format!("--sandbox={sandbox}"));
+                } else {
+                    args.push("-c".into());
+                    args.push(format!("sandbox_mode=\"{sandbox}\""));
+                }
             }
         }
         args.push("-".into());
@@ -743,6 +747,39 @@ mod tests {
         host.prompt(&target, &prompt, tx).await.unwrap();
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("resumed".into())));
+    }
+
+    #[tokio::test]
+    async fn a_resumed_turn_keeps_the_full_access_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = dir.path().join("argv.txt");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" > '{}'\n{FIXTURE_BODY}",
+                argv.display(),
+            ),
+        );
+        let adapter = std::sync::Arc::new(CodexAcpAdapter::new_with_program(
+            fixture.to_string_lossy(),
+            None,
+            true,
+            Some("th-persisted".into()),
+        ));
+        let mut host = AcpHost::new(1, adapter.clone());
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        host.prompt(&target, "hello", tx).await.unwrap();
+        let args = std::fs::read_to_string(argv).unwrap();
+        assert!(args.contains("resume th-persisted"), "argv: {args}");
+        assert!(
+            args.contains("sandbox_mode=\"danger-full-access\""),
+            "argv: {args}"
+        );
+        assert!(!args.contains("--sandbox"), "argv: {args}");
     }
 
     #[tokio::test]

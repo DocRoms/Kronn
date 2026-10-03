@@ -37,6 +37,7 @@ pub mod learning_sweep;
 pub mod legacy_docs;
 pub mod log_buffer;
 pub mod mcp_scanner;
+pub mod mcp_secret_refs;
 pub mod media_probe;
 pub mod message_file_links;
 pub mod model_catalog;

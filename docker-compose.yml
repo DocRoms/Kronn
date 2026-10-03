@@ -8,8 +8,10 @@ services:
         CARGO_PROFILE: ${CARGO_PROFILE:-fast}
         APP_UID: ${KRONN_HOST_UID:-1000}
         APP_GID: ${KRONN_HOST_GID:-1000}
-    group_add:
-      - "${KRONN_DOCKER_GID:-989}"  # Docker socket GID for docker compose access
+    # The host's Docker socket (and its group) is NOT mounted by default: any
+    # process in this container — every agent — could use it to become root on
+    # the host. `KRONN_DOCKER_SOCKET=1` in .env adds both through the generated
+    # docker-compose.override.yml (KT-979).
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Linux: resolve host.docker.internal → host IP (macOS/Windows have this built-in)
     expose:
@@ -62,7 +64,6 @@ services:
       - ${KRONN_BUN_BIN:-./.docker/empty}:/host-bin/bun:ro            # Bun runtime + installer
       - ${KRONN_EXTRA_BIN:-./.docker/empty}:/host-bin/extra:ro        # Escape hatch — anything else (asdf shims, pyenv, custom paths)
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # Docker compose plugin
-      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for docker compose
       # Read the machine's hostname mappings when project Docker endpoints are
       # inspected. `make start` snapshots the real host file because Docker
       # Desktop / OrbStack resolve a direct `/etc/hosts` bind inside their VM.

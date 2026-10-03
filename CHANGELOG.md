@@ -739,6 +739,83 @@ Release notes for 0.9.3 and earlier are available in the
   and surfaced as the raw body; the status is now read correctly, for every HTTP
   agent.
 
+- In Docker, agents can no longer control the host's Docker (KT-979). The
+  host's Docker socket was mounted into the container, so any agent could use
+  it to take over the machine. It is now off by default; the project Docker
+  panel says how to turn it on (`KRONN_DOCKER_SOCKET=1` in `.env`, then
+  `make start`) and what that allows.
+
+- In Docker, a project's MCP file that already held a token gives it up
+  (found by the 0.14.2 Docker run-through). An entry Kronn had not written
+  itself, by hand or by the old `kronn mcp sync`, was kept as the user's, value
+  included, even after Kronn imported that MCP and encrypted its token; and the
+  backup taken before the rewrite held the token too. An entry that runs the
+  server of an MCP Kronn manages is now rewritten with references, and the
+  backups are written without the values.
+
+- In Docker, Codex can run commands in a discussion again. Since 0.13.0 the
+  adapter that discussions use kept Codex's own sandbox inside the container,
+  where it cannot start ("bwrap: No permissions to create a new namespace"),
+  so every command failed; there the container is the boundary, as it already
+  was for the direct launch. This covers the later turns of a discussion too,
+  which resume the Codex session and could not take the sandbox flag.
+
+- In Docker, an agent in a discussion receives the values its project's MCP
+  references stand for. Kronn recorded them under the project's host path,
+  while discussion agents start under the container's `/host-home` mount of the
+  same directory, so no reference resolved and the project's MCPs ran without
+  their tokens.
+
+- In Docker, a Claude Code discussion gets its project's MCPs. The adapter
+  that discussions use dropped the whole project registry: it read a
+  `${KRONN_MCP_…}` reference as a credential, and the synced `kronn-internal`
+  entry, which points at the script path the host can see, as a foreign
+  declaration. A pure reference now counts as what it is, and Kronn's own
+  bridge replaces the synced copy.
+
+- In Docker, a Claude Code discussion works past its first message. The
+  volumes that keep Claude Code's sessions were created owned by root, so
+  Claude Code, which runs with your UID, could not save a session and every
+  later turn failed with "Claude Code reported an unsuccessful result". The
+  image now creates them for your user, and `make start` repairs volumes
+  created before.
+
+- `kronn mcp sync` no longer writes tokens in clear into repositories while
+  Kronn runs in Docker (KT-963). It generated each repository's `.mcp.json`
+  from `~/.config/kronn/secrets.toml`, values included, where every agent of
+  the container could read them. It now refuses there and points to Kronn's
+  MCPs page, which keeps secrets encrypted; natively it still works and says
+  that the tokens are in clear. `KRONN_ALLOW_PLAINTEXT_MCP=1` forces it.
+
+- Kronn no longer writes agent files for CLIs this machine does not have, and
+  a project can keep them out of its repository altogether (KT-971). The MCP
+  sync wrote `.mcp.json`, `.kiro/`, `.gemini/`, `.vibe/`, `.ai/` and `.gitignore`
+  lines into every repository, for every CLI, installed or not, with no way to
+  turn it off. It now writes only the files of installed CLIs, and the project
+  overview offers **Agent files: in the repository / outside the repository**.
+  Outside, Kronn writes nothing in the repository and takes back what it had
+  put there — your own MCP entries stay; Claude Code keeps its MCP servers,
+  read from Kronn's data directory, while Kiro, Gemini and Vibe have none for
+  that project.
+
+- The first `make start` no longer leaves root-owned folders in your home
+  (KT-960). Docker created every missing mount source itself, as root —
+  `~/.codex`, `~/.config/rtk`, `~/.kiro`… — and turned a missing
+  `~/.claude.json` into a directory. They are now created as you before the
+  containers start, read from `docker-compose.yml` so the list never drifts.
+
+- In Docker, agents can no longer read the host's credential files through
+  the read-only home mount (KT-962). `make start` now covers each credential
+  path that exists on the host (`~/.config/kronn`, `~/.ssh`, `~/.aws`,
+  `~/.config/gh`, `~/.netrc`…) with an empty read-only mount in the generated
+  `docker-compose.override.yml`. Restart with `make start` to apply it.
+
+- In Docker, project MCP files no longer hold credential values (KT-964).
+  Claude Code's `.mcp.json` now refers to them (`${KRONN_MCP_…}`), and Kronn
+  gives the values only to an agent it starts in that project. Kiro, Gemini
+  and Vibe get no credential-bearing MCP in Docker until they are proven to
+  read such references. Natively, nothing changes.
+
 - An HTTP agent's file search can no longer flood its own context (KT-959).
   On 02/10 a framing step asked `find_files` for `**/*` over a PHP repository
   with `vendor/`: the answer listed every one of up to 20 000 files, about

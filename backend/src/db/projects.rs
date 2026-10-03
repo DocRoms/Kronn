@@ -75,6 +75,38 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     Ok(projects)
 }
 
+/// Where Kronn writes this project's agent files (KT-971). An unknown project
+/// reads as the default, `repo`.
+pub fn agent_files_policy(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<crate::models::AgentFilesPolicy> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT agent_files FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value
+        .as_deref()
+        .map(crate::models::AgentFilesPolicy::parse)
+        .unwrap_or_default())
+}
+
+/// Returns false when the project does not exist.
+pub fn set_agent_files_policy(
+    conn: &Connection,
+    project_id: &str,
+    policy: crate::models::AgentFilesPolicy,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE projects SET agent_files = ?2 WHERE id = ?1",
+        params![project_id, policy.as_str()],
+    )?;
+    Ok(changed > 0)
+}
+
 pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,

@@ -25,6 +25,7 @@ vi.mock('../../lib/api', () => ({
     // the mocked module returns undefined and the cards crash silently.
     auditStatus: vi.fn().mockResolvedValue(null),
     auditResumable: vi.fn().mockResolvedValue(null),
+    agentFiles: vi.fn().mockResolvedValue({ policy: 'repo' }),
     auditStatusAll: vi.fn().mockResolvedValue([]),
     auditHistory: vi.fn().mockResolvedValue([]),
     auditEvidence: vi.fn().mockResolvedValue({

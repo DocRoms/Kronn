@@ -942,6 +942,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/used-skills", get(api::projects::used_skills))
         .route("/api/projects/{id}", get(api::projects::get))
         .route(
+            "/api/projects/{id}/agent-files",
+            get(api::projects::agent_files::get).put(api::projects::agent_files::set),
+        )
+        .route(
             "/api/projects/{id}/repository-resources",
             get(api::projects::repository_resources),
         )

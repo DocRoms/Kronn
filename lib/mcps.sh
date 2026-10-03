@@ -22,6 +22,9 @@ init_secrets() {
     cat > "$secrets_file" <<'TOML'
 # Kronn — MCP Secrets (centralized tokens)
 # This file is used by `kronn` to generate .mcp.json for each repository.
+# Its values are NOT encrypted, and are written in clear into each
+# repository's .mcp.json, where any agent can read them. Prefer Kronn's MCPs
+# page, which keeps secrets encrypted.
 
 [atlassian]
 url = ""
@@ -78,6 +81,16 @@ secrets_configured() {
 
 # ─── MCP sync ────────────────────────────────────────────────────────────────
 
+# KT-963 — whether Kronn's Docker backend is running. Its container mounts every
+# repository with the user's UID, so a token written in clear into a
+# repository's .mcp.json is readable by any agent it runs.
+kronn_docker_backend_running() {
+    command -v docker >/dev/null 2>&1 || return 1
+    local ids
+    ids=$(cd "${KRONN_DIR:-.}" 2>/dev/null && docker compose ps -q backend 2>/dev/null) || return 1
+    [[ -n "$ids" ]]
+}
+
 load_mcp_secret_env() {
     export ATLASSIAN_URL JIRA_USERNAME JIRA_API_TOKEN
     export CONFLUENCE_USERNAME CONFLUENCE_API_TOKEN
@@ -106,6 +119,17 @@ mcp_missing_secrets_for_template() {
     done
 }
 
+# Whether this flow may write tokens in clear into a repository: not while
+# Kronn runs in Docker, unless forced (KT-963). Says why when it refuses.
+mcp_plaintext_allowed() {
+    if kronn_docker_backend_running && [[ "${KRONN_ALLOW_PLAINTEXT_MCP:-0}" != "1" ]]; then
+        fail "Refused: Kronn runs in Docker, where every agent can read a repository's .mcp.json."
+        info "Configure these MCP servers in Kronn (MCPs page): it keeps their secrets encrypted and gives them only to the agents of their project."
+        printf "  ${DIM}KRONN_ALLOW_PLAINTEXT_MCP=1 kronn mcp sync forces it anyway.${RESET}\n"
+        return 1
+    fi
+}
+
 # Generate .mcp.json for a repo from its .mcp.json.example + central secrets.
 sync_mcp_for_repo() {
     local repo_dir="$1"
@@ -113,6 +137,9 @@ sync_mcp_for_repo() {
     local output="$repo_dir/.mcp.json"
 
     if [[ ! -f "$template" ]]; then
+        return 1
+    fi
+    if [[ "${KRONN_PLAINTEXT_MCP_CHECKED:-0}" != "1" ]] && ! mcp_plaintext_allowed; then
         return 1
     fi
 
@@ -162,6 +189,14 @@ sync_mcp_for_repo() {
 # Sync MCP for all known repos.
 sync_mcp_all() {
     step "MCP synchronization"
+
+    # This flow writes the secrets.toml values in clear into each repository.
+    if ! mcp_plaintext_allowed; then
+        return 1
+    fi
+    local KRONN_PLAINTEXT_MCP_CHECKED=1
+    warn "secrets.toml and the .mcp.json files written from it hold your tokens in clear: any agent working in these repositories can read them."
+    info "Prefer Kronn's MCPs page, which keeps them encrypted."
 
     if ! secrets_configured; then
         warn "No secret configured."

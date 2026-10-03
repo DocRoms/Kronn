@@ -149,25 +149,45 @@ RESET  := \033[0m
 		echo "$(RED)  ERROR: Cannot fix ~/.claude.json — remove it manually$(RESET)"; \
 	fi
 
-## Generate docker-compose.override.yml for extra repo dirs (KRONN_EXTRA_REPOS)
+## Create the ${HOME} bind-mount sources as the user before Docker does it as
+## root (scripts/docker-bind-sources.sh).
+.PHONY: _ensure-bind-sources
+_ensure-bind-sources:
+	@./scripts/docker-bind-sources.sh docker-compose.yml "$$HOME"
+
+## Generate docker-compose.override.yml: empty read-only mounts over the host's
+## secrets (scripts/docker-secret-masks.sh), extra repo dirs (KRONN_EXTRA_REPOS)
+## and, only when KRONN_DOCKER_SOCKET=1, the host's Docker socket and group.
 .PHONY: _gen-override
 _gen-override:
 	@extra_repos=$$(sed -n 's/^KRONN_EXTRA_REPOS=//p' .env | tail -n 1); \
-	if [ -n "$$extra_repos" ]; then \
-		echo "# Auto-generated — extra rw mounts from KRONN_EXTRA_REPOS" > docker-compose.override.yml; \
+	docker_socket=$$(sed -n 's/^KRONN_DOCKER_SOCKET=//p' .env | tail -n 1); \
+	docker_gid=$$(sed -n 's/^KRONN_DOCKER_GID=//p' .env | tail -n 1); \
+	masks=$$(./scripts/docker-secret-masks.sh "$$HOME" ./.docker/empty ./.docker/empty-file); \
+	if [ -z "$$masks" ] && [ -z "$$extra_repos" ] && [ "$$docker_socket" != "1" ]; then \
+		rm -f docker-compose.override.yml; \
+	else \
+		echo "# Auto-generated — host secret masks, KRONN_EXTRA_REPOS rw mounts, opt-in Docker socket" > docker-compose.override.yml; \
 		echo "services:" >> docker-compose.override.yml; \
 		echo "  backend:" >> docker-compose.override.yml; \
+		if [ "$$docker_socket" = "1" ]; then \
+			echo "    group_add:" >> docker-compose.override.yml; \
+			echo "      - \"$${docker_gid:-989}\"" >> docker-compose.override.yml; \
+			echo "$(YELLOW)  Docker socket enabled (KRONN_DOCKER_SOCKET=1): agents can control Docker, and so this machine.$(RESET)"; \
+		fi; \
 		echo "    volumes:" >> docker-compose.override.yml; \
-		IFS=':'; for dir in $$extra_repos; do \
-			case "$$dir" in \
-				"$$HOME"/*) rel=$${dir#$$HOME/}; target="/host-home/$$rel" ;; \
-				*) target="$$dir" ;; \
-			esac; \
-			echo "      - $$dir:$$target:rw" >> docker-compose.override.yml; \
-			echo "$(CYAN)  Extra rw mount: $$dir$(RESET)"; \
-		done; \
-	elif [ -f docker-compose.override.yml ]; then \
-		rm -f docker-compose.override.yml; \
+		if [ "$$docker_socket" = "1" ]; then echo "      - /var/run/docker.sock:/var/run/docker.sock" >> docker-compose.override.yml; fi; \
+		if [ -n "$$masks" ]; then printf '%s\n' "$$masks" >> docker-compose.override.yml; fi; \
+		if [ -n "$$extra_repos" ]; then \
+			IFS=':'; for dir in $$extra_repos; do \
+				case "$$dir" in \
+					"$$HOME"/*) rel=$${dir#$$HOME/}; target="/host-home/$$rel" ;; \
+					*) target="$$dir" ;; \
+				esac; \
+				echo "      - $$dir:$$target:rw" >> docker-compose.override.yml; \
+				echo "$(CYAN)  Extra rw mount: $$dir$(RESET)"; \
+			done; \
+		fi; \
 	fi
 
 ## Write/remove KRONN_RUST_LOG in .env based on DEBUG=1.
@@ -214,13 +234,14 @@ install:
 	@echo "$(CYAN)Launching the guided Kronn setup (./kronn start)...$(RESET)"
 	@./kronn start
 
-start: .env _snapshot-host-hosts _gen-override _apply-debug-flag
+start: .env _snapshot-host-hosts _ensure-bind-sources _gen-override _apply-debug-flag
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		echo "$(YELLOW)  macOS note: Docker can't run your host agents (Claude, Codex, …) or read the Keychain.$(RESET)"; \
 		echo "$(YELLOW)  For native agent execution prefer: ./kronn start-dev$(RESET)"; \
 	fi
 	@echo "$(GREEN)▸ Building $(APP_NAME) (fast profile)...$(RESET)"
 	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d --build
+	@$(MAKE) --no-print-directory _own-claude-volumes
 	@echo ""
 	@echo "  $(CYAN)╭──╮$(RESET)"
 	@echo "  $(CYAN)│$(GREEN)⚡$(CYAN)│$(RESET) $(GREEN)Kronn v$(VERSION)$(RESET)"
@@ -234,9 +255,16 @@ start: .env _snapshot-host-hosts _gen-override _apply-debug-flag
 	@echo ""
 
 ## Production build (Docker, release with LTO — slow but optimized binary)
-start-prod: .env _snapshot-host-hosts _gen-override
+start-prod: .env _snapshot-host-hosts _ensure-bind-sources _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME) (production release)...$(RESET)"
 	@$(DOCKER_COMP) up -d --build
+	@$(MAKE) --no-print-directory _own-claude-volumes
+
+.PHONY: _own-claude-volumes
+# Volumes created before the image pre-created their mount points are owned by
+# root, so Claude Code cannot save a session and every resumed turn fails.
+_own-claude-volumes:
+	@$(DOCKER_COMP) exec -T -u 0 backend chown kronn:kronn /home/kronn/.claude/projects /home/kronn/.claude/sessions
 
 ## Stop all services
 stop:

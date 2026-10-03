@@ -6680,6 +6680,80 @@ async fn put_json_root(app: Router, uri: &str, body: Value) -> (StatusCode, Valu
     (status, json)
 }
 
+#[tokio::test]
+async fn a_project_can_switch_its_agent_files_outside_its_repository_and_back() {
+    // KT-971 — the setting is read, switched both ways, and refused for an
+    // unknown project.
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "p-agent-files".into(),
+        name: "agent-files".into(),
+        path: repo.path().to_string_lossy().into_owned(),
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let uri = "/api/projects/p-agent-files/agent-files";
+
+    let (_, read) = get_json(build_router_with_auth(state.clone(), false), uri).await;
+    assert_eq!(read["data"]["policy"], "repo", "{read}");
+    assert!(read["data"].get("outside_dir").is_none());
+
+    let (_, outside) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        uri,
+        serde_json::json!({"policy": "outside"}),
+    )
+    .await;
+    assert_eq!(outside["data"]["policy"], "outside", "{outside}");
+    assert!(outside["data"]["outside_dir"]
+        .as_str()
+        .unwrap()
+        .contains("project-agent-files"));
+    let (_, read) = get_json(build_router_with_auth(state.clone(), false), uri).await;
+    assert_eq!(read["data"]["policy"], "outside");
+
+    let (_, back) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        uri,
+        serde_json::json!({"policy": "repo"}),
+    )
+    .await;
+    assert_eq!(back["data"]["policy"], "repo", "{back}");
+
+    let (_, unknown) = put_json_root(
+        build_router_with_auth(state, false),
+        "/api/projects/nope/agent-files",
+        serde_json::json!({"policy": "outside"}),
+    )
+    .await;
+    assert_eq!(unknown["error_code"], "not_found", "{unknown}");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Health endpoint tests
 // ═══════════════════════════════════════════════════════════════════════════════
