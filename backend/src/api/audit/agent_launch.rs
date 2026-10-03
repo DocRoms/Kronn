@@ -89,6 +89,12 @@ pub(super) struct AuditAgentLauncher {
     /// agents, and Claude and Codex through their adapters. What `start` hands
     /// back is then a lifeline process, not the agent (KT-927).
     acp: bool,
+    /// The named connection the user picked for an HTTP agent (KT-980), with
+    /// its resolved endpoint and key. `None` uses the provider's default slot.
+    connection: Option<(
+        crate::models::ExternalApiConnection,
+        crate::agents::runner::ExternalHttpRuntime,
+    )>,
 }
 
 impl AuditAgentLauncher {
@@ -116,7 +122,47 @@ impl AuditAgentLauncher {
             state: state.clone(),
             http,
             acp,
+            connection: None,
         }
+    }
+
+    /// Launcher for one audit request. A named connection must exist and
+    /// target this agent; an HTTP agent's `Custom` target requires one.
+    pub(super) async fn for_request(
+        state: &AppState,
+        agent: &AgentType,
+        connection_id: Option<&str>,
+    ) -> Result<Self, String> {
+        let mut launcher = Self::new(state, agent).await;
+        let Some(id) =
+            crate::http_transport::validate_connection_target(state, agent, connection_id).await?
+        else {
+            return Ok(launcher);
+        };
+        let lookup = id.clone();
+        let connection = state
+            .db
+            .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("External API connection {id} was not found"))?;
+        let tokens = state.config.read().await.tokens.clone();
+        let runtime = crate::http_transport::external_http_runtime(&connection, &tokens)
+            .ok_or_else(|| {
+                format!(
+                    "External API connection {} has no endpoint configured",
+                    connection.display_name
+                )
+            })?;
+        launcher.connection = Some((connection, runtime));
+        Ok(launcher)
+    }
+
+    /// The connection a validation discussion must keep using after the audit.
+    pub(super) fn connection_id(&self) -> Option<String> {
+        self.connection
+            .as_ref()
+            .map(|(connection, _)| connection.id.clone())
     }
 
     /// Whether stopping the agent means tripping a token rather than killing a
@@ -144,6 +190,7 @@ impl AuditAgentLauncher {
         prompt: &str,
         tokens: &TokensConfig,
         cancel: Option<CancellationToken>,
+        step_target: &str,
     ) -> Result<AgentProcess, String> {
         let Some(http) = &self.http else {
             return runner::start_agent_with_config(AgentStartConfig {
@@ -161,21 +208,66 @@ impl AuditAgentLauncher {
         // The resolved path, not the stored one: inside a container the stored
         // host path does not exist, and the runner reads the project's docs from it.
         let resolved = project_path.to_string_lossy();
+        let connection_model = self.connection.as_ref().and_then(|(connection, _)| {
+            crate::http_transport::connection_tier_model(connection, tier)
+        });
         runner::start_agent_with_config(AgentStartConfig {
             full_access: true,
             tier,
-            tools: Some(crate::api::agent_tools::KronnToolExecutor::audit_arc(
-                self.state.clone(),
-                project_path.to_path_buf(),
-            )),
+            tools: Some(
+                crate::api::agent_tools::KronnToolExecutor::audit_arc_for_step(
+                    self.state.clone(),
+                    project_path.to_path_buf(),
+                    Some(step_target),
+                ),
+            ),
             model_tiers: Some(&http.model_tiers),
             http_endpoints: Some(&http.endpoints),
             ollama_context_overrides: Some(&http.ollama_context_overrides),
             http_request_timeout: Some(http.request_timeout),
+            external_http: self.connection.as_ref().map(|(_, runtime)| runtime),
+            model_override: connection_model.as_deref(),
             cancel_token: cancel,
             ..AgentStartConfig::new(agent_type, &resolved, prompt, tokens)
         })
         .await
+    }
+}
+
+/// Mirrors an HTTP agent's tool activity into the audit tracker every two
+/// seconds for one step. A CLI reports each tool in its stream-json lines; an
+/// HTTP agent only through its run, and may write no text for minutes.
+/// Dropping the guard stops the probe.
+pub(super) struct ToolActivityMirror(tokio::task::JoinHandle<()>);
+
+impl ToolActivityMirror {
+    pub(super) fn start(
+        probe: runner::ToolActivityProbe,
+        tracker: std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
+        project_id: String,
+    ) -> Self {
+        Self(tokio::spawn(async move {
+            let mut shown: Option<(String, u32)> = None;
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let Some(activity) = probe.read() else {
+                    continue;
+                };
+                if shown.as_ref() == Some(&activity) {
+                    continue;
+                }
+                if let Ok(mut t) = tracker.lock() {
+                    t.set_tool_activity(&project_id, activity.0.clone(), activity.1);
+                }
+                shown = Some(activity);
+            }
+        }))
+    }
+}
+
+impl Drop for ToolActivityMirror {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

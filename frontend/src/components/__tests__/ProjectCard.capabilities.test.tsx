@@ -17,13 +17,11 @@ const agent = (agent_type: AgentDetection['agent_type']): AgentDetection => ({
 });
 
 describe('audit/briefing capability predicates', () => {
-  it('audit is a positive allowlist — Vibe, Nvidia and Custom are out', () => {
-    for (const t of ['ClaudeCode', 'Codex', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm'] as const) {
+  it('audit is a positive allowlist — every HTTP provider is in (KT-980), Vibe is out', () => {
+    for (const t of ['ClaudeCode', 'Codex', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia', 'Custom'] as const) {
       expect(canRunAudit(agent(t)), t).toBe(true);
     }
-    for (const t of ['Vibe', 'Nvidia', 'Custom'] as const) {
-      expect(canRunAudit(agent(t)), t).toBe(false);
-    }
+    expect(canRunAudit(agent('Vibe'))).toBe(false);
   });
 
   it('briefing keeps Ollama (conversation-only), excludes only Vibe', () => {

@@ -153,6 +153,7 @@ async fn prompt_of(kind: Kind, linked: bool) -> (String, tempfile::TempDir) {
                 axum::extract::Path(PROJECT_ID.to_string()),
                 axum::Json(LaunchAuditRequest {
                     agent: AgentType::ClaudeCode,
+                    connection_id: None,
                     tier: None,
                     kind: None,
                     custom_prompt: None,

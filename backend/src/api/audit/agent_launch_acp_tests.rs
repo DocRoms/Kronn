@@ -186,6 +186,7 @@ fn launch(
                 axum::extract::Path(id),
                 axum::Json(LaunchAuditRequest {
                     agent,
+                    connection_id: None,
                     tier: None,
                     kind: Some(AuditKind::Docker),
                     custom_prompt: None,
@@ -206,6 +207,7 @@ fn launch(
                     axum::extract::Path(id),
                     axum::Json(PartialAuditRequest {
                         agent,
+                        connection_id: None,
                         tier: None,
                         steps: vec![step],
                     }),

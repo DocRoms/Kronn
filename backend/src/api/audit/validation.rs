@@ -264,15 +264,37 @@ pub fn validate_step_output(
     // we keep the detection binary — partial progress is recovered by
     // the resume layer, not by relaxing the leak check here.
     if let Ok(content) = std::fs::read_to_string(&dst_path) {
-        let leaked = count_raw_placeholders(&content);
+        let leaked_names = raw_placeholder_names(&content);
+        let leaked = leaked_names.len();
         if leaked > 0 {
+            // Name what is left: one forgotten field in a written document is
+            // not an untouched template, and the two need different fixes.
+            let template_count = template_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|t| count_raw_placeholders(&t))
+                .unwrap_or(0);
+            let untouched = template_count > 0 && leaked >= template_count;
+            let shown = leaked_names
+                .iter()
+                .take(5)
+                .map(|n| format!("{{{{{n}}}}}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             return (
                 false,
                 Some(StepValidationWarning {
-                    reason: format!(
-                        "step did not fill `{}`: {} raw `{{{{...}}}}` placeholders remain (the file is still the template — agent likely crashed / rate-limited before writing)",
-                        target_file, leaked
-                    ),
+                    reason: if untouched {
+                        format!(
+                            "step did not fill `{}`: {} raw `{{{{...}}}}` placeholders remain (the file is still the template — agent likely crashed / rate-limited before writing)",
+                            target_file, leaked
+                        )
+                    } else {
+                        format!(
+                            "step left {} placeholder(s) unfilled in `{}`: {} (the rest of the file was written)",
+                            leaked, target_file, shown
+                        )
+                    },
                     repaired: false, // file IS the template; nothing to restore
                 }),
             );
@@ -391,6 +413,11 @@ pub fn check_detector_disposition(
 /// lexical, and an UNCLOSED fence restores everything it withheld,
 /// opening line included.
 pub(crate) fn count_raw_placeholders(content: &str) -> usize {
+    raw_placeholder_names(content).len()
+}
+
+/// The `{{TOKEN}}` placeholders still in `content`, in order, outside code.
+pub(crate) fn raw_placeholder_names(content: &str) -> Vec<String> {
     let stripped = crate::core::anti_halluc::strip_inline_code(
         &crate::core::anti_halluc::strip_fenced_code(content),
     );
@@ -398,7 +425,7 @@ pub(crate) fn count_raw_placeholders(content: &str) -> usize {
     // UPPERCASE_SNAKE (with optional digits + _). The trailing
     // boundary is a literal `}}`, not just `}`, to avoid hits on
     // Twig double-brace blocks that contain spaces / parens.
-    let mut count = 0usize;
+    let mut names = Vec::new();
     let mut rest = stripped.as_str();
     while let Some(start) = rest.find("{{") {
         let after_open = &rest[start + 2..];
@@ -415,11 +442,43 @@ pub(crate) fn count_raw_placeholders(content: &str) -> usize {
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
             && inside.chars().any(|c| c.is_ascii_uppercase());
         if is_placeholder {
-            count += 1;
+            names.push(inside.to_string());
         }
         rest = &after_open[end + 2..];
     }
-    count
+    names
+}
+
+/// Placeholders whose value Kronn knows for certain, not the model: filled
+/// by the pipeline so a step never fails on a date it could not see.
+pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> String {
+    content
+        .replace("{{DATE}}", today)
+        .replace("{{ DATE }}", today)
+}
+
+/// Apply [`fill_kronn_owned_placeholders`] to this step's own target file.
+pub(crate) fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
+    if !target_file.starts_with("docs/") {
+        return;
+    }
+    let path = project_path.join(target_file);
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        // Only a document the agent otherwise finished: filling the date of an
+        // untouched template would pass it off as rewritten.
+        if raw_placeholder_names(&content)
+            .iter()
+            .any(|name| name != "DATE")
+        {
+            return;
+        }
+        let filled = fill_kronn_owned_placeholders(&content, today);
+        if filled != content {
+            if let Err(error) = std::fs::write(&path, filled) {
+                tracing::warn!(target_file, %error, "could not fill Kronn-owned placeholders");
+            }
+        }
+    }
 }
 
 /// The 10 dimensions Step 8 § B must account for in the coverage matrix.
@@ -1028,6 +1087,73 @@ mod tests {
             !w.repaired,
             "no auto-repair when the file IS the template (re-running the step is the only path)"
         );
+    }
+
+    #[test]
+    fn kronn_fills_the_dates_it_owns_and_nothing_else() {
+        // KT-967 — run O6: qwen3.6:35b wrote 1,321 words of AGENTS.md and
+        // left only `{{DATE}}`; the step failed on a value Kronn knows.
+        let filled = fill_kronn_owned_placeholders(
+            "audit=\"{{DATE}}\" reviewed {{ DATE }} keep {{TASK_1}}",
+            "2026-10-03",
+        );
+        assert_eq!(
+            filled,
+            "audit=\"2026-10-03\" reviewed 2026-10-03 keep {{TASK_1}}"
+        );
+    }
+
+    #[test]
+    fn the_date_is_filled_only_in_a_document_the_agent_finished() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "done, reviewed {{DATE}}").unwrap();
+        std::fs::write(docs.join("b.md"), "{{TASK_1}} reviewed {{DATE}}").unwrap();
+        fill_step_owned_placeholders(tmp.path(), "docs/a.md", "2026-10-03");
+        fill_step_owned_placeholders(tmp.path(), "docs/b.md", "2026-10-03");
+        assert_eq!(
+            std::fs::read_to_string(docs.join("a.md")).unwrap(),
+            "done, reviewed 2026-10-03"
+        );
+        assert_eq!(
+            std::fs::read_to_string(docs.join("b.md")).unwrap(),
+            "{{TASK_1}} reviewed {{DATE}}"
+        );
+    }
+
+    #[test]
+    #[serial(kronn_templates_env)]
+    fn a_written_doc_with_a_forgotten_field_is_named_not_called_a_template() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let target = "docs/AGENTS.md";
+        let (_tmp, project) = fixture(target, 0, 0);
+        let template = format!("# Doc\n{{{{ONE}}}}\n{{{{TWO}}}}\n{}", "padding ".repeat(40));
+        let templates = std::env::var_os("KRONN_TEMPLATES_DIR").unwrap();
+        std::fs::write(std::path::Path::new(&templates).join(target), &template).unwrap();
+
+        std::fs::write(project.join(target), template.replace("{{ONE}}", "written")).unwrap();
+        let (success, warning) = validate_step_output(true, &project, target);
+        assert!(!success);
+        let reason = warning.unwrap().reason;
+        assert!(
+            reason.contains("{{TWO}}") && !reason.contains("still the template"),
+            "{reason}"
+        );
+
+        // The untouched template keeps its own diagnosis.
+        std::fs::write(project.join(target), &template).unwrap();
+        let (_, warning) = validate_step_output(true, &project, target);
+        assert!(warning.unwrap().reason.contains("still the template"));
     }
 
     #[test]

@@ -4,14 +4,15 @@ import { planning, projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
-import { canRunAudit, canRunBriefing } from '../lib/agentCapabilities';
+import { canRunAudit } from '../lib/agentCapabilities';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import AuditRecapPanel from './AuditRecapPanel';
+import { AuditTimeline } from './AuditTimeline';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
-  saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint, formatStepList,
+  saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
 import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
@@ -20,20 +21,18 @@ import {
   Plus, Trash2, Zap,
   Loader2,
   MessageSquare, AlertTriangle,
-  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
+  FileCode, ShieldCheck, BookOpen, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
   Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package, ListTodo,
   CircleHelp,
   Container,
   Copy,
 } from 'lucide-react';
-import { BriefingForm } from './BriefingForm';
 import { CopyIdPill } from './CopyIdPill';
 import { ProjectCodePanel } from './ProjectCodePanel';
 import { ProjectGitPanel } from './ProjectGitPanel';
 import { ProjectTasksPanel } from './ProjectTasksPanel';
 import { ContextHelp } from './ContextHelp';
-import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { ProjectDockerPanel } from './ProjectDockerPanel';
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
@@ -496,6 +495,8 @@ export function ProjectCard({
 
   // ── Audit state ──
   const [auditActive, setAuditActive] = useState(false);
+  // Who runs the live audit, from the server: whichever client launched it.
+  const [auditAuditor, setAuditAuditor] = useState<{ agent: AgentType; tier: ModelTier; connectionId: string | null } | null>(null);
   // 0.8.4 (#298) — bump on every audit completion so the recap panel
   // refetches the latest run + per-step metrics without manual reload.
   const [auditCompletedTick, setAuditCompletedTick] = useState(0);
@@ -531,15 +532,8 @@ export function ProjectCard({
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
-  /// Briefing-start in flight — re-used by the post-form AI review
-  /// trigger. Pre-fix it guarded the now-removed second "Briefing IA"
-  /// button against double-clicks; with the form-only flow the inner
-  /// submit button is already `disabled` while pending, but the state
-  /// is still wired so the outer "Définir le briefing" CTA can grey
-  /// out if a parallel briefing is mid-spawn.
-  const [briefingStarting] = useState(false);
-  // 0.8.4 (#285) — désagentified briefing form modal toggle.
-  const [briefingFormOpen, setBriefingFormOpen] = useState(false);
+  // KT-980 — the named external API connection picked for an HTTP agent.
+  const [auditConnectionId, setAuditConnectionId] = useState<string | null>(null);
   /// Companion ref for `auditActive` — keeps `handleFullAudit` and
   /// `startPartialAudit` race-free against a double-click that fires
   /// before React re-renders.
@@ -619,15 +613,10 @@ export function ProjectCard({
     return () => { cancelled = true; };
   }, [proj.id, isOpen, detailMode, auditCompletedTick]);
 
-  // Briefing agent: an explicit audit pick stays valid (audit-capable ⊂
-  // briefing-capable), otherwise fall back to any BRIEFING-capable agent —
-  // never the audit list, which is narrower (an API-only agent can brief
-  // without being able to write the audit's docs).
-  const briefingAgentPick = (auditAgentChoice && agents.some(a => a.agent_type === auditAgentChoice && canRunBriefing(a)))
-    ? auditAgentChoice
-    : (agents.filter(canRunBriefing)[0]?.agent_type ?? 'ClaudeCode');
   const auditAgents = useMemo(() => agents.filter(canRunAudit), [agents]);
-  const selectedAuditAgent = auditAgentChoice && auditAgents.some(a => a.agent_type === auditAgentChoice)
+  // A named connection is its own target: its agent need not be a detection.
+  const selectedAuditAgent = auditAgentChoice
+    && (auditConnectionId !== null || auditAgents.some(a => a.agent_type === auditAgentChoice))
     ? auditAgentChoice
     : (auditAgents[0]?.agent_type ?? 'ClaudeCode');
 
@@ -960,6 +949,7 @@ export function ProjectCard({
         // only the run id so the server remains authoritative for legacy runs.
         kind: resumeRunId ? null : 'Full',
         resume_run_id: resumeRunId,
+        connection_id: auditConnectionId ?? undefined,
       }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the
@@ -1095,7 +1085,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
+  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
 
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
@@ -1113,7 +1103,7 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: steps.length, currentFile: null,
     });
     try {
-      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: auditTierChoice, steps }, {
+      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: auditTierChoice, steps, connection_id: auditConnectionId ?? undefined }, {
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
@@ -1190,7 +1180,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -1238,6 +1228,11 @@ export function ProjectCard({
           setAuditStep(p.step_index);
           setAuditTotalSteps(p.total_steps);
           setAuditCurrentFile(p.current_file ?? '');
+          if (p.agent && p.tier) {
+            const auditor = { agent: p.agent, tier: p.tier, connectionId: p.connection_id ?? null };
+            setAuditAuditor(prev => (prev && prev.agent === auditor.agent && prev.tier === auditor.tier
+              && prev.connectionId === auditor.connectionId ? prev : auditor));
+          }
           // 0.8.2 TD #233 — surface elapsed for the live counter. Parse
           // once per poll; the per-second tick effect drives re-render.
           const startedMs = Date.parse(p.started_at);
@@ -1284,6 +1279,7 @@ export function ProjectCard({
           const wasActive = auditActiveRef.current;
           auditActiveRef.current = false;
           setAuditActive(false);
+          setAuditAuditor(null);
           setAuditStartedAt(null);
           // 0.8.3 (#274) — clear token chips when the audit wraps so
           // the next run starts from a clean slate instead of
@@ -1335,6 +1331,9 @@ export function ProjectCard({
 
     return () => {
       cancelled = true;
+      // This run's poll is cancelled, so it settled nothing: let the re-run
+      // (adoption tick, project change) poll again instead of bailing.
+      resumeSettledRef.current = false;
       if (auditPollRef.current) {
         clearInterval(auditPollRef.current);
         auditPollRef.current = null;
@@ -1363,56 +1362,6 @@ export function ProjectCard({
     const id = setInterval(() => setAuditNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [auditActive, auditStartedAt]);
-
-  const auditAgentPicker = auditAgents.length > 0 ? (
-    <div className="dash-audit-agent-picker" data-testid="project-audit-agent-picker">
-      <span className="text-xs text-dim">{t('disc.agentAndMode')}</span>
-      <AgentSwitchPicker
-        currentAgent={selectedAuditAgent}
-        currentTier={auditTierChoice}
-        availableAgents={auditAgents.map(agent => agent.agent_type)}
-        modelTiers={modelTiers}
-        defaultModelLabel={t('disc.defaultAgentModel')}
-        tierLabels={{
-          economy: t('disc.tier.economy'),
-          default: t('disc.tier.default'),
-          reasoning: t('disc.tier.reasoning'),
-        }}
-        onSelectionChange={async (agent, tier) => {
-          setAuditAgentChoice(agent);
-          setAuditTierChoice(tier);
-        }}
-        title={t('disc.agentAndMode')}
-        ariaLabel={t('disc.agentAndMode')}
-      />
-    </div>
-  ) : (
-    <span className="text-xs text-dim">{t('disc.noAgent')}</span>
-  );
-
-  const auditLaunchButton = (
-    <button
-      className="dash-icon-btn dash-btn-accent-border"
-      onClick={() => void handleFullAudit()}
-      disabled={auditAgents.length === 0}
-    >
-      <Play size={12} /> {resumableAudit
-        // KT-931 — `last_completed_step` counts the steps that succeeded, so
-        // "+ 1" no longer points at the next step to run: name the ones a
-        // resume re-runs (a backend without the list keeps the old wording).
-        ? (resumableAudit.steps_to_redo && resumableAudit.steps_to_redo.length > 0
-          ? t('audit.resumeRedoSteps', formatStepList(resumableAudit.steps_to_redo))
-          : t('audit.resumeFromStep', resumableAudit.last_completed_step + 1))
-        : t('audit.startFullAudit')}
-    </button>
-  );
-
-  const auditLaunchControls = (
-    <div className="dash-audit-launch-controls" data-testid="project-audit-launch-controls">
-      {auditAgentPicker}
-      {auditLaunchButton}
-    </div>
-  );
 
   const auditOutcomeLabel = latestAuditOutcome?.status === 'Completed'
     ? t('projects.docAi.auditRecap.status.completed')
@@ -2797,173 +2746,6 @@ export function ProjectCard({
             )}
             {(detailMode ? detailView === 'audit' : isSectionOpen('aiContext')) && (
               <>
-                {/* 0.8.4 — audit history panel (chips + per-step table).
-                   Mounted here at the top of AI Context so it's directly
-                   adjacent to the launcher row. Pre-fix it lived inside
-                   "Documentation projet" which is a file browser, not an
-                   audit surface — users had to expand the wrong section
-                   to find their previous runs' timings. The panel
-                   self-hides when history is empty (fresh project). */}
-                <AuditRecapPanel
-                  projectId={proj.id}
-                  refreshTrigger={auditCompletedTick}
-                  selectedRunId={selectedAuditRunId}
-                />
-                {(proj.audit_status === 'NoTemplate' || (proj.audit_status === 'TemplateInstalled' && !bootstrapInProgress)) && !auditActive && (
-                  <div className="dash-audit-pad">
-                    <p className="dash-audit-warning">
-                      <AlertTriangle size={11} /> {proj.audit_status === 'NoTemplate' ? t('audit.noTemplate') : t('audit.description')}
-                    </p>
-                    {shouldShowTrackerHint && (
-                      <div className="dash-tracker-hint" data-testid="audit-tracker-prerequisite">
-                        <span className="dash-tracker-hint-text">
-                          💡 {t('audit.trackerHint')}
-                        </span>
-                        <div className="dash-tracker-hint-actions">
-                          <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
-                            <Plug size={12} /> {t('audit.trackerHintConfigure')}
-                          </button>
-                          <button
-                            className="dash-icon-btn dash-tracker-hint-dismiss"
-                            onClick={dismissTrackerHint}
-                            title={t('audit.trackerHintDismiss')}
-                          >
-                            <X size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                    {auditAgentPicker}
-                    {briefingFormOpen && (
-                      <BriefingForm
-                        projectId={proj.id}
-                        agent={briefingAgentPick}
-                        tier={auditTierChoice}
-                        onClose={() => setBriefingFormOpen(false)}
-                        onSaved={(discId) => {
-                          // 0.8.4 UX fix — single briefing flow. The form
-                          // submits the answers AND spawns the AI review
-                          // disc. Refetch the project list so the briefing
-                          // notes pill updates, refetch discussions so the
-                          // new disc shows up in the sidebar, then jump
-                          // into the disc if it was created.
-                          onRefetch();
-                          onRefetchDiscussions();
-                          if (discId) {
-                            onAutoRunDiscussion(discId);
-                            onNavigate('discussions');
-                          }
-                        }}
-                        toast={toast}
-                      />
-                    )}
-                    <div className="flex-row gap-4 mb-4">
-                      {briefingDisc && !briefingDone ? (
-                        <button
-                          className="dash-icon-btn dash-btn-info"
-                          onClick={() => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }}
-                        >
-                          <MessageSquare size={12} /> {t('audit.resumeBriefing')}
-                        </button>
-                      ) : !briefingDone ? (
-                        // 0.8.4 UX fix — ONE entry point. The form is the
-                        // canonical briefing flow now: fill it, save, AI
-                        // reviews. Pre-fix we had 2 independent buttons
-                        // ("Briefing formulaire" + "Briefing IA") that
-                        // let users fork into inconsistent state. The
-                        // form-only flow keeps the AI value (review +
-                        // clarifications on ambiguous answers) while
-                        // killing the "did I do both? did I do neither?"
-                        // confusion.
-                        <button
-                          className="dash-icon-btn dash-btn-info"
-                          onClick={() => setBriefingFormOpen(true)}
-                          disabled={agents.filter(canRunBriefing).length === 0 || briefingStarting}
-                          title={t('briefing.formBtnTooltip')}
-                          data-testid="briefing-open-form-btn"
-                        >
-                          <FileText size={12} /> {t('briefing.formBtn')}
-                        </button>
-                      ) : (
-                        <span className="dash-briefing-done">
-                          <Check size={10} /> {t('audit.briefingDone')}
-                        </span>
-                      )}
-                      {!briefingDone && (
-                        <span className="dash-briefing-hint">
-                          {t('audit.briefingDesc')}
-                        </span>
-                      )}
-                    </div>
-                    <p className="dash-audit-desc">
-                      {t('audit.fullAuditDesc')}
-                    </p>
-                    <div className="flex-row gap-4" data-testid="project-audit-launch-controls">
-                      {auditLaunchButton}
-                    </div>
-                  </div>
-                )}
-
-                {auditActive && (
-                  <div className="dash-audit-pad">
-                    <div className="flex-row gap-4 mb-4">
-                      <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} className="text-accent" />
-                      <span className="dash-audit-step">
-                        {t('audit.step', auditStep, auditTotalSteps, auditCurrentFile)}
-                      </span>
-                      {auditStartedAt !== null && (
-                        <span className="text-2xs text-ghost" title={t('audit.elapsedTooltip')}>
-                          {t('audit.elapsed', formatElapsedShort(Math.max(0, auditNow - auditStartedAt)))}
-                        </span>
-                      )}
-                      {/* 0.8.3 (#274) — last step + cumulative token
-                          chips. Both stay hidden until the first
-                          step_done lands AND the agent reports usage
-                          (Vibe/Ollama direct stream stay 0). Gives
-                          the operator a live signal for "which step
-                          should I optimize" without polling. */}
-                      {auditLastStepTokens !== null && auditLastStepTokens > 0 && (
-                        <span className="text-2xs text-ghost" title={t('audit.lastStepTokensTooltip')}>
-                          {t('audit.lastStepTokens', auditLastStepTokens.toLocaleString())}
-                        </span>
-                      )}
-                      {auditTotalTokens !== null && auditTotalTokens > 0 && (
-                        <span className="text-2xs text-ghost" title={t('audit.totalTokensTooltip')}>
-                          {t('audit.totalTokens', auditTotalTokens.toLocaleString())}
-                        </span>
-                      )}
-                      {/* 0.8.3 (#281) — current tool the agent is
-                          calling. Last-write-wins (the agent fires
-                          tool_call as it goes); cleared on
-                          step_done. Hidden when null so the chip
-                          doesn't take space when the agent is
-                          just thinking. */}
-                      {auditCurrentTool && (
-                        <span className="text-2xs text-ghost" title={t('audit.currentToolTooltip')}>
-                          {t('audit.currentTool', auditCurrentTool)}
-                          {/* 0.8.4 (#319 / B3) — show the running tool-call
-                             count so the user sees forward motion during
-                             long tool-only phases (e.g. Step 9 writes 25+
-                             TD files without an intermediate `Usage` event). */}
-                          {auditToolCallCount != null && auditToolCallCount > 0 && ` (${auditToolCallCount})`}
-                        </span>
-                      )}
-                      <button
-                        className="dash-icon-btn dash-btn-cancel"
-                        onClick={handleCancelAudit}
-                        title={t('audit.cancelAudit')}
-                      >
-                        <StopCircle size={12} /> {t('audit.cancelAudit')}
-                      </button>
-                    </div>
-                    <div className="dash-progress-track">
-                      <div className="dash-progress-fill" style={{
-                        width: `${(auditStep / auditTotalSteps) * 100}%`,
-                      }} />
-                    </div>
-                  </div>
-                )}
-
                 {bootstrapInProgress && bootstrapDisc && !auditActive && (
                   <div className="dash-audit-pad">
                     <p className="dash-audit-warning">
@@ -2983,84 +2765,93 @@ export function ProjectCard({
                     <p className="dash-audit-hint-accent">
                       <Rocket size={11} /> {t('audit.bootstrapDone')}
                     </p>
-                    {auditLaunchControls}
                   </div>
                 )}
 
-                {proj.audit_status === 'Audited' && !auditActive && (
-                  <div className="dash-audit-pad">
-                    {validationInProgress && validationDisc ? (
-                      <>
-                        <p className="dash-audit-warning">
-                          <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', unseenBasis(validationDisc))}
-                        </p>
-                        <p className="dash-audit-desc">
-                          {t('audit.validationHint')}
-                        </p>
-                        <button
-                          className="dash-icon-btn dash-btn-accent-border"
-                          onClick={() => { onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}
-                        >
-                          <MessageSquare size={12} /> {t('audit.resumeValidation')}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <p className="dash-audit-hint">
-                          {t('audit.readyToValidate')}
-                        </p>
-                        <button
-                          className="dash-icon-btn dash-btn-accent-border"
-                          onClick={() => {
-                            onSetDiscPrefill({
-                              projectId: proj.id,
-                              title: 'Validation audit AI',
-                              prompt: t('audit.validationPrompt'),
-                              locked: true,
-                            });
-                            onNavigate('discussions');
-                          }}
-                        >
-                          <ShieldCheck size={12} /> {t('audit.validate')}
-                        </button>
-                      </>
-                    )}
-                    {/* Keep a complete re-audit available before validation. */}
-                    {!validationInProgress && (
-                      <div style={{ marginTop: 8 }}>
-                        {auditLaunchControls}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {proj.audit_status === 'Validated' && !auditActive && (
-                  <>
-                  <div className="dash-audit-validated">
-                    <ShieldCheck size={11} /> {t('audit.done')}
-                    {/* 0.8.3 — quick access to the TD index post-validation. */}
-                    {(proj.tech_debt_count ?? 0) > 0 && (
-                      <button
-                        type="button"
-                        className="dash-audit-view-tds-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (!isOpen) onToggleOpen();
-                          selectDetailView('docs');
-                          setExpandedTab('docAi');
-                          setDocDeepLink('docs/tech-debt');
-                        }}
-                      >
-                        {t('audit.viewTechDebts', proj.tech_debt_count ?? 0)}
+                {shouldShowTrackerHint && (
+                  <div className="dash-tracker-hint" data-testid="audit-tracker-prerequisite">
+                    <span className="dash-tracker-hint-text">
+                      💡 {t('audit.trackerHint')}
+                    </span>
+                    <div className="dash-tracker-hint-actions">
+                      <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
+                        <Plug size={12} /> {t('audit.trackerHintConfigure')}
                       </button>
-                    )}
+                      <button
+                        className="dash-icon-btn dash-tracker-hint-dismiss"
+                        onClick={dismissTrackerHint}
+                        title={t('audit.trackerHintDismiss')}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
                   </div>
-                  <div className="dash-audit-pad">
-                    <p className="dash-audit-desc">{t('audit.reAuditHint')}</p>
-                    {auditLaunchControls}
-                  </div>
-                  </>
                 )}
+                {!bootstrapInProgress && (
+                  <AuditTimeline
+                    projectId={proj.id}
+                    auditStatus={proj.audit_status}
+                    techDebtCount={proj.tech_debt_count ?? 0}
+                    agents={agents}
+                    selectedAgent={selectedAuditAgent}
+                    selectedTier={auditTierChoice}
+                    modelTiers={modelTiers}
+                    selectedConnectionId={auditConnectionId}
+                    onSelect={(agent, tier, connectionId) => {
+                      setAuditAgentChoice(agent);
+                      setAuditTierChoice(tier);
+                      setAuditConnectionId(connectionId);
+                    }}
+                    briefingDone={briefingDone}
+                    onBriefingSaved={onRefetch}
+                    auditActive={auditActive}
+                    liveStep={auditStep}
+                    liveTotal={auditTotalSteps}
+                    liveFile={auditCurrentFile}
+                    liveElapsed={auditStartedAt !== null ? t('audit.elapsed', formatElapsedShort(Math.max(0, auditNow - auditStartedAt))) : null}
+                    liveTool={auditCurrentTool}
+                    liveStartedAt={auditStartedAt}
+                    liveAuditor={auditAuditor}
+                    liveToolCalls={auditToolCallCount ?? null}
+                    liveStepTokens={auditLastStepTokens}
+                    liveTotalTokens={auditTotalTokens}
+                    onResumeBriefingDiscussion={briefingDisc && !briefingDone
+                      ? () => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }
+                      : null}
+                    onCancel={handleCancelAudit}
+                    resumable={resumableAudit}
+                    onLaunch={() => void handleFullAudit()}
+                    validationInProgress={validationInProgress}
+                    onValidate={() => {
+                      if (validationInProgress && validationDisc) {
+                        onOpenDiscussion(validationDisc.id);
+                        onNavigate('discussions');
+                        return;
+                      }
+                      onSetDiscPrefill({
+                        projectId: proj.id,
+                        title: 'Validation audit AI',
+                        prompt: t('audit.validationPrompt'),
+                        locked: true,
+                      });
+                      onNavigate('discussions');
+                    }}
+                    onViewTechDebts={() => {
+                      if (!isOpen) onToggleOpen();
+                      selectDetailView('docs');
+                      setExpandedTab('docAi');
+                      setDocDeepLink('docs/tech-debt');
+                    }}
+                    refreshTrigger={auditCompletedTick}
+                    toast={toast}
+                  />
+                )}
+                {/* Past runs and their per-step timings, below the current one. */}
+                <AuditRecapPanel
+                  projectId={proj.id}
+                  refreshTrigger={auditCompletedTick}
+                  selectedRunId={selectedAuditRunId}
+                />
               </>
             )}
           </div>

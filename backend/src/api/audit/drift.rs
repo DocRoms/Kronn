@@ -17,7 +17,7 @@ use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
 
-use super::{SseStream, ANALYSIS_STEPS, PROMPT_PREAMBLE};
+use super::{SseStream, ANALYSIS_STEPS};
 
 /// GET /api/projects/:id/drift
 /// Check which docs/ sections are stale based on source file checksums.
@@ -238,7 +238,22 @@ pub async fn partial_audit(
     }
     // Same wiring as the Full pipeline: an HTTP agent gets file tools scoped to
     // this project (a no-op for a CLI agent).
-    let agent_launcher = super::agent_launch::AuditAgentLauncher::new(&state, &agent_type).await;
+    let agent_launcher = match super::agent_launch::AuditAgentLauncher::for_request(
+        &state,
+        &agent_type,
+        req.connection_id.as_deref(),
+    )
+    .await
+    {
+        Ok(launcher) => launcher,
+        Err(error) => {
+            let msg = serde_json::json!({ "error": error });
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
+            }));
+            return Sse::new(stream);
+        }
+    };
     let requested_steps = resolved_steps;
     let total_requested = requested_steps.len();
     let audit_tracker = state.audit_tracker.clone();
@@ -358,6 +373,12 @@ pub async fn partial_audit(
 
         if let Ok(mut t) = audit_tracker.lock() {
             t.start_progress(&project_id_for_progress, total_requested as u32, "partial");
+            t.set_auditor(
+                &project_id_for_progress,
+                agent_type.clone(),
+                audit_tier,
+                agent_launcher.connection_id(),
+            );
         }
 
         // `requested_steps` are the CANONICAL (resolved) steps — the client
@@ -446,15 +467,11 @@ pub async fn partial_audit(
             yield Event::default().event("step_start").data(step_start.to_string());
 
             let today = Utc::now().format("%Y-%m-%d").to_string();
-            let today_compact = Utc::now().format("%Y%m%d").to_string();
             // Chained sub-audit steps (10..16) carry the relevance gate, same
             // as a full chained run — a partial re-run of a sub-audit that no
             // longer applies must still write its one-line "Not applicable".
             let gate = super::gate_for_step(step, first_chained_step);
-            let mut full_prompt = format!("{}\n\n{}{}", PROMPT_PREAMBLE, gate, analysis_step.prompt)
-                .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
-                .replace("today's date (YYYY-MM-DD)", &today)
-                .replace("set to today's date", &format!("set to {}", today));
+            let mut full_prompt = super::dated_step_prompt(gate, analysis_step.prompt, Utc::now());
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
@@ -559,6 +576,7 @@ pub async fn partial_audit(
                 &attempt_prompt,
                 &tokens,
                 attempt_cancel.clone(),
+                analysis_step.target_file,
             ).await {
                 Ok(mut process) => {
                     // Only a direct CLI agent has a PID worth killing: the
@@ -571,6 +589,14 @@ pub async fn partial_audit(
                         }
                     }
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                    // An HTTP agent's tool activity, for the card's live chips.
+                    let _tool_activity = (!is_stream_json).then(|| {
+                        super::agent_launch::ToolActivityMirror::start(
+                            process.tool_activity_probe(),
+                            audit_tracker.clone(),
+                            project_id_for_progress.clone(),
+                        )
+                    });
                     while let Some(line) = process.next_line().await {
                         if is_stream_json {
                             if let runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. } =
@@ -699,6 +725,13 @@ pub async fn partial_audit(
                     // Gate order = Full parity (matrix v2): CLI → semantic
                     // validator → step-8 disposition → enforce lint → the
                     // rewrite-proof snapshot LAST.
+                    if cli_success {
+                        crate::api::audit::validation::fill_step_owned_placeholders(
+                            &project_path,
+                            analysis_step.target_file,
+                            &chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                        );
+                    }
                     let (mut success, validation_warning) =
                         super::validation::validate_step_output(
                             cli_success, &project_path, analysis_step.target_file,

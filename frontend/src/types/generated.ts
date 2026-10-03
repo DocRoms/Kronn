@@ -690,7 +690,16 @@ step_tokens?: number | null, total_tokens_so_far?: number | null, current_tool?:
  * files without intermediate `Usage` blocks — the symptom that
  * confused the user during the 8-min Step 8 of the Full audit).
  */
-current_tool_call_count?: number | null, };
+current_tool_call_count?: number | null,
+/**
+ * Who is auditing (KT-994): the card freezes its agent panel on this
+ * choice while the audit runs, whichever client launched it.
+ */
+agent?: AgentType, tier?: ModelTier,
+/**
+ * The named external connection, for an HTTP agent that uses one.
+ */
+connection_id?: string, };
 
 export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
 
@@ -811,6 +820,12 @@ cli_success: boolean, step_warning?: string | null,
  * Mirrors the `step_warning.repaired` field from #292.
  */
 step_repaired_from_template: boolean, };
+
+/**
+ * KT-977 — one step of the Full audit, known before any run: lets the UI
+ * say what a step not yet run will produce.
+ */
+export type AuditStepInfo = { index: number, target_file: string, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 
@@ -3546,6 +3561,11 @@ export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMark
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
+ * KT-980 — the named external API connection an HTTP agent uses. Required
+ * for a `Custom` agent; for LiteLLM or NVIDIA it picks one of several.
+ */
+connection_id?: string,
+/**
  * Model capability selected by the shared agent picker. Missing values
  * keep the historical audit behaviour (Reasoning).
  */
@@ -4797,6 +4817,11 @@ next_path: string, max_pages?: number | null, } | { "type": "LinkHeader", page_s
 has_more_path: string, max_pages?: number | null, };
 
 export type PartialAuditRequest = { agent: AgentType,
+/**
+ * KT-980 — the named external API connection an HTTP agent uses. Required
+ * for a `Custom` agent; for LiteLLM or NVIDIA it picks one of several.
+ */
+connection_id?: string,
 /**
  * Model capability selected by the shared agent picker. Missing values
  * keep the historical partial-audit behaviour (Reasoning).

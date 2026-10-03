@@ -50,6 +50,20 @@ pub async fn audit_status_all(
     Json(ApiResponse::ok(snapshot))
 }
 
+/// GET /api/audit/steps — the Full audit's steps in run order, from the same
+/// chain the pipeline executes, so the UI never keeps its own copy.
+pub async fn audit_steps() -> Json<ApiResponse<Vec<AuditStepInfo>>> {
+    let steps = super::assemble_chained_steps(crate::models::AuditKind::Full)
+        .into_iter()
+        .enumerate()
+        .map(|(i, step)| AuditStepInfo {
+            index: i as u32 + 1,
+            target_file: step.target_file.to_string(),
+        })
+        .collect();
+    Json(ApiResponse::ok(steps))
+}
+
 /// 0.8.4 (#298) — fetch the most-recent **completed** audit run for a
 /// project, or `None`. Sister of `audit_latest_resumable` (which only
 /// returns Interrupted rows); this one returns Completed rows so the
@@ -224,5 +238,28 @@ mod resumable_tests {
         assert!(ResumableAudit::new(run("Nonsense"), &[])
             .steps_to_redo
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod audit_steps_tests {
+    #[tokio::test]
+    async fn lists_the_full_chain_in_run_order() {
+        let steps = super::audit_steps().await.0.data.expect("steps");
+        assert_eq!(steps.len(), 16);
+        assert!(steps
+            .iter()
+            .enumerate()
+            .all(|(i, s)| s.index as usize == i + 1));
+        assert_eq!(steps[0].target_file, "docs/AGENTS.md");
+        // The consolidation's position may move between versions; the UI
+        // groups steps by target file, so only its presence is pinned.
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|s| s.target_file == "docs/decisions.md")
+                .count(),
+            1
+        );
     }
 }

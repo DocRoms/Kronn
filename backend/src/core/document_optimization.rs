@@ -369,26 +369,48 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
         if raw.contains('<') || raw.contains('>') {
             continue;
         }
+        // Run O7: `.gitignore:3 — only logs/ ignored, not root-level` was told to
+        // split references; the fix was to move the comment out of the marker.
+        if let Some((reference, comment)) = raw.split_once(char::is_whitespace) {
+            if reference.contains(':') && !reference.contains(',') {
+                out.push(diag(
+                    "broken_citation",
+                    rel,
+                    format!(
+                        "malformed file citation `{raw}`: a marker holds only `path:line`. \
+                         Write [src: file: {reference}] and put `{}` outside the brackets",
+                        comment.trim()
+                    ),
+                ));
+                continue;
+            }
+        }
         if raw.contains(',') {
             out.push(diag("broken_citation", rel,
                 format!("malformed file citation `{raw}`: use one [src: file: path:line] marker per reference")));
             continue;
         }
         let Some((path_part, line_part)) = raw.rsplit_once(':') else {
-            out.push(diag(
-                "broken_citation",
-                rel,
-                format!("malformed file citation `{raw}`"),
-            ));
+            let detail = if is_project_dir(project, raw) {
+                format!(
+                    "malformed file citation `{raw}`: {}",
+                    directory_citation_message(raw)
+                )
+            } else {
+                format!("malformed file citation `{raw}`: expected [src: file: path:line]")
+            };
+            out.push(diag("broken_citation", rel, detail));
             continue;
         };
         let path = project.join(path_part.trim());
         if outside_project(project, &path) || !path.is_file() {
-            out.push(diag(
-                "broken_citation",
-                rel,
-                format!("citation path does not exist `{}`", path_part.trim()),
-            ));
+            // Run O7: `helpers/hbs/:1` was reported as a path that does not exist.
+            let detail = if is_project_dir(project, path_part.trim()) {
+                directory_citation_message(path_part.trim())
+            } else {
+                format!("citation path does not exist `{}`", path_part.trim())
+            };
+            out.push(diag("broken_citation", rel, detail));
             continue;
         }
         let max_line = read(&path).map(|s| s.lines().count()).unwrap_or(0);
@@ -636,13 +658,48 @@ fn collect_valid_links(
                 out.push(diag(
                     "broken_link",
                     &relative(project, source),
-                    format!("broken link target `{target}`"),
+                    match root_relative_fix(project, source, clean) {
+                        Some(fix) => format!(
+                            "broken link target `{target}`: links resolve from this document's \
+                             folder, and `{clean}` exists from the repository root — write `{fix}`"
+                        ),
+                        None => format!("broken link target `{target}`"),
+                    },
                 ));
             }
         } else {
             linked.insert(normalize(&resolved));
         }
     }
+}
+
+/// The link a model meant when it wrote a repository-root path from inside a
+/// folder (`docs/AGENTS.md` from `docs/`): the same file, relative to `source`.
+fn root_relative_fix(project: &Path, source: &Path, clean: &str) -> Option<String> {
+    let target = project.join(clean.trim_start_matches("./"));
+    if clean.is_empty() || outside_project(project, &target) || !target.exists() {
+        return None;
+    }
+    let dir = source.parent()?.strip_prefix(project).ok()?;
+    let target = Path::new(clean.trim_start_matches("./"));
+    if let Ok(inside) = target.strip_prefix(dir) {
+        return Some(inside.to_string_lossy().into_owned());
+    }
+    let ups = "../".repeat(dir.components().count());
+    Some(format!("{ups}{}", target.to_string_lossy()))
+}
+
+fn is_project_dir(project: &Path, path: &str) -> bool {
+    let path = project.join(path);
+    !outside_project(project, &path) && path.is_dir()
+}
+
+fn directory_citation_message(path: &str) -> String {
+    format!(
+        "`{path}` is a directory, and a [src: file:] marker needs a file and a line. Cite \
+         one file inside it as [src: file: path:line], or name the directory in backticks \
+         without a marker"
+    )
 }
 
 fn measure(path: &str, content: &str) -> DocumentMeasure {
@@ -757,6 +814,90 @@ mod tests {
     fn write(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn a_root_relative_link_says_which_link_to_write() {
+        // Run O7, step 1: `[..](docs/AGENTS.md)` inside docs/AGENTS.md was
+        // reported as a bare "broken link target" through two retries.
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("docs/AGENTS.md"), "x\n");
+        write(&tmp.path().join("package.json"), "{}\n");
+        let source = tmp.path().join("docs/AGENTS.md");
+        let mut out = Vec::new();
+        let mut linked = BTreeSet::new();
+        collect_valid_links(
+            tmp.path(),
+            &source,
+            "[a](docs/AGENTS.md) [b](package.json) [c](nowhere.md)",
+            &mut linked,
+            Some(&mut out),
+        );
+        let messages: Vec<_> = out.iter().map(|d| d.message.clone()).collect();
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(
+            messages[0].ends_with("write `AGENTS.md`"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1].ends_with("write `../package.json`"),
+            "{}",
+            messages[1]
+        );
+        assert_eq!(messages[2], "broken link target `nowhere.md`");
+    }
+
+    #[test]
+    fn a_directory_citation_says_what_to_do_instead() {
+        // Run O6: "malformed file citation `helpers/`" sent qwen3.6:35b
+        // re-reading sources for two attempts instead of dropping the marker.
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("helpers/a.js"), "x\n");
+        let mut out = Vec::new();
+        inspect_citations(
+            tmp.path(),
+            "docs/AGENTS.md",
+            "Helpers [src: file: helpers/] and [src: file: nowhere] and [src: file: helpers/:3]",
+            &mut out,
+        );
+        assert_eq!(out.len(), 3, "{out:#?}");
+        assert!(
+            out[2].message.contains("is a directory"),
+            "{}",
+            out[2].message
+        );
+        assert!(
+            out[0].message.contains("is a directory"),
+            "{}",
+            out[0].message
+        );
+        assert!(out[0].message.contains("in backticks without a marker"));
+        assert!(
+            !out[1].message.contains("is a directory"),
+            "{}",
+            out[1].message
+        );
+        assert!(out[1].message.contains("expected [src: file: path:line]"));
+
+        let mut out = Vec::new();
+        inspect_citations(
+            tmp.path(),
+            "docs/x.md",
+            "[src: file: helpers/a.js:1 — only logs/ ignored, not root] [src: file: a.js:1, b.js:2]",
+            &mut out,
+        );
+        assert_eq!(out.len(), 2, "{out:#?}");
+        assert!(
+            out[0].message.contains(
+                "Write [src: file: helpers/a.js:1] and put `— only logs/ ignored, not root` outside"
+            ),
+            "{}",
+            out[0].message
+        );
+        assert!(out[1]
+            .message
+            .contains("one [src: file: path:line] marker per reference"));
     }
 
     #[test]

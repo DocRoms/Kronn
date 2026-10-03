@@ -162,6 +162,7 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
                 axum::extract::Path(PROJECT_ID.into()),
                 axum::Json(crate::models::LaunchAuditRequest {
                     agent: AgentType::LiteLlm,
+                    connection_id: None,
                     tier: Some(ModelTier::Reasoning),
                     kind: None,
                     custom_prompt: None,

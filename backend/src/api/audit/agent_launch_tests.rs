@@ -86,6 +86,7 @@ async fn run_step(state: &AppState, project: &Path, prompt: &str) -> (bool, Stri
             prompt,
             &tokens,
             None,
+            "docs/AGENTS.md",
         )
         .await
         .expect("an HTTP audit agent starts");
@@ -318,6 +319,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
             axum::extract::Path(PROJECT_ID.into()),
             axum::Json(crate::models::LaunchAuditRequest {
                 agent: AgentType::LiteLlm,
+                connection_id: None,
                 tier: Some(ModelTier::Reasoning),
                 kind: None,
                 custom_prompt: None,
@@ -487,6 +489,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
         axum::extract::Path(PROJECT_ID.into()),
         axum::Json(crate::models::LaunchAuditRequest {
             agent: AgentType::LiteLlm,
+            connection_id: None,
             tier: Some(ModelTier::Reasoning),
             kind: None,
             custom_prompt: None,
@@ -647,6 +650,7 @@ async fn an_unreachable_provider_is_a_start_failure_never_a_clean_run() {
             "Write the probe doc",
             &tokens,
             None,
+            "docs/AGENTS.md",
         )
         .await;
     assert!(
@@ -678,6 +682,7 @@ async fn a_missing_model_is_named_instead_of_guessed() {
             "Write the probe doc",
             &tokens,
             None,
+            "docs/AGENTS.md",
         )
         .await
         .err()
@@ -756,6 +761,7 @@ async fn the_stop_token_reaches_an_http_agent_no_process_kill_can_reach() {
             "Write the probe doc",
             &tokens,
             Some(cancel),
+            "docs/AGENTS.md",
         )
         .await
         .err()
@@ -817,11 +823,17 @@ async fn cancel_audit_trips_the_token_of_a_running_http_step() {
 }
 
 /// Drive the partial-audit handler on a fresh project and return its SSE body.
-async fn partial_audit_stream(state: &AppState, project: &Path, agent: AgentType) -> String {
+async fn partial_audit_stream(
+    state: &AppState,
+    project: &Path,
+    agent: AgentType,
+    connection: Option<&str>,
+) -> String {
     use axum::response::IntoResponse;
     let path = project.to_string_lossy().into_owned();
+    let project_id = format!("proj-partial-{}", uuid::Uuid::new_v4());
     let row: crate::models::Project = serde_json::from_value(json!({
-        "id": "proj-partial", "name": "partial", "path": path,
+        "id": project_id, "name": "partial", "path": path,
         "repo_url": null, "token_override": null, "ai_config": {"detected": false, "configs": []},
         "created_at": chrono::Utc::now().to_rfc3339(), "updated_at": chrono::Utc::now().to_rfc3339()
     }))
@@ -839,9 +851,10 @@ async fn partial_audit_stream(state: &AppState, project: &Path, agent: AgentType
         + 1;
     let response = crate::api::audit::drift::partial_audit(
         axum::extract::State(state.clone()),
-        axum::extract::Path("proj-partial".to_string()),
+        axum::extract::Path(project_id.clone()),
         axum::Json(crate::models::PartialAuditRequest {
             agent,
+            connection_id: connection.map(str::to_string),
             tier: None,
             steps: vec![step],
         }),
@@ -860,18 +873,42 @@ async fn partial_audit_stream(state: &AppState, project: &Path, agent: AgentType
 
 #[tokio::test]
 async fn the_partial_audit_applies_the_same_gate_and_launcher() {
-    // NVIDIA stays refused, with the one message the Full launch uses.
+    // Vibe has no file tools: refused, with the one message the Full launch uses.
     let state = litellm_state("http://127.0.0.1:1").await;
-    let project = tempfile::tempdir().unwrap();
-    let refused = partial_audit_stream(&state, project.path(), AgentType::Nvidia).await;
+    let refused = partial_audit_stream(
+        &state,
+        tempfile::tempdir().unwrap().path(),
+        AgentType::Vibe,
+        None,
+    )
+    .await;
     assert!(refused.contains("cannot run audits"), "{refused}");
     assert!(
-        refused.contains("Ollama") && refused.contains("LiteLLM"),
+        refused.contains("Ollama") && refused.contains("LiteLLM") && refused.contains("NVIDIA"),
         "{refused}"
     );
 
-    // LiteLLM passes the gate and reaches the HTTP launcher: with no tier model
-    // configured it fails on the launcher's own remedy, never on the gate.
+    // KT-980 — a Custom agent needs its named connection: refused without one,
+    // by name, before anything runs.
+    let custom = partial_audit_stream(
+        &state,
+        tempfile::tempdir().unwrap().path(),
+        AgentType::Custom,
+        None,
+    )
+    .await;
+    assert!(custom.contains("requires a connection_id"), "{custom}");
+    let unknown = partial_audit_stream(
+        &state,
+        tempfile::tempdir().unwrap().path(),
+        AgentType::Custom,
+        Some("missing"),
+    )
+    .await;
+    assert!(unknown.contains("was not found"), "{unknown}");
+
+    // LiteLLM and NVIDIA pass the gate and reach the HTTP launcher: with no tier
+    // model configured they fail on the launcher's own remedy, never on the gate.
     let mut config = crate::core::config::default_config();
     config.agents.lite_llm.base_url = Some("http://127.0.0.1:1".into());
     let state = AppState::new_defaults(
@@ -879,13 +916,81 @@ async fn the_partial_audit_applies_the_same_gate_and_launcher() {
         Arc::new(crate::db::Database::open_in_memory().unwrap()),
         crate::DEFAULT_MAX_CONCURRENT_AGENTS,
     );
-    let project = tempfile::tempdir().unwrap();
-    let admitted = partial_audit_stream(&state, project.path(), AgentType::LiteLlm).await;
+    let admitted = partial_audit_stream(
+        &state,
+        tempfile::tempdir().unwrap().path(),
+        AgentType::LiteLlm,
+        None,
+    )
+    .await;
     assert!(!admitted.contains("cannot run audits"), "{admitted}");
     assert!(
         admitted.contains("No LiteLLM model configured"),
         "{admitted}"
     );
+    let nvidia = partial_audit_stream(
+        &state,
+        tempfile::tempdir().unwrap().path(),
+        AgentType::Nvidia,
+        None,
+    )
+    .await;
+    assert!(!nvidia.contains("cannot run audits"), "{nvidia}");
+    assert!(nvidia.contains("No NVIDIA model configured"), "{nvidia}");
+}
+
+#[tokio::test]
+async fn a_named_connection_audit_calls_that_connection_with_its_tier_model() {
+    // KT-980 — an OpenRouter-style connection is a `Custom` agent: the audit
+    // must reach the connection's own endpoint with the model of the tier.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("stop here"))
+        .mount(&server)
+        .await;
+    let state = AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        )),
+        Arc::new(crate::db::Database::open_in_memory().unwrap()),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let now = chrono::Utc::now();
+    let connection = crate::models::ExternalApiConnection {
+        id: "conn-or".into(),
+        display_name: "OpenRouter".into(),
+        mention_alias: "openrouter".into(),
+        endpoint: Some(format!("{}/v1", server.uri())),
+        credential_slug: "openrouter".into(),
+        origin_preset: crate::models::ExternalApiConnectionPreset::OpenRouter,
+        economy_model: Some("or/economy".into()),
+        default_model: Some("or/default".into()),
+        reasoning_model: Some("or/reasoning".into()),
+        created_at: now,
+        updated_at: now,
+        image_model: None,
+        video_model: None,
+        media_endpoint: None,
+    };
+    state
+        .db
+        .with_conn(move |conn| crate::db::external_api_connections::insert(conn, &connection))
+        .await
+        .unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let body =
+        partial_audit_stream(&state, project.path(), AgentType::Custom, Some("conn-or")).await;
+
+    assert!(!body.contains("cannot run audits"), "{body}");
+    let requests = server.received_requests().await.expect("requests");
+    assert!(
+        !requests.is_empty(),
+        "the connection's endpoint was never called: {body}"
+    );
+    let sent: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(sent["model"], "or/reasoning", "{sent}");
 }
 
 // ── KT-926 — what an audit prompt says about OTHER repos ─────────────────────
@@ -958,6 +1063,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
             axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::LaunchAuditRequest {
                 agent: AgentType::ClaudeCode,
+                connection_id: None,
                 tier: None,
                 kind: None,
                 custom_prompt: None,
@@ -972,6 +1078,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
             axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::PartialAuditRequest {
                 agent: AgentType::ClaudeCode,
+                connection_id: None,
                 tier: None,
                 steps: refreshable_steps(),
             }),
@@ -1170,6 +1277,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::LaunchAuditRequest {
             agent: AgentType::ClaudeCode,
+            connection_id: None,
             tier: None,
             kind: None,
             custom_prompt: None,
@@ -1315,6 +1423,7 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::LaunchAuditRequest {
             agent: AgentType::ClaudeCode,
+            connection_id: None,
             tier: None,
             kind: None,
             custom_prompt: None,

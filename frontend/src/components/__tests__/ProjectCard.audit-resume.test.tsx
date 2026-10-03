@@ -70,7 +70,7 @@ const AGENT: AgentDetection = {
   runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
-function renderCard(onRefetch = noop, detailMode = false) {
+function renderCard(onRefetch = noop, detailMode = false, externalAuditLive = false) {
   return render(
     <ProjectCard
       project={PROJECT}
@@ -93,6 +93,7 @@ function renderCard(onRefetch = noop, detailMode = false) {
       onRefetchDiscussions={noop}
       onRefetchSkills={noop}
       onRefetchDrift={noop}
+      externalAuditLive={externalAuditLive}
     />
   );
 }
@@ -114,7 +115,7 @@ describe('ProjectCard — audit resume after refresh (0.8.3 #280-fix)', () => {
   // action above the bar). We look for the i18n key `audit.step` which
   // only renders inside the live progress bar.
   const isAuditBarMounted = (container: HTMLElement) =>
-    container.querySelector('.dash-audit-step') !== null;
+    container.querySelector('[data-testid="audit-timeline-live"]') !== null;
 
   it('surfaces the audit bar when backend reports running, even WITHOUT a local checkpoint', async () => {
     // The killer regression. Pre-fix: no checkpoint → no poll → no
@@ -134,6 +135,27 @@ describe('ProjectCard — audit resume after refresh (0.8.3 #280-fix)', () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     expect(projectsApi.auditStatus).toHaveBeenCalledWith('p-resume');
+    expect(isAuditBarMounted(container)).toBe(true);
+  });
+
+  it('adopts an audit the dashboard already knows about at mount (KT-994)', async () => {
+    // The adoption tick re-ran the poll effect: its cleanup cancelled the
+    // first poll and the re-run bailed on the settled flag, so the card
+    // never learnt the audit was running (launch enabled, live step failed).
+    vi.mocked(projectsApi.auditStatus).mockResolvedValue({
+      project_id: 'p-resume',
+      phase: 'auditing',
+      step_index: 1,
+      total_steps: 16,
+      current_file: 'docs/AGENTS.md',
+      started_at: '2026-10-03T09:46:41Z',
+      kind: 'full_audit',
+    });
+
+    const { container } = renderCard(noop, false, true);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+
     expect(isAuditBarMounted(container)).toBe(true);
   });
 

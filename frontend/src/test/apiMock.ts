@@ -329,6 +329,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // override to seed the chip list.
       auditHistory: resolve([]),
       auditRunSteps: resolve([]),
+    auditSteps: resolve([]),
       // 0.8.4 (#294) — cross-agent memory bindings. Default "no
       // imported discs" so sidebar tests that don't care about the
       // badge see it stay hidden.

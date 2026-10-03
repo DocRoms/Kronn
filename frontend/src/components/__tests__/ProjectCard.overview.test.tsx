@@ -165,7 +165,7 @@ describe('ProjectCard — repository overview', () => {
     const auditSection = document.querySelector('[data-project-view="audit"]');
     expect(auditSection).toBeInTheDocument();
     expect(auditSection?.querySelector('.dash-collapsible-header')).not.toBeInTheDocument();
-    expect(auditSection?.querySelector('.dash-audit-pad')).toBeInTheDocument();
+    expect(auditSection?.querySelector('[data-testid="audit-timeline"]')).toBeInTheDocument();
 
     fireEvent.click(docsTab);
     expect(docsTab).toHaveAttribute('data-active', 'true');
