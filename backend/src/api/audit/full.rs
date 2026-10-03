@@ -240,35 +240,21 @@ pub async fn full_audit(
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-926 — the only other repos this prompt names are the ones the user
+    // explicitly linked to the project. Never the list of the machine's Kronn
+    // projects: the prompt goes to the model provider, and a companion list
+    // would be copied into a versioned `docs/AGENTS.md`.
     let linked_repos_block =
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
-    // 0.8.3 — candidate pool for companion-repo detection. The agent
-    // only suggests links from this finite list (typically 5-20),
-    // not "every repo I see on disk" — keeps suggestions scalable
-    // for users with hundreds of repos.
-    let pid_for_universe = project_id.clone();
-    let kronn_projects_universe_block =
-        match state.db.with_conn(crate::db::projects::list_projects).await {
-            Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(
-                &all,
-                &pid_for_universe,
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to load Kronn projects for companion-detection block: {}",
-                    e
-                );
-                None
-            }
-        };
     let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
-        return sse_error(format!(
-            "{agent_type:?} cannot run audits: it has no filesystem access, so the docs/ deliverables would silently never be written. Pick a CLI agent."
-        ));
+        return sse_error(super::audit_refusal_message(&agent_type));
     }
     let agent_label = format!("{:?}", agent_type);
+    // Snapshot the HTTP provider settings once for the whole run (a no-op for a
+    // CLI agent): every step resolves the same models and endpoints.
+    let agent_launcher = super::agent_launch::AuditAgentLauncher::new(&state, &agent_type).await;
 
     let tokens = {
         let config = state.config.read().await;
@@ -776,7 +762,9 @@ pub async fn full_audit(
         // audits) and the frontend's live-elapsed counter would jump
         // BACK in time once the SSE event lands, leaving the user
         // staring at a counter that re-starts from 0 mid-run.
-        let mut total_tokens_so_far: u64 = 0;
+        // KT-927 — unknown (`None`) until a step's agent reports something, so a
+        // run whose runtime reports nothing never shows "0 tokens".
+        let mut run_tokens = super::agent_launch::RunTokens::default();
         // 0.8.3 (#311) — track resume + completion status. On every
         // successful `step_done` we bump `last_successful_step` AND
         // persist via `update_last_completed_step`. At end-of-stream
@@ -948,7 +936,7 @@ pub async fn full_audit(
                 // 0.8.3 — clear per-step ephemeral chips so a stale
                 // "🔧 Read" or per-step token count from step N-1
                 // doesn't leak into the poll snapshot for step N.
-                // total_tokens_so_far stays intact (cumulative).
+                // run_tokens stays intact (cumulative).
                 t.clear_step_chips(&project_id);
             }
 
@@ -1012,20 +1000,21 @@ pub async fn full_audit(
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
             }
-            if let Some(ref block) = kronn_projects_universe_block {
-                full_prompt.push_str(&format!("\n\n{}\n", block));
-            }
 
             // 0.8.3 (#274) — per-step instrumentation. The audit UI
             // shows a static "Step N/M — file.md" today; users have
             // no signal for how long things take or what tokens are
             // burning. We track:
             //   - step_started_at: wall-clock start (Instant)
-            //   - step_tokens:    max(input+output) seen via
+            //   - step_usage:     max(input+output) seen via
             //     `parse_claude_stream_line` — Claude reports
-            //     cumulative usage per call, so `.max()` is correct
-            //     (NOT a sum, which would double-count).
-            //   - total_tokens_so_far: running counter across all
+            //     cumulative usage per call, so the largest reading is
+            //     correct (NOT a sum, which would double-count). An
+            //     agent that does not speak stream-json (ACP — OpenCode,
+            //     the adapters —, HTTP) reports through the process's
+            //     own usage counters instead (KT-927: they used to read
+            //     0 here). `None` = the runtime reported nothing.
+            //   - run_tokens: running counter across all
             //     finished steps + the current one's last reading.
             // Surfaced via the enriched `step_done` event below; the
             // frontend then displays per-step + total tokens + a
@@ -1054,7 +1043,7 @@ pub async fn full_audit(
                         serde_json::json!({
                             "step": step, "success": false, "file": file_label,
                             "tokens": 0, "duration_ms": 0,
-                            "total_tokens": total_tokens_so_far,
+                            "total_tokens": run_tokens.total(),
                         }).to_string()
                     );
                     any_step_warning = true;
@@ -1079,7 +1068,7 @@ pub async fn full_audit(
                             serde_json::json!({
                                 "step": step, "success": false, "file": file_label,
                                 "tokens": 0, "duration_ms": 0,
-                                "total_tokens": total_tokens_so_far,
+                                "total_tokens": run_tokens.total(),
                             }).to_string()
                         );
                         any_step_warning = true;
@@ -1103,27 +1092,46 @@ pub async fn full_audit(
             let mut citation_feedback: Option<String> = None;
             'attempts: loop {
             attempt += 1;
-            let mut step_tokens: u64 = 0;
+            let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
             let attempt_prompt = match &citation_feedback {
                 Some(fb) => format!("{full_prompt}\n\n{fb}"),
                 None => full_prompt.clone(),
             };
 
-            match runner::start_agent_with_config(runner::AgentStartConfig {
-                full_access: true,
-                tier: audit_tier,
-                // Audit admission currently accepts CLI providers only. The
-                // auditor already has its bounded source/citation prompt; keep
-                // native HTTP tools explicitly absent so a future provider
-                // expansion cannot inherit mutation capabilities by omission.
-                tools: None,
-                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &attempt_prompt, &tokens)
-            }).await {
+            // An HTTP agent's loop is a task and an ACP agent's work a session
+            // in a process the ACP host owns: Stop reaches either through this
+            // token, the counterpart of the PID a direct CLI agent is killed
+            // by. Registered BEFORE the start, which for an HTTP agent awaits
+            // the provider's first response (minutes, on a cold local model)
+            // and for an ACP agent the handshake: a Stop in that window must
+            // still find it.
+            let attempt_cancel = agent_launcher.stops_with_token().then(tokio_util::sync::CancellationToken::new);
+            if let Some(cancel) = &attempt_cancel {
+                if let Ok(mut tracker) = audit_tracker.lock() {
+                    tracker.agent_cancels.insert(project_id.clone(), cancel.clone());
+                }
+            }
+            match agent_launcher.start(
+                &agent_type,
+                audit_tier,
+                &project_path,
+                &project_path_str,
+                &attempt_prompt,
+                &tokens,
+                attempt_cancel.clone(),
+            ).await {
                 Ok(mut process) => {
-                    // Register the child PID for cancellation
-                    if let Some(pid) = process.child.id() {
-                        if let Ok(mut tracker) = audit_tracker.lock() {
-                            tracker.running_pids.insert(project_id.clone(), pid);
+                    // Register the child PID for cancellation — of a direct CLI
+                    // agent only. The child of an HTTP or ACP run is a lifeline
+                    // that does no work: killing it made the pipeline believe
+                    // the step was over while the agent kept going, and it
+                    // would end the wait before the agent's process was
+                    // reaped. Those are stopped through `attempt_cancel`.
+                    if attempt_cancel.is_none() {
+                        if let Some(pid) = process.child.id() {
+                            if let Ok(mut tracker) = audit_tracker.lock() {
+                                tracker.running_pids.insert(project_id.clone(), pid);
+                            }
                         }
                     }
 
@@ -1192,32 +1200,22 @@ pub async fn full_audit(
                         // text). Non-stream-json agents (Vibe direct,
                         // Ollama) skip this branch — their chips stay
                         // empty rather than show stale 0 values.
+                        let mut usage_moved = false;
                         if is_stream_json {
                             match runner::parse_claude_stream_line(&line) {
-                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
-                                    step_tokens = step_tokens.max(input_tokens + output_tokens);
-                                    let cumulative = total_tokens_so_far.saturating_add(step_tokens);
-                                    // 0.8.3 — mirror the live value into
-                                    // the AuditTracker so the poll
-                                    // endpoint can re-seed the chips
-                                    // when SSE buffers / stalls (nginx
-                                    // buffering, agent thinking-only
-                                    // output, page re-mount).
-                                    if let Ok(mut t) = audit_tracker.lock() {
-                                        t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                // A reading that counts nothing is no reading.
+                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. }
+                                    if input_tokens + output_tokens > 0 =>
+                                {
+                                    if step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen) {
+                                        step_usage = crate::db::audit_runs::StepTokens {
+                                            input: Some(input_tokens),
+                                            output: Some(output_tokens),
+                                            cache_read: prompt_cache.cached_prompt_tokens,
+                                            cache_write: prompt_cache.cache_write_prompt_tokens,
+                                        };
+                                        usage_moved = true;
                                     }
-                                    // Surface tokens-so-far LIVE so the
-                                    // frontend chip ticks during the
-                                    // step (was previously emitted only
-                                    // at `step_done`, leaving the user
-                                    // staring at a static counter).
-                                    yield Event::default().event("step_progress").data(
-                                        serde_json::json!({
-                                            "step": step,
-                                            "step_tokens": step_tokens,
-                                            "total_tokens_so_far": cumulative,
-                                        }).to_string()
-                                    );
                                 }
                                 runner::StreamJsonEvent::ToolStart(name) => {
                                     // 0.8.3 — also persist the tool in
@@ -1240,13 +1238,64 @@ pub async fn full_audit(
                                     );
                                 }
                                 // An audit is a one-shot run: nothing to resume.
-                                runner::StreamJsonEvent::Text(_)
+                                runner::StreamJsonEvent::Usage { .. }
+                                | runner::StreamJsonEvent::Text(_)
                                 | runner::StreamJsonEvent::TerminalError(_)
                                 | runner::StreamJsonEvent::ToolInputDelta(_)
                                 | runner::StreamJsonEvent::ToolEnd
                                 | runner::StreamJsonEvent::SessionId(_)
                                 | runner::StreamJsonEvent::Skip => {}
                             }
+                        } else {
+                            // KT-927 — an agent that streams text (ACP:
+                            // OpenCode, the adapters; HTTP) has no usage in
+                            // its lines: the session reports it on the
+                            // process. It used to be read nowhere, so every
+                            // such step was recorded at 0.
+                            let reading = crate::db::audit_runs::StepTokens::from_reported(
+                                process.reported_usage_counters(),
+                            );
+                            if reading.total().is_some() && reading != step_usage {
+                                step_usage = reading;
+                                usage_moved = true;
+                            }
+                        }
+                        if usage_moved {
+                            if let Some(step_tokens) = step_usage.total() {
+                                let cumulative = run_tokens.with(step_tokens);
+                                // 0.8.3 — mirror the live value into
+                                // the AuditTracker so the poll
+                                // endpoint can re-seed the chips
+                                // when SSE buffers / stalls (nginx
+                                // buffering, agent thinking-only
+                                // output, page re-mount).
+                                if let Ok(mut t) = audit_tracker.lock() {
+                                    t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                }
+                                // Surface tokens-so-far LIVE so the
+                                // frontend chip ticks during the
+                                // step (was previously emitted only
+                                // at `step_done`, leaving the user
+                                // staring at a static counter).
+                                yield Event::default().event("step_progress").data(
+                                    serde_json::json!({
+                                        "step": step,
+                                        "step_tokens": step_tokens,
+                                        "total_tokens_so_far": cumulative,
+                                    }).to_string()
+                                );
+                            }
+                        }
+                    }
+                    // The session's usage can land after the last line of text
+                    // (ACP reports it with the end of the turn): read it once
+                    // the stream is over.
+                    if !is_stream_json {
+                        let reading = crate::db::audit_runs::StepTokens::from_reported(
+                            process.reported_usage_counters(),
+                        );
+                        if reading.total().is_some() {
+                            step_usage = reading;
                         }
                     }
                     let status = process.child.wait().await;
@@ -1255,6 +1304,7 @@ pub async fn full_audit(
                     // Unregister PID
                     if let Ok(mut tracker) = audit_tracker.lock() {
                         tracker.running_pids.remove(&project_id);
+                        tracker.agent_cancels.remove(&project_id);
                     }
 
                     // PER-ATTEMPT boundary: enforce mode can retry the same
@@ -1358,7 +1408,7 @@ pub async fn full_audit(
 
                     let cli_success = status.map(|s| s.success()).unwrap_or(false);
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
-                    total_tokens_so_far = total_tokens_so_far.saturating_add(step_tokens);
+                    run_tokens.add(step_usage.total());
 
                     // 0.8.3 — Root-cause guard for the empty-tech-debt
                     // bug on DOCROMS_WEB. The CLI exited 0 (cli_success)
@@ -1561,9 +1611,9 @@ pub async fn full_audit(
                         "step": step,
                         "success": success,
                         "file": file_label,
-                        "tokens": step_tokens,
+                        "tokens": step_usage.total(),
                         "duration_ms": duration_ms,
-                        "total_tokens": total_tokens_so_far,
+                        "total_tokens": run_tokens.total(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
 
@@ -1578,6 +1628,8 @@ pub async fn full_audit(
                         let warn_reason = warning.as_ref().map(|w| w.reason.clone());
                         let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
                         let ended = Utc::now();
+                        let recorded_usage = step_usage;
+                        let recorded_total = run_tokens.total();
                         if let Err(e) = db.with_conn(move |conn| {
                             crate::db::audit_runs::finalize_audit_step(
                                 conn,
@@ -1585,8 +1637,8 @@ pub async fn full_audit(
                                 step as u32,
                                 ended,
                                 duration_ms,
-                                step_tokens,
-                                total_tokens_so_far,
+                                &recorded_usage,
+                                recorded_total,
                                 success,
                                 warn_reason.as_deref(),
                                 repaired,
@@ -1644,6 +1696,9 @@ pub async fn full_audit(
                 }
                 Err(e) => {
                     tracing::error!("Audit step {} failed to start: {}", step, e);
+                    if let Ok(mut tracker) = audit_tracker.lock() {
+                        tracker.agent_cancels.remove(&project_id);
+                    }
                     any_step_warning = true;
                     warned_steps.push(step as u32);
                     let err = serde_json::json!({
@@ -1658,7 +1713,7 @@ pub async fn full_audit(
                         serde_json::json!({
                             "step": step, "success": false, "file": file_label,
                             "tokens": 0, "duration_ms": 0,
-                            "total_tokens": total_tokens_so_far,
+                            "total_tokens": run_tokens.total(),
                         }).to_string()
                     );
                 }
@@ -2595,6 +2650,10 @@ pub async fn cancel_audit(
             ));
         };
         tracker.cancelled.insert(project_id.clone());
+        // An HTTP agent runs in a task, not in the process killed below.
+        if let Some(cancel) = tracker.agent_cancels.remove(&project_id) {
+            cancel.cancel();
+        }
         if let Some(pid) = tracker.running_pids.remove(&project_id) {
             tracing::info!(
                 "Killing audit agent process (PID {}) for project {}",

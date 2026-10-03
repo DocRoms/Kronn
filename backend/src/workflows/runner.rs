@@ -678,17 +678,14 @@ async fn execute_run_with_notify_policy(
     // Running — a run cancelled before it starts keeps nothing awake.
     let _power_lease = crate::core::power_guard::acquire();
 
-    // Resolve project + companion-repo context. Same pattern as the
-    // audit pipeline (api/audit/full.rs:58-74): pre-format the
-    // linked_repos + Kronn-projects-universe blocks ONCE here so every
-    // Agent step in this run pays for the DB hit exactly once instead
-    // of N times. The helper returns an empty string when there's
-    // nothing to inject (no project bound, no companions registered).
-    // the same read also carries how this project prepares a
+    // Resolve the project once: its path, and how it prepares a
     // worktree. A worktree is invisible to containers mounted on the main
     // checkout, so a validation run in one reads the wrong code and passes;
     // the recipe that fixes that belongs to the project, not to each of its
     // workflows.
+    // KT-926 — an Agent step's prompt carries nothing about the user's other
+    // Kronn projects: it goes to the model provider, so the only repos a prompt
+    // may name are the ones the user linked to the project themselves.
     let (project_path, project_hooks) = if let Some(ref pid) = workflow.project_id {
         let pid_clone = pid.clone();
         let db3 = db.clone();
@@ -705,9 +702,6 @@ async fn execute_run_with_notify_policy(
     } else {
         (String::new(), None)
     };
-    let agent_extra_context =
-        crate::api::projects::compute_companion_context(&state, workflow.project_id.as_deref())
-            .await;
 
     // 0.7.0 Phase 4 — detect resume: a non-empty step_results means
     // this is a continuation from a Gate pause (or a future restart-
@@ -1084,6 +1078,13 @@ async fn execute_run_with_notify_policy(
                 .filter(|d| (d.installed || d.runtime_available) && d.enabled)
                 .map(|d| d.agent_type.clone())
                 .collect();
+            // A test ACP route stands in for the agent binary; without this the
+            // preflight would depend on what the host happens to have installed.
+            #[cfg(test)]
+            let routed = crate::agents::runner::resolve_agent_work_dir(Some(&work_dir), &work_dir)
+                .is_ok_and(|dir| crate::agents::runner::test_acp_routes::is_routed(&dir));
+            #[cfg(not(test))]
+            let routed = false;
             let mut missing: Vec<(String, String)> = Vec::new();
             for step in workflow
                 .steps
@@ -1098,7 +1099,8 @@ async fn execute_run_with_notify_policy(
                         .base_url
                         .as_deref()
                         .is_some_and(|url| !url.trim().is_empty());
-                let ok = declared_proxy
+                let ok = routed
+                    || declared_proxy
                     || usable
                         .iter()
                         .any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
@@ -1788,7 +1790,6 @@ async fn execute_run_with_notify_policy(
                             tokens_config,
                             full_access,
                             &ctx,
-                            &agent_extra_context,
                             Some(progress_tx),
                             Some(&activity_tx),
                             Some(&agents_config.model_tiers),
@@ -2842,7 +2843,6 @@ async fn execute_run_with_notify_policy(
                                 tokens_config,
                                 full_access,
                                 &ctx,
-                                &agent_extra_context,
                                 None,
                                 None,
                                 Some(&agents_config.model_tiers),
@@ -6434,6 +6434,67 @@ mod tests {
             persisted.step_results[0].last_activity, None,
             "the terminal result replaces the in-flight one"
         );
+    }
+
+    /// KT-926 — the prompt of a workflow Agent step goes to the model provider, so it
+    /// names no Kronn project but the one the workflow is bound to: with three
+    /// other projects registered, neither their names nor their paths reach the
+    /// agent, whether or not the project has a linked repo. The step is run by
+    /// the real `execute_run` on a scripted `claude`, and the test reads the
+    /// prompt that agent was handed on stdin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_step_prompt_names_no_unlinked_kronn_project() {
+        use crate::api::other_projects_fixture as fixture;
+        const STEP_MARKER: &str = "WF-STEP-MARKER-KT926";
+        for linked in [false, true] {
+            let tools = tempfile::tempdir().unwrap();
+            let (program, log) = fixture::recording_claude(tools.path());
+            let (state, tokens, agents) = test_state_and_configs();
+            let repo = tempfile::tempdir().unwrap();
+            assert!(std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+            fixture::project_among_others(&state, repo.path(), linked).await;
+            let _route = fixture::route_claude(repo.path(), &program);
+
+            let mut wf = make_workflow_with_artifacts(Default::default());
+            wf.id = "wf-kt926".into();
+            wf.project_id = Some(fixture::PROJECT_ID.into());
+            let mut agent = fake_step("lead");
+            agent.prompt_template = format!("{STEP_MARKER}: describe this project");
+            wf.steps = vec![agent];
+            let mut run = pending_run("run-kt926", &wf.id);
+            insert_wf_and_run(&state, &wf, &run).await;
+
+            execute_run(
+                state.clone(),
+                &wf,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the run completes");
+
+            let prompts: Vec<String> = fixture::recorded_turns(&log)
+                .into_iter()
+                .filter(|turn| turn.contains(STEP_MARKER))
+                .collect();
+            assert_eq!(
+                prompts.len(),
+                1,
+                "linked={linked}: the Agent step ran once, got {prompts:?}"
+            );
+            fixture::assert_no_unlinked_project(&prompts[0], "workflow Agent step");
+            fixture::assert_no_candidate_pool(&prompts[0], "workflow Agent step");
+        }
     }
 
     #[tokio::test]

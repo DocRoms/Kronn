@@ -42,18 +42,70 @@ pub struct OllamaModel {
 pub struct OllamaHealthResponse {
     /// "online", "offline", "not_installed", "unreachable"
     pub status: String,
+    /// The server's own version, from `/api/version`. `None` when the server
+    /// is not online or did not answer that probe.
     pub version: Option<String>,
     pub endpoint: String,
     pub models_count: u32,
     /// User-facing explanation when status != "online". Contextualized
     /// for the detected environment (native, Docker, WSL).
     pub hint: Option<String>,
+    /// KT-930 — this host is a Mac on Apple Silicon AND the running Ollama is
+    /// recent enough to run `-mlx` models as Kronn expects. Decided here, from
+    /// the host and the server's reported version — never from the browser's
+    /// user agent, which says nothing about where Ollama runs. `false` when
+    /// either fact is missing or unknown.
+    pub mlx_capable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct OllamaModelsResponse {
     pub models: Vec<OllamaModel>,
+}
+
+/// KT-930 — how an installed model compares with the official Ollama library's
+/// current copy of the same tag.
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum OllamaUpdateStatus {
+    /// The library's manifest hashes to the digest installed here.
+    UpToDate,
+    /// The library's manifest hashes to something else: the tag moved on.
+    UpdateAvailable,
+    /// No answer to compare against: the registry was unreachable or slow, the
+    /// model is not in the official library, or either digest was unreadable.
+    /// Never read as up to date.
+    Unknown,
+}
+
+/// One installed model's freshness.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaModelFreshness {
+    pub name: String,
+    pub status: OllamaUpdateStatus,
+}
+
+/// What a suggested tag weighs, from the library's manifest (the sum of its
+/// config and layer sizes), formatted like `OllamaModel::size`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaSuggestionSize {
+    pub name: String,
+    pub size: String,
+}
+
+/// GET /api/ollama/registry — what the official library says about the
+/// installed models and the suggested tags, without downloading anything.
+/// A tag the library did not answer for is simply absent from `suggestions`
+/// and `unknown` in `models`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OllamaRegistryResponse {
+    pub models: Vec<OllamaModelFreshness>,
+    pub suggestions: Vec<OllamaSuggestionSize>,
 }
 
 /// The sole accepted input for a local Ollama pull.  The endpoint never

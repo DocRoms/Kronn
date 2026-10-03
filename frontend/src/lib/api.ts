@@ -170,6 +170,7 @@ import type {
   ImportQuickExecRequest,
   OllamaHealthResponse,
   OllamaModelsResponse,
+  OllamaRegistryResponse,
   SetOllamaContextOverrideResponse,
   LiteLlmHealthResponse,
   NvidiaModelsResponse,
@@ -600,9 +601,10 @@ interface AuditSseEvent {
   // total_tokens is the running sum across steps. started_at is an
   // ISO-8601 timestamp surfaced once on the `start` event so the
   // frontend can compute live elapsed without local-clock drift.
-  tokens?: number;
+  // `null` (KT-927): the agent reported no usage — unknown, never 0.
+  tokens?: number | null;
   duration_ms?: number;
-  total_tokens?: number;
+  total_tokens?: number | null;
   started_at?: string;
   // 0.8.3 (#281) — live step progress + tool-call events fired
   // mid-step (Claude stream-json only). step_tokens = current
@@ -1337,9 +1339,9 @@ export const projects = {
       onStepDone: (
         step: number,
         success: boolean,
-        tokens?: number,
+        tokens?: number | null,
         durationMs?: number,
-        totalTokens?: number,
+        totalTokens?: number | null,
       ) => void;
       /**
        * 0.8.3 (#281) — live token counter during a step. Fires every
@@ -2901,6 +2903,16 @@ export const usage = {
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
+  /** What the official Ollama library says about the installed models (is
+   *  there an update?) and the given suggested tags (how big?). Asks the
+   *  internet through the backend: never wait on it to draw the card. The
+   *  backend caches for hours; `fresh` makes it ask again (after an update,
+   *  on Refresh). */
+  registry: (suggested: string[], fresh = false) =>
+    api<OllamaRegistryResponse>(
+      'GET',
+      `/ollama/registry?suggested=${encodeURIComponent(suggested.join(','))}${fresh ? '&fresh=true' : ''}`,
+    ),
   pull: (
     model: string,
     handlers: {

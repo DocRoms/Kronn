@@ -84,13 +84,10 @@ fn load_detail(
     let default_targets = if crate::db::discussions::disc_is_no_agent(conn, &id)? {
         crate::db::discussion_sessions::list_sessions(conn, &id, false)?
             .iter()
-            .map(|session| {
-                Ok(crate::models::MessageTarget::cli(
-                    crate::db::discussions::parse_agent_type(&session.agent_type)?,
-                    session.id,
-                ))
+            .filter_map(|session| {
+                crate::db::discussions::session_cli_target(&session.agent_type, session.id)
             })
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect()
     } else {
         let mut target = crate::models::MessageTarget::discussion_agent(discussion.agent.clone());
         target.connection_id = discussion.connection_id.clone();
@@ -1196,6 +1193,43 @@ mod tests {
         }).await.unwrap();
         let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
         AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    #[tokio::test]
+    async fn a_room_with_an_unidentified_peer_still_opens() {
+        // One `Unknown` session used to fail the whole detail with "unknown
+        // persisted agent type", so the room never rendered.
+        let state = state_with_disc("d-unknown").await;
+        let (claude, detail) = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::set_disc_no_agent(conn, "d-unknown", true)?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-unknown",
+                    "Unknown",
+                    Some("sess-unknown"),
+                    "peer",
+                )?;
+                let claude = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-unknown",
+                    "ClaudeCode",
+                    Some("sess-claude"),
+                    "peer",
+                )?;
+                Ok((claude, load_detail(conn, "d-unknown")?))
+            })
+            .await
+            .unwrap();
+        let detail = detail.expect("the room exists");
+        assert_eq!(
+            detail.default_targets,
+            vec![crate::models::MessageTarget::cli(
+                crate::models::AgentType::ClaudeCode,
+                claude
+            )]
+        );
     }
 
     #[tokio::test]

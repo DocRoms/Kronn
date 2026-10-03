@@ -340,6 +340,27 @@ describe('DiscussionsPage', () => {
     return { view, page, discussion, other };
   }
 
+  it('shows why a discussion could not be opened and loads it on retry', async () => {
+    const discussion = makeListDiscussion('d-load-failed', 0);
+    vi.mocked(discussionsApi.poll).mockRejectedValue(new Error('unknown persisted agent type'));
+    const lifted = liftedProps();
+    await wrap(
+      <DiscussionsPage
+        projects={[]} agents={[unavailableNative]} allDiscussions={[discussion]}
+        configLanguage="fr" agentAccess={null}
+        refetchDiscussions={noop} refetchProjects={noop} onNavigate={noop}
+        toast={toastFn} initialActiveDiscussionId={discussion.id} {...lifted}
+      />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Impossible d’ouvrir cette discussion');
+    expect(alert).toHaveTextContent('unknown persisted agent type');
+
+    vi.mocked(discussionsApi.poll).mockResolvedValue({ revision: 'r-ok', detail: discussion } as never);
+    fireEvent.click(screen.getByRole('button', { name: 'Réessayer' }));
+    await waitFor(() => expect(screen.queryByText(/Impossible d’ouvrir cette discussion/)).toBeNull());
+  });
+
   it('allows human publication in a no_agent room without an installed native provider', async () => {
     vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: true });
     vi.mocked(discussionsApi.sendMessageStream).mockReset();

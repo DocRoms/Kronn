@@ -11,6 +11,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-09-30
+
 ### Added
 
 - The Automation page lists the skills. "Skills" is a fifth type in the
@@ -140,9 +142,77 @@ Release notes for 0.9.3 and earlier are available in the
   nightly-triage"); "Align all" follows the same rule. Writing or loading a
   single resource announces its dependencies and includes them by default;
   leaving them out warns that it will only partly work.
+- An audit, Full or partial, can run on Ollama or LiteLLM (KT-924). Both were
+  refused on the ground that an HTTP agent has no filesystem, which stopped being
+  true when Kronn gave them native file tools: the audit now hands the agent
+  those tools, scoped to the project. Every path is canonicalised against the
+  project and refused when it leaves it (`..`, an absolute path, a symlink), there
+  is no shell, and a truncated read says so. The audit's agent is offered only
+  `read_file`, `list_files`, `find_files`, `search_text`, `git_status`,
+  `git_diff`, `git_log` and the four write tools — no `web_fetch`, no
+  `git_commit`, no plan or REST-plugin tools. The model and endpoint come from the
+  tiers and endpoints set in Settings → Agents, like a discussion or a workflow
+  step. A step whose agent writes nothing is still recorded as failed, whether it
+  left its file missing, still the template, or untouched. Stop reaches an HTTP
+  agent's request and tool loop, which a process kill cannot. The refusal that
+  remains (Vibe, NVIDIA, Custom) now names the agents that are accepted, and the
+  audit's agent picker offers Ollama and LiteLLM. NVIDIA and Custom stay refused:
+  sending a whole repository to a hosted service is a decision the audit does not
+  take for you.
+
+- An installed Ollama model can be updated from its card, and a Mac is offered
+  the builds made for it (KT-930). In Config › Agents › Local models › Ollama,
+  the download block now lists the installed models, each with an **Update**
+  button, except a model confirmed up to date: it asks Ollama to pull that exact
+  tag again, with the download's own progress, Cancel and error messages. A badge beside it says **Update
+  available** when the official Ollama library's copy of that tag is no longer
+  the one you hold, **Up to date** when it is, and **Not checked** whenever Kronn
+  could not confirm either way (the registry did not answer, or the model is not
+  from the official library): never "up to date" on a guess. The comparison
+  downloads nothing: the SHA-256 of the registry's manifest for the tag is the
+  digest Ollama reports locally. Answers are cached for hours; Refresh, and a
+  finished update, check again instead. The block's folded summary counts the
+  updates waiting. On a Mac with Apple Silicon running Ollama 0.34 or later, the `-mlx`
+  builds (`gemma4:12b-mlx`, `qwen3.8:27b-mlx`) come first in the suggestions,
+  marked "Optimized for Mac". The backend decides (`mlx_capable` and `version` on
+  `GET /api/ollama/health`, from the host and the server's own version), never
+  the browser's user agent; on any other machine the list is unchanged.
 
 ### Changed
 
+- The Ollama card's "Download a model" block is folded once a model is installed
+  (KT-930). It was always open, and took the card over even with a full model
+  library. It stays open for a first use, remembers your choice in this browser
+  and, folded, says how many suggestions it holds and how many downloads are
+  running; a download in flight stays visible, with its Cancel. The suggestions
+  are now one portable model per hardware tier — `qwen3.5:4b`, `qwen3:8b`,
+  `qwen3:30b-a3b` — in place of the former six, each with the repository run that
+  shows it exists, and all five are checked against the Ollama library (see
+  `docs/operations/ollama-local-models.md`). Each suggestion shows its real
+  size, read off the library's manifest rather than typed into Kronn; when the
+  library does not answer, no size is shown instead of an invented one. The
+  card draws from your local Ollama first and fills in what the library says
+  when it arrives (answers are cached for hours, and the only thing sent is a
+  library tag name).
+
+- No prompt Kronn sends to a model lists your other Kronn projects any more
+  (KT-926). The steps of a Full or partial audit, and every discussion (the
+  audit's briefing and validation included), orchestration round and workflow
+  Agent step, used to carry the name and absolute path of every other project
+  registered in Kronn; the audit steps also asked the agent to read their
+  `docs/AGENTS.md` and to write a `## Suggested companion repos` section into
+  the audited repository's own `docs/AGENTS.md`. That prompt goes to the model
+  provider, which may be a remote service with no relation to those projects,
+  and the section landed in a versioned file; for an HTTP agent, whose file
+  tools cannot leave the project since KT-924, the instruction to read another
+  repository contradicted the tools. The only other repositories a prompt names
+  are the ones you linked to the project yourself ("Linked repos" on the
+  project): every audit step names them inline, and discussions and workflow
+  Agent steps keep reading them from the project's `docs/linked-repos.md`, as
+  before. Nothing else about the audit changes: it still describes the
+  repository from what the repository says. A `## Suggested companion repos`
+  section an earlier audit left in a `docs/AGENTS.md` is not removed by this
+  change.
 - The Plugins sidebar no longer carries a per-project tree, so each plugin is
   listed once (a global plugin used to appear once per project, and again
   under "No project"). It is a flat list: Favorites and "Recently tested"
@@ -221,6 +291,94 @@ Release notes for 0.9.3 and earlier are available in the
   answers, byte for byte, nor in what is masked (KT-915).
 
 ### Fixed
+
+- The model list of Config shows the models OpenCode declares in a project
+  too, and a launch runs the model you chose (KT-928). OpenCode builds its
+  model list per working directory — its user-level config plus the
+  `opencode.json` of that directory — while Kronn read it from a neutral one,
+  so a provider only a project declares, a local Ollama for instance, was in
+  every run of that project and in no selector. Kronn now also asks OpenCode
+  from each registered project that has its own `opencode.json(c)` (or
+  `.opencode/opencode.json(c)`; the files are only checked for, never read),
+  and adds what comes back: a model only a project offers says so in its
+  description, nothing is listed that OpenCode did not report, and a project
+  that fails to answer is left out without failing the refresh. The reader also
+  accepts a model list grouped by provider, which it used to drop whole. On
+  the launch side, a model that the session does not list was silently
+  replaced by OpenCode's own default while the discussion kept showing the one
+  you picked; that launch is now refused with a message naming the model, and
+  nothing is sent to the agent. A value of another session option (an effort
+  level, a mode) can no longer be taken for a model.
+- An audit on OpenCode reads a versioned environment template and no longer
+  aborts when a read is refused (KT-927). OpenCode guards `*.env.*` by pattern
+  and asks Kronn about a read without saying which file, so `.env.dist`, like
+  `.env.example`, `.env.sample` and `.env.template`, was refused together with
+  the real `.env` — and OpenCode ends its whole turn when a question is
+  refused, so one template read aborted the step. Kronn now starts OpenCode
+  with a read policy: the templates are readable, `.env`, `.env.local` and the
+  other real environment files stay refused, and a refusal reaches the agent as
+  the tool's answer instead of ending the turn. For the other ACP agents the
+  broker refuses a read of a real secret file, or of a link to one, even with
+  full access, and allows the templates. A project that already passes its own
+  `OPENCODE_CONFIG_CONTENT` keeps it. See
+  [auditing with an ACP agent](docs/architecture/audit-acp-agents.md).
+
+- "Cancel" stops an audit on an ACP agent in seconds, and the partial audit can
+  be cancelled at all (KT-927). `cancel-audit` killed the process it had on
+  record, which for OpenCode — and for Claude and Codex through their adapters —
+  is a lifeline that does no work: the audit believed the step over while the
+  agent kept reading and writing, for about eight minutes on an OpenCode run. The
+  stop now cancels the agent's ACP session and shuts its process down, with
+  what it started. The partial audit had no cancellation whatsoever, for any
+  agent: Cancel set a flag nothing read and the refresh ran to its end; it now
+  stops between steps and during one, ends as Cancelled, and leaves the baseline
+  alone.
+
+- The steps of an audit on an ACP agent record the tokens they consumed
+  (KT-927). Only Claude's own stream was read, so every step of OpenCode — or of
+  any ACP agent, Claude and Codex included — counted 0 tokens, per step and per
+  run. The recap now keeps input, output and cache read/written apart, as the
+  runtime reports them (migration 205), for the Full and the partial audit. A
+  runtime that reports nothing gives an unknown figure (`—`), never 0; the run
+  total is unknown until a step has reported.
+- A local model can now read a large API response in parts instead of losing it
+  (KT-929). The `api_call` tool of the HTTP agents (Ollama, LiteLLM, NVIDIA)
+  takes an `extract`, a JSONPath applied to the response, the same one workflows
+  and the CLI bridge already took; only what it selects comes back. Until now a
+  response too big for the window was shortened with the advice to "ask for a
+  part you have not seen", and the tool had no way to ask. The model asked again
+  for the same thing, was refused as a repeat, and the turn ended half done: a
+  SpeedCurve answer with LCP, FCP, INP and TTFB missing. A shortened API result
+  now says what it holds (its keys, with the paging shown as values, the length of
+  its main list, the keys of one element down to its nested objects) and gives
+  paths that select something on that very response, one of them for a whole
+  element. A call that differs from the previous one only by its `extract` or a
+  query parameter is a new question and runs; only an identical call is answered
+  as a repeat. A result that was already an extract is told to select less
+  instead. Measured on a 198 KB answer of a hundred runs in a 32K window: the
+  first result is shortened to 8 KB, one targeted call returns the four metrics of
+  all runs in 2 KB, and the conversation stays at 19,319 of 32,768 tokens. The
+  window itself is unchanged: a discussion already runs `qwen3.8:27b-mlx` at
+  65,536 tokens on a 64 GB Mac, and the 32K ceiling applies only to a native MLX
+  worker (see `docs/operations/ollama-local-models.md`).
+
+- A room that a CLI peer joined without being identified opens again
+  (KT-925). The bridge joins such a peer as `Unknown`; the discussion detail,
+  its default targets, native replies and room imports then failed with
+  "unknown persisted agent type", and the room never rendered. That peer is
+  now skipped as a typed target and logged. The bridge also recognises
+  OpenCode, which was joining as `Unknown`, and a discussion whose first load
+  fails says why, with a retry, instead of loading forever.
+
+- Frontend dependencies: `brace-expansion` is pinned to 5.0.12, which fixes
+  GHSA-qhr7-859c-m2p7 and two related advisories (denial of service by
+  recursion, quadratic expansion). It is only used by the lint tooling.
+
+- Backend tests: the workflow test that reads a running step's tool call no
+  longer depends on a Claude CLI being installed on the machine. The agent
+  preflight now accepts an agent served by a test ACP route, so the test
+  passes on a CI runner without `claude` on the PATH. Nothing changes outside
+  tests.
 
 - The Automation sidebar folds every group, the first one included (KT-921).
   The group that held the open automation was forced open, and the first group

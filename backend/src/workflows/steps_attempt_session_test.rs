@@ -38,7 +38,6 @@ async fn run_claude_fixture(script: &str) -> StepResult {
         &tokens,
         false,
         &TemplateContext::new(),
-        "",
         None,
         None,
         None,

@@ -1635,16 +1635,16 @@ body"#;
         );
 
         // 0.8.3 cross-repo evidence — the skill must teach the
-        // runner-side companion-repo injection (see runner.rs:124
-        // and triage::TRIAGE_PROMPT_ADDENDUM). Without this section
-        // an architect designing a migration workflow won't realize
-        // the runtime injects linked_repos AND that the agent is
+        // linked-repo evidence pattern (see triage::TRIAGE_PROMPT_ADDENDUM).
+        // Without this section an architect designing a migration
+        // workflow won't realize the project's linked_repos are the
+        // source AND that the agent is
         // expected to cite `evidence: <repo>/<path>:<line>` in
         // `decided`/`mocked` entries — the killer differentiator
         // versus a flat "agent improvises in isolation" pipeline.
         assert!(
             c.contains("Cross-repo evidence"),
-            "skill must teach the cross-repo evidence section (linked_repos auto-injection)"
+            "skill must teach the cross-repo evidence section (the project's linked repos)"
         );
         assert!(
             c.contains("linked_repos") || c.contains("Linked repositories"),

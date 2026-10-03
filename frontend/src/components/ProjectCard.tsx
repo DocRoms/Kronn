@@ -593,8 +593,8 @@ export function ProjectCard({
 
   // Briefing agent: an explicit audit pick stays valid (audit-capable ⊂
   // briefing-capable), otherwise fall back to any BRIEFING-capable agent —
-  // never the audit list, which is empty when only Ollama is installed
-  // while the briefing legitimately works with it.
+  // never the audit list, which is narrower (an API-only agent can brief
+  // without being able to write the audit's docs).
   const briefingAgentPick = (auditAgentChoice && agents.some(a => a.agent_type === auditAgentChoice && canRunBriefing(a)))
     ? auditAgentChoice
     : (agents.filter(canRunBriefing)[0]?.agent_type ?? 'ClaudeCode');
@@ -962,7 +962,11 @@ export function ProjectCard({
           // is the running sum maintained server-side. Both stay
           // null when the agent doesn't speak stream-json (Vibe,
           // Ollama direct) — the chips hide rather than show 0.
+          // KT-927 — `null` is an agent that reported no usage (an ACP agent
+          // whose runtime gives none): unknown, not 0, so the previous step's
+          // figure must not stay on screen as if it were this one's.
           if (typeof tokens === 'number') setAuditLastStepTokens(tokens);
+          else if (tokens === null) setAuditLastStepTokens(null);
           if (typeof totalTokens === 'number') setAuditTotalTokens(totalTokens);
           // 0.8.3 (#281) — clear current tool when step finishes so
           // the chip doesn't show stale "🔧 Read" on the next step.

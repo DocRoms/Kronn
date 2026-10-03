@@ -84,7 +84,7 @@ pub(crate) fn step_model_override(
 }
 
 /// Build the full agent-ready prompt for a step: template render +
-/// `extra_context` append + output-format addendum + triage addendum.
+/// output-format addendum + triage addendum.
 /// Does NOT append the signal-protocol instructions — those depend on
 /// runtime `on_result` rules and are still added by [`execute_step`]
 /// after this helper returns.
@@ -97,22 +97,15 @@ pub(crate) fn step_model_override(
 pub(crate) fn build_step_prompt(
     step: &WorkflowStep,
     ctx: &TemplateContext,
-    extra_context: &str,
 ) -> Result<String, String> {
     let mut prompt = ctx
         .render_strict(&step.prompt_template)
         .map_err(|e| format!("Template render error: {}", e))?;
 
-    // 0.8.3 — audit-pipeline symmetry: append the pre-computed
-    // linked_repos + Kronn-projects-universe blocks to every Agent
-    // step's prompt. Empty when the workflow has no project binding
-    // or the project has no companions registered. Inserted BEFORE
-    // the output_format / triage / signal addenda so those still
-    // anchor the END of the prompt (LLMs follow trailing instructions
-    // more reliably than leading ones).
-    if !extra_context.is_empty() {
-        prompt.push_str(extra_context);
-    }
+    // KT-926 — nothing about the user's other Kronn projects is appended here:
+    // the prompt goes to the model provider. The output_format / triage /
+    // signal addenda below anchor the END of the prompt (LLMs follow trailing
+    // instructions more reliably than leading ones).
 
     // Auto-inject structured output format instructions when output_format
     // is `Structured` or `TypedSchema`. The TypedSchema variant adds the
@@ -146,19 +139,12 @@ pub(crate) fn build_step_prompt(
 ///
 /// - `project_path`: original project path for MCP context resolution
 /// - `work_dir`: agent's working directory (may be a worktree)
-/// - `extra_context`: pre-formatted companion-repo + Kronn-projects-
-///   universe blocks (linked_repos + universe). Computed ONCE at run
-///   start by [`crate::workflows::runner::execute_run`] and passed in
-///   here so every Agent step in the run shares the same audit-pipeline
-///   symmetric context without re-querying the DB. Pass `""` for runs
-///   without a project binding (Notify-only / ApiCall-only).
 /// - `progress_tx`: if Some, partial output text is streamed as it arrives
 ///
-/// 0.8.3 — 8 args (was 7) after adding `extra_context` for cross-repo
-/// companion injection. Bundling them into a struct would force every
-/// caller (runner, test-step endpoint, api/workflows/test-step) to
-/// build the struct vs. passing positional args inline, with no
-/// real readability win at the call site. Allow the lint locally.
+/// Bundling the arguments into a struct would force every caller (runner,
+/// test-step endpoint, api/workflows/test-step) to build the struct vs.
+/// passing positional args inline, with no real readability win at the call
+/// site. Allow the lint locally.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_step(
     step: &WorkflowStep,
@@ -167,7 +153,6 @@ pub async fn execute_step(
     tokens_config: &TokensConfig,
     full_access: bool,
     ctx: &TemplateContext,
-    extra_context: &str,
     progress_tx: Option<ProgressSender>,
     activity: Option<&AgentActivitySink>,
     // 2026-06-12 (run-9 finding) — the user's [agents.model_tiers] overrides
@@ -190,9 +175,9 @@ pub async fn execute_step(
 ) -> StepOutcome {
     let start = Instant::now();
 
-    // Build prompt (template render + extra_context + output-format
-    // addendum + triage addendum). Errors map to a Failed StepOutcome.
-    let mut prompt = match build_step_prompt(step, ctx, extra_context) {
+    // Build prompt (template render + output-format addendum + triage
+    // addendum). Errors map to a Failed StepOutcome.
+    let mut prompt = match build_step_prompt(step, ctx) {
         Ok(p) => p,
         Err(e) => {
             return StepOutcome {
@@ -2295,11 +2280,9 @@ mod tests {
     // ── build_step_prompt — 0.8.3 (TD-265) ──────────────────────────────
     //
     // The prompt-assembly path was extracted from execute_step so we can
-    // unit-test the behavior independently from the agent spawn. These
-    // tests lock in the wiring between extra_context (linked_repos +
-    // universe block injected by the runner) and the final prompt the
-    // agent sees. A regression here would silently drop the cross-repo
-    // evidence the entire 0.8.3 release is built around.
+    // unit-test the behavior independently from the agent spawn. KT-926: the
+    // step prompt is the rendered template plus the addenda below and nothing
+    // about the user's other Kronn projects.
 
     #[test]
     fn a_reviewer_on_the_same_agent_speaks_to_the_same_endpoint() {
@@ -2397,16 +2380,15 @@ mod tests {
     }
 
     #[test]
-    fn build_step_prompt_returns_rendered_template_when_extra_context_is_empty() {
-        // No project = no companion-repo context. The prompt is just
-        // the rendered template; callers must not see any synthetic
-        // "## Linked repositories" header injected.
+    fn build_step_prompt_returns_the_rendered_template_and_nothing_else() {
+        // A free-text step is just its rendered template: no synthetic
+        // "## Linked repositories" / "## Other Kronn projects" header.
         let step = make_step("Hello world");
         let ctx = TemplateContext::new();
-        let prompt = build_step_prompt(&step, &ctx, "").expect("must render");
+        let prompt = build_step_prompt(&step, &ctx).expect("must render");
         assert_eq!(
             prompt, "Hello world",
-            "empty extra_context must not leak any header into the prompt"
+            "the prompt must not carry anything the template did not say"
         );
     }
 
@@ -2416,7 +2398,7 @@ mod tests {
         let mut ctx = TemplateContext::new();
         ctx.set_issue("Correct title", "Body", "7", "https://example/7", &[]);
 
-        let error = build_step_prompt(&step, &ctx, "")
+        let error = build_step_prompt(&step, &ctx)
             .expect_err("strict runtime rendering must stop before agent startup");
 
         assert!(error.contains("issue.titel"));
@@ -2424,60 +2406,26 @@ mod tests {
     }
 
     #[test]
-    fn build_step_prompt_appends_extra_context_after_render() {
-        // The runner pre-computes `## Linked repositories ...` + the
-        // `## Other Kronn projects ...` block ONCE and passes them as
-        // extra_context. The helper appends them VERBATIM after the
-        // template render — that's the entire wiring the cross-repo
-        // evidence pattern depends on.
-        let step = make_step("Do the thing.");
-        let ctx = TemplateContext::new();
-        let extra = "\n\n## Linked repositories (companion repos)\n- **front_africanews** — `/r/front_africanews`\n";
-        let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
-        assert!(
-            prompt.starts_with("Do the thing."),
-            "rendered template must lead the prompt"
-        );
-        assert!(
-            prompt.contains("## Linked repositories (companion repos)"),
-            "extra_context header must be present in final prompt — wiring regression"
-        );
-        assert!(
-            prompt.contains("front_africanews"),
-            "concrete companion entries must reach the prompt"
-        );
-        // Order matters: extra_context must come AFTER the rendered
-        // template (so the trailing addenda below — output_format /
-        // triage — anchor the END of the prompt).
-        let user_idx = prompt.find("Do the thing.").unwrap();
-        let extra_idx = prompt.find("## Linked repositories").unwrap();
-        assert!(
-            user_idx < extra_idx,
-            "extra_context must be appended AFTER the rendered template, not prepended"
-        );
-    }
-
-    #[test]
     fn build_step_prompt_keeps_addenda_anchored_at_the_end() {
         // When the step has a TypedSchema output_format AND a triage
-        // description, both addenda must trail the prompt — even when
-        // extra_context is also present. LLMs follow trailing
-        // instructions more reliably than leading ones, so the order
-        // is load-bearing: template → extra_context → output_format
-        // addendum → triage addendum.
+        // description, both addenda must trail the prompt. LLMs follow
+        // trailing instructions more reliably than leading ones, so the order
+        // is load-bearing: template → output_format addendum → triage
+        // addendum.
         let mut step = make_step("Triage this ticket");
         step.description = Some("[TRIAGE] feasibility audit".into());
         step.output_format = crate::workflows::triage::triage_output_format();
         let ctx = TemplateContext::new();
-        let extra = "\n\n## Linked repositories\n- ref\n";
-        let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
+        let prompt = build_step_prompt(&step, &ctx).expect("must render");
         let template_idx = prompt.find("Triage this ticket").unwrap();
-        let extra_idx = prompt.find("## Linked repositories").unwrap();
         let triage_idx = prompt
             .find("TRIAGE MODE")
             .expect("triage addendum must be appended");
-        assert!(template_idx < extra_idx && extra_idx < triage_idx,
-            "order must be: template → extra_context → triage addendum; got idx {template_idx}/{extra_idx}/{triage_idx}");
+        assert_eq!(template_idx, 0, "the rendered template leads the prompt");
+        assert!(
+            template_idx < triage_idx,
+            "order must be: template → triage addendum; got idx {template_idx}/{triage_idx}"
+        );
     }
 
     // ── fail_fast_on_unresolved ──────────────────────────────────────────
@@ -3171,7 +3119,6 @@ mod http_native_tool_step_tests {
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3229,7 +3176,6 @@ mod http_native_tool_step_tests {
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3356,7 +3302,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3404,7 +3349,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3457,7 +3401,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3536,7 +3479,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             &tokens,
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3631,7 +3573,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             &tokens,
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,

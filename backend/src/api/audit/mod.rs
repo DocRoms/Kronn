@@ -12,6 +12,7 @@ use std::pin::Pin;
 use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 
+mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
@@ -1218,8 +1219,18 @@ pub(crate) fn partial_selectable(step: &AnalysisStep) -> bool {
 }
 
 /// Agents eligible to RUN an audit: the pipeline's only deliverable is
-/// files written into `docs/`, so an agent without filesystem access can
-/// only produce a silent no-op that the validator then flags step by step.
+/// files written into `docs/`, so an agent that cannot write there can only
+/// produce a silent no-op that the validator then flags step by step.
+///
+/// Two kinds of agent can: a CLI with its own filesystem, and an HTTP agent
+/// whose file tools Kronn executes on its behalf (KT-338), scoped to the
+/// project by `agent_launch` (KT-924). Ollama and LiteLLM are the HTTP agents
+/// admitted: NVIDIA is a hosted service the user has not been asked to send a
+/// whole repository to, and `Custom` needs a named connection the audit has no
+/// way to select. The refusal therefore stays for an agent with no file tools
+/// Kronn can scope to the project, and `audit_refusal_message` names who is
+/// accepted.
+///
 /// ALLOWLIST, not denylist (Codex A4 v2): a new/unknown variant must force
 /// a compiler decision here instead of being audit-capable by default —
 /// `Custom`'s runner is a bare `echo` that exits 0, the exact silent no-op
@@ -1233,15 +1244,39 @@ pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
         | AgentType::OpenCode
         | AgentType::GeminiCli
         | AgentType::Kiro
-        | AgentType::CopilotCli => true,
-        // LiteLLM joins Ollama here: an audit needs a filesystem and a tool
-        // loop, and the HTTP path has neither.
-        AgentType::Vibe
+        | AgentType::CopilotCli
         | AgentType::Ollama
-        | AgentType::LiteLlm
-        | AgentType::Nvidia
-        | AgentType::Custom => false,
+        | AgentType::LiteLlm => true,
+        AgentType::Vibe | AgentType::Nvidia | AgentType::Custom => false,
     }
+}
+
+/// The agents `agent_can_audit` admits, for the refusal message. Kept beside the
+/// predicate and pinned to it by a test, so the message cannot name an agent the
+/// gate refuses or forget one it accepts.
+const AUDIT_AGENTS: [crate::models::AgentType; 8] = [
+    crate::models::AgentType::ClaudeCode,
+    crate::models::AgentType::Codex,
+    crate::models::AgentType::OpenCode,
+    crate::models::AgentType::GeminiCli,
+    crate::models::AgentType::Kiro,
+    crate::models::AgentType::CopilotCli,
+    crate::models::AgentType::Ollama,
+    crate::models::AgentType::LiteLlm,
+];
+
+/// Why `agent` was refused, and who would have been accepted. One wording for the
+/// Full and the partial launch: the two used to disagree, and neither said which
+/// agents to pick instead.
+pub(crate) fn audit_refusal_message(agent: &crate::models::AgentType) -> String {
+    let accepted = AUDIT_AGENTS
+        .iter()
+        .map(crate::api::disc_helpers::agent_display_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{agent:?} cannot run audits: Kronn has no file tools it can scope to the project for it, so the docs/ deliverables would silently never be written. Pick one of: {accepted}."
+    )
 }
 
 pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [AnalysisStep] {
@@ -1836,28 +1871,72 @@ mod prompt_tests {
         }
     }
 
-    #[test]
-    fn audit_capability_excludes_agents_without_filesystem() {
-        // Codex A4 — Ollama is a bare HTTP chat (runner: "NO executable
-        // tools and NO file access") and Vibe is API-only: neither can
-        // write the docs/ deliverables. The predicate gates BOTH launch
-        // endpoints because MCP callers bypass the UI's canAudit.
+    /// Every `AgentType`, with whether an audit may run on it. A new variant is a
+    /// compile error in `agent_can_audit`; this table is what pins the decision.
+    fn audit_capability_table() -> [(crate::models::AgentType, bool); 11] {
         use crate::models::AgentType;
-        // Exhaustive over EVERY variant — a new one added without updating
-        // the allowlist fails compilation, and this pins today's contract.
-        for (agent, expected) in [
+        [
             (AgentType::ClaudeCode, true),
             (AgentType::Codex, true),
+            (AgentType::OpenCode, true),
             (AgentType::GeminiCli, true),
             (AgentType::Kiro, true),
             (AgentType::CopilotCli, true),
+            // KT-924 — HTTP agents whose file tools Kronn executes, scoped to the
+            // project by `agent_launch`: they no longer lack a filesystem.
+            (AgentType::Ollama, true),
+            (AgentType::LiteLlm, true),
+            // Vibe is API-only with no file tools; NVIDIA is hosted and was never
+            // offered the project; Custom needs a connection the audit cannot pick.
             (AgentType::Vibe, false),
-            (AgentType::Ollama, false),
-            // Custom's runner is `echo "Custom agent not configured"` —
-            // exit 0, zero writes: the canonical silent no-op.
+            (AgentType::Nvidia, false),
             (AgentType::Custom, false),
-        ] {
+        ]
+    }
+
+    #[test]
+    fn audit_capability_admits_the_agents_that_have_file_tools() {
+        // The predicate gates BOTH launch endpoints because MCP callers bypass
+        // the UI's canAudit.
+        for (agent, expected) in audit_capability_table() {
             assert_eq!(agent_can_audit(&agent), expected, "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate() {
+        // The Full and the partial launch share this one wording (KT-924): it
+        // must list exactly the agents `agent_can_audit` admits — no more (a
+        // refused one named as a fix), no fewer.
+        let accepted: Vec<crate::models::AgentType> = audit_capability_table()
+            .into_iter()
+            .filter_map(|(agent, admitted)| admitted.then_some(agent))
+            .collect();
+        assert_eq!(
+            AUDIT_AGENTS.to_vec(),
+            accepted,
+            "the list behind the message drifted from the gate"
+        );
+        for (agent, admitted) in audit_capability_table() {
+            if admitted {
+                continue;
+            }
+            let message = audit_refusal_message(&agent);
+            assert!(
+                message.starts_with(&format!("{agent:?} cannot run audits")),
+                "{message}"
+            );
+            let (_, picks) = message.split_once("Pick one of: ").expect(&message);
+            let picks: Vec<&str> = picks.trim_end_matches('.').split(", ").collect();
+            let expected: Vec<String> = accepted
+                .iter()
+                .map(crate::api::disc_helpers::agent_display_name)
+                .collect();
+            assert_eq!(picks, expected, "{agent:?}");
+            assert!(picks.contains(&"Ollama") && picks.contains(&"LiteLLM"));
+            // The stale premise, and the stale advice, are gone.
+            assert!(!message.contains("no filesystem access"), "{message}");
+            assert!(!message.contains("Pick a CLI agent"), "{message}");
         }
     }
 

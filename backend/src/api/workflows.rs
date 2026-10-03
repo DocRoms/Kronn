@@ -3165,9 +3165,7 @@ pub async fn test_step(
     let ollama_context_overrides = cfg.server.ollama_context_overrides.clone();
     drop(cfg);
 
-    // Resolve project path (for MCP context). 0.8.3 — also pre-format
-    // the companion-repo context blocks so test-step preview matches
-    // production-run prompt content. Symmetric with execute_run.
+    // Resolve project path (for MCP context).
     let project_path = if let Some(pid) = &req.project_id {
         let id = pid.clone();
         match state
@@ -3181,8 +3179,6 @@ pub async fn test_step(
     } else {
         std::env::temp_dir().to_string_lossy().to_string()
     };
-    let agent_extra_context =
-        crate::api::projects::compute_companion_context(&state, req.project_id.as_deref()).await;
     let work_dir = project_path.clone();
 
     // Build template context with mock data
@@ -3268,7 +3264,6 @@ pub async fn test_step(
             &tokens,
             full_access,
             &ctx,
-            &agent_extra_context,
             Some(progress_tx),
             None,
             Some(&model_tiers),

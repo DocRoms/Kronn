@@ -549,12 +549,18 @@ pub async fn disc_append(
                             .iter()
                             .find(|view| view.id == pk)
                             .ok_or_else(|| anyhow::anyhow!("resolved CLI session is missing"))?;
-                        Ok(MessageTarget::cli(
-                            crate::db::discussions::parse_agent_type(&view.agent_type)?,
+                        Ok(crate::db::discussions::session_cli_target(
+                            &view.agent_type,
                             pk,
                         ))
                     })
                     .collect::<anyhow::Result<Vec<_>>>()
+                    .map(|targets| {
+                        targets
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<MessageTarget>>()
+                    })
             })
             .await
         {

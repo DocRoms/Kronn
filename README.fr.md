@@ -23,35 +23,58 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.14.1 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.14.2 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.14.1
+## Nouveautés de la 0.14.2
 
-- **Des workflows qui s'enchaînent sans se marcher dessus :** une étape
-  `TriggerWorkflow` lance un autre workflow avec ses variables et continue
-  aussitôt ; `concurrency_key` limite les runs par ticket ; un run isolé peut
-  partir de `origin/main` (`base_ref`) ; un run porte un libellé métier qu'on
-  retrouve en un appel.
-- **Des agents de workflow qui pilotent leur room :** une étape Agent avec
-  `room_id` est principal de la room sans jeton d'invitation, y compris après
-  `/resume`, et l'agent natif d'une room lance lui-même des exécutions de tâches.
-- **Les Artifacts, anciennement Pages :** les images d'une API authentifiée
-  (pièces jointes Jira) s'affichent dans un Artifact, un champ d'action peut
-  partir des données de la ligne cliquée, et les Artifacts s'exportent et
-  s'importent en bundles versionnés.
-- **Plus léger, plus stable :** le cache de prompts Anthropic via LiteLLM est
-  actif par défaut, une longue discussion ne gèle plus et ne retélécharge plus
-  son transcript, et les thèmes sombres passent WCAG AA.
-- **Plus sûr pour vos dépôts :** Kronn ne supprime plus au démarrage les skills
-  et agents propres à un dépôt, et le worktree d'un run interrompu que personne
-  n'a repris est récupéré après 7 jours, ses commits gardés sur une branche.
+- **AI & automatisation, dépôt par dépôt :** l'onglet d'un projet montre ses
+  skills, automatisations et Artifacts côte à côte, dépôt et Kronn, avec ce qui
+  demande votre attention en tête, une fiche Comparer, une approbation par
+  version et le contenu de chaque ressource en mode Dépôt / Kronn / Diff. Il
+  charge environ 40 fois plus vite sur un gros projet.
+- **De vrais skills dans `.agents/skills` :** Kronn écrit ses skills au format
+  standard Agent Skills, peut regrouper les dossiers de skills éparpillés dans
+  `.agents/skills`, et un skill du dépôt se choisit pour une discussion : son
+  `SKILL.md` est lu, masqué et transmis à l'agent à chaque message.
+- **Des pages Automatisation et Plugins plus nettes :** la sidebar
+  Automatisation se groupe par type, par projet ou pas du tout, avec des
+  filtres en puces et un nouveau type Skills ; la page Plugins liste chaque
+  plugin une seule fois, avec projet, santé et synchro en filtres. Les
+  ressources montrent ce qu'elles utilisent et ce qui les utilise.
+- **Une orchestration des tâches plus fiable :** un worker peut finaliser une
+  fusion, une validation qui ne pourra jamais tourner est refusée au lancement,
+  une validation rouge renvoie le travail au worker et prévient le principal, et
+  un quota partagé se réarme d'un geste.
+- **Des coûts justes, des sessions plus légères :** le coût se calcule sur
+  l'entrée, le cache et la sortie au tarif du modèle qui a répondu, les
+  sessions Claude Code lancées par Kronn ne chargent plus la mémoire automatique
+  du poste, et un test de connexion HTTP signale une erreur de facturation comme
+  telle.
+- **Des audits sur modèle local :** un audit peut tourner sur Ollama ou
+  LiteLLM. Le modèle ne lit et n'écrit que dans le projet, par des outils
+  fichiers que Kronn exécute pour lui, sans shell, sans web ni commit, et une
+  étape qui n'écrit rien échoue. Avec OpenCode, les gabarits d'environnement
+  sont lisibles, l'arrêt prend quelques secondes et chaque étape compte ses
+  tokens.
+- **Des modèles locaux qui vont au bout :** un agent HTTP peut demander
+  seulement la partie utile d'une grosse réponse d'API, une réponse raccourcie
+  dit ce qu'elle contient, et les modèles OpenCode déclarés dans un projet
+  apparaissent dans les sélecteurs. La carte Ollama replie son bloc de
+  téléchargement, signale qu'un modèle installé a une mise à jour et propose
+  d'abord les versions MLX sur Apple Silicon.
+- **Des prompts qui restent privés :** aucun prompt envoyé à un modèle ne liste
+  vos autres projets Kronn ; seuls les dépôts liés à un projet sont nommés.
+- **Des rooms qui s'ouvrent toujours :** un CLI que le bridge ne sait pas
+  identifier ne rend plus sa room illisible, OpenCode est reconnu quand il la
+  rejoint, et une discussion qui ne se charge pas dit pourquoi, avec un bouton
+  Réessayer.
 
 Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.14.1](#nouveautés-de-la-0141)
+- [Nouveautés de la 0.14.2](#nouveautés-de-la-0142)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -115,7 +138,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.14.1 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.14.2 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

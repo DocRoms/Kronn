@@ -1035,6 +1035,18 @@ pub struct AuditRunStep {
     pub step_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_tokens: Option<u64>,
+    /// What the step's agent reported, parts apart (KT-927). Each is absent when
+    /// the runtime did not report it — which is not zero. `step_tokens` is
+    /// absent too when neither input nor output was reported: the step's cost is
+    /// unknown, never 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
     /// `false` when the CLI exited non-zero OR `step_warning` fired.
     pub cli_success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

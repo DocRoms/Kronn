@@ -354,6 +354,47 @@ An override above the advertised model window or RAM-derived ceiling is
 accepted with all applicable warnings, but impossible/fat-finger values are
 bounded. The saved value is per model and survives restart.
 
+### What `qwen3.8:27b-mlx` gets on a 64 GB Mac (KT-929)
+
+The question came from a discussion where an Ollama agent on this model lost part
+of a large API answer and the brief suspected a 32K window. Which window a run
+gets depends on who runs the model, not only on the machine:
+
+| Rule | Window | Where |
+|---|---|---|
+| Memory band for 64 GiB, weights and cache cost not yet known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:4940] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` |
+| Discussion principal (`ToolRunMode::General`) | 65,536, requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:216] |
+| Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:93] |
+| Per-model override (Settings), any value from 2,048 to 1,048,576 | the override, for a discussion; a worker is still held at 32,768 or below | `resolve_ctx_cap_for_model` |
+| `KRONN_OLLAMA_NUM_CTX_CAP` | that number, for both | `resolve_ctx_cap_for_model` |
+
+These rows are computed by the functions a run calls, and the test pins them, the
+override cases included
+[src: file: backend/src/agents/runner_test.rs:2520]. They are not an observation of
+a running Ollama: the band, the trained window and the 64 GiB are inputs, and
+`GET /api/ollama/models` (`context_ceiling`, `context_origin`) and the
+`kronn::ollama` log line give what a given machine actually resolved. Once the
+model has been loaded at two different windows, the exact figure the machine can
+hold (70 % of memory minus the weights, over the measured cache cost per token)
+replaces the band
+[src: file: backend/src/agents/runner.rs:5208].
+
+So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
+Mac is at 65,536 unless a per-model override or the environment variable says
+otherwise. That is the one thing this section could not read: the override map
+of the machine that produced the discussion. `ollama_context_overrides` in the
+Kronn configuration, or `context_origin: "model_override"` in the model list, says
+whether the discussion was at 65,536 or at a number somebody chose.
+
+No cap was changed. The worker ceiling is there because a nominal 65K slot cost
+31 GB and produced no first tool call in seventeen minutes (comment at
+`MLX_WORKER_EFFECTIVE_CTX_CAP`), which is evidence against raising it. The
+discussion's 65,536 is already above what the failing case needed once `api_call`
+can select: a 198 KB answer, the full catalogue and a 32,768-token window ended at
+19,319 estimated tokens (see
+[HTTP-agent capabilities](../architecture/http-agent-capabilities.md#asking-for-part-of-an-api-response-kt-929)).
+
 ## Runtime gotchas (handled and empirically verified)
 
 1. **num_ctx** — Ollama's default context window is huge (up to 256K for some
@@ -506,6 +547,167 @@ ONCE on the paid reasoning tier (Claude) before falling through to `on_invalid`.
 This is a loop POLICY (derived from the step having run on Ollama), not a knob.
 The escalation RATE — logged on `kronn::ollama::escalation` — is the health
 metric that reveals which steps are too hard for the chosen local model.
+
+## Downloading, updating and Mac MLX builds from Settings (KT-930)
+
+Config › Agents › Local models › Ollama.
+
+### The download block folds
+
+The "Download a model" block opens by itself while nothing is installed (a first
+use) and is folded as soon as one model is. It is the way to ADD a model, not
+something to scroll past forever. Once the user clicks it, that choice is kept in
+this browser under `kronn:ollamaDownloadOpen` and wins over the default; the
+default itself is never written, so someone who never touched it keeps the
+automatic behaviour. Folded, its summary line counts the suggestions and the
+downloads in progress. A download or an update in flight is drawn above the
+block, outside the fold, with its progress and its Cancel, so folding the block
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:157]
+[src: file: frontend/src/hooks/usePersistentFold.ts:19]
+
+### The suggestions, and what "verified" means here
+
+`frontend/src/components/settings/ollamaModels.ts` holds one portable suggestion
+per hardware tier and a short list of Mac MLX builds. Every entry is an exact tag
+with the repository file it was taken from, and a tag goes in only when something
+in this repository shows it exists AND ran. Sizes are not stored: a figure typed
+here goes stale, so the card shows the one the backend reads off the library's own
+manifest (see [Reading the official library](#reading-the-official-library)).
+[src: file: frontend/src/components/settings/ollamaModels.ts:31]
+
+| Tag | Tier | Seen to exist and run in |
+|---|---|---|
+| `qwen3.5:4b` | CPU, no GPU | `docs/research/native-tool-catalogue-2026-09-22.md` (2026-09-22 run) |
+| `qwen3:8b` | ≥ 16 GB RAM | the Ollama Default seed of the model catalogue [src: file: backend/src/core/model_catalog/mod.rs:100]; the bench table below |
+| `qwen3:30b-a3b` | GPU or ≥ 32 GB | the Ollama Reasoning seed [src: file: backend/src/core/model_catalog/mod.rs:101]; the bench table below |
+| `gemma4:12b-mlx` | ≥ 16 GB RAM, Mac only | `docs/research/native-tool-catalogue-2026-09-22.md` |
+| `qwen3.8:27b-mlx` | GPU or ≥ 32 GB, Mac only | `docs/research/native-qp-litellm-ollama-2026-09-22.md` |
+
+**Checked against the live library on 2026-10-01.** All five tags answer HTTP 200
+on `https://registry.ollama.ai/v2/library/<family>/manifests/<tag>` with
+`Accept: application/vnd.docker.distribution.manifest.v2+json` (`qwen3.5:4b`,
+`qwen3:8b`, `qwen3:30b-a3b`, `gemma4:12b-mlx`, `qwen3.8:27b-mlx`). The check was
+run from the user's own machine by the task's reviewer, because the sandbox the
+list was written in cannot reach the registry; the column above says where each
+tag was first seen to run.
+
+Re-check before a release, one tag at a time:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+  https://registry.ollama.ai/v2/library/qwen3.8/manifests/27b-mlx
+```
+
+A plain sibling of an MLX tag (`gemma4:12b`, `qwen3.8:27b`) is deliberately NOT
+suggested: nothing here shows it exists, and a name that does not exist is a
+download that fails in front of the user.
+
+### Updating an installed model
+
+The installed models are listed inside the download block with an **Update**
+button, hidden for a model the registry confirmed up to date (a **Not checked**
+model keeps it, since nothing was confirmed). It is the download flow pointed at a tag Ollama already holds:
+`POST /api/ollama/pull` with that exact tag, the same progress, the same Cancel,
+the same error messages, then a refresh of the installed list. There is no
+separate update endpoint to drift from the download one. [src: file: backend/src/api/ollama.rs:502]
+
+Update re-asks Ollama for the tag; the files that did not change stay as they are.
+Next to each model's Update button a badge says whether the tag has moved on:
+**Update available**, **Up to date**, or **Not checked**. When the block is
+folded, its summary counts the updates waiting. Updating a model withholds its
+badge until the library has been asked again, so a verdict that described the
+replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:449]
+
+### Reading the official library
+
+Both the "update available" badge and the size shown on each suggestion come
+from the registry's manifest of a tag, `GET
+https://registry.ollama.ai/v2/library/<family>/manifests/<tag>` with
+`Accept: application/vnd.docker.distribution.manifest.v2+json`. Nothing is
+downloaded. [src: file: backend/src/core/ollama_registry.rs:43]
+
+- **Freshness.** The registry does not send a `Docker-Content-Digest` header, but
+  the SHA-256 of the manifest body, hashed exactly as received, is the `digest`
+  that the local Ollama reports for the same tag in `/api/tags`. Measured on
+  2026-10-01 on the user's machine: `qwen3.8:27b-mlx` (`5642e97495e1a088…`), `qwen3.5:4b`
+  and `qwen3.5:2b` identical; `gemma4:12b-mlx` different (registry `ded7a27350032202…`,
+  local `117d0d84cf2ab865…`), a real pending update. Equal is "up to date",
+  different is "update available". [src: file: backend/src/core/ollama_registry.rs:184]
+  [src: file: backend/src/core/ollama_registry.rs:211]
+- **Size.** The manifest's `config.size` plus every `layers[].size`, formatted
+  like the installed list ("4.1 GB"). A manifest with a missing or overflowing
+  size gives no size rather than a partial sum.
+- **Never a guess.** Each of these reads "not checked" (`unknown`), and never "up
+  to date": the registry did not answer or was too slow, the body was not a
+  manifest (an HTML error page served with a 200), the model is not in the
+  official library (`user/model`, `hf.co/…`, a second colon, an uppercase family),
+  or either digest is unreadable (a local Ollama too old to report one). A model
+  that is not a plain library name is never even sent to the registry. A model
+  made locally under a library name reads as an update, and updating it would
+  replace it: that is the one case this comparison cannot tell apart.
+
+How it stays light: `GET /api/ollama/registry?suggested=<tag>,<tag>` is its own
+call, separate from `/api/ollama/models`, which the card never waits on: it is
+drawn from the local answers and the badges and sizes fill in when the library
+answers, or never. In the backend each lookup has a 4 s timeout, a 256 KiB body
+cap, at most 4 run at once, at most 48 tags are looked up per request, and a whole
+answer is bounded to 8 s; whatever finished by then is used and cached. Answers are
+cached for 6 hours, a failure for 2 minutes (long enough that a blocked network is
+not asked again on every visit, short enough that it never sticks). The only thing
+that leaves the machine is a library tag name, sent by the Kronn backend, not the
+browser. [src: file: backend/src/api/ollama.rs:316]
+
+The cache can be bypassed: `&fresh=true` asks the registry again and replaces what
+was cached. The card does it on the Refresh button and after an update finishes,
+and only then. Without it, a model updated right after its tag moved on again would
+be compared with a manifest cached before the move and called outdated; with it,
+the verdict follows what is installed now. If the registry does not answer a
+recheck, the model reads "not checked": a stale answer is not passed off as current.
+The card marks a recheck done only once its answer has landed, so a request that a
+newer render supersedes is followed by another fresh one, never by a cached one
+that raced it. [src: file: backend/src/core/ollama_registry.rs:55]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:424]
+[src: file: backend/src/core/ollama_registry.rs:47]
+[src: file: backend/src/core/ollama_registry.rs:81]
+
+To check one model by hand:
+
+```sh
+curl -s -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+  https://registry.ollama.ai/v2/library/gemma4/manifests/12b-mlx | shasum -a 256
+curl -s localhost:11434/api/tags   # "digest" of the same tag
+```
+
+The tests never reach the registry: the manifest source is a trait, and the
+fixture is a hand-built manifest in the same shape (its fake blob digests aside)
+whose SHA-256 was computed independently with `shasum -a 256`. They cover identical
+and different digests, a dead registry, a model outside the library, a body that is
+not a manifest, the cache's expiry, the concurrency bound, the time budget and the
+size sum. [src: file: backend/src/core/ollama_registry.rs:459]
+
+### Mac MLX builds
+
+`GET /api/ollama/health` carries `version` (the running server's, from
+`/api/version`, read fresh on each probe so a Refresh sees an update to Ollama)
+and `mlx_capable`. The browser never decides: a user agent says nothing about
+where Ollama runs. [src: file: backend/src/api/ollama.rs:102]
+
+`mlx_capable` is true when both hold:
+
+1. **The host is a Mac on Apple Silicon.** The OS is `host_os_label()`, so a
+   Kronn in Docker on a Mac answers for the Mac; the chip is the build's own
+   architecture (`aarch64`). An amd64 image emulated on Apple Silicon reads as
+   Intel, which errs towards not offering MLX. [src: file: backend/src/core/env.rs:81]
+2. **Ollama is at least 0.34.** That is the version the runner already scopes
+   its MLX worker mitigations to, and the one MLX was measured on (0.34.2 reused
+   9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
+   prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
+   should steer a user to.
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:5448]
+
+When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
+then the portable list. Everywhere else the list is exactly the portable one.
 
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 

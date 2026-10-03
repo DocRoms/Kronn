@@ -55,6 +55,69 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:1-166]
 [src: file: backend/src/api/external_api_connections.rs:536-638]
 
+## Where OpenCode's models come from (KT-928)
+
+Kronn never lists an OpenCode model itself, and never runs `opencode models`.
+Its list is what `opencode acp` answers to `session/new`: the `configOptions`
+entry whose id names a model. In OpenCode 1.18.33 (read from the bundled
+source) that entry has the id `model` and one flat `provider/model` value per
+model of every provider OpenCode loaded for the session's directory (for a
+local provider, `ollama/qwen3.8:27b`, colon included); a model's variants are
+either extra `provider/model/variant` values or a separate `effort` option, and
+the session modes are a third option, `mode`. No prompt is sent, so discovery
+costs no inference. The reader keeps only each value's id and display name;
+nothing else of the response, and no OpenCode config or credential file, is
+read into the catalogue. A select option may also group its values (ACP allows
+both shapes): groups are flattened, a value offered twice is kept once.
+[src: file: backend/src/core/model_catalog/acp_discovery.rs:24-96]
+[src: file: backend/src/acp.rs:298-385]
+
+**The list depends on the directory.** OpenCode loads its providers per working
+directory: the user-level config (`opencode.json[c]` in its config directory),
+the `opencode.json[c]` found from the session directory upwards, the
+`.opencode/opencode.json[c]` of that directory, and `OPENCODE_CONFIG`. A launch
+runs in the project directory; discovery used to run in the OS temporary
+directory and therefore saw the user-level config only. A provider declared by
+a project's own config — typically a local Ollama — was offered to every run of
+that project and appeared in no selector. This, not a filter or a cache, is why
+models were missing: the Config UI applies no filter to what the catalogue
+holds (`catalogModelOptions`).
+[src: file: frontend/src/lib/modelCatalogSelection.ts:76-119]
+
+OpenCode discovery now runs in two kinds of directory at once, inside the
+single 20 s discovery bound: the neutral one, and every registered project that
+carries its own OpenCode config (`opencode.json`, `opencode.jsonc`,
+`.opencode/opencode.json`, `.opencode/opencode.jsonc` — existence is checked,
+the files are never opened; at most 16 projects). The results are merged:
+
+- a model the neutral directory already offers is left exactly as discovered;
+- a model only a project offers is added once, with a description saying it is
+  offered only inside that project (it is absent from a run elsewhere);
+- nothing is added that an OpenCode session did not report;
+- a project whose discovery fails is left out and logged by reason only; it
+  does not fail the refresh. A failure of the neutral discovery is returned as
+  it is, whatever the projects answered.
+[src: file: backend/src/core/model_catalog/mod.rs:382-535]
+
+Known gaps: a model seen only through `OPENCODE_CONFIG` set in a user's shell,
+or through an `opencode.json` above the project directory, is not found, since
+Kronn's process does not see that environment and only checks the project's own
+directory. While a project's discovery fails, the models only it offers fall
+back to `cached` + `unavailable` until the next successful refresh. The `mode`
+option of a session is folded into `reasoning_modes` by the generic ACP reader
+(its id contains "mode"), so OpenCode models without variants list `build` and
+`plan` there; this is display only, no effort is ever sent to OpenCode.
+
+**The chosen model is the model that runs.** The runner applies the resolved
+model with `session/set_config_option`, searching the model option before any
+other option (an effort or mode value never stands in for a model). A session
+that lists no models keeps its own default: there is nothing to match. A
+session that lists models without the chosen one used to be left on OpenCode's
+own default while every screen showed the chosen model; the launch is now
+refused, naming the model, before any prompt is sent.
+[src: file: backend/src/agents/runner.rs:4362-4405]
+[src: file: backend/src/acp.rs:1330-1375]
+
 ## Launch safety and UI
 
 Discussion dispatch is the shared boundary for ordinary discussions, Quick

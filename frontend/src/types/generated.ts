@@ -791,6 +791,13 @@ recommendations_json?: string | null, };
  */
 export type AuditRunStep = { audit_run_id: string, step_index: number, file_label: string, started_at: string, ended_at?: string | null, duration_ms?: number | null, step_tokens?: number | null, cumulative_tokens?: number | null,
 /**
+ * What the step's agent reported, parts apart (KT-927). Each is absent when
+ * the runtime did not report it — which is not zero. `step_tokens` is
+ * absent too when neither input nor output was reported: the step's cost is
+ * unknown, never 0.
+ */
+input_tokens?: number | null, output_tokens?: number | null, cache_read_tokens?: number | null, cache_write_tokens?: number | null,
+/**
  * `false` when the CLI exited non-zero OR `step_warning` fired.
  */
 cli_success: boolean, step_warning?: string | null,
@@ -4599,12 +4606,25 @@ export type OllamaHealthResponse = {
 /**
  * "online", "offline", "not_installed", "unreachable"
  */
-status: string, version: string | null, endpoint: string, models_count: number,
+status: string,
+/**
+ * The server's own version, from `/api/version`. `None` when the server
+ * is not online or did not answer that probe.
+ */
+version: string | null, endpoint: string, models_count: number,
 /**
  * User-facing explanation when status != "online". Contextualized
  * for the detected environment (native, Docker, WSL).
  */
-hint: string | null, };
+hint: string | null,
+/**
+ * KT-930 — this host is a Mac on Apple Silicon AND the running Ollama is
+ * recent enough to run `-mlx` models as Kronn expects. Decided here, from
+ * the host and the server's reported version — never from the browser's
+ * user agent, which says nothing about where Ollama runs. `false` when
+ * either fact is missing or unknown.
+ */
+mlx_capable: boolean, };
 
 export type OllamaModel = { name: string, size: string, modified: string,
 /**
@@ -4640,6 +4660,11 @@ context_override: number | null,
  */
 context_origin: string, };
 
+/**
+ * One installed model's freshness.
+ */
+export type OllamaModelFreshness = { name: string, status: OllamaUpdateStatus, };
+
 export type OllamaModelsResponse = { models: Array<OllamaModel>, };
 
 /**
@@ -4648,6 +4673,26 @@ export type OllamaModelsResponse = { models: Array<OllamaModel>, };
  * stages have no byte counter.
  */
 export type OllamaPullProgress = { status: string, digest: string | null, completed: number | null, total: number | null, };
+
+/**
+ * GET /api/ollama/registry — what the official library says about the
+ * installed models and the suggested tags, without downloading anything.
+ * A tag the library did not answer for is simply absent from `suggestions`
+ * and `unknown` in `models`.
+ */
+export type OllamaRegistryResponse = { models: Array<OllamaModelFreshness>, suggestions: Array<OllamaSuggestionSize>, };
+
+/**
+ * What a suggested tag weighs, from the library's manifest (the sum of its
+ * config and layer sizes), formatted like `OllamaModel::size`.
+ */
+export type OllamaSuggestionSize = { name: string, size: string, };
+
+/**
+ * KT-930 — how an installed model compares with the official Ollama library's
+ * current copy of the same tag.
+ */
+export type OllamaUpdateStatus = "up_to_date" | "update_available" | "unknown";
 
 /**
  * What happens when `TypedSchema` validation still fails after a

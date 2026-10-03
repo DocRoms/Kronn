@@ -511,10 +511,57 @@ pub fn insert_audit_step_start(
     Ok(())
 }
 
+/// What one audit step consumed, as its agent reported it (KT-927). Every part
+/// is `None` when the runtime did not report it — which is not zero: a step that
+/// reported nothing is of unknown cost, never free. Input is as the agent states
+/// it; whether it already contains the cached share depends on the agent (see
+/// `core::pricing::TokenCounters::from_agent_report`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StepTokens {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+impl StepTokens {
+    /// Nothing was reported.
+    pub const UNKNOWN: Self = Self {
+        input: None,
+        output: None,
+        cache_read: None,
+        cache_write: None,
+    };
+
+    /// The usage a structured transport (an ACP session, an HTTP provider)
+    /// reported for the run. `None` when it reported nothing.
+    pub fn from_reported(usage: Option<crate::agents::runner::ReportedUsage>) -> Self {
+        let Some(usage) = usage else {
+            return Self::UNKNOWN;
+        };
+        Self {
+            input: Some(usage.input_tokens),
+            output: Some(usage.output_tokens),
+            cache_read: usage.prompt_cache.cached_prompt_tokens,
+            cache_write: usage.prompt_cache.cache_write_prompt_tokens,
+        }
+    }
+
+    /// The step's headline figure: input plus output. `None` — unknown — unless
+    /// the runtime reported at least one of them.
+    pub fn total(&self) -> Option<u64> {
+        match (self.input, self.output) {
+            (None, None) => None,
+            (input, output) => Some(input.unwrap_or(0).saturating_add(output.unwrap_or(0))),
+        }
+    }
+}
+
 /// Finalize a step row at `step_done` (or step_warning). `success`
 /// is `false` when `validate_step_output` (#292) emitted
 /// a warning OR when the CLI exited non-zero. `step_warning` is the
-/// reason string (None on success).
+/// reason string (None on success). `cumulative_tokens` is the run's total so
+/// far, `None` until a step has reported something.
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_audit_step(
     conn: &Connection,
@@ -522,12 +569,13 @@ pub fn finalize_audit_step(
     step_index: u32,
     ended_at: DateTime<Utc>,
     duration_ms: u64,
-    step_tokens: u64,
-    cumulative_tokens: u64,
+    tokens: &StepTokens,
+    cumulative_tokens: Option<u64>,
     cli_success: bool,
     step_warning: Option<&str>,
     repaired: bool,
 ) -> Result<()> {
+    let as_sql = |value: Option<u64>| value.map(|value| value as i64);
     conn.execute(
         "UPDATE audit_run_steps SET
             ended_at = ?3,
@@ -536,18 +584,26 @@ pub fn finalize_audit_step(
             cumulative_tokens = ?6,
             cli_success = ?7,
             step_warning = ?8,
-            step_repaired_from_template = ?9
+            step_repaired_from_template = ?9,
+            input_tokens = ?10,
+            output_tokens = ?11,
+            cache_read_tokens = ?12,
+            cache_write_tokens = ?13
          WHERE audit_run_id = ?1 AND step_index = ?2",
         params![
             audit_run_id,
             step_index as i64,
             ended_at.to_rfc3339(),
             duration_ms as i64,
-            step_tokens as i64,
-            cumulative_tokens as i64,
+            as_sql(tokens.total()),
+            as_sql(cumulative_tokens),
             cli_success as i32,
             step_warning,
             repaired as i32,
+            as_sql(tokens.input),
+            as_sql(tokens.output),
+            as_sql(tokens.cache_read),
+            as_sql(tokens.cache_write),
         ],
     )?;
     Ok(())
@@ -559,7 +615,8 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
     let mut stmt = conn.prepare(
         "SELECT audit_run_id, step_index, file_label, started_at, ended_at,
                 duration_ms, step_tokens, cumulative_tokens, cli_success,
-                step_warning, step_repaired_from_template
+                step_warning, step_repaired_from_template,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
          FROM audit_run_steps
          WHERE audit_run_id = ?1
          ORDER BY step_index ASC",
@@ -582,6 +639,10 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
             duration_ms: row.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
             step_tokens: row.get::<_, Option<i64>>(6)?.map(|v| v.max(0) as u64),
             cumulative_tokens: row.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as u64),
+            input_tokens: row.get::<_, Option<i64>>(11)?.map(|v| v.max(0) as u64),
+            output_tokens: row.get::<_, Option<i64>>(12)?.map(|v| v.max(0) as u64),
+            cache_read_tokens: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u64),
+            cache_write_tokens: row.get::<_, Option<i64>>(14)?.map(|v| v.max(0) as u64),
             cli_success: row.get::<_, i64>(8)? != 0,
             step_warning: row.get(9)?,
             step_repaired_from_template: row.get::<_, i64>(10)? != 0,
@@ -641,6 +702,10 @@ mod tests {
                 cli_success INTEGER NOT NULL DEFAULT 1,
                 step_warning TEXT,
                 step_repaired_from_template INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                cache_write_tokens INTEGER,
                 FOREIGN KEY (audit_run_id) REFERENCES audit_runs(id) ON DELETE CASCADE
             );
             CREATE UNIQUE INDEX idx_audit_run_steps_run
@@ -1162,7 +1227,21 @@ mod tests {
         // Finalize with success.
         let ended = started + chrono::Duration::seconds(42);
         finalize_audit_step(
-            &conn, "run-x", 1, ended, 42_000, 1_234, 1_234, true, None, false,
+            &conn,
+            "run-x",
+            1,
+            ended,
+            42_000,
+            &StepTokens {
+                input: Some(1_000),
+                output: Some(234),
+                cache_read: Some(50),
+                cache_write: None,
+            },
+            Some(1_234),
+            true,
+            None,
+            false,
         )
         .unwrap();
         let steps = list_audit_steps(&conn, "run-x").unwrap();
@@ -1170,9 +1249,74 @@ mod tests {
         assert_eq!(steps[0].duration_ms, Some(42_000));
         assert_eq!(steps[0].step_tokens, Some(1_234));
         assert_eq!(steps[0].cumulative_tokens, Some(1_234));
+        assert_eq!(steps[0].input_tokens, Some(1_000));
+        assert_eq!(steps[0].output_tokens, Some(234));
+        assert_eq!(steps[0].cache_read_tokens, Some(50));
+        assert_eq!(
+            steps[0].cache_write_tokens, None,
+            "a cache figure the runtime did not give stays absent, never 0"
+        );
         assert!(steps[0].cli_success);
         assert!(steps[0].step_warning.is_none());
         assert!(!steps[0].step_repaired_from_template);
+    }
+
+    #[test]
+    fn a_step_whose_agent_reported_no_usage_is_stored_unknown_never_zero() {
+        // KT-927 — every ACP step used to land here as 0 tokens. A runtime that
+        // reports nothing leaves the figures NULL, in the step and in the run.
+        let conn = fresh_conn();
+        let t0 = Utc::now();
+        insert_running(&conn, "run-u", "p1", "Full", "OpenCode", t0).unwrap();
+        insert_audit_step_start(&conn, "run-u", 1, "docs/glossary.md", t0).unwrap();
+        finalize_audit_step(
+            &conn,
+            "run-u",
+            1,
+            t0 + chrono::Duration::seconds(3),
+            3_000,
+            &StepTokens::UNKNOWN,
+            None,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let step = &list_audit_steps(&conn, "run-u").unwrap()[0];
+        assert_eq!(step.step_tokens, None);
+        assert_eq!(step.cumulative_tokens, None);
+        assert_eq!(step.input_tokens, None);
+        assert_eq!(step.output_tokens, None);
+        assert_eq!(step.cache_read_tokens, None);
+        assert_eq!(step.cache_write_tokens, None);
+        assert!(step.cli_success, "an unmeasured step is not a failed one");
+    }
+
+    #[test]
+    fn a_reported_usage_becomes_parts_and_a_headline_total() {
+        use crate::agents::runner::{PromptCacheUsage, ReportedUsage};
+        let tokens = StepTokens::from_reported(Some(ReportedUsage {
+            input_tokens: 6_126,
+            output_tokens: 28,
+            prompt_cache: PromptCacheUsage {
+                cached_prompt_tokens: Some(1_800),
+                cache_write_prompt_tokens: None,
+            },
+        }));
+        assert_eq!(tokens.total(), Some(6_154));
+        assert_eq!(tokens.cache_read, Some(1_800));
+        assert_eq!(tokens.cache_write, None);
+        assert_eq!(StepTokens::from_reported(None).total(), None);
+        // Only the output reported: still a figure, not an unknown.
+        assert_eq!(
+            StepTokens {
+                output: Some(9),
+                ..StepTokens::UNKNOWN
+            }
+            .total(),
+            Some(9)
+        );
     }
 
     #[test]
@@ -1221,8 +1365,12 @@ mod tests {
             5,
             t0 + chrono::Duration::seconds(7),
             7_000,
-            500,
-            12_000,
+            &StepTokens {
+                input: Some(400),
+                output: Some(100),
+                ..StepTokens::UNKNOWN
+            },
+            Some(12_000),
             false,
             Some("target file is empty — repaired from template"),
             true,

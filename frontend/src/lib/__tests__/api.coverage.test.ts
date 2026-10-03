@@ -296,6 +296,14 @@ describe('api.ollama', () => {
   if ('models' in ollama) {
     it('models', async () => { await exec((ollama as { models: () => Promise<unknown> }).models(), 'GET', '/ollama/models'); });
   }
+  if ('registry' in ollama) {
+    it('registry', async () => {
+      await exec((ollama as { registry: (suggested: string[]) => Promise<unknown> }).registry(['qwen3:8b', 'gemma4:12b-mlx']), 'GET', '/ollama/registry?suggested=qwen3%3A8b%2Cgemma4%3A12b-mlx');
+    });
+    it('registry, asked fresh', async () => {
+      await exec((ollama as { registry: (suggested: string[], fresh: boolean) => Promise<unknown> }).registry(['qwen3:8b'], true), 'GET', '/ollama/registry?suggested=qwen3%3A8b&fresh=true');
+    });
+  }
 });
 describe('api.apiCallLogs', () => {
   if ('list' in apiCallLogs) {

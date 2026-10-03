@@ -22,6 +22,7 @@ mod adapter_process;
 mod claude_adapter;
 mod codex_adapter;
 mod permission_broker;
+mod secret_files;
 
 pub use claude_adapter::ClaudeAcpAdapter;
 pub use codex_adapter::CodexAcpAdapter;
@@ -58,6 +59,70 @@ printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","inde
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"orchestrated"}}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}'
 "#;
+
+    /// An `opencode acp` stand-in, run with python3: ids are read from the
+    /// requests, the shapes are those of OpenCode 1.18 (`session/request_permission`
+    /// with `kind: read`, empty `locations`, and the `once`/`always`/`reject`
+    /// options). It records the inline configuration it was started with and the
+    /// answer it got under `$FIXTURE_OUT`, then goes on with its turn.
+    #[cfg(unix)]
+    pub(crate) const OPENCODE_ACP_FIXTURE: &str = r#"
+import json, os, sys
+
+def send(frame):
+    sys.stdout.write(json.dumps(frame) + "\n")
+    sys.stdout.flush()
+
+out = os.environ["FIXTURE_OUT"]
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "fixture-session"}})
+    elif method == "session/prompt":
+        with open(out + "/config.json", "w") as handle:
+            handle.write(os.environ.get("OPENCODE_CONFIG_CONTENT", ""))
+        send({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission", "params": {
+            "sessionId": "fixture-session",
+            "toolCall": {"toolCallId": "call-1", "title": "read", "kind": "read",
+                         "status": "pending", "locations": [], "rawInput": {}},
+            "options": [
+                {"optionId": "once", "kind": "allow_once", "name": "Allow once"},
+                {"optionId": "always", "kind": "allow_always", "name": "Always allow"},
+                {"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+            ]}})
+        reply = sys.stdin.readline()
+        with open(out + "/reply.json", "w") as handle:
+            handle.write(reply)
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": "fixture-session",
+            "update": {"sessionUpdate": "agent_message_chunk",
+                       "content": {"type": "text", "text": "carried on after the refusal"}}}})
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 100, "outputTokens": 20, "totalTokens": 160,
+                      "cachedReadTokens": 30, "cachedWriteTokens": 10}}})
+"#;
+
+    /// Write the stand-in as an executable named `opencode`, for a test that puts
+    /// `dir` first on `PATH` so that Kronn's own spawn of `opencode acp` finds it.
+    #[cfg(unix)]
+    pub(crate) fn write_fake_opencode(dir: &Path) -> PathBuf {
+        let path = dir.join("opencode");
+        fs::write(
+            &path,
+            format!("#!/usr/bin/env python3{OPENCODE_ACP_FIXTURE}"),
+        )
+        .expect("write fake opencode");
+        let mut perms = fs::metadata(&path)
+            .expect("stat fake opencode")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod fake opencode");
+        path
+    }
 
     pub(crate) fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fixture-cli");
@@ -331,23 +396,9 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
                 .or_else(|| option.get("options"))
                 .and_then(Value::as_array)
                 .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| {
-                            let vid = value
-                                .get("id")
-                                .or_else(|| value.get("value"))
-                                .and_then(Value::as_str)
-                                .filter(|id| !id.trim().is_empty())?
-                                .to_owned();
-                            let name = value
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or(&vid)
-                                .to_owned();
-                            Some(AcpConfigValue { id: vid, name })
-                        })
-                        .collect()
+                    let mut flat = Vec::new();
+                    collect_config_values(values, &mut flat);
+                    flat
                 })
                 .unwrap_or_default();
             Some(AcpConfigOption {
@@ -357,6 +408,46 @@ fn parse_config_options(result: &Value) -> Vec<AcpConfigOption> {
             })
         })
         .collect()
+}
+
+/// Read the values of one select option. ACP lets `options` be either a flat
+/// list of `{value, name}` or a list of groups `{group, name, options: [...]}`
+/// (the ACP SDK bundled with OpenCode 1.18.33 declares the option list as a
+/// union of both shapes). A group is not a selectable value, so it is
+/// flattened: reading only the flat shape made every grouped value look absent.
+/// A value offered twice is kept once.
+fn collect_config_values(values: &[Value], out: &mut Vec<AcpConfigValue>) {
+    for value in values {
+        let id = value
+            .get("id")
+            .or_else(|| value.get("value"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty());
+        match id {
+            Some(id) => {
+                if out.iter().any(|known| known.id == id) {
+                    continue;
+                }
+                let name = value.get("name").and_then(Value::as_str).unwrap_or(id);
+                out.push(AcpConfigValue {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                });
+            }
+            None => {
+                if let Some(members) = value.get("options").and_then(Value::as_array) {
+                    collect_config_values(members, out);
+                }
+            }
+        }
+    }
+}
+
+/// ACP does not standardize which option carries the model catalogue, so a
+/// runtime's option is the catalogue when its id names a model. Shared by
+/// discovery (what to list) and launch (what a chosen model must be found in).
+pub(crate) fn is_model_option_id(id: &str) -> bool {
+    id.to_lowercase().contains("model")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -575,6 +666,71 @@ impl Drop for DispatcherOwner {
 struct AcpProcess {
     child: Option<Child>,
     dispatcher: Option<DispatcherOwner>,
+    /// The process group the child leads (Unix), so that stopping the agent
+    /// stops what it started too: its shell commands, its MCP servers.
+    group: Option<u32>,
+}
+
+impl Drop for AcpProcess {
+    fn drop(&mut self) {
+        // Still owning the child means nobody shut it down: `kill_on_drop` only
+        // reaches the child itself, not what it spawned.
+        if self.child.is_some() {
+            kill_process_group(self.group);
+        }
+    }
+}
+
+/// SIGKILL a process group Kronn created for an ACP child. The child is still
+/// owned, so it has not been reaped and its pid cannot have been reused.
+#[cfg(unix)]
+fn kill_process_group(group: Option<u32>) {
+    if let Some(pgid) = group
+        .and_then(|group| i32::try_from(group).ok())
+        .filter(|pgid| *pgid > 1)
+    {
+        // SAFETY: a plain signal to a group that `process_group(0)` made at spawn.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_group: Option<u32>) {}
+
+/// The subprocess of a native ACP session: its command, working directory and
+/// the environment Kronn gives it.
+fn native_command(
+    agent: AcpAgent,
+    program: &str,
+    args: &[&str],
+    cwd: &str,
+    discussion_id: Option<&str>,
+) -> tokio::process::Command {
+    let mut command = crate::core::cmd::async_cmd(program);
+    command.args(args).current_dir(cwd);
+    if let Some(discussion_id) = discussion_id {
+        command.env("KRONN_DISCUSSION_ID", discussion_id);
+    }
+    if agent == AcpAgent::OpenCode {
+        apply_opencode_policy(&mut command);
+    }
+    command
+}
+
+/// Environment Kronn gives `opencode acp`, on top of the user's own: the inline
+/// configuration that keeps real environment files out of reach without making a
+/// refusal end the turn (see [`secret_files::opencode_config_content`]). A
+/// configuration the operator already passes the same way is theirs and is left
+/// alone.
+fn apply_opencode_policy(command: &mut tokio::process::Command) {
+    const VARIABLE: &str = "OPENCODE_CONFIG_CONTENT";
+    if std::env::var_os(VARIABLE).is_some() {
+        tracing::info!("{VARIABLE} is already set; Kronn's OpenCode read policy is not applied");
+        return;
+    }
+    command.env(VARIABLE, secret_files::opencode_config_content());
 }
 
 /// `session/new` inputs captured at `initialize` time. Retained so that
@@ -600,11 +756,7 @@ impl AcpJsonRpcTransport {
         let (program, args) = native_acp_command(agent).ok_or_else(|| {
             AcpError::Transport(format!("no verified production ACP command for {agent:?}"))
         })?;
-        let mut command = crate::core::cmd::async_cmd(program);
-        command.args(args).current_dir(cwd);
-        if let Some(discussion_id) = discussion_id {
-            command.env("KRONN_DISCUSSION_ID", discussion_id);
-        }
+        let command = native_command(agent, program, &args, cwd, discussion_id);
         Self::spawn_scoped(agent, command, full_access, Some(scope)).await
     }
 
@@ -627,9 +779,14 @@ impl AcpJsonRpcTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        // Its own group: stopping the agent then stops the processes it started,
+        // which killing the agent alone leaves running.
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|error| AcpError::Transport(format!("spawn ACP process: {error}")))?;
+        let group = child.id().filter(|_| cfg!(unix));
         let stdin = child
             .stdin
             .take()
@@ -658,6 +815,7 @@ impl AcpJsonRpcTransport {
             process: Mutex::new(AcpProcess {
                 child: Some(child),
                 dispatcher: Some(DispatcherOwner::new(dispatcher)),
+                group,
             }),
             next_id: AtomicU64::new(1),
             pending,
@@ -943,10 +1101,16 @@ fn usage_from_prompt_result(result: &Value) -> Option<AcpSessionEvent> {
         .get("outputTokens")
         .and_then(Value::as_u64)
         .unwrap_or_default();
+    // A usage block that counts nothing is a runtime that did not measure, not
+    // a run that cost nothing: it reports no usage at all.
     (input_tokens > 0 || output_tokens > 0).then_some(AcpSessionEvent::Usage {
         input_tokens,
         output_tokens,
-        prompt_cache: Default::default(),
+        // `None` when the runtime did not say — which is not zero.
+        prompt_cache: crate::agents::runner::PromptCacheUsage {
+            cached_prompt_tokens: usage.get("cachedReadTokens").and_then(Value::as_u64),
+            cache_write_prompt_tokens: usage.get("cachedWriteTokens").and_then(Value::as_u64),
+        },
     })
 }
 
@@ -1233,6 +1397,8 @@ impl AcpTransport for AcpJsonRpcTransport {
         let mut process = self.process.lock().await;
         let mut errors = Vec::new();
         if let Some(mut child) = process.child.take() {
+            // The group first: what the agent started must not outlive it.
+            kill_process_group(process.group.take());
             if let Err(error) = child.start_kill() {
                 errors.push(format!("stop ACP process: {error}"));
             }
@@ -1304,19 +1470,36 @@ impl AcpHost {
         self.transport.config_options().await
     }
 
+    /// Whether the current session lists models at all. A chosen model that is
+    /// absent from such a list will not be the one the agent runs; against a
+    /// session that lists none, `select_model` keeps its deliberate no-op.
+    pub async fn offers_model_catalogue(&self) -> bool {
+        self.transport
+            .config_options()
+            .await
+            .iter()
+            .any(|option| is_model_option_id(&option.id) && !option.available.is_empty())
+    }
+
     /// Apply a tier/model choice to an existing session by matching it against
     /// the options the session actually returned, then calling
-    /// `session/set_config_option`. Returns `true` when a matching option value
-    /// was found and applied; `false` is a deliberate no-op (no catalogue or no
-    /// match) so a catalogue-less agent keeps its own default rather than
-    /// receiving a spurious selection.
+    /// `session/set_config_option`. The model catalogue is searched before any
+    /// other option, so an effort or mode value never stands in for a model.
+    /// Returns `true` when a matching option value was found and applied;
+    /// `false` is a deliberate no-op (no catalogue or no match) so a
+    /// catalogue-less agent keeps its own default rather than receiving a
+    /// spurious selection. A caller that must run exactly the chosen model
+    /// checks `offers_model_catalogue` before accepting `false`.
     pub async fn select_model(
         &self,
         target: &AcpSessionTarget,
         model: &str,
     ) -> Result<bool, AcpError> {
         let options = self.transport.config_options().await;
-        for option in &options {
+        let (catalogue, others): (Vec<_>, Vec<_>) = options
+            .iter()
+            .partition(|option| is_model_option_id(&option.id));
+        for option in catalogue.into_iter().chain(others) {
             if let Some(value) = option
                 .available
                 .iter()
@@ -1620,6 +1803,172 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    /// OpenCode builds the `model` option as one flat `provider/model` value per
+    /// model of every provider it loaded for the session directory, then an
+    /// `effort` and a `mode` option (read from the 1.18.33 bundle). A local
+    /// provider such as Ollama is a provider like another: its models must come
+    /// out one for one, the `:` of a tag included, and nothing else may be added.
+    #[test]
+    fn a_local_provider_model_is_read_like_any_other_opencode_model() {
+        let options = parse_config_options(&json!({
+            "sessionId": "ses_local",
+            "configOptions": [
+                {
+                    "id": "model", "name": "Model", "category": "model", "type": "select",
+                    "currentValue": "ollama/qwen3.8:27b",
+                    "options": [
+                        {"value": "ollama/llama3.3:70b", "name": "Ollama/Llama 3.3 70B"},
+                        {"value": "ollama/qwen3.8:27b", "name": "Ollama/Qwen3.8 27B"},
+                        {"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"}
+                    ]
+                },
+                {
+                    "id": "mode", "name": "Session Mode", "category": "mode", "type": "select",
+                    "currentValue": "build",
+                    "options": [{"value": "build", "name": "build"}, {"value": "plan", "name": "plan"}]
+                }
+            ]
+        }));
+        let model = options
+            .iter()
+            .find(|option| is_model_option_id(&option.id))
+            .expect("model option");
+        assert_eq!(model.current.as_deref(), Some("ollama/qwen3.8:27b"));
+        assert_eq!(
+            model
+                .available
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "ollama/llama3.3:70b",
+                "ollama/qwen3.8:27b",
+                "opencode/big-pickle"
+            ]
+        );
+        assert!(
+            options
+                .iter()
+                .filter(|option| is_model_option_id(&option.id))
+                .count()
+                == 1,
+            "a session mode is not a model catalogue"
+        );
+    }
+
+    /// ACP also allows a select option to group its values. A group is not a
+    /// value: it has no `value` of its own, and reading only the flat shape
+    /// dropped every model of a grouped catalogue.
+    #[test]
+    fn grouped_select_options_are_flattened_into_their_values() {
+        let options = parse_config_options(&json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "model",
+                "currentValue": "ollama/qwen3.8:27b",
+                "options": [
+                    {"group": "ollama", "name": "Ollama", "options": [
+                        {"value": "ollama/qwen3.8:27b", "name": "Qwen3.8 27B"},
+                        {"value": "ollama/llama3.3:70b", "name": "Llama 3.3 70B"}
+                    ]},
+                    {"group": "opencode", "name": "OpenCode Zen", "options": [
+                        {"value": "opencode/big-pickle", "name": "Big Pickle"},
+                        {"value": "ollama/qwen3.8:27b", "name": "duplicate of a value above"}
+                    ]},
+                    {"value": "loose/model", "name": "Loose"}
+                ]
+            }]
+        }));
+        let ids: Vec<&str> = options[0]
+            .available
+            .iter()
+            .map(|value| value.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "ollama/qwen3.8:27b",
+                "ollama/llama3.3:70b",
+                "opencode/big-pickle",
+                "loose/model"
+            ]
+        );
+        assert_eq!(options[0].available[0].name, "Qwen3.8 27B");
+    }
+
+    /// A value of another option (an effort level, a session mode) must never
+    /// be taken for a model, even when it carries the model's name.
+    #[tokio::test]
+    async fn a_chosen_model_is_matched_in_the_model_catalogue_before_any_other_option() {
+        let recorded = Arc::new(Mutex::new(None));
+        let mut host = AcpHost::new(
+            1,
+            Arc::new(ModelTransport {
+                options: vec![
+                    AcpConfigOption {
+                        id: "effort".into(),
+                        current: Some("default".into()),
+                        available: vec![AcpConfigValue {
+                            id: "default".into(),
+                            name: "Default".into(),
+                        }],
+                    },
+                    AcpConfigOption {
+                        id: "model".into(),
+                        current: Some("opencode/big-pickle".into()),
+                        available: vec![
+                            AcpConfigValue {
+                                id: "opencode/big-pickle".into(),
+                                name: "Big Pickle".into(),
+                            },
+                            AcpConfigValue {
+                                id: "default".into(),
+                                name: "A model that is literally named default".into(),
+                            },
+                        ],
+                    },
+                ],
+                recorded: recorded.clone(),
+            }),
+        );
+        host.negotiate(request()).await.unwrap();
+        let target = host.create_session().await.unwrap();
+
+        assert!(host.offers_model_catalogue().await);
+        assert!(host.select_model(&target, "default").await.unwrap());
+        assert_eq!(
+            recorded
+                .lock()
+                .await
+                .as_ref()
+                .map(|(c, v)| (c.as_str(), v.as_str())),
+            Some(("model", "default")),
+            "the model option, not the effort option, receives the choice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_model_list_does_not_claim_a_model_catalogue() {
+        let mut host = AcpHost::new(
+            1,
+            Arc::new(ModelTransport {
+                options: vec![AcpConfigOption {
+                    id: "mode".into(),
+                    current: Some("build".into()),
+                    available: vec![AcpConfigValue {
+                        id: "build".into(),
+                        name: "build".into(),
+                    }],
+                }],
+                recorded: Arc::new(Mutex::new(None)),
+            }),
+        );
+        host.negotiate(request()).await.unwrap();
+        host.create_session().await.unwrap();
+
+        assert!(!host.offers_model_catalogue().await);
     }
 
     #[tokio::test]
@@ -2070,6 +2419,194 @@ mod tests {
         );
     }
 
+    /// KT-927 — the cache the runtime reports travels with the turn's usage;
+    /// what it does not report stays absent, never zero.
+    #[test]
+    fn prompt_usage_carries_the_cache_tokens_the_runtime_reports() {
+        let with_cache = json!({
+            "usage": {"inputTokens": 100, "outputTokens": 20, "totalTokens": 160,
+                      "cachedReadTokens": 30, "cachedWriteTokens": 10}
+        });
+        assert_eq!(
+            usage_from_prompt_result(&with_cache),
+            Some(AcpSessionEvent::Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+                prompt_cache: crate::agents::runner::PromptCacheUsage {
+                    cached_prompt_tokens: Some(30),
+                    cache_write_prompt_tokens: Some(10),
+                },
+            }),
+        );
+        let read_only =
+            json!({"usage": {"inputTokens": 100, "outputTokens": 20, "cachedReadTokens": 30}});
+        match usage_from_prompt_result(&read_only) {
+            Some(AcpSessionEvent::Usage { prompt_cache, .. }) => {
+                assert_eq!(prompt_cache.cached_prompt_tokens, Some(30));
+                assert_eq!(prompt_cache.cache_write_prompt_tokens, None);
+            }
+            other => panic!("expected usage, got {other:?}"),
+        }
+    }
+
+    /// KT-927 — OpenCode is started with Kronn's read policy, unless the operator
+    /// already passes an inline configuration of their own.
+    #[test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    fn opencode_starts_with_the_read_policy_unless_the_operator_brought_their_own() {
+        fn config_of(command: &tokio::process::Command) -> Option<String> {
+            command
+                .as_std()
+                .get_envs()
+                .find(|(name, _)| *name == "OPENCODE_CONFIG_CONTENT")
+                .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+        }
+
+        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+        let mut command = crate::core::cmd::async_cmd("opencode");
+        apply_opencode_policy(&mut command);
+        assert_eq!(
+            config_of(&command).as_deref(),
+            Some(secret_files::opencode_config_content().as_str())
+        );
+
+        std::env::set_var("OPENCODE_CONFIG_CONTENT", r#"{"theme":"mine"}"#);
+        let mut command = crate::core::cmd::async_cmd("opencode");
+        apply_opencode_policy(&mut command);
+        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+        assert_eq!(
+            config_of(&command),
+            None,
+            "the operator's own inline configuration is inherited untouched"
+        );
+    }
+
+    /// KT-927 — OpenCode, scripted, on the real transport and the real broker.
+    /// It asks to read an environment file WITHOUT saying which one (that is
+    /// what OpenCode's `read` permission request carries), is refused, goes on
+    /// with its turn and ends it reporting what it consumed. Before, the refusal
+    /// ended the turn and the step with it, and the usage was never read.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    async fn a_refused_read_does_not_end_the_turn_and_the_turn_reports_its_usage() {
+        let out = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+        // Only the program differs from `spawn_native`: the environment Kronn
+        // gives OpenCode is built by the same function.
+        let mut command = native_command(
+            AcpAgent::OpenCode,
+            "python3",
+            &["-c", test_support::OPENCODE_ACP_FIXTURE],
+            &project.path().to_string_lossy(),
+            None,
+        );
+        command.env("FIXTURE_OUT", out.path());
+        let transport = AcpJsonRpcTransport::spawn_scoped(
+            AcpAgent::OpenCode,
+            command,
+            true,
+            Some(AcpSessionScope::new(
+                Some(project.path().to_path_buf()),
+                "disc-kt927",
+            )),
+        )
+        .await
+        .unwrap();
+        transport.initialize(request()).await.unwrap();
+        let target = transport.create_session().await.unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        transport
+            .prompt(&target, "read .env.dist then .env", tx)
+            .await
+            .expect("a refused read must not end the turn");
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        transport.shutdown().await.unwrap();
+
+        let reply: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.path().join("reply.json")).unwrap())
+                .unwrap();
+        assert_eq!(reply["id"], json!(99));
+        assert_eq!(
+            reply["result"]["outcome"],
+            json!({"outcome": "selected", "optionId": "reject"}),
+            "the refusal is an answer to the tool call, which OpenCode hands its model"
+        );
+        assert!(
+            events.contains(&AcpSessionEvent::TextDelta(
+                "carried on after the refusal".into()
+            )),
+            "the turn went on: {events:?}"
+        );
+        assert!(
+            events.contains(&AcpSessionEvent::Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+                prompt_cache: crate::agents::runner::PromptCacheUsage {
+                    cached_prompt_tokens: Some(30),
+                    cache_write_prompt_tokens: Some(10),
+                },
+            }),
+            "input, output and cache are read from the end of the turn: {events:?}"
+        );
+        assert_eq!(events.last(), Some(&AcpSessionEvent::Completed));
+
+        // What OpenCode was started with: real environment files denied,
+        // templates allowed, and a refusal that does not stop the loop.
+        let config: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.path().join("config.json")).unwrap())
+                .expect("the agent received Kronn's inline configuration");
+        assert_eq!(config["experimental"]["continue_loop_on_deny"], true);
+        assert_eq!(config["permission"]["read"]["*.env"], "deny");
+        assert_eq!(config["permission"]["read"]["*.env.*"], "deny");
+        assert_eq!(config["permission"]["read"]["*.env.dist"], "allow");
+        assert_eq!(config["permission"]["read"]["*.env.example"], "allow");
+    }
+
+    /// KT-927 — stopping the agent stops what it started. Killing the ACP child
+    /// alone left its shell commands running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_stops_the_processes_the_agent_started_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let mut command = crate::core::cmd::async_cmd("sh");
+        command
+            .env("PID_FILE", &pid_file)
+            .args(["-c", "sleep 300 & echo $! > \"$PID_FILE\"; wait"]);
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) == 0 };
+        let descendant = timeout(FIXTURE_GUARD, async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        return pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the agent starts its helper");
+        assert!(alive(descendant), "the helper runs before the stop");
+
+        transport.shutdown().await.unwrap();
+
+        timeout(FIXTURE_GUARD, async {
+            while alive(descendant) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the helper must not outlive the agent it belongs to");
+    }
+
     #[test]
     fn a_response_without_usage_reports_none() {
         assert_eq!(
@@ -2381,6 +2918,7 @@ done"#]);
                 let _sender = sender;
                 std::future::pending::<()>().await;
             }))),
+            group: None,
         };
 
         drop(process);

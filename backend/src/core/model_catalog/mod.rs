@@ -379,12 +379,157 @@ pub async fn refresh_agent_catalog(
     refresh_if_stale(db, agent_type, true).await
 }
 
+/// Files OpenCode reads as a project's own configuration, relative to the
+/// project directory. Their presence alone decides whether a project can offer
+/// models the user-level configuration does not: the files are never opened, so
+/// nothing they hold (a key, a header) can reach the catalogue.
+const OPENCODE_PROJECT_CONFIGS: [&str; 4] = [
+    "opencode.json",
+    "opencode.jsonc",
+    ".opencode/opencode.json",
+    ".opencode/opencode.jsonc",
+];
+
+/// A project scope is one extra OpenCode process per refresh, so the number of
+/// projects consulted is bounded; going past it is logged, never silent.
+const MAX_OPENCODE_PROJECT_SCOPES: usize = 16;
+
+/// OpenCode builds its model list per working directory, and a launch runs in
+/// the project directory while discovery runs in a neutral one. A provider
+/// declared only by a project's `opencode.json` — a local Ollama is the usual
+/// case — is therefore offered to every run in that project yet invisible to
+/// discovery. Keep, among `projects` (name, resolved directory), those that
+/// carry their own OpenCode config; they are the only ones worth asking.
+fn opencode_project_scopes(
+    projects: &[(String, std::path::PathBuf)],
+) -> Vec<(String, std::path::PathBuf)> {
+    let mut scopes: Vec<(String, std::path::PathBuf)> = projects
+        .iter()
+        .filter(|(_, dir)| {
+            dir.is_dir()
+                && OPENCODE_PROJECT_CONFIGS
+                    .iter()
+                    .any(|config| dir.join(config).is_file())
+        })
+        .cloned()
+        .collect();
+    if scopes.len() > MAX_OPENCODE_PROJECT_SCOPES {
+        tracing::warn!(
+            projects = scopes.len(),
+            limit = MAX_OPENCODE_PROJECT_SCOPES,
+            "more projects carry an OpenCode config than one refresh consults; the rest are left out"
+        );
+        scopes.truncate(MAX_OPENCODE_PROJECT_SCOPES);
+    }
+    scopes
+}
+
+/// Fold what OpenCode offers inside some projects into what it offers
+/// everywhere. Every model comes from an OpenCode session response — nothing is
+/// added by Kronn — and one already offered everywhere is not repeated. A model
+/// only a project offers says so in its description, since it is absent from a
+/// run in any other directory. A failed project scope is left out and logged
+/// (its reason only): it never turns the refresh into a failure, because one
+/// project's broken config must not take OpenCode away from every other project.
+/// A failed global discovery is returned as it is, project results or not.
+fn merge_project_scopes(
+    global: DiscoveryOutcome,
+    scoped: Vec<(String, DiscoveryOutcome)>,
+) -> DiscoveryOutcome {
+    let DiscoveryOutcome::Live(mut models) = global else {
+        return global;
+    };
+    for (project, outcome) in scoped {
+        match outcome {
+            DiscoveryOutcome::Live(offered) => {
+                for model in offered {
+                    if models.iter().any(|known| known.model_id == model.model_id) {
+                        continue;
+                    }
+                    let note = format!("Offered by OpenCode only inside the project {project}.");
+                    models.push(DiscoveredModel {
+                        description: Some(match model.description {
+                            Some(description) => format!("{description} {note}"),
+                            None => note,
+                        }),
+                        ..model
+                    });
+                }
+            }
+            other => {
+                let reason = reason_for(&other).map(|(reason, _)| reason);
+                tracing::warn!(
+                    project = %project,
+                    ?reason,
+                    "OpenCode discovery failed in a project directory; its own models are left out of this snapshot"
+                );
+            }
+        }
+    }
+    DiscoveryOutcome::Live(models)
+}
+
+/// OpenCode discovery: the neutral directory and every project scope, run
+/// together so the whole refresh keeps one discovery bound.
+async fn discover_opencode(db: &Database) -> DiscoveryOutcome {
+    discover_opencode_with(db, |dir| async move {
+        match timeout(
+            DISCOVERY_TIMEOUT,
+            acp_discovery::discover_in(&AgentType::OpenCode, &dir),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => DiscoveryOutcome::Timeout,
+        }
+    })
+    .await
+}
+
+/// `discover_opencode` with the per-directory discovery supplied, so the
+/// project listing, the scope choice and the merge are testable without an
+/// OpenCode process.
+async fn discover_opencode_with<F, Fut>(db: &Database, discover_scope: F) -> DiscoveryOutcome
+where
+    F: Fn(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = DiscoveryOutcome>,
+{
+    let projects = db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+        .map(|projects| {
+            projects
+                .into_iter()
+                .map(|project| {
+                    let dir = crate::core::scanner::resolve_host_path(&project.path);
+                    (project.name, dir)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not list projects for OpenCode discovery; only the user-level catalogue is read");
+            Vec::new()
+        });
+    let scopes = opencode_project_scopes(&projects);
+    let discover_scope = &discover_scope;
+    let scoped = futures::future::join_all(
+        scopes
+            .into_iter()
+            .map(|(name, dir)| async move { (name, discover_scope(dir).await) }),
+    );
+    let (global, scoped) = tokio::join!(discover(&AgentType::OpenCode), scoped);
+    merge_project_scopes(global, scoped)
+}
+
 async fn discover_and_reconcile(
     db: &Database,
     agent_type: AgentType,
 ) -> anyhow::Result<ModelCatalogView> {
     let runtime_target_id = db::agent_runtime_target_id(&agent_type);
-    let outcome = discover(&agent_type).await;
+    let outcome = match agent_type {
+        AgentType::OpenCode => discover_opencode(db).await,
+        _ => discover(&agent_type).await,
+    };
     let at = agent_type.clone();
     let target = runtime_target_id.clone();
     match outcome {
@@ -2118,5 +2263,261 @@ mod tests {
         assert!(view.stale);
         assert!(!view.live_refresh_ok);
         assert!(view.models.is_empty());
+    }
+
+    fn offered(model_id: &str) -> DiscoveredModel {
+        DiscoveredModel {
+            model_id: model_id.into(),
+            display_name: model_id.into(),
+            resolved_model: None,
+            description: None,
+            capabilities: Vec::new(),
+            reasoning_modes: Vec::new(),
+            default_reasoning_mode: None,
+        }
+    }
+
+    fn ids(models: &[DiscoveredModel]) -> Vec<&str> {
+        models.iter().map(|model| model.model_id.as_str()).collect()
+    }
+
+    fn project_at(id: &str, name: &str, path: &std::path::Path) -> crate::models::Project {
+        let now = Utc::now();
+        crate::models::Project {
+            id: id.into(),
+            name: name.into(),
+            path: path.to_string_lossy().into_owned(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: crate::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn only_projects_with_their_own_opencode_config_are_asked() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bench = root.path().join("bench");
+        std::fs::create_dir_all(&bench).unwrap();
+        std::fs::write(bench.join("opencode.json"), "{}").unwrap();
+        let app = root.path().join("app");
+        std::fs::create_dir_all(app.join(".opencode")).unwrap();
+        std::fs::write(app.join(".opencode/opencode.jsonc"), "{}").unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        // A directory that is only named like a config is not a config.
+        let impostor = root.path().join("impostor");
+        std::fs::create_dir_all(impostor.join("opencode.json")).unwrap();
+        let gone = root.path().join("gone");
+
+        let scopes = opencode_project_scopes(&[
+            ("bench".into(), bench.clone()),
+            ("app".into(), app.clone()),
+            ("plain".into(), plain),
+            ("impostor".into(), impostor),
+            ("gone".into(), gone),
+        ]);
+
+        assert_eq!(
+            scopes,
+            vec![("bench".to_string(), bench), ("app".to_string(), app)]
+        );
+    }
+
+    /// A model only a project offers joins the list once, says where it is
+    /// offered, and everything that reaches the list came from a session
+    /// response: nothing is added, and what the user-level config offers is
+    /// left exactly as discovered.
+    #[test]
+    fn a_project_only_model_joins_the_global_list_once_and_nothing_is_invented() {
+        let global = DiscoveryOutcome::Live(vec![
+            offered("opencode/big-pickle"),
+            offered("anthropic/claude-sonnet"),
+        ]);
+        let merged = merge_project_scopes(
+            global,
+            vec![
+                (
+                    "bench".into(),
+                    DiscoveryOutcome::Live(vec![
+                        offered("opencode/big-pickle"),
+                        offered("ollama/qwen3.8:27b"),
+                    ]),
+                ),
+                (
+                    "other".into(),
+                    DiscoveryOutcome::Live(vec![offered("ollama/qwen3.8:27b")]),
+                ),
+            ],
+        );
+
+        let DiscoveryOutcome::Live(models) = merged else {
+            panic!("a live global discovery stays live");
+        };
+        assert_eq!(
+            ids(&models),
+            vec![
+                "opencode/big-pickle",
+                "anthropic/claude-sonnet",
+                "ollama/qwen3.8:27b"
+            ]
+        );
+        assert_eq!(models[0].description, None);
+        assert_eq!(models[1].description, None);
+        let note = models[2].description.as_deref().expect("scope note");
+        assert!(
+            note.contains("bench") && !note.contains("other"),
+            "the first project that offers it is named: {note}"
+        );
+    }
+
+    #[test]
+    fn a_failed_project_scope_leaves_the_rest_of_the_refresh_intact() {
+        let merged = merge_project_scopes(
+            DiscoveryOutcome::Live(vec![offered("opencode/big-pickle")]),
+            vec![
+                ("broken".into(), DiscoveryOutcome::Timeout),
+                (
+                    "denied".into(),
+                    DiscoveryOutcome::AuthRequired("login".into()),
+                ),
+                ("nothing".into(), DiscoveryOutcome::Unsupported),
+                (
+                    "bench".into(),
+                    DiscoveryOutcome::Live(vec![offered("ollama/qwen3.8:27b")]),
+                ),
+            ],
+        );
+
+        let DiscoveryOutcome::Live(models) = merged else {
+            panic!("one project's failure must not fail the refresh");
+        };
+        assert_eq!(
+            ids(&models),
+            vec!["opencode/big-pickle", "ollama/qwen3.8:27b"]
+        );
+    }
+
+    #[test]
+    fn a_failed_user_level_discovery_is_never_masked_by_project_results() {
+        for failure in [
+            DiscoveryOutcome::Timeout,
+            DiscoveryOutcome::CliMissing("opencode".into()),
+            DiscoveryOutcome::Unsupported,
+        ] {
+            let merged = merge_project_scopes(
+                failure.clone(),
+                vec![(
+                    "bench".into(),
+                    DiscoveryOutcome::Live(vec![offered("ollama/qwen3.8:27b")]),
+                )],
+            );
+            assert_eq!(merged, failure);
+        }
+    }
+
+    /// OpenCode is wired to a local Ollama through a project's own config: the
+    /// catalogue must list that model with the rest, and only what OpenCode
+    /// reported. Drives the whole path — project list, scope choice, merge,
+    /// persistence, the view Settings reads.
+    #[tokio::test]
+    async fn every_model_opencode_offers_reaches_the_catalogue_local_providers_included() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bench = root.path().join("bench");
+        std::fs::create_dir_all(&bench).unwrap();
+        std::fs::write(bench.join("opencode.json"), "{}").unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+
+        let database = test_db();
+        let (bench_project, plain_project) = (
+            project_at("p-bench", "bench", &bench),
+            project_at("p-plain", "plain", &plain),
+        );
+        database
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &bench_project)?;
+                crate::db::projects::insert_project(conn, &plain_project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // What each directory's OpenCode session lists. Only `bench` has a config
+        // of its own, so only `bench` may be asked.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let bench_dir = bench.clone();
+        let outcome = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![
+                    offered("opencode/big-pickle"),
+                    offered("anthropic/claude-sonnet"),
+                ]),
+                discover_opencode_with(&database, |dir| {
+                    asked.lock().unwrap().push(dir.clone());
+                    let answer = if dir == bench_dir {
+                        DiscoveryOutcome::Live(vec![
+                            offered("opencode/big-pickle"),
+                            offered("anthropic/claude-sonnet"),
+                            offered("ollama/llama3.3:70b"),
+                            offered("ollama/qwen3.8:27b"),
+                        ])
+                    } else {
+                        DiscoveryOutcome::Unsupported
+                    };
+                    async move { answer }
+                }),
+            )
+            .await;
+        assert_eq!(*asked.lock().unwrap(), vec![bench]);
+
+        let DiscoveryOutcome::Live(models) = outcome else {
+            panic!("a live discovery stays live");
+        };
+        let target = db::agent_runtime_target_id(&AgentType::OpenCode);
+        let reconcile_target = target.clone();
+        database
+            .with_conn(move |conn| {
+                db::reconcile_live(conn, &reconcile_target, &AgentType::OpenCode, &models)
+            })
+            .await
+            .unwrap();
+
+        let view = build_view(&database, target, AgentType::OpenCode)
+            .await
+            .unwrap();
+        let mut listed: Vec<&str> = view.models.iter().map(|m| m.model_id.as_str()).collect();
+        listed.sort_unstable();
+        assert_eq!(
+            listed,
+            vec![
+                "anthropic/claude-sonnet",
+                "ollama/llama3.3:70b",
+                "ollama/qwen3.8:27b",
+                "opencode/big-pickle",
+            ],
+            "every model OpenCode reported, and none it did not"
+        );
+        assert!(view
+            .models
+            .iter()
+            .all(|model| model.availability == ModelAvailability::Available
+                && model.provenance == ModelProvenance::Live));
     }
 }
