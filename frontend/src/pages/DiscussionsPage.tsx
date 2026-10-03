@@ -55,6 +55,7 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
+import { useSustainedFlag } from '../hooks/useSustainedFlag';
 import { AGENT_LABELS, agentColor, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isRoomAgentDisabled, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
@@ -100,6 +101,8 @@ type InterruptedStreamState = {
 // `shared_run_updated` events for brand-new media jobs collapses into one
 // relist instead of one per event.
 const MEDIA_JOBS_RELIST_DEBOUNCE_MS = 250;
+// How long a WebSocket reconnect lasts before the banner says so (#220).
+const REALTIME_BANNER_DELAY_MS = 3000;
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -1503,6 +1506,10 @@ export function DiscussionsPage({
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   const interruptedStream = activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
   const durablePartial = activeDiscussion?.partial_response;
+  // #220 — the local stream can drop while the server keeps running the agent;
+  // only a run the server no longer reports is "interrupted".
+  const serverStillRunning = !!allDiscussions.find(d => d.id === activeDiscussionId)?.agent_running;
+  const streamLost = !sending && !serverStillRunning;
   const pendingReplySlots = useMemo(() => {
     if (!activeDiscussion || (
       !sending
@@ -1879,6 +1886,9 @@ export function DiscussionsPage({
     }
     refreshContactsPresence();
   });
+  // #220 — a socket that reconnects within seconds (tab throttling, a missed
+  // pong) is not worth a banner: the agent runs server-side either way.
+  const realtimeReconnecting = useSustainedFlag(wsConnectionState === 'reconnecting', REALTIME_BANNER_DELAY_MS);
 
   // Baseline presence poll (every 30s) — edge events handle instant transitions
   // in between; this guarantees the dots converge to the truth even if an event
@@ -3846,11 +3856,11 @@ export function DiscussionsPage({
                     onToggleLogs={() => setShowLogs(value => !value)}
                     stopping={stoppingDispatchIds.has(reply.id)}
                     onStop={() => { void handleStopDispatch(reply.id); }}
-                    recovering={!sending || durablePartial?.dispatch?.last_error === 'backend_restarted'}
+                    recovering={streamLost || durablePartial?.dispatch?.last_error === 'backend_restarted'}
                     recoveryLabel={
                       durablePartial?.dispatch?.last_error === 'backend_restarted'
                         ? t('disc.streamRestartSaved', durablePartial.dispatch.attempts ?? 1)
-                        : !sending
+                        : streamLost
                           ? t('disc.streamDisconnectedSaved')
                           : null
                     }
@@ -4011,7 +4021,7 @@ export function DiscussionsPage({
     handleMsgEditStart, handleMsgExpandSummary, handleMsgReply, handleMsgTts, handleReplyNavigate,
     handleRetryAgentDispatch, handleStopDispatch, hasFullAccess, locale, mediaJobsByMessage,
     messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, orchState, pendingFileMsgIds,
-    pendingReplySlots, recoveryAgentLabel, resilientStreamingText, sending, sendingElapsed,
+    pendingReplySlots, recoveryAgentLabel, resilientStreamingText, sending, sendingElapsed, streamLost,
     showLogs, stableEditMessage, stableLaunchQp, stableOpenActionDiscussion, stableRetry,
     stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply]);
 
@@ -4417,7 +4427,7 @@ export function DiscussionsPage({
               </div>
             )}
 
-            {wsConnectionState === 'reconnecting' && (
+            {realtimeReconnecting && (
               <div className="disc-realtime-status" role="status" aria-live="polite">
                 <WifiOff size={14} aria-hidden="true" />
                 <span>{t('disc.realtimeReconnecting')}</span>

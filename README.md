@@ -68,6 +68,19 @@
 - **Rooms that always open:** a CLI the bridge cannot identify no longer makes
   its room unreadable, OpenCode is recognised when it joins, and a discussion
   that fails to load says why, with a retry.
+- **A safer Docker mode:** agents no longer see your home's credential files,
+  the host's Docker socket, or MCP tokens in repositories and in the CLIs'
+  configs; Kronn's data directory is owner-only. See the security advisory and
+  rotate the tokens you had configured.
+- **Fast on a big workspace:** the Discussions and Projects pages open in under
+  a second on a 10 GB database, a click on a discussion re-renders two cards
+  instead of the whole list, and one Kronn loading screen covers start-up and
+  restarts instead of an error page.
+- **LiteLLM models checked:** testing a connection flags every model that
+  answers 404, live, and a refused model cannot be saved.
+- **Desktop installers are back:** each release carries its Windows, macOS and
+  Linux installers again, and the update banner only offers a version you can
+  install.
 
 Earlier releases are described in the [CHANGELOG](CHANGELOG.md).
 

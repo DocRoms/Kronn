@@ -3001,6 +3001,119 @@ args = ["@example/old-mcp"]
         }
     }
 
+    /// KT-965 — under Docker the CLIs' global configs (~/.codex, ~/.copilot,
+    /// ~/.gemini, ~/.claude.json) are mounted from the user's home and read by
+    /// every agent of the container: no secret value may be written there.
+    /// Natively nothing changes (decision on KT-964).
+    #[test]
+    #[serial]
+    fn under_docker_no_host_cli_config_receives_a_secret_value() {
+        use crate::core::mcp_scanner::{ClaudeSync, GeminiSync};
+        let tmp = setup_tmp("host-sync-secrets");
+        let home = tmp.join("fake-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prev_home = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        for (id, label, env) in [
+            (
+                "tokened",
+                "github",
+                Some(("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_never_in_a_host_config")),
+            ),
+            ("plain", "filesystem", None),
+        ] {
+            crate::db::mcps::upsert_server(
+                &conn,
+                &crate::models::McpServer {
+                    id: format!("srv-{id}"),
+                    name: label.into(),
+                    description: String::new(),
+                    transport: crate::models::McpTransport::Stdio {
+                        command: "sh".into(),
+                        args: vec![format!("{label}-mcp")],
+                    },
+                    source: crate::models::McpSource::Manual,
+                    api_spec: None,
+                },
+            )
+            .unwrap();
+            let env: HashMap<String, String> = env
+                .map(|(key, value)| HashMap::from([(key.to_string(), value.to_string())]))
+                .unwrap_or_default();
+            crate::db::mcps::insert_config(
+                &conn,
+                &crate::models::McpConfig {
+                    id: format!("cfg-{id}"),
+                    server_id: format!("srv-{id}"),
+                    label: label.into(),
+                    env_keys: env.keys().cloned().collect(),
+                    env_encrypted: if env.is_empty() {
+                        String::new()
+                    } else {
+                        crate::db::mcps::encrypt_env(&env, secret).unwrap()
+                    },
+                    args_override: None,
+                    is_global: true,
+                    include_general: true,
+                    config_hash: format!("h-{id}"),
+                    project_ids: vec![],
+                    host_sync: crate::models::HostSyncMode::GlobalOnly,
+                },
+            )
+            .unwrap();
+        }
+
+        let plans = |mode: &str| -> Vec<(&'static str, String)> {
+            std::env::set_var("KRONN_MCP_SECRET_REFERENCES", mode);
+            let syncs: [(&'static str, &dyn HostMcpSync); 4] = [
+                ("Codex", &CodexSync),
+                ("Copilot", &CopilotSync),
+                ("Claude Code", &ClaudeSync),
+                ("Gemini", &GeminiSync),
+            ];
+            let out = syncs
+                .iter()
+                .map(|(name, sync)| {
+                    let plan = sync
+                        .prepare(&conn, secret)
+                        .unwrap_or_else(|| panic!("{name} plan"));
+                    (*name, plan.content)
+                })
+                .collect();
+            std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+            out
+        };
+
+        let docker = plans("1");
+        let native = plans("0");
+        match prev_home {
+            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        cleanup(&tmp);
+
+        for (name, content) in &docker {
+            assert!(
+                !content.contains("ghp_never_in_a_host_config"),
+                "{name}: a secret value reached the host config under Docker:\n{content}"
+            );
+            assert!(
+                content.contains("filesystem"),
+                "{name}: an MCP without secrets must stay:\n{content}"
+            );
+        }
+        for (name, content) in &native {
+            assert!(
+                content.contains("ghp_never_in_a_host_config"),
+                "{name}: natively the host config keeps working as before:\n{content}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     #[serial]

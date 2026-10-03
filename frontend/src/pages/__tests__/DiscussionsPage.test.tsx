@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { loadDraft } from '../../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft } from '../../lib/chat-reply-drafts';
@@ -1272,6 +1272,102 @@ describe('DiscussionsPage', () => {
     expect(document.body).not.toHaveTextContent("Agent en cours d'exécution...");
   });
 
+  it('does not call a stream interrupted while the server still runs the agent', async () => {
+    // #220 — the local stream dropped, the agent kept working server-side.
+    const fullDisc = {
+      ...makeListDiscussion('d-stream-alive', 1),
+      messages: [{
+        id: 'u-existing', role: 'User' as const, channel: 'main' as const,
+        content: 'Question précédente', agent_type: null,
+        timestamp: '2026-09-01T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+    };
+    let markServerRunning: (running: boolean) => void = () => {};
+    let detailFetches = 0;
+    vi.mocked(discussionsApi.get).mockImplementation(async () => {
+      detailFetches += 1;
+      if (detailFetches === 1) return fullDisc;
+      throw new Error('backend restarting');
+    });
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId, payload, onText, _onDone, onError, _signal, onStart, _onLog, onAccepted) => {
+        onStart?.();
+        onAccepted?.({
+          message_id: payload.client_message_id ?? 'u-new',
+          sort_order: 2,
+          duplicate: false,
+        });
+        // The server now runs the agent and keeps reporting it.
+        markServerRunning(true);
+        onText?.('Analyse locale déjà reçue avant la coupure.');
+        // Same-frame failure: the rAF-backed lifted map has not rendered yet.
+        // The synchronous recovery buffer must still retain this chunk.
+        onError?.('network disconnected');
+      },
+    );
+
+    function StatefulDiscussion() {
+      const [serverRunning, setServerRunning] = useState(false);
+      markServerRunning = setServerRunning;
+      const listed = useMemo(() => [{ ...fullDisc, agent_running: serverRunning }], [serverRunning]);
+      const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
+      const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
+      const [sendingStartMap, setSendingStartMap] = useState<Record<string, number>>({});
+      const [queuedMap, setQueuedMap] = useState<Record<string, boolean>>({});
+      const abortControllers = useRef<Record<string, AbortController>>({});
+      return (
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={listed}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={noop}
+          refetchProjects={noop}
+          onNavigate={noop}
+          toast={toastFn}
+          initialActiveDiscussionId="d-stream-alive"
+          sendingMap={sendingMap}
+          setSendingMap={setSendingMap}
+          queuedMap={queuedMap}
+          setQueuedMap={setQueuedMap}
+          sendingStartMap={sendingStartMap}
+          setSendingStartMap={setSendingStartMap}
+          streamingMap={streamingMap}
+          setStreamingMap={setStreamingMap}
+          noteStreamTick={noop}
+          abortControllers={abortControllers}
+          cleanupStream={(discId) => {
+            setSendingMap(previous => ({ ...previous, [discId]: false }));
+            setStreamingMap(previous => {
+              const { [discId]: _removed, ...rest } = previous;
+              return rest;
+            });
+          }}
+          markDiscussionSeen={noop}
+          onActiveDiscussionChange={noop}
+          lastSeenMsgCount={{}}
+        />
+      );
+    }
+
+    await wrap(<StatefulDiscussion />);
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(chatInput, { target: { value: 'Lancer une longue analyse' } });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    });
+
+    await waitFor(() => {
+      expect(document.body).toHaveTextContent('Analyse locale déjà reçue avant la coupure.');
+    });
+    expect(screen.getAllByText('Analyse locale déjà reçue avant la coupure.')).toHaveLength(1);
+    expect(document.body).not.toHaveTextContent('Connexion au flux interrompue');
+  });
+
   it('renders a legacy checkpoint even when no active dispatch row survives', async () => {
     const fullDisc = {
       ...makeListDiscussion('d-orphan-checkpoint', 1),
@@ -1853,7 +1949,7 @@ describe('DiscussionsPage', () => {
     expect(screen.queryByRole('complementary', { name: 'Assets' })).toBeNull();
   });
 
-  it('explains that real-time data will resync while the socket reconnects', async () => {
+  it('explains that real-time data will resync once the socket has been reconnecting for a while', async () => {
     const { useWebSocket } = await import('../../hooks/useWebSocket');
     const discussion = makeListDiscussion('d1', 0);
     vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
@@ -1878,8 +1974,10 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    expect(screen.getByRole('status')).toHaveTextContent(/reconnexion en cours/i);
-    expect(screen.getByRole('status')).toHaveTextContent(/brouillons sont conservés/i);
+    // #220 — a reconnect that clears within seconds never shows the banner.
+    expect(screen.queryByText(/reconnexion en cours/i)).toBeNull();
+    const banner = await screen.findByText(/reconnexion en cours/i, {}, { timeout: 5000 });
+    expect(banner.closest('[role="status"]')).toHaveTextContent(/brouillons sont conservés/i);
 
     vi.mocked(useWebSocket).mockImplementation(() => ({
       connected: false,

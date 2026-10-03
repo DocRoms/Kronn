@@ -2,8 +2,15 @@ name: Desktop Build
 
 on:
   push:
-    tags: ['v*']
+    # This repository tags releases `0.14.2`; a `v*`-only filter never fired,
+    # and 0.12.0 to 0.14.1 shipped without installers (KT-970).
+    tags: ['v*', '[0-9]+.[0-9]+.[0-9]+*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Attach the installers to this existing release (e.g. 0.14.1); empty = build only'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -46,6 +53,9 @@ jobs:
       - name: Checkout source (bounded network retry)
         uses: actions/checkout@v7
         timeout-minutes: 5
+        with:
+          # Installers attached to an existing release are built from its tag.
+          ref: ${{ inputs.release_tag }}
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
@@ -345,9 +355,19 @@ jobs:
   release:
     needs: [build-desktop, verify-installers]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
 
     steps:
+      - name: Checkout release checks
+        uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          sparse-checkout: backend/sidecars/docs
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -357,8 +377,10 @@ jobs:
         run: find artifacts -type f | sort
 
       - name: Create Release
+        if: inputs.release_tag == ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           draft: true
           generate_release_notes: true
           body: |
@@ -403,3 +425,17 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.deb
             artifacts/**/*.AppImage
+
+      # A release published by hand, before this workflow fixed its trigger,
+      # gets its installers attached without touching its notes or status.
+      - name: Attach installers to an existing release
+        if: inputs.release_tag != ''
+        run: |
+          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0 \
+            | xargs -0 gh release upload "$RELEASE_TAG" --clobber
+
+      # Blocking: the release must carry an installer for every platform.
+      - name: Verify the release carries every installer
+        run: |
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+            | python3 backend/sidecars/docs/verify_artifacts.py --release-assets

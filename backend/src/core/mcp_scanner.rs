@@ -2239,6 +2239,9 @@ impl HostMcpSync for CodexSync {
                 // Abort the whole Codex sync plan — see decrypt_env_strict.
                 Err(_) => return None,
             };
+            if withheld_from_host_config(config, &env, "Codex") {
+                continue;
+            }
             // Codex requires names matching ^[a-zA-Z0-9_-]+$ — slugify
             let raw_key = config.label.clone();
             let key = slugify_label(&raw_key);
@@ -2414,6 +2417,9 @@ impl HostMcpSync for CopilotSync {
                 // Abort the whole Copilot sync plan — see decrypt_env_strict.
                 Err(_) => return None,
             };
+            if withheld_from_host_config(config, &env, "Copilot") {
+                continue;
+            }
 
             let key = config.label.clone();
             mcp_servers.insert(
@@ -2744,6 +2750,25 @@ fn warn_missing_host_binaries(conn: &rusqlite::Connection) {
 
 /// Whether a config opts in to outbound host sync. Anything other than
 /// `None` means Kronn should write it to the relevant CLI config file.
+/// Under Docker the host CLIs' global configs are mounted read-write from the
+/// user's home and read by every agent in the container, whatever its
+/// project: an MCP that carries secrets stays out of them (KT-965), like the
+/// project files of CLIs that cannot resolve references (KT-964).
+fn withheld_from_host_config(
+    config: &crate::models::McpConfig,
+    env: &HashMap<String, String>,
+    cli: &str,
+) -> bool {
+    if !crate::core::mcp_secret_refs::enabled() || env.is_empty() {
+        return false;
+    }
+    tracing::warn!(
+        "MCP '{}' carries secrets: left out of {cli}'s global config under Docker",
+        config.label
+    );
+    true
+}
+
 pub(crate) fn should_host_sync(config: &crate::models::McpConfig) -> bool {
     use crate::models::HostSyncMode;
     matches!(
@@ -2800,6 +2825,14 @@ fn build_kronn_managed_json_entry(
     // Err = decrypt failure with expected keys → the caller must abort its
     // whole host-config write (see decrypt_env_strict).
     let env = decrypt_env_strict(config, secret)?;
+    let cli = if use_http_url_for_streamable {
+        "Gemini"
+    } else {
+        "Claude Code"
+    };
+    if withheld_from_host_config(config, &env, cli) {
+        return Ok(None);
+    }
 
     let mut obj = serde_json::Map::new();
     match &server.transport {
@@ -3076,7 +3109,7 @@ impl HostMcpSync for ClaudeSync {
             };
             let entry = match build_kronn_managed_json_entry(config, server, secret, false, true) {
                 Ok(Some(e)) => e,
-                Ok(None) => continue, // ApiOnly skipped
+                Ok(None) => continue, // ApiOnly, or withheld under Docker
                 // Decrypt failure: abort the whole Claude host sync so the
                 // existing on-disk secrets are preserved (already logged).
                 Err(_) => return None,
@@ -3471,7 +3504,7 @@ impl HostMcpSync for GeminiSync {
                         serde_json::Value::String(config.label.clone()),
                     );
                 }
-                Ok(None) => {} // ApiOnly skipped
+                Ok(None) => {} // ApiOnly, or withheld under Docker
                 // Decrypt failure: abort the whole Gemini host sync (logged).
                 Err(_) => return None,
             }

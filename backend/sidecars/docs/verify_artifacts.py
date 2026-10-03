@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Fail a desktop release unless every platform produced a real installer."""
+"""Fail a desktop release unless every platform produced a real installer.
+
+Two checks: the CI artifacts before the release is created, and the assets the
+published release really carries (`--release-assets`, names on stdin). Releases
+0.12.0 to 0.14.1 shipped with no installer at all, which only the second can
+catch (KT-970).
+"""
 
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 
@@ -13,6 +20,25 @@ EXPECTED_ARTIFACTS = {
     "kronn-macOS-x64": {".dmg"},
     "kronn-linux": {".deb", ".appimage"},
 }
+
+
+# What each platform needs among a release's assets, by Tauri's file names
+# (`Kronn_0.14.2_aarch64.dmg`, `Kronn_0.14.2_x64-setup.exe`, ...).
+RELEASE_PLATFORMS = {
+    "Windows": (".exe", ".msi"),
+    "macOS Apple Silicon": ("_aarch64.dmg",),
+    "macOS Intel": ("_x64.dmg",),
+    "Linux": (".appimage", ".deb"),
+}
+
+
+def missing_release_platforms(asset_names: list[str]) -> list[str]:
+    names = [name.strip().lower() for name in asset_names if name.strip()]
+    return [
+        platform
+        for platform, endings in RELEASE_PLATFORMS.items()
+        if not any(name.endswith(ending) for name in names for ending in endings)
+    ]
 
 
 def verify(root: Path) -> list[Path]:
@@ -40,8 +66,21 @@ def verify(root: Path) -> list[Path]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("root", type=Path)
+    parser.add_argument("root", type=Path, nargs="?")
+    parser.add_argument(
+        "--release-assets",
+        action="store_true",
+        help="read a release's asset names on stdin and fail if a platform has no installer",
+    )
     args = parser.parse_args()
+    if args.release_assets:
+        missing = missing_release_platforms(sys.stdin.read().splitlines())
+        if missing:
+            raise SystemExit("Release without an installer for: " + ", ".join(missing))
+        print("release carries an installer for every platform")
+        return
+    if args.root is None:
+        parser.error("the artifact root is required")
     installers = verify(args.root.resolve())
     for installer in installers:
         print(f"verified {installer} ({installer.stat().st_size} bytes)")
