@@ -203,11 +203,23 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     projects: {
       list: resolve([]),
       get: resolve(null),
+      agentFiles: resolve({ policy: 'repo' }),
+      setAgentFiles: resolve({ policy: 'repo' }),
       scan: resolve([]),
       create: resolve({}),
       addFolder: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),
+      repositoryResources: resolve({
+        kronn_exists: false,
+        skill_roots: [],
+        skills_present: [],
+        skills_available: [],
+        resources: [],
+      }),
+      usedSkills: resolve([]),
+      linkedReposCandidates: resolve([]),
+      setLinkedRepos: resolve(true),
       dockerStatus: resolve({
         compose_present: false,
         compose_file: null,
@@ -317,6 +329,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // override to seed the chip list.
       auditHistory: resolve([]),
       auditRunSteps: resolve([]),
+    auditSteps: resolve([]),
       // 0.8.4 (#294) — cross-agent memory bindings. Default "no
       // imported discs" so sidebar tests that don't care about the
       // badge see it stay hidden.
@@ -364,7 +377,6 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       updateConfig: resolve({}),
       updateCustomSpec: resolve({ server: {}, orphan_env_keys: [] }),
       cleanupOrphanEnv: resolve({ configs_updated: 0, total_keys_removed: 0 }),
-      exportFileUrl: vi.fn((...args: unknown[]) => `/api/mcps/custom/${args[0] as string}/export-file`),
       importPluginFile: resolve({}),
       deleteConfig: resolve(undefined),
       link: resolve(undefined),
@@ -578,8 +590,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     ollama: {
-      health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null }),
+      health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null, mlx_capable: false }),
       models: resolve({ models: [] }),
+      registry: resolve({ models: [], suggestions: [] }),
       setContextOverride: resolve({ model: '', num_ctx: null, warnings: [] }),
     },
 
@@ -636,6 +649,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
       remove: resolve(null),
       test: resolve({ ok: false, status: 'transport_error', models: [], hint: null }),
+      testProgress: resolve({ done: 0, total: 0 }),
     },
 
     debugApi: {

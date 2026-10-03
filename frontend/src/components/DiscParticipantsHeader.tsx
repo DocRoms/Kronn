@@ -63,6 +63,13 @@ interface ParticipantRow {
   last_write_at?: string | null;
   resume_reason?: string | null;
   resume_since?: string | null;
+  workflow_step?: {
+    run_id: string;
+    workflow_id: string;
+    workflow_name: string;
+    step_key: string;
+    step_name: string;
+  } | null;
 }
 
 // Presence thresholds live in `lib/discPresence.ts` (pure, unit-tested);
@@ -195,6 +202,7 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
     ? presenceLabel(selectedParticipant, selectedPresence, t)
     : null;
   const selectedResumeCommand = selectedParticipant
+    && !selectedParticipant.workflow_step
     ? resumeCommandFor(selectedParticipant.agent_type, selectedParticipant.conversation_id)
     : null;
   const selectedDisplayName = selectedParticipant
@@ -266,6 +274,11 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
                 {AGENT_MENTIONS.find(mention => mention.type === p.agent_type)?.trigger
                   ?? p.agent_type}
               </span>
+              {p.workflow_step && (
+                <span className="disc-participant-workflow" data-testid="workflow-step-participant">
+                  {p.workflow_step.workflow_name} › {p.workflow_step.step_name}
+                </span>
+              )}
               {writeState === 'failed' && (
                 <span className="disc-participant-write-failed-dot" aria-label={t('disc.writeFailed')} />
               )}
@@ -292,8 +305,12 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
               </button>
             </header>
             <div className="disc-participant-details-meta">
-              <span>{selectedParticipant.role}</span>
-              <span>{selectedParticipant.wake_mode === 'native_dispatch' ? t('disc.targetNative') : t('disc.targetCli')}</span>
+              <span>{selectedParticipant.workflow_step ? t('disc.targetDiscussionAgent') : selectedParticipant.role}</span>
+              <span>{selectedParticipant.workflow_step
+                ? t('disc.workflowStepAgent')
+                : selectedParticipant.wake_mode === 'native_dispatch'
+                  ? t('disc.targetNative')
+                  : t('disc.targetCli')}</span>
             </div>
             <dl>
               <div>
@@ -305,6 +322,22 @@ export function DiscParticipantsHeader({ discId, t, refreshKey = 0 }: DiscPartic
                   <dt>{t('disc.participantModel')}</dt>
                   <dd className="disc-participant-model">{selectedParticipant.model}</dd>
                 </div>
+              )}
+              {selectedParticipant.workflow_step && (
+                <>
+                  <div>
+                    <dt>{t('disc.workflow')}</dt>
+                    <dd>{selectedParticipant.workflow_step.workflow_name}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('disc.workflowStep')}</dt>
+                    <dd>{selectedParticipant.workflow_step.step_name}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('disc.workflowRunLabel')}</dt>
+                    <dd>{selectedParticipant.workflow_step.run_id}</dd>
+                  </div>
+                </>
               )}
               {selectedParticipant.resume_reason && (
                 <div>

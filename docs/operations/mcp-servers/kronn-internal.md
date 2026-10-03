@@ -37,6 +37,16 @@ required; choices, context, recommendations, multiple selection and task
 reference are optional. Free-text answers are always available. A recommendation
 is not a preselected answer or consent.
 
+A question authored by a workflow Agent step may also declare
+`"resume":{"workflow_id":"<workflow id>","variables":{"name":"value"}}`.
+Answering or declining such a question starts that workflow once; commenting
+does not resolve the question and does not start it. The declaration accepts at
+most 16 variables. Workflow ids are non-empty and at most 128 characters;
+variable names are 1–64 ASCII letters, digits, `_`, `-`, or `.`, and each value
+is a control-free string of at most 8,000 characters.
+`[src: file: backend/src/db/discussion_questions.rs:231]`
+`[src: file: backend/src/api/discussion_questions.rs:64]`
+
 Pause execution, delegation and completion of the affected lot until the human
 answers. Continue unrelated tasks and keep listening with `disc_wait_for_peer`.
 This is a scoped agent protocol, not a global scheduler stop: `task_ref` does not
@@ -396,6 +406,52 @@ persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
 manifest.
 
+Kronn runs each validation at integration the way it runs a Quick Exec, not
+through a shell: `command` is split on whitespace into ONE binary and its
+literal arguments, the binary must be a bare name on the Quick Exec allowlist
+(`cargo`, `make`, `node`, `pnpm`, `npm`, `tsc`, `eslint`, `vitest`, `python3`,
+`git`, `gh`, `rtk` and a few probes; `cd` and `npx` are not on it), and the
+working directory is always the root of the execution's worktree. `&&`, `||`,
+`|`, `;`, `&`, redirections, `$(…)`, backticks and a leading `VAR=value` are
+shell syntax and are refused, since they would reach the binary as literal
+text. A subdirectory is reached with the tool's own option:
+`pnpm --dir frontend exec tsc -b --pretty false`,
+`cargo test --manifest-path backend/Cargo.toml --target-dir <dir>`.
+`task_exec_prepare` accepts the same optional `validations` and answers
+`launchable: false` with reason `invalid_validations` (naming the form that runs)
+for a command that could never run; `task_exec_launch` refuses it the same way
+before anything is created, so a bad gate is no longer found at integration,
+after the worker delivered and the review passed. The contract is served by
+`tool_manual({tool: "task_exec_prepare"})`.
+`[src: file: backend/src/core/quick_exec.rs]`
+`[src: file: backend/src/api/orchestration.rs]`
+
+To correct the gates of an execution that already exists, the principal calls
+`task_exec_reassign({task_execution_id, validations, reason})` — `validations`
+instead of `worker`, ONE change per call (both, or neither, is refused). The
+set REPLACES the current one (`[]` removes every gate), is held to the launch
+rules, and is journaled on the execution (`validations_replaced`, with the actor,
+the reason and the previous set); nothing is relaunched and earlier validation
+results stay as evidence. It is refused while the execution is Integrating,
+Validating or Applying, once it is Done, Failed or Cancelled, and for an
+execution of a campaign run, whose gates are the campaign's shared policy.
+`[src: file: backend/src/db/orchestration.rs]`
+The swap is a change of `task_exec_reassign` and not a tool of its own because
+every declaration is paid for on every session (`mcp_surface_budget.py`), and
+because that tool is already the principal's amendment of a live execution:
+principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
+have let a self-reviewing worker weaken its own gates and ties the swap to the
+persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
+`[src: file: backend/src/api/orchestration.rs]`
+
+The worker brief of a worker with a shell says who runs which gates: the worker
+runs the TARGETED tests, the long validations the principal persisted are played
+by Kronn at integration, and the worker commits and delivers in the same turn
+without ever waiting on a background command (its shell tool cuts a command at
+600 s, and a worker that hands the turn back to wait ends without delivering,
+`worker_completed_without_delivery`).
+`[src: file: backend/src/api/orchestration.rs]`
+
 `task_exec_status` returns `next_action.tool = task_exec_resume` only for a
 publicly recoverable Applying-origin checkpoint. The principal may then call
 `task_exec_resume`, which uses the backend's guarded resume path: it rechecks
@@ -407,12 +463,41 @@ retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/scripts/disc-introspection-mcp.py:921-941]
 [src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
+An approved delivery the integration sends back (a red validation, a merge
+conflict) is not left in `ChangesRequested`. In the same checkpoint the worker
+is re-activated on the next attempt with the failing command, its exit code and
+its output (a joined CLI through a control offer, parked
+`Blocked(awaiting_worker_acceptance)` until it re-accepts; a native worker
+through a fresh dispatch, back to `Working`), and the principal that approved
+gets a notice in the parent room, addressed to its pinned session, with the
+same evidence. When the failure did not come from the delivery, the principal
+calls `task_exec_resume`: the integration runs again on the same approved
+delivery, without a new delivery, and validations already green for that
+candidate are not run again. The relaunched worker is stood down first, and the
+call is refused once the worker committed or left changes since the send-back,
+or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
+the re-validation does not rewind the attempt the send-back opened.
+[src: file: backend/src/api/orchestration.rs]
+[src: file: backend/src/db/orchestration.rs]
+
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
 validations (command, exit code, duration) and a backend-derived
 `next_action`, trimmed to stay under 1 000 characters as the bridge prints it.
 The default `view: "full"` is unchanged: worker briefs and reviews read its
 lineage, attempts and manifests.
+
+`view: "full"` also lists `worker_sessions` (KT-911): one entry per CLI process
+the worker started, oldest first, with its `attempt_no`, the `dispatch_job_id`
+that launched it, its `agent_type`, its `session_id` (the id the CLI reported on
+its init line, which is the name of its transcript), and `cost_usd` (`null`
+with a `cost_unknown_reason` when unknown, and while the turn is still running).
+A rework starts a new attempt and a relaunched dispatch starts a new process;
+both keep their earlier entries. Only the execution's current dispatch may add
+one, so a replaced worker cannot relabel it. `view: "compact"` carries the
+`session_id` of the latest two. An HTTP worker has no CLI session and lists none.
+[src: file: backend/src/db/orchestration.rs]
+[src: file: backend/src/api/delivery_publication.rs]
 
 `task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
 the execution is in one of the `wait_for` statuses and adds
@@ -550,20 +635,34 @@ the only target.
 `[src: file: backend/src/api_tests.rs]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
-two deliberately distinct identity domains (KT-421). The live
+two deliberately distinct identity domains. The live
 `(source_agent, source_session_id)` pair — the same one every other lifecycle
 tool sends — proves the caller is the exact `discussion_sessions` row the
 offer targets; it rotates across an MCP reload (`adhoc-*`). A separate
 `source_binding_session_id` names the reload-stable `disc_source_history`
-binding that actually moves the session origin -> child; it stays `cli-*`
-even after the live identity above has rotated. Collapsing the two, as an
-earlier revision did, makes a resumed CLI's own offer permanently
-unacceptable: its active identity no longer matches the durable one the
-accept step used to reuse for both checks. Both values are derived by the
-trusted bridge from its own state and are absent from the tool's input
-schema — the model supplies only `offer_id`; there is no fallback to
-agent-type/alias matching or any other permissive resolution if either is
-missing.
+binding of the principal room; it stays `cli-*` even after the live identity
+above has rotated. Acceptance validates both identities but moves neither the
+live membership nor the durable binding. Instead, the execution's pinned CLI
+session id carries the worker role, the child remains the durable task/evidence
+room, and the accept result returns the worker instructions directly. This lets
+a CLI principal continue receiving its principal-room turns and remain a party
+to the other executions it coordinates while it works on the accepted execution.
+Both identity values are derived by the trusted bridge and absent from the tool's
+input schema — the model supplies only `offer_id`; there is no fallback to
+agent-type/alias matching or any other permissive resolution if either is missing.
+[src: file: backend/src/api/orchestration.rs:3789-3948]
+[src: file: backend/scripts/disc-introspection-mcp.py:6091-6137]
+
+`task_exec_deliver` does not perform a room return: the execution transitions to
+`AwaitingReview` while the CLI is already in its principal room. The legacy
+terminal return remains only as compatibility for executions accepted by older
+bridges that physically moved a session into a child room.
+[src: file: backend/src/api/orchestration.rs:4160]
+[src: file: backend/src/db/orchestration.rs:4017]
+
+Collapsing the live and reload-stable identities, as an earlier revision did,
+makes a resumed CLI's own offer permanently unacceptable: its active identity no
+longer matches the durable one the accept step used to reuse for both checks.
 An old bridge that has not reloaded this contract sends only the legacy pair
 and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
@@ -867,7 +966,7 @@ loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined
 [src: file: backend/scripts/disc-introspection-mcp.py:1250-1274]
 [src: file: backend/scripts/disc-introspection-mcp.py:9351-9368]
 
-The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, …) so no env-var prep is needed.
+The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, OpenCode → OpenCode, …), then from the parent command line, so no env-var prep is needed. An unidentified CLI joins as `Unknown`: it can read and post, but no implicit turn is routed to it. Set `KRONN_AGENT_TYPE` to name it explicitly.
 
 The bridge owns a separate durable **read cursor** per joined room. A normal
 caller omits `since_sort_order`; the bridge resumes from the last wait result

@@ -23,6 +23,7 @@
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { DashboardPage } from '../pages/DashboardPage';
+import { WorkflowsPage } from '../pages/WorkflowsPage';
 
 const QP_TITLE = `Compare-agents PW ${Date.now()}`;
 const QP_PROMPT = 'Renvoie simplement le mot "noté" pour ce test.';
@@ -166,7 +167,7 @@ test.describe('Compare-agents — fan-out the same prompt across N agents', () =
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
     await dashboard.openWorkflows();
-    await page.locator('[data-tour-id="automation-kind-quick-prompt"]').click();
+    await new WorkflowsPage(page).selectKind('quickPrompts');
 
     // The QP we created should appear in the list. Find its compare
     // button via the testid we wired in WorkflowsPage.tsx.

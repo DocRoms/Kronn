@@ -32,7 +32,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Agent semaphore** — `tokio::sync::Semaphore` in `AppState` limiting work performed on the Kronn host. A normal discussion run acquires it only for a CLI or Ollama; LiteLLM and NVIDIA bypass it. Durable dispatch admission separately enforces the same aggregate local limit plus a per-family limit. Size configurable via `max_concurrent_agents`.
 
-**full_access** — Boolean field on `AgentConfig` (persisted in config.toml). When true, agent runner adds `--dangerously-skip-permissions` (Claude) or `--full-auto` (Codex) to CLI invocations. Controlled via `GET/POST /api/config/agent-access`.
+**full_access** — Boolean field on `AgentConfig` (persisted in config.toml). When true, agent runner adds `--dangerously-skip-permissions` (Claude), `--sandbox=danger-full-access` (Codex), `--yolo` (Gemini) or `--allow-all-tools` (Copilot) to CLI invocations; task workers never get them. Kronn's own `kronn-internal` tools are allowed with or without it (KT-953). Controlled via `GET/POST /api/config/agent-access`.
 
 ## Domain concepts
 
@@ -242,6 +242,8 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 **ActiveRunsPopover savings parser** — Defensive JSON navigator in `backend/src/api/rtk.rs::savings` that handles RTK 0.37 shape (`summary.total_saved` / `summary.avg_savings_pct` / `summary.total_commands`) with fallbacks on legacy top-level keys. Returns `available: false` when parsing fails so the UI cleanly hides the counter. A regression test embeds a real user-provided payload.
 
 **Agent stall timeout** — Configurable in `ServerConfig`, default 5 minutes, range 1–60 minutes. If an agent produces no output for this duration, the process is killed and the step/message is marked as failed.
+
+**Model inactivity watchdog** (KT-932) — `backend/src/agents/idle_watchdog.rs`. Fails an ACP or native-HTTP agent run whose model stays silent for the whole delay (bytes on the HTTP stream, frames from the ACP agent; progress restarts it) and cancels the generation, so Ollama is free for the next request. Delay: the discussion's agent inactivity timeout (at least 15 min) or the step's `stall_timeout_secs`; default 15 min. Distinct from the stall timeout, which watches what the consumer reads. While an ACP tool call is open (no terminal `completed`/`failed`/`cancelled` update yet) the model's delay is suspended in favour of `tool_execution_timeout` — 8× wider — so a long but healthy tool (a build, a test run) is never mistaken for a dead model; a tool call that never closes is still cut by that wider bound, named in the failure reason.
 
 **Agent activity logs** — Real-time stderr + stream-json tool activity streamed via SSE `log` events. Shows what the agent is doing (reading files, running commands, editing) during a conversation or workflow step.
 

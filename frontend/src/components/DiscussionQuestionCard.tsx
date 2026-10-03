@@ -98,6 +98,7 @@ function QuestionBody({
 }) {
   const { t } = useT();
   const [selected, setSelected] = useState<string[]>([]);
+  const [itemSelections, setItemSelections] = useState<Record<string, string>>({});
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
@@ -115,7 +116,11 @@ function QuestionBody({
   const answered = question.state === 'answered' && question.answer !== null;
   // A refusal resolves the question too: the card must stop offering to decide.
   const declined = question.state === 'declined';
-  const canSend = selected.length > 0 || text.trim().length > 0;
+  const items = question.items ?? [];
+  const hasItems = items.length > 0;
+  const canSend = hasItems
+    ? items.every(item => itemSelections[item.id] !== undefined)
+    : selected.length > 0 || text.trim().length > 0;
 
   const toggle = (optionId: string) => {
     // Frozen while in flight: the key was minted for the answer as it stood,
@@ -129,6 +134,13 @@ function QuestionBody({
         ? current.filter(id => id !== optionId)
         : [...current, optionId];
     });
+  };
+
+  const selectItemOutcome = (itemId: string, optionId: string) => {
+    if (inFlight.current) return;
+    renewKey();
+    setError('');
+    setItemSelections(current => ({ ...current, [itemId]: optionId }));
   };
 
   // A comment is not a decision: the asker reads it and the card keeps waiting.
@@ -185,7 +197,15 @@ function QuestionBody({
     setError('');
     try {
       const updated = await discussionsApi.answerQuestion(discussionId, question.id, {
-        selected_option_ids: selected,
+        selected_option_ids: hasItems ? [] : selected,
+        item_answers: hasItems
+          ? items.flatMap(item => {
+            const selectedOptionId = itemSelections[item.id];
+            return selectedOptionId === undefined
+              ? []
+              : [{ item_id: item.id, selected_option_id: selectedOptionId }];
+          })
+          : [],
         text: text.trim() || null,
         idempotency_key: idempotencyKey.current,
       });
@@ -227,12 +247,26 @@ function QuestionBody({
 
       <p className="disc-question-text">{question.question}</p>
       {question.context && <p className="disc-question-context">{question.context}</p>}
+      {question.requester_workflow_step && !question.requester_workflow_step.active && (
+        <p
+          className="disc-question-unread-warning"
+          data-testid="disc-question-finished-step-warning"
+          role="status"
+        >
+          <AlertOctagon size={13} aria-hidden="true" />
+          {t(
+            'disc.question.finishedStepWarning',
+            question.requester_workflow_step.workflow_name,
+            question.requester_workflow_step.step_name,
+          )}
+        </p>
+      )}
 
       {question.answer ? (
         <AnsweredSummary question={question} answer={question.answer} declined={declined} />
       ) : (
         <>
-          {question.options.length > 0 && (
+          {!hasItems && question.options.length > 0 && (
             <ul className="disc-question-options">
               {question.options.map(option => {
                 const recommended = question.recommended_option_ids.includes(option.id);
@@ -270,6 +304,34 @@ function QuestionBody({
                 );
               })}
             </ul>
+          )}
+
+          {hasItems && (
+            <div className="disc-question-items" data-testid="disc-question-items">
+              {items.map(item => (
+                <fieldset className="disc-question-item" key={item.id}>
+                  <legend>{item.label}</legend>
+                  {item.description && <p className="disc-question-option-desc">{item.description}</p>}
+                  <ul className="disc-question-options">
+                    {question.options.map(option => (
+                      <li key={option.id}>
+                        <label data-selected={itemSelections[item.id] === option.id}>
+                          <input
+                            type="radio"
+                            name={`question-${question.id}-${item.id}`}
+                            checked={itemSelections[item.id] === option.id}
+                            onChange={() => selectItemOutcome(item.id, option.id)}
+                            disabled={sending}
+                            data-testid={`disc-question-item-${item.id}-${option.id}`}
+                          />
+                          <span className="disc-question-option-label">{option.label}</span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                </fieldset>
+              ))}
+            </div>
           )}
 
           {/* Always offered, options or not: the right answer is regularly one
@@ -346,11 +408,23 @@ function AnsweredSummary({
 }) {
   const { t } = useT();
   const chosen = question.options.filter(option => answer.selected_option_ids.includes(option.id));
+  const itemChoices = (answer.item_answers ?? []).flatMap(itemAnswer => {
+    const item = (question.items ?? []).find(candidate => candidate.id === itemAnswer.item_id);
+    const option = question.options.find(candidate => candidate.id === itemAnswer.selected_option_id);
+    return item && option ? [{ item, option }] : [];
+  });
   return (
     <div className="disc-question-answer" data-testid="disc-question-answer">
       {chosen.length > 0 && (
         <ul className="disc-question-chosen">
           {chosen.map(option => <li key={option.id}>{option.label}</li>)}
+        </ul>
+      )}
+      {itemChoices.length > 0 && (
+        <ul className="disc-question-chosen">
+          {itemChoices.map(choice => (
+            <li key={choice.item.id}>{choice.item.label}: {choice.option.label}</li>
+          ))}
         </ul>
       )}
       {answer.text && <p className="disc-question-answer-text">{answer.text}</p>}

@@ -674,6 +674,24 @@ async fn configured_services(
         .collect())
 }
 
+/// Why Docker cannot be driven from here: in a container that was not given
+/// the host's Docker socket, which is off by default because any agent could
+/// use it to become root on the host (KT-979). `None` when it can.
+fn docker_socket_refusal() -> Option<&'static str> {
+    docker_socket_refusal_for(
+        crate::core::env::is_docker(),
+        std::path::Path::new("/var/run/docker.sock").exists(),
+    )
+}
+
+fn docker_socket_refusal_for(in_container: bool, socket_present: bool) -> Option<&'static str> {
+    (in_container && !socket_present).then_some(
+        "Docker control is off: Kronn runs in a container without the host's Docker socket. \
+         Add KRONN_DOCKER_SOCKET=1 to .env and run make start to turn it on — every agent \
+         will then be able to control Docker, and so this machine.",
+    )
+}
+
 fn empty_status() -> ProjectDockerStatus {
     ProjectDockerStatus {
         compose_present: false,
@@ -696,6 +714,10 @@ async fn inspect_compose(root: &FsPath, compose_file: &str) -> ProjectDockerStat
         checked_at: Utc::now(),
         error: None,
     };
+    if let Some(refusal) = docker_socket_refusal() {
+        status.error = Some(refusal.to_string());
+        return status;
+    }
     let configured = match configured_services(root, compose_file).await {
         Ok(services) => {
             status.docker_available = true;
@@ -807,7 +829,11 @@ pub async fn docker_running_projects(
         return Json(ApiResponse::err(bounded_command_error(&output)));
     }
 
-    let projects = match state.db.with_conn(crate::db::projects::list_projects).await {
+    let projects = match state
+        .db
+        .with_read_conn(crate::db::projects::list_projects)
+        .await
+    {
         Ok(projects) => projects
             .into_iter()
             .map(|project| {
@@ -928,6 +954,9 @@ pub async fn docker_action(
             "No Docker Compose file found at project root",
         ));
     };
+    if let Some(refusal) = docker_socket_refusal() {
+        return Json(ApiResponse::err(refusal));
+    }
     let configured = match configured_services(&root, &compose_file).await {
         Ok(services) => services,
         Err(error) => return Json(ApiResponse::err(error)),
@@ -967,6 +996,17 @@ pub async fn docker_action(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn docker_control_says_how_to_turn_it_on_only_in_a_container_without_the_socket() {
+        let refusal = super::docker_socket_refusal_for(true, false).unwrap();
+        assert!(refusal.contains("KRONN_DOCKER_SOCKET=1") && refusal.contains("this machine"));
+        assert!(super::docker_socket_refusal_for(true, true).is_none());
+        assert!(
+            super::docker_socket_refusal_for(false, false).is_none(),
+            "natively the host's Docker is used"
+        );
+    }
+
     use super::*;
 
     fn configured(name: &str) -> ConfiguredDockerService {

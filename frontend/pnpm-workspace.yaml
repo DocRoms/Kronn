@@ -25,7 +25,8 @@
 #   otherwise). Drop each entry once the direct upstream dep picks it
 #   up. Each floor is the first release that fixes every advisory reported
 #   for that transitive dependency by `pnpm audit`; floors were last refreshed
-#   on 2026-09-16, when pnpm audit reported sharp (GHSA-rgj7-g3m4-5g8c, high,
+#   on 2026-09-30 (brace-expansion 5.0.12: GHSA-qhr7-859c-m2p7 and two siblings),
+#   and before that on 2026-09-16, when pnpm audit reported sharp (GHSA-rgj7-g3m4-5g8c, high,
 #   libheif) and adm-zip (GHSA-vwc7-r8mq-g2x9, moderate, extraction follows
 #   destination symlinks) — both held at the vulnerable version BY these very
 #   pins, which is the failure mode to watch for here. Major
@@ -38,7 +39,7 @@ allowBuilds:
   sharp: true
 minimumReleaseAgeExclude:
   - postcss@8.5.23
-  - brace-expansion@5.0.9
+  - brace-expansion@5.0.12
   - mermaid@11.16.1
   - dompurify@3.4.13
   - nanoid@3.3.18
@@ -46,7 +47,7 @@ overrides:
   adm-zip: '0.6.1'
   postcss: '8.5.23'
   flatted: '>=3.4.2'
-  brace-expansion: '5.0.9'
+  brace-expansion: '5.0.12'
   dompurify: '3.4.13'
   protobufjs: '7.6.5'
   sharp: '0.35.4'

@@ -11,8 +11,10 @@ const usage = (over: Partial<TaskExecutionUsage> = {}): TaskExecutionUsage => ({
   duration_ms: 42_000,
   in_app_tokens: 0,
   in_app_messages: 0,
+  in_app_breakdown: null,
   in_app_cost_usd: null,
   in_app_cost_is_partial: false,
+  in_app_cost_unknown_reasons: [],
   cli_traffic_tokens: 1000,
   cli_billable_tokens: 900,
   cli_sessions: 1,
@@ -104,6 +106,92 @@ describe('TaskExecutionCard', () => {
   it('does not turn an unknown cost into a fake zero', () => {
     wrap(<TaskExecutionCard detail={detail({ usage: usage({ in_app_cost_usd: null }) })} />);
     expect(screen.getByTestId('orch-exec-cost')).toHaveTextContent('—');
+  });
+
+  // ── KT-894 — the cache told apart from the real input, and no bare dash ────
+
+  it('says why an unpriced reply has no cost instead of a bare dash', () => {
+    wrap(
+      <TaskExecutionCard
+        detail={detail({
+          usage: usage({
+            in_app_cost_usd: null,
+            in_app_cost_unknown_reasons: ['no confirmed rate for the serving model'],
+          }),
+        })}
+      />
+    );
+    const cost = screen.getByTestId('orch-exec-cost');
+    expect(cost).toHaveTextContent('—');
+    expect(screen.getByTestId('orch-exec-cost-unknown')).toHaveTextContent(
+      'no confirmed rate for the serving model',
+    );
+  });
+
+  it('adds no unknown-cost note when every reply was priced', () => {
+    wrap(
+      <TaskExecutionCard
+        detail={detail({ usage: usage({ in_app_cost_usd: 13.56, in_app_messages: 1, in_app_tokens: 25_261_395 }) })}
+      />
+    );
+    expect(screen.getByTestId('orch-exec-cost')).toHaveTextContent('$13.5600');
+    expect(screen.queryByTestId('orch-exec-cost-unknown')).toBeNull();
+  });
+
+  it('tells the cache from the real input in the in-app tokens', () => {
+    // KT-837: 25 261 395 tokens of which 24 851 584 were cache reads.
+    wrap(
+      <TaskExecutionCard
+        detail={detail({
+          usage: usage({
+            in_app_tokens: 25_261_395,
+            in_app_messages: 1,
+            in_app_breakdown: {
+              messages: 1,
+              input_tokens: 358_194,
+              cache_read_tokens: 24_851_584,
+              cache_write_tokens: null,
+              output_tokens: 51_617,
+            },
+          }),
+        })}
+      />
+    );
+    const row = screen.getByTestId('orch-exec-in-app-tokens');
+    expect(row.textContent).toContain((358_194).toLocaleString());
+    expect(row.textContent).toContain((24_851_584).toLocaleString());
+    expect(row.textContent).toContain((51_617).toLocaleString());
+    // The ambiguous total is not what the row leads with any more.
+    expect(row.textContent).not.toContain((25_261_395).toLocaleString());
+    expect(screen.queryByTestId('orch-exec-in-app-split-partial')).toBeNull();
+  });
+
+  it('keeps the total and flags a split that covers only some replies', () => {
+    wrap(
+      <TaskExecutionCard
+        detail={detail({
+          usage: usage({
+            in_app_tokens: 30_000,
+            in_app_messages: 3,
+            in_app_breakdown: {
+              messages: 1,
+              input_tokens: 100,
+              cache_read_tokens: 800,
+              cache_write_tokens: null,
+              output_tokens: 100,
+            },
+          }),
+        })}
+      />
+    );
+    const row = screen.getByTestId('orch-exec-in-app-tokens');
+    expect(row.textContent).toContain((30_000).toLocaleString());
+    expect(screen.getByTestId('orch-exec-in-app-split-partial')).toBeTruthy();
+  });
+
+  it('shows no in-app tokens row when no agent replied', () => {
+    wrap(<TaskExecutionCard detail={detail({ usage: usage({ in_app_messages: 0 }) })} />);
+    expect(screen.queryByTestId('orch-exec-in-app-tokens')).toBeNull();
   });
 
   it('shows an em dash rather than zero when the tokens are unknown', () => {

@@ -22,19 +22,15 @@ use crate::AppState;
 
 use super::helpers::{
     build_sub_audit_validation_prompt, build_validation_prompt, check_ai_dir_permissions,
-    compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills,
+    compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills, partial_run_block,
     remove_bootstrap_block,
 };
-use super::{SseStream, PROMPT_PREAMBLE};
+use super::{detach_sse_stream, SseStream};
 
 /// POST /api/projects/:id/full-audit
 /// Unified endpoint: install template + run the assembled audit chain + create validation discussion.
-/// Finalizes an audit whose SSE consumer vanished mid-run (MCP bridge
-/// death, browser tab close): the generator is dropped at its next yield
-/// and nothing downstream runs — observed live as a zombie (tracker frozen
-/// on step 1, run row stuck on Running, orphaned agent, zero logs).
-/// Armed at pipeline start, disarmed on every normal ending. Drop can't do
-/// async work, so the cleanup is spawned onto the runtime.
+/// Settles durable state and releases shared resources if the pipeline exits abnormally.
+/// Subscriber disconnects cannot trigger it because audit streams run detached.
 ///
 /// Also holds the shared power assertion (`core::power_guard`): default
 /// `pmset` puts the machine to sleep mid-audit (a 1h27 freeze was measured
@@ -45,8 +41,7 @@ pub(super) struct AuditDropGuard {
     armed: bool,
     db: std::sync::Arc<crate::db::Database>,
     tracker: std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-    /// None for partial/drift refreshes — they have no audit_runs row;
-    /// the guard then only clears the tracker (+ power assertion).
+    /// Attached after the durable run row is created.
     run_id: Option<String>,
     project_id: String,
     power: Option<crate::core::power_guard::PowerLease>,
@@ -102,10 +97,8 @@ impl AuditDropGuard {
 
 impl Drop for AuditDropGuard {
     fn drop(&mut self) {
-        // Power assertion FIRST, by design: the run's real work is already
-        // over (the SSE consumer vanished), only the ms-scale DB finalization
-        // below remains, so there is nothing left to keep the machine awake
-        // for. Distinct from the AUDIT lease just below, which is different.
+        // Internal failures leave only the short finalization path below.
+        // Distinct from the AUDIT lease just below, which is different.
         self.release_power_assertion();
         // Order matters for the AUDIT (project) lease: it is released LAST,
         // only once this run's terminal state is settled — otherwise a
@@ -113,7 +106,7 @@ impl Drop for AuditDropGuard {
         // Running rows) or have its fresh progress wiped by a late clear.
         if self.armed {
             tracing::warn!(
-                "Audit for {} dropped mid-flight (SSE consumer vanished) — cleaning up (run: {:?})",
+                "Audit for {} dropped mid-flight; cleaning up (run: {:?})",
                 self.project_id,
                 self.run_id
             );
@@ -138,7 +131,7 @@ impl Drop for AuditDropGuard {
                     handle.spawn(async move {
                         match db.with_conn(move |conn| {
                             crate::db::audit_runs::mark_interrupted(
-                                conn, &run_id, "sse consumer dropped mid-run (bridge/tab gone)",
+                                conn, &run_id, "audit pipeline dropped before completion",
                             )
                         }).await {
                             Ok(()) => {
@@ -158,9 +151,7 @@ impl Drop for AuditDropGuard {
                 }
             }
         }
-        // Synchronous release for the remaining paths: disarmed (the pipeline
-        // finalized the run itself before this Drop) and armed-without-row
-        // (partial/drift — tracker cleanup above is all there is to settle).
+        // Release synchronously after normal completion or before row creation.
         if self.leased {
             if let Ok(mut t) = self.tracker.lock() {
                 t.release_lease(&self.project_id);
@@ -249,35 +240,31 @@ pub async fn full_audit(
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-926 — the only other repos this prompt names are the ones the user
+    // explicitly linked to the project. Never the list of the machine's Kronn
+    // projects: the prompt goes to the model provider, and a companion list
+    // would be copied into a versioned `docs/AGENTS.md`.
     let linked_repos_block =
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
-    // 0.8.3 — candidate pool for companion-repo detection. The agent
-    // only suggests links from this finite list (typically 5-20),
-    // not "every repo I see on disk" — keeps suggestions scalable
-    // for users with hundreds of repos.
-    let pid_for_universe = project_id.clone();
-    let kronn_projects_universe_block =
-        match state.db.with_conn(crate::db::projects::list_projects).await {
-            Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(
-                &all,
-                &pid_for_universe,
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to load Kronn projects for companion-detection block: {}",
-                    e
-                );
-                None
-            }
-        };
     let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
-        return sse_error(format!(
-            "{agent_type:?} cannot run audits: it has no filesystem access, so the docs/ deliverables would silently never be written. Pick a CLI agent."
-        ));
+        return sse_error(super::audit_refusal_message(&agent_type));
     }
     let agent_label = format!("{:?}", agent_type);
+    // Snapshot the HTTP provider settings once for the whole run (a no-op for a
+    // CLI agent): every step resolves the same models and endpoints.
+    let agent_launcher = match super::agent_launch::AuditAgentLauncher::for_request(
+        &state,
+        &agent_type,
+        req.connection_id.as_deref(),
+    )
+    .await
+    {
+        Ok(launcher) => launcher,
+        Err(error) => return sse_error(error),
+    };
+    let audit_connection_id = agent_launcher.connection_id();
 
     let tokens = {
         let config = state.config.read().await;
@@ -339,6 +326,14 @@ pub async fn full_audit(
         // fresher output. Resolving after the lease closes the TOCTOU where
         // another run could finish between validation and insert. Every
         // rejection is a hard error, never a silent fresh run.
+        // KT-841 — steps the interrupted predecessor already completed
+        // CLEANLY (no CLI failure, no validation warning), keyed by
+        // 1-based step index. Populated below only on resume. Drives the
+        // per-step skip decision so a warned step past a chain of later
+        // successes still gets retried WITHOUT replaying those successes
+        // (the old `step <= resume_from` contiguous check replayed them).
+        let mut already_succeeded_steps: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
         let (kind, resume_from) = if let Some(run_id) = resume_run_id_req.clone() {
             let fetched = db.with_conn({
                 let run_id = run_id.clone();
@@ -347,24 +342,28 @@ pub async fn full_audit(
                     let row = crate::db::audit_runs::get_by_id(conn, &run_id)?;
                     let latest = crate::db::audit_runs::list_recent(conn, &pid, 1)?
                         .into_iter().next();
-                    Ok((row, latest))
+                    let steps = crate::db::audit_runs::list_audit_steps(conn, &run_id)?;
+                    Ok((row, latest, steps))
                 }
             }).await;
             let resolved = match fetched {
-                Ok((row, latest)) => {
+                Ok((row, latest, steps)) => {
                     if latest.as_ref().map(|l| l.id != run_id).unwrap_or(true) {
                         Err(format!(
                             "resume_run_id {run_id} is not the project's most recent run — \
                              a newer attempt supersedes it; launch a fresh audit instead"
                         ))
                     } else {
-                        resolve_resume_row(&run_id, row.as_ref(), &project_id)
+                        resolve_resume_row(&run_id, row.as_ref(), &project_id).map(|plan| (plan, steps))
                     }
                 }
                 Err(e) => Err(format!("resume_run_id lookup failed: {e}")),
             };
             match resolved {
-                Ok(plan) => plan,
+                Ok((plan, steps)) => {
+                    already_succeeded_steps = already_succeeded_step_indices(&steps);
+                    plan
+                }
                 Err(msg) => {
                     yield Event::default().event("error").data(
                         serde_json::json!({ "error": msg }).to_string(),
@@ -401,6 +400,20 @@ pub async fn full_audit(
         // the relevance gate into the prompt at build time.
         let first_chained_step = super::ANALYSIS_STEPS.len() + 1;
         let total_steps = steps.len();
+        // Recompute from the actual documents, including predecessors created
+        // before documentary failures were persisted on their owning steps.
+        let documentary_recovery = if resume_run_id_req.is_some() && should_optimize_documents(kind) {
+            match crate::core::document_optimization::analyze(&project_path) {
+                Ok(report) => super::document_repair::recovery_plan(&report.diagnostics, &steps),
+                Err(error) => {
+                    yield Event::default().event("error").data(serde_json::json!({
+                        "error": format!("Cannot inspect documentary recovery targets: {error}")
+                    }).to_string());
+                    return;
+                }
+            }
+        } else { Default::default() };
+        for step in documentary_recovery.keys() { already_succeeded_steps.remove(step); }
         // A checkpoint beyond the pipeline is a corrupt/mismatched row, not a
         // request to skip everything — REFUSE it rather than clamp (a clamp
         // to total_steps would silently jump to validation-only on a run
@@ -442,6 +455,25 @@ pub async fn full_audit(
             return;
         }
         drop_guard.set_run_id(audit_run_id.clone());
+
+        // KT-931 — a resumed run INHERITS the steps its predecessor completed
+        // cleanly, recorded on its own row before anything else can interrupt
+        // it: the next resume of THIS run (which skips them) must still find
+        // them succeeded and re-run only what failed again.
+        if !already_succeeded_steps.is_empty() {
+            let carried: Vec<(u32, String)> = steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| (index as u32 + 1, step_file_label(step).to_string()))
+                .filter(|(step, _)| already_succeeded_steps.contains(step))
+                .collect();
+            let run_id = audit_run_id.clone();
+            if let Err(e) = db.with_conn(move |conn| {
+                crate::db::audit_runs::carry_over_steps(conn, &run_id, &carried, Utc::now())
+            }).await {
+                tracing::error!("Failed to record the steps carried over by run {audit_run_id}: {e}");
+            }
+        }
 
         // CONTRACTUAL revocation (Codex A5): this run is about to mutate
         // docs/, so any prior "Validated" state is stale the moment we
@@ -489,6 +521,7 @@ pub async fn full_audit(
         // even when the SSE client (browser tab) went away.
         if let Ok(mut t) = audit_tracker.lock() {
             t.start_progress(&project_id, total_steps as u32, "full_audit");
+            t.set_auditor(&project_id, agent_type.clone(), audit_tier, audit_connection_id.clone());
             // Phase 1 starts here; advance_step will update to "auditing"
             // once the assembled step chain begins. The intermediate installing
             // phase is visible by checking step_index == 0.
@@ -626,11 +659,6 @@ pub async fn full_audit(
                             );
                         }
                     }
-                }
-
-                let index_file = project_path.join("docs/AGENTS.md");
-                if index_file.exists() {
-                    crate::api::projects::inject_bootstrap_prompt(&index_file);
                 }
 
                 runner::fix_file_ownership(&project_path);
@@ -778,24 +806,34 @@ pub async fn full_audit(
         // audits) and the frontend's live-elapsed counter would jump
         // BACK in time once the SSE event lands, leaving the user
         // staring at a counter that re-starts from 0 mid-run.
-        let mut total_tokens_so_far: u64 = 0;
+        // KT-927 — unknown (`None`) until a step's agent reports something, so a
+        // run whose runtime reports nothing never shows "0 tokens".
+        let mut run_tokens = super::agent_launch::RunTokens::default();
         // 0.8.3 (#311) — track resume + completion status. On every
-        // successful `step_done` we bump `last_successful_step` AND
-        // persist via `update_last_completed_step`. At end-of-stream
-        // we use these two locals to decide between:
+        // successful `step_done` the run's `progress` records it AND
+        // persists the exact count via `update_last_completed_step`. At
+        // end-of-stream `progress.outcome()` decides between:
         //   - `complete()`         (the whole assembled chain succeeded)
-        //   - `mark_interrupted()` (some step warning OR stream ended
-        //                          before the final step — resumable later)
+        //   - `mark_interrupted()` (some step failed or never ran —
+        //                          resumable later, only those steps)
         //   - `mark_failed()`      (catastrophic failure, e.g. start_agent
         //                          returned Err for every step)
-        // The validation discussion is only created on the happy path.
-        // 0.8.3 (#311) — when resuming, prime `last_successful_step`
-        // with the caller-provided value so the completion check at
-        // end-of-stream considers the previously-done steps.
-        // Validated against total_steps at launch (out-of-range = refused).
-        let mut last_successful_step: u32 = resume_from;
-        let mut any_step_warning: bool = false;
-        let mut warned_steps: Vec<u32> = Vec::new();
+        // KT-931 — a run some of whose steps failed still gets a
+        // validation discussion for the steps that succeeded (it just
+        // stays Interrupted and names the steps to redo); only a run
+        // where nothing succeeded has nothing to validate.
+        // When resuming, `progress` is primed with the steps the
+        // predecessor completed cleanly, so the completion check at
+        // end-of-stream considers them. The resume checkpoint was
+        // validated against total_steps at launch (out-of-range = refused).
+        let mut progress = RunProgress::new(
+            total_steps as u32,
+            already_succeeded_steps.iter().copied(),
+        )
+        .with_founding_step(founding_step_index(&steps));
+        // The documentary-optimization gate (an invented path) blocks the
+        // validation of the whole run — it is a run-level verdict, not a step's.
+        let mut docs_blocked: bool = false;
         // Findings indices actually (re)written this run — successful steps
         // plus resume-skipped ones (written by the interrupted predecessor of
         // the same logical audit). Reconciliation unions TD ids from THESE,
@@ -917,13 +955,16 @@ pub async fn full_audit(
             }
 
             let step = step_num + 1;
-            let file_label = if analysis_step.target_file == "REVIEW" { "Final review" } else { analysis_step.target_file };
+            let file_label = step_file_label(analysis_step);
 
             // 0.8.3 (#311) — resume support. Skip steps the previous
-            // interrupted run already completed. We still advance the
-            // tracker's `step_index` so the UI bar shows correct
+            // interrupted run already completed CLEANLY (KT-841: per-step,
+            // from `already_succeeded_steps` — NOT a `step <= resume_from`
+            // contiguous check, which used to replay every step past a
+            // warning that itself froze the checkpoint). We still advance
+            // the tracker's `step_index` so the UI bar shows correct
             // progress, but we don't spawn an agent for these.
-            if (step as u32) <= resume_from {
+            if already_succeeded_steps.contains(&(step as u32)) {
                 if let Ok(mut t) = audit_tracker.lock() {
                     t.advance_step(&project_id, step as u32, Some(file_label.to_string()));
                 }
@@ -947,7 +988,7 @@ pub async fn full_audit(
                 // 0.8.3 — clear per-step ephemeral chips so a stale
                 // "🔧 Read" or per-step token count from step N-1
                 // doesn't leak into the poll snapshot for step N.
-                // total_tokens_so_far stays intact (cumulative).
+                // run_tokens stays intact (cumulative).
                 t.clear_step_chips(&project_id);
             }
 
@@ -975,15 +1016,11 @@ pub async fn full_audit(
             }
 
             let today = Utc::now().format("%Y-%m-%d").to_string();
-            let today_compact = Utc::now().format("%Y%m%d").to_string();
             // Chained sub-audit steps get the relevance gate FIRST — a
             // dimension foreign to the project must cost one line, not a
             // full agent pass.
             let gate = super::gate_for_step(step, first_chained_step);
-            let mut full_prompt = format!("{}\n\n{}{}", PROMPT_PREAMBLE, gate, analysis_step.prompt)
-                .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
-                .replace("today's date (YYYY-MM-DD)", &today)
-                .replace("set to today's date", &format!("set to {}", today));
+            let mut full_prompt = super::dated_step_prompt(gate, analysis_step.prompt, Utc::now());
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
@@ -1011,20 +1048,21 @@ pub async fn full_audit(
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
             }
-            if let Some(ref block) = kronn_projects_universe_block {
-                full_prompt.push_str(&format!("\n\n{}\n", block));
-            }
 
             // 0.8.3 (#274) — per-step instrumentation. The audit UI
             // shows a static "Step N/M — file.md" today; users have
             // no signal for how long things take or what tokens are
             // burning. We track:
             //   - step_started_at: wall-clock start (Instant)
-            //   - step_tokens:    max(input+output) seen via
+            //   - step_usage:     max(input+output) seen via
             //     `parse_claude_stream_line` — Claude reports
-            //     cumulative usage per call, so `.max()` is correct
-            //     (NOT a sum, which would double-count).
-            //   - total_tokens_so_far: running counter across all
+            //     cumulative usage per call, so the largest reading is
+            //     correct (NOT a sum, which would double-count). An
+            //     agent that does not speak stream-json (ACP — OpenCode,
+            //     the adapters —, HTTP) reports through the process's
+            //     own usage counters instead (KT-927: they used to read
+            //     0 here). `None` = the runtime reported nothing.
+            //   - run_tokens: running counter across all
             //     finished steps + the current one's last reading.
             // Surfaced via the enriched `step_done` event below; the
             // frontend then displays per-step + total tokens + a
@@ -1032,46 +1070,143 @@ pub async fn full_audit(
             // step_started_at wallclock).
             let step_started_at = std::time::Instant::now();
 
-            // 0.8.8 PR-A — enforce-mode per-step retry loop. `off`/`warn` run a
-            // single attempt (`max_attempts == 1`) with the gate inert, so the
-            // behaviour is unchanged. In `enforce`, a step that wrote fabricated
-            // `[src:]` citations re-runs with a corrective addendum, bounded by
-            // `MAX_ATTEMPTS`. The terminal attempt falls through to `step_done`
-            // / DB finalize exactly once.
-            let max_attempts = if enforce_mode {
+            // KT-841 — rewrite-proof snapshot BEFORE the agent runs (parity
+            // with `drift.rs`'s partial pipeline). Taken ONCE per step,
+            // outside the retry loop below, so a retry is still compared
+            // against the state before the FIRST attempt, not a partially
+            // rewritten intermediate. Compared as the LAST gate, after
+            // CLI/validator/enforce, so equality only means `unchanged` when
+            // every other gate was already green.
+            let pre_snapshot = match super::validation::target_snapshot(&project_path, analysis_step.target_file) {
+                Ok(snap) => snap,
+                Err(reason) => {
+                    // Unreadable pre-state (≠ absent): fail before burning tokens.
+                    yield Event::default().event("step_warning").data(
+                        serde_json::json!({
+                            "step": step, "file": file_label,
+                            "reason": reason, "repaired_from_template": false,
+                        }).to_string()
+                    );
+                    yield Event::default().event("step_done").data(
+                        serde_json::json!({
+                            "step": step, "success": false, "file": file_label,
+                            "tokens": 0, "duration_ms": 0,
+                            "total_tokens": run_tokens.total(),
+                        }).to_string()
+                    );
+                    progress.record_failure(step as u32);
+                    continue;
+                }
+            };
+            // Snapshot the full human-owned surface, not just target_file:
+            // Step 9 and future review prompts may legitimately edit several
+            // docs during one attempt.
+            let human_owned_snapshot =
+                match super::helpers::capture_human_owned_sections(&project_path) {
+                    Ok(snapshot) => snapshot,
+                    Err(reason) => {
+                        yield Event::default().event("step_warning").data(
+                            serde_json::json!({
+                                "step": step, "file": file_label,
+                                "reason": reason, "repaired_from_template": false,
+                            }).to_string()
+                        );
+                        yield Event::default().event("step_done").data(
+                            serde_json::json!({
+                                "step": step, "success": false, "file": file_label,
+                                "tokens": 0, "duration_ms": 0,
+                                "total_tokens": run_tokens.total(),
+                            }).to_string()
+                        );
+                        progress.record_failure(step as u32);
+                        continue;
+                    }
+                };
+
+            // Correct blockers before final validation, at most twice per
+            // step. Full's documentary gate also applies in off/warn mode;
+            // the global provenance setting still controls the enforce gate.
+            let recovery_targets = documentary_recovery.get(&(step as u32)).cloned().unwrap_or_default();
+            let documentary_snapshot = if should_optimize_documents(kind) {
+                match super::document_repair::snapshot_for_recovery(&project_path, &recovery_targets) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(reason) => {
+                        yield Event::default().event("error").data(serde_json::json!({
+                            "step":step,"file":file_label,"error":reason,"fatal":true
+                        }).to_string());
+                        return;
+                    }
+                }
+            } else { None };
+            let max_attempts = if enforce_mode || documentary_snapshot.is_some() {
                 super::anti_hallu_enforce::MAX_ATTEMPTS
             } else {
                 1
             };
             let mut attempt: usize = 0;
-            let mut citation_feedback: Option<String> = None;
+            let mut citation_feedback = (!recovery_targets.is_empty())
+                .then(|| super::document_repair::feedback(&recovery_targets));
+            if resume_run_id_req.is_some() && documentary_snapshot.is_some() {
+                if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
+                    citation_feedback.get_or_insert_with(String::new).push_str(&feedback);
+                }
+            }
+            let mut previous_attempt_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
             'attempts: loop {
             attempt += 1;
-            let mut step_tokens: u64 = 0;
+            let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
             let attempt_prompt = match &citation_feedback {
                 Some(fb) => format!("{full_prompt}\n\n{fb}"),
                 None => full_prompt.clone(),
             };
 
-            match runner::start_agent_with_config(runner::AgentStartConfig {
-                full_access: true,
-                tier: audit_tier,
-                // Audit admission currently accepts CLI providers only. The
-                // auditor already has its bounded source/citation prompt; keep
-                // native HTTP tools explicitly absent so a future provider
-                // expansion cannot inherit mutation capabilities by omission.
-                tools: None,
-                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &attempt_prompt, &tokens)
-            }).await {
+            // An HTTP agent's loop is a task and an ACP agent's work a session
+            // in a process the ACP host owns: Stop reaches either through this
+            // token, the counterpart of the PID a direct CLI agent is killed
+            // by. Registered BEFORE the start, which for an HTTP agent awaits
+            // the provider's first response (minutes, on a cold local model)
+            // and for an ACP agent the handshake: a Stop in that window must
+            // still find it.
+            let attempt_cancel = agent_launcher.stops_with_token().then(tokio_util::sync::CancellationToken::new);
+            if let Some(cancel) = &attempt_cancel {
+                if let Ok(mut tracker) = audit_tracker.lock() {
+                    tracker.agent_cancels.insert(project_id.clone(), cancel.clone());
+                }
+            }
+            match agent_launcher.start(
+                &agent_type,
+                audit_tier,
+                &project_path,
+                &project_path_str,
+                &attempt_prompt,
+                &tokens,
+                attempt_cancel.clone(),
+                analysis_step.target_file,
+            ).await {
                 Ok(mut process) => {
-                    // Register the child PID for cancellation
-                    if let Some(pid) = process.child.id() {
-                        if let Ok(mut tracker) = audit_tracker.lock() {
-                            tracker.running_pids.insert(project_id.clone(), pid);
+                    // Register the child PID for cancellation — of a direct CLI
+                    // agent only. The child of an HTTP or ACP run is a lifeline
+                    // that does no work: killing it made the pipeline believe
+                    // the step was over while the agent kept going, and it
+                    // would end the wait before the agent's process was
+                    // reaped. Those are stopped through `attempt_cancel`.
+                    if attempt_cancel.is_none() {
+                        if let Some(pid) = process.child.id() {
+                            if let Ok(mut tracker) = audit_tracker.lock() {
+                                tracker.running_pids.insert(project_id.clone(), pid);
+                            }
                         }
                     }
 
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                    // An HTTP agent's tool activity, for the card's live chips.
+                    let _tool_activity = (!is_stream_json).then(|| {
+                        super::agent_launch::ToolActivityMirror::start(
+                            process.tool_activity_probe(),
+                            audit_tracker.clone(),
+                            project_id.clone(),
+                        )
+                    });
                     // 0.8.3 (#309) — Zombie audit detection.
                     //
                     // The naive `while let Some(line) = process.next_line().await`
@@ -1136,32 +1271,22 @@ pub async fn full_audit(
                         // text). Non-stream-json agents (Vibe direct,
                         // Ollama) skip this branch — their chips stay
                         // empty rather than show stale 0 values.
+                        let mut usage_moved = false;
                         if is_stream_json {
                             match runner::parse_claude_stream_line(&line) {
-                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
-                                    step_tokens = step_tokens.max(input_tokens + output_tokens);
-                                    let cumulative = total_tokens_so_far.saturating_add(step_tokens);
-                                    // 0.8.3 — mirror the live value into
-                                    // the AuditTracker so the poll
-                                    // endpoint can re-seed the chips
-                                    // when SSE buffers / stalls (nginx
-                                    // buffering, agent thinking-only
-                                    // output, page re-mount).
-                                    if let Ok(mut t) = audit_tracker.lock() {
-                                        t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                // A reading that counts nothing is no reading.
+                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. }
+                                    if input_tokens + output_tokens > 0 =>
+                                {
+                                    if step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen) {
+                                        step_usage = crate::db::audit_runs::StepTokens {
+                                            input: Some(input_tokens),
+                                            output: Some(output_tokens),
+                                            cache_read: prompt_cache.cached_prompt_tokens,
+                                            cache_write: prompt_cache.cache_write_prompt_tokens,
+                                        };
+                                        usage_moved = true;
                                     }
-                                    // Surface tokens-so-far LIVE so the
-                                    // frontend chip ticks during the
-                                    // step (was previously emitted only
-                                    // at `step_done`, leaving the user
-                                    // staring at a static counter).
-                                    yield Event::default().event("step_progress").data(
-                                        serde_json::json!({
-                                            "step": step,
-                                            "step_tokens": step_tokens,
-                                            "total_tokens_so_far": cumulative,
-                                        }).to_string()
-                                    );
                                 }
                                 runner::StreamJsonEvent::ToolStart(name) => {
                                     // 0.8.3 — also persist the tool in
@@ -1184,13 +1309,64 @@ pub async fn full_audit(
                                     );
                                 }
                                 // An audit is a one-shot run: nothing to resume.
-                                runner::StreamJsonEvent::Text(_)
+                                runner::StreamJsonEvent::Usage { .. }
+                                | runner::StreamJsonEvent::Text(_)
                                 | runner::StreamJsonEvent::TerminalError(_)
                                 | runner::StreamJsonEvent::ToolInputDelta(_)
                                 | runner::StreamJsonEvent::ToolEnd
                                 | runner::StreamJsonEvent::SessionId(_)
                                 | runner::StreamJsonEvent::Skip => {}
                             }
+                        } else {
+                            // KT-927 — an agent that streams text (ACP:
+                            // OpenCode, the adapters; HTTP) has no usage in
+                            // its lines: the session reports it on the
+                            // process. It used to be read nowhere, so every
+                            // such step was recorded at 0.
+                            let reading = crate::db::audit_runs::StepTokens::from_reported(
+                                process.reported_usage_counters(),
+                            );
+                            if reading.total().is_some() && reading != step_usage {
+                                step_usage = reading;
+                                usage_moved = true;
+                            }
+                        }
+                        if usage_moved {
+                            if let Some(step_tokens) = step_usage.total() {
+                                let cumulative = run_tokens.with(step_tokens);
+                                // 0.8.3 — mirror the live value into
+                                // the AuditTracker so the poll
+                                // endpoint can re-seed the chips
+                                // when SSE buffers / stalls (nginx
+                                // buffering, agent thinking-only
+                                // output, page re-mount).
+                                if let Ok(mut t) = audit_tracker.lock() {
+                                    t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                }
+                                // Surface tokens-so-far LIVE so the
+                                // frontend chip ticks during the
+                                // step (was previously emitted only
+                                // at `step_done`, leaving the user
+                                // staring at a static counter).
+                                yield Event::default().event("step_progress").data(
+                                    serde_json::json!({
+                                        "step": step,
+                                        "step_tokens": step_tokens,
+                                        "total_tokens_so_far": cumulative,
+                                    }).to_string()
+                                );
+                            }
+                        }
+                    }
+                    // The session's usage can land after the last line of text
+                    // (ACP reports it with the end of the turn): read it once
+                    // the stream is over.
+                    if !is_stream_json {
+                        let reading = crate::db::audit_runs::StepTokens::from_reported(
+                            process.reported_usage_counters(),
+                        );
+                        if reading.total().is_some() {
+                            step_usage = reading;
                         }
                     }
                     let status = process.child.wait().await;
@@ -1199,6 +1375,7 @@ pub async fn full_audit(
                     // Unregister PID
                     if let Ok(mut tracker) = audit_tracker.lock() {
                         tracker.running_pids.remove(&project_id);
+                        tracker.agent_cancels.remove(&project_id);
                     }
 
                     // PER-ATTEMPT boundary: enforce mode can retry the same
@@ -1241,6 +1418,37 @@ pub async fn full_audit(
                         }
                     }
 
+                    // Ownership is enforced at the attempt boundary, before
+                    // cancellation, retry, or failure can leave an agent's
+                    // rewrite on disk. A report failure also fails the step:
+                    // the human text is restored, but the promised proposal
+                    // was not durably recorded.
+                    let ownership_warning = match super::helpers::protect_human_owned_sections(
+                        &project_path,
+                        &human_owned_snapshot,
+                        &today,
+                    ) {
+                        Ok(_) => None,
+                        Err(reason) => {
+                            let reason = format!(
+                                "human-owned section protection failed for {file_label}: {reason}"
+                            );
+                            tracing::warn!("Audit step {} ({}): {}", step, file_label, reason);
+                            yield Event::default().event("step_warning").data(
+                                serde_json::json!({
+                                    "step": step,
+                                    "file": file_label,
+                                    "reason": reason.clone(),
+                                    "repaired_from_template": false,
+                                }).to_string()
+                            );
+                            Some(crate::api::audit::validation::StepValidationWarning {
+                                reason,
+                                repaired: false,
+                            })
+                        }
+                    };
+
                     // Check if cancelled during this step. Must finalize
                     // exactly like the pre-step branch: persist `Cancelled`
                     // and disarm the drop-guard. Without this the guard's Drop
@@ -1271,7 +1479,9 @@ pub async fn full_audit(
 
                     let cli_success = status.map(|s| s.success()).unwrap_or(false);
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
-                    total_tokens_so_far = total_tokens_so_far.saturating_add(step_tokens);
+                    run_tokens.add(step_usage.total());
+                    let combined_step_usage = previous_attempt_usage.plus(step_usage);
+                    previous_attempt_usage = combined_step_usage;
 
                     // 0.8.3 — Root-cause guard for the empty-tech-debt
                     // bug on DOCROMS_WEB. The CLI exited 0 (cli_success)
@@ -1288,10 +1498,43 @@ pub async fn full_audit(
                     // step_done so the overall audit summary is honest.
                     // The file is NEVER overwritten — re-running the
                     // step is the only repair path.
+                    if cli_success {
+                        crate::api::audit::validation::fill_step_owned_placeholders(
+                            &project_path,
+                            analysis_step.target_file,
+                            &chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                        );
+                    }
                     let (mut success, mut warning) = crate::api::audit::validation::validate_step_output(
                         cli_success,
                         &project_path,
                         analysis_step.target_file,
+                    );
+
+                    // A model can finish normally with an incomplete coverage
+                    // table. Give that exact failure back within the existing
+                    // Full-audit attempt budget, never after a provider failure
+                    // or an ownership violation and never by accepting bad data.
+                    if cli_success && !success && ownership_warning.is_none()
+                        && documentary_snapshot.is_some() && attempt < max_attempts
+                    {
+                        if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
+                            yield Event::default().event("step_retry").data(serde_json::json!({
+                                "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                "reason":"dimension_coverage","diagnostic":warning.as_ref().map(|w| &w.reason),
+                            }).to_string());
+                            citation_feedback = Some(feedback);
+                            continue 'attempts;
+                        }
+                    }
+
+                    if let Some(ownership_warning) = ownership_warning {
+                        success = false;
+                        warning = Some(ownership_warning);
+                    }
+
+                    warning = super::validation::with_http_diagnostics(
+                        success, warning, &process.captured_stderr(),
                     );
 
                     if let Some(w) = &warning {
@@ -1341,6 +1584,42 @@ pub async fn full_audit(
                             // only runs when `success` was still true, i.e. the
                             // validation pass produced no warning.
                             warning = Some(w);
+                        }
+                    }
+
+                    // The final documentary gate is independent of the global
+                    // anti-hallucination mode. Correct its blockers now, while
+                    // the responsible step can still receive bounded feedback.
+                    let mut documentary_repair_proven = false;
+                    if success {
+                        if let Some(before) = &documentary_snapshot {
+                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets);
+                            let reason = match gate {
+                                Ok(blocking) if blocking.is_empty() => {
+                                    documentary_repair_proven = super::document_repair::recovery_changed(
+                                        &project_path, before, &recovery_targets,
+                                    );
+                                    None
+                                }
+                                Ok(blocking) if attempt < max_attempts => {
+                                    citation_feedback = Some(super::document_repair::feedback(&blocking));
+                                    yield Event::default().event("step_retry").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                        "reason":"documentary_blockers","fabricated_count":blocking.len(),
+                                        "diagnostics":blocking,
+                                    }).to_string());
+                                    continue 'attempts;
+                                }
+                                Ok(blocking) => Some(super::document_repair::feedback(&blocking)),
+                                Err(error) => Some(format!("Documentary correction failed: {error}")),
+                            };
+                            if let Some(reason) = reason {
+                                success = false;
+                                yield Event::default().event("step_warning").data(serde_json::json!({
+                                    "step":step,"file":file_label,"reason":reason,"repaired_from_template":false,
+                                }).to_string());
+                                warning = Some(super::validation::StepValidationWarning { reason, repaired:false });
+                            }
                         }
                     }
 
@@ -1398,20 +1677,67 @@ pub async fn full_audit(
                                     reason, repaired: false,
                                 });
                             }
-                            EnforceGateOutcome::Pass { written } => {
-                                // Clean citations — stamp `audit="<today>"` on
-                                // any curated="ai" section (deterministic, 0
-                                // tokens). The Full pipeline has no rewrite
-                                // proof, so stamping here is safe.
-                                if let Some(stamped) =
-                                    super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
-                                {
-                                    let target_path = project_path.join(analysis_step.target_file);
-                                    if let Err(e) = std::fs::write(&target_path, &stamped) {
-                                        tracing::warn!(
-                                            "Audit step {} ({}): failed to stamp audit dates: {}",
-                                            step, file_label, e
-                                        );
+                            EnforceGateOutcome::Pass { .. } => {
+                                // No mutation here (mirrors the partial
+                                // pipeline, Codex msg 150): the audit-date
+                                // stamp only applies once the rewrite-proof
+                                // gate below has PROVEN a substantial
+                                // rewrite — stamping an unchanged file would
+                                // mask the very thing that gate exists to
+                                // catch.
+                            }
+                        }
+                    }
+
+                    // KT-841 — rewrite-proof gate (parity with the partial
+                    // pipeline's `drift.rs`): a step that reports success but
+                    // left its target BYTE-IDENTICAL (post-normalization) to
+                    // before the agent ran did nothing — that must fail, not
+                    // silently pass through as a no-op success. Runs LAST,
+                    // only when every earlier gate is green. The decision
+                    // itself is a pure function (`rewrite_proof_verdict`, unit
+                    // tested below) — this block only maps it to SSE events.
+                    if success && !documentary_repair_proven {
+                        match rewrite_proof_verdict(
+                            analysis_step.target_file,
+                            &pre_snapshot,
+                            super::validation::target_snapshot(&project_path, analysis_step.target_file),
+                        ) {
+                            RewriteProofVerdict::Skipped => {}
+                            RewriteProofVerdict::Unreadable(reason) | RewriteProofVerdict::Unchanged(reason) => {
+                                success = false;
+                                tracing::warn!(
+                                    "Audit step {} ({}) rewrite-proof gate failed: {}",
+                                    step, file_label, reason
+                                );
+                                yield Event::default().event("step_warning").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "reason": reason.clone(), "repaired_from_template": false,
+                                    }).to_string()
+                                );
+                                warning = Some(crate::api::audit::validation::StepValidationWarning {
+                                    reason, repaired: false,
+                                });
+                            }
+                            RewriteProofVerdict::Proven => {
+                                let target_path = project_path.join(analysis_step.target_file);
+                                // Substantial rewrite PROVEN — only now may we
+                                // stamp the curated audit dates (mirrors
+                                // drift.rs: stamping an unproven rewrite would
+                                // mask a no-op step as freshly audited).
+                                if enforce_mode {
+                                    if let Ok(written) = std::fs::read_to_string(&target_path) {
+                                        if let Some(stamped) =
+                                            super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
+                                        {
+                                            if let Err(e) = std::fs::write(&target_path, &stamped) {
+                                                tracing::warn!(
+                                                    "Audit step {} ({}): failed to stamp audit dates: {}",
+                                                    step, file_label, e
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1422,9 +1748,9 @@ pub async fn full_audit(
                         "step": step,
                         "success": success,
                         "file": file_label,
-                        "tokens": step_tokens,
+                        "tokens": combined_step_usage.total(),
                         "duration_ms": duration_ms,
-                        "total_tokens": total_tokens_so_far,
+                        "total_tokens": run_tokens.total(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
 
@@ -1439,6 +1765,8 @@ pub async fn full_audit(
                         let warn_reason = warning.as_ref().map(|w| w.reason.clone());
                         let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
                         let ended = Utc::now();
+                        let recorded_usage = combined_step_usage;
+                        let recorded_total = run_tokens.total();
                         if let Err(e) = db.with_conn(move |conn| {
                             crate::db::audit_runs::finalize_audit_step(
                                 conn,
@@ -1446,8 +1774,8 @@ pub async fn full_audit(
                                 step as u32,
                                 ended,
                                 duration_ms,
-                                step_tokens,
-                                total_tokens_so_far,
+                                &recorded_usage,
+                                recorded_total,
                                 success,
                                 warn_reason.as_deref(),
                                 repaired,
@@ -1458,11 +1786,11 @@ pub async fn full_audit(
                     }
 
                     // 0.8.3 (#311) — track per-step progress in audit_runs
-                    // so an interrupted SSE stream can be resumed at
-                    // `last_completed_step + 1` instead of restarting
-                    // from step 1. We only update on `success=true`
-                    // (no warning, no cli_failure) so a half-baked step
-                    // doesn't get treated as done on resume.
+                    // so an interrupted run reports how far it got and a
+                    // resume re-runs only what is left instead of restarting
+                    // from step 1. We only count `success=true` (no warning,
+                    // no cli_failure) so a half-baked step doesn't get
+                    // treated as done on resume.
                     if success {
                         // This index was (re)written by THIS run — eligible
                         // for the reconciliation union. A warned/failed step
@@ -1472,39 +1800,56 @@ pub async fn full_audit(
                         if analysis_step.target_file.contains("inconsistencies-") {
                             freshly_written_indices.push(analysis_step.target_file.to_string());
                         }
-                        // The checkpoint is the CONTIGUOUS successful prefix:
-                        // once any step warned/failed, later successes no
-                        // longer advance it — otherwise resume would skip
-                        // 1..=checkpoint right over the failed step and the
-                        // gap would never be re-run.
-                        if !any_step_warning {
-                            last_successful_step = step as u32;
-                            let run_id = audit_run_id.clone();
-                            let log_run_id = run_id.clone();
-                            let step_n = step as u32;
-                            if let Err(e) = db.with_conn(move |conn| {
-                                crate::db::audit_runs::update_last_completed_step(conn, &run_id, step_n)
-                            }).await {
-                                tracing::error!("Failed to persist last_completed_step={step_n} for run {log_run_id}: {e}");
-                            }
+                        // KT-841 — resume decides skip/replay per step from the
+                        // persisted `audit_run_steps` outcomes (see the
+                        // `already_succeeded_steps` set above), so a warned
+                        // step is retried on its own merits.
+                        // KT-931 — the persisted scalar is the EXACT number of
+                        // steps that succeeded, those after an earlier
+                        // failure included: it neither freezes at the first
+                        // warning (it read 4 on a 15/16 run) nor jumps to the
+                        // last step's index (it read 16/16 with one failed).
+                        let step_n = step as u32;
+                        let succeeded = progress.record_success(step_n);
+                        let run_id = audit_run_id.clone();
+                        let log_run_id = run_id.clone();
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::update_last_completed_step(conn, &run_id, succeeded)
+                        }).await {
+                            tracing::error!("Failed to persist last_completed_step={succeeded} (step {step_n}) for run {log_run_id}: {e}");
                         }
                     } else {
-                        // Track that something went wrong so the
-                        // end-of-stream branch knows to mark the run
-                        // as Interrupted rather than Completed and
-                        // skip the validation discussion creation
-                        // (cf F8c #312 — no validation disc unless all
-                        // 9 steps reported success).
-                        any_step_warning = true;
-                        warned_steps.push(step as u32);
+                        // Track that this step must be redone: the run ends
+                        // Interrupted (resumable on exactly the steps that
+                        // did not succeed) and its validation discussion,
+                        // when there is one, names them.
+                        progress.record_failure(step as u32);
                     }
                 }
                 Err(e) => {
                     tracing::error!("Audit step {} failed to start: {}", step, e);
-                    any_step_warning = true;
-                    warned_steps.push(step as u32);
+                    if let Ok(mut tracker) = audit_tracker.lock() {
+                        tracker.agent_cancels.remove(&project_id);
+                    }
+                    progress.record_failure(step as u32);
+                    let reason = format!("Step {} ({}): {}", step, file_label, e);
+                    let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                    let run_id = audit_run_id.clone();
+                    let warning = reason.clone();
+                    let recorded_total = run_tokens.total();
+                    // A failed corrective launch must retain the completed
+                    // attempts' usage and a durable cause after SSE disconnects.
+                    if let Err(error) = db.with_conn(move |conn| {
+                        crate::db::audit_runs::finalize_audit_step(
+                            conn, &run_id, step as u32, Utc::now(), duration_ms,
+                            &previous_attempt_usage, recorded_total, false,
+                            Some(&warning), false,
+                        )
+                    }).await {
+                        tracing::error!("Failed to finalize launch error for audit step {step}: {error}");
+                    }
                     let err = serde_json::json!({
-                        "error": format!("Step {} ({}): {}", step, file_label, e),
+                        "error": reason,
                         "step": step
                     });
                     yield Event::default().event("step_error").data(err.to_string());
@@ -1514,8 +1859,8 @@ pub async fn full_audit(
                     yield Event::default().event("step_done").data(
                         serde_json::json!({
                             "step": step, "success": false, "file": file_label,
-                            "tokens": 0, "duration_ms": 0,
-                            "total_tokens": total_tokens_so_far,
+                            "tokens": previous_attempt_usage.total(), "duration_ms": duration_ms,
+                            "total_tokens": run_tokens.total(),
                         }).to_string()
                     );
                 }
@@ -1640,7 +1985,8 @@ pub async fn full_audit(
         // with a gap (warned/failed step) even the successfully-rewritten
         // indices don't cover every dimension, so classifying priors against
         // them would fabricate Missed/Stale verdicts. Complete runs only.
-        let run_is_complete = !any_step_warning && last_successful_step == total_steps as u32;
+        let outcome = progress.outcome();
+        let run_is_complete = outcome == RunOutcome::Complete;
         if is_full && run_is_complete && !pre_audit_td_snapshot.is_empty() {
             let project_path_for_recon = project_path.clone();
             let snapshot = pre_audit_td_snapshot.clone();
@@ -1718,9 +2064,13 @@ pub async fn full_audit(
 
         // ── Phase 2.6: Documentary optimization ──
         // Deterministic and token-free. It runs after generation/reconciliation
-        // and before validation so an oversized or broken mandatory context can
-        // never earn a completed audit or spawn a validation discussion.
-        if run_is_complete && should_optimize_documents(kind) {
+        // and before validation. Broken links and invalid file citations
+        // (grammar, path or range) block validation; volume and orphan
+        // diagnostics remain warnings.
+        // KT-931 — a run with failed steps is validated too (for the steps that
+        // succeeded), so the invented-path guard covers it as well: only a run
+        // where nothing succeeded has no document to check.
+        if outcome != RunOutcome::Nothing && should_optimize_documents(kind) {
             let pp = project_path.clone();
             let optimization = tokio::task::spawn_blocking(move || {
                 crate::core::document_optimization::analyze_and_write(&pp)
@@ -1737,7 +2087,24 @@ pub async fn full_audit(
                         }).to_string()
                     );
                     if !blocking.is_empty() {
-                        any_step_warning = true;
+                        docs_blocked = true;
+                        let recovery = super::document_repair::recovery_plan(&blocking, &steps);
+                        let mut warnings = Vec::new();
+                        for (step, diagnostics) in recovery {
+                            progress.invalidate_success(step);
+                            let reason = super::document_repair::feedback(&diagnostics);
+                            yield Event::default().event("step_warning").data(serde_json::json!({
+                                "step":step,"file":steps[step as usize - 1].target_file,
+                                "reason":reason,"repaired_from_template":false,
+                            }).to_string());
+                            warnings.push((step, reason));
+                        }
+                        let run_id = audit_run_id.clone();
+                        if let Err(error) = db.with_conn(move |conn|
+                            crate::db::audit_runs::invalidate_documentary_steps(conn, &run_id, &warnings)
+                        ).await {
+                            tracing::error!("Could not persist documentary recovery for {audit_run_id}: {error}");
+                        }
                         tracing::warn!(
                             target: "kronn::invariant",
                             diagnostics = blocking.len(),
@@ -1746,13 +2113,13 @@ pub async fn full_audit(
                     }
                 }
                 Ok(Err(e)) => {
-                    any_step_warning = true;
+                    docs_blocked = true;
                     yield Event::default().event("documentary_optimization").data(
                         serde_json::json!({"phase": "documentary_optimization", "error": e, "blocking_count": 1}).to_string()
                     );
                 }
                 Err(e) => {
-                    any_step_warning = true;
+                    docs_blocked = true;
                     yield Event::default().event("documentary_optimization").data(
                         serde_json::json!({"phase": "documentary_optimization", "error": format!("task panicked: {e}"), "blocking_count": 1}).to_string()
                     );
@@ -1766,28 +2133,48 @@ pub async fn full_audit(
         // the user reviews them directly. The 4-phase validation flow
         // only makes sense after a complete docs/ regeneration.
         //
-        // 0.8.3 (#312 F8c) — additional gate: the validation disc is
-        // ONLY created when every step reported success AND we made
-        // it through all 9 steps. Pre-fix, a rate-limit at step 5
-        // produced a validation disc anyway (because the SSE handler
-        // reached this code regardless of step outcomes), and the
-        // ProjectCard then said "Validation en cours" on an audit
-        // that hadn't actually produced anything past step 5.
-        let audit_fully_succeeded = last_successful_step == total_steps as u32
-            && !any_step_warning;
+        // 0.8.3 (#312 F8c) — additional gate: a run only counts as complete
+        // (Completed, drift baseline, full validation) when EVERY step of the
+        // chain succeeded. Pre-fix, a rate-limit at step 5 produced a
+        // validation disc anyway and the ProjectCard said "Validation en
+        // cours" on an audit that hadn't produced anything past step 5.
+        //
+        // KT-931 — but one failed step (often an environmental one: the Mac
+        // went to sleep, a rate limit) must not void the others: a run where
+        // SOME steps succeeded still gets a validation discussion for those,
+        // naming the steps to redo. It is not Completed — it stays
+        // Interrupted, and a resume re-runs only the steps in
+        // `steps_to_redo`. Only a run where nothing succeeded has nothing to
+        // validate, and an invented path found by the documentary
+        // optimization still blocks every kind of validation.
+        let steps_to_redo = progress.steps_to_redo();
+        // KT-931 — a partial run is only validatable if its founding step
+        // (the one producing `docs/AGENTS.md`) succeeded: without the entry
+        // point the documentation has nowhere to start from, so the run
+        // stays Interrupted with no validation and `steps_to_redo` names the
+        // founding step along with the rest.
+        let validation_wanted = progress.is_validatable() && !docs_blocked;
+        let audit_fully_succeeded = run_is_complete && !docs_blocked;
         if !audit_fully_succeeded {
             tracing::info!(
-                "Audit run {} on project {} interrupted at step {}/{} (any_step_warning={}). Skipping validation discussion creation.",
-                audit_run_id, project_id, last_successful_step, total_steps, any_step_warning
+                "Audit run {} on project {} interrupted: {}/{} steps succeeded, to redo: {:?} (docs_blocked={}). {}",
+                audit_run_id, project_id, progress.succeeded_count(), total_steps,
+                steps_to_redo, docs_blocked,
+                if validation_wanted {
+                    "Validating the steps that succeeded."
+                } else {
+                    "Skipping validation discussion creation."
+                }
             );
             // Surface the interrupted state to the frontend so it can
             // show the dynamic resume step instead of "Validation en cours".
             yield Event::default().event("audit_interrupted").data(
                 serde_json::json!({
-                    "last_completed_step": last_successful_step,
+                    "last_completed_step": progress.succeeded_count(),
                     "total_steps": total_steps as u32,
-                    "had_warnings": any_step_warning,
-                    "warned_steps": warned_steps,
+                    "had_warnings": !progress.failed_steps().is_empty() || docs_blocked,
+                    "warned_steps": progress.failed_steps(),
+                    "steps_to_redo": steps_to_redo,
                 }).to_string()
             );
         }
@@ -1867,9 +2254,12 @@ pub async fn full_audit(
         // would dump TDs to disk with no human-validation flow.
         // BUILT here, INSERTED in the terminal transaction below: the
         // invariant "a validation discussion exists iff the run is
-        // Completed" is structural (same commit), not compensated.
+        // Completed" is structural (same commit), not compensated. A partial
+        // run (KT-931) is the one other holder of a validation discussion: it
+        // is linked in the same commit as its Interrupted status, and no
+        // Completed run exists without its own.
         let pending_validation: Option<(Discussion, DiscussionMessage)> =
-            if kind.is_validatable() && audit_fully_succeeded && baseline_ok {
+            if kind.is_validatable() && validation_wanted && baseline_ok {
         if let Ok(mut t) = audit_tracker.lock() { t.mark_validating(&project_id); }
 
         let pp = project_path_str.clone();
@@ -1906,6 +2296,25 @@ pub async fn full_audit(
         } else {
             build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp, &run_td_ids)
         };
+        // KT-931 — a partial run says which steps are NOT being validated.
+        let validation_prompt = if outcome == RunOutcome::Partial {
+            let to_redo: Vec<(u32, String)> = steps_to_redo
+                .iter()
+                .map(|&step| {
+                    let file = steps
+                        .get(step as usize - 1)
+                        .map(|s| step_file_label(s).to_string())
+                        .unwrap_or_default();
+                    (step, file)
+                })
+                .collect();
+            format!(
+                "{}{validation_prompt}",
+                partial_run_block(&to_redo, total_steps as u32, run_td_ids.is_empty(), &language)
+            )
+        } else {
+            validation_prompt
+        };
 
         let now = Utc::now();
         let discussion_id = Uuid::new_v4().to_string();
@@ -1939,7 +2348,7 @@ pub async fn full_audit(
             "Validation audit AI".to_string()
         };
         let discussion = Discussion {
-            connection_id: None,
+            connection_id: audit_connection_id.clone(),
             awaiting_agent: false,
             agent_running: false,
             id: discussion_id.clone(),
@@ -2026,64 +2435,35 @@ pub async fn full_audit(
         // transaction inserts the validation discussion + its prompt AND
         // stamps the run Completed — "a validation discussion exists iff the
         // run is Completed" holds structurally, no compensation. Interrupted
-        // path: terminal write alone. If the write (or the metrics feeding
-        // it) fails, the run does NOT present as finished: terminal `error`
-        // + return, never a `done`, no disarm — the guard's Drop retries
-        // mark_interrupted and keeps the lease fail-closed on failure.
+        // path: terminal write alone — plus, for a partial run (KT-931), the
+        // validation discussion of its successful steps in the same
+        // transaction. If the write (or the metrics feeding it) fails, the
+        // run does NOT present as finished: terminal `error` + return, never
+        // a `done`, no disarm — the guard's Drop retries mark_interrupted and
+        // keeps the lease fail-closed on failure.
         let finalize_result: Result<(), String> = match completion_counts {
             Ok((counts, resolved, new, carried, score, recs_json)) => {
-                let run_id = run_id_for_complete.clone();
-                let succeeded = audit_fully_succeeded;
-                let last_step = last_successful_step;
-                let warned = warned_steps.clone();
-                let validation = pending_validation.clone();
-                // steps + the validation phase — the historical "/10" for a
-                // 9-step run, now dynamic (a chained Full is 16+1).
-                let total_for_report = total_steps + 1;
-                db_for_complete.with_conn(move |conn| {
-                    let tx = conn.unchecked_transaction()?;
-                    if succeeded {
-                        if let Some((disc, msg)) = validation.as_ref() {
-                            crate::db::discussions::insert_discussion(&tx, disc)?;
-                            crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
-                        }
-                        crate::db::audit_runs::complete(
-                            &tx, &run_id, ended_at, "Completed",
-                            counts.critical, counts.high, counts.medium, counts.low,
-                            resolved, new, carried,
-                            score, None, recs_json.as_deref(),
-                        )?;
-                        // 076 — durable run→validation link, same commit:
-                        // the validate endpoint trusts only this.
-                        if let Some((disc, _)) = validation.as_ref() {
-                            crate::db::audit_runs::set_validation_discussion(&tx, &run_id, &disc.id)?;
-                        }
-                    } else {
-                        // 0.8.3 (#311) — mark as Interrupted (not Completed,
-                        // not Failed): the resume mechanism will pick this
-                        // row up via `latest_resumable` and the frontend
-                        // shows the dynamic resume step.
-                        crate::db::audit_runs::mark_interrupted(
-                            &tx,
-                            &run_id,
-                            &if warned.is_empty() {
-                                format!("interrupted after step {last_step}/{} (stream-end)", total_for_report)
-                            } else {
-                                format!("interrupted after step {last_step}/{} (warned steps: {warned:?})", total_for_report)
-                            },
-                        )?;
-                        // The TD files ARE on disk even when the run ends
-                        // Interrupted — keep the counters honest (they read
-                        // 0 while 14 TD files existed).
-                        crate::db::audit_runs::update_td_counts(
-                            &tx, &run_id,
-                            counts.critical, counts.high, counts.medium, counts.low,
-                            resolved, new, carried,
-                        )?;
-                    }
-                    tx.commit()?;
-                    Ok(())
-                }).await.map_err(|e| format!("terminal write failed: {e}"))
+                let write = TerminalWrite {
+                    run_id: run_id_for_complete.clone(),
+                    ended_at,
+                    fully_succeeded: audit_fully_succeeded,
+                    counts,
+                    resolved,
+                    new,
+                    carried,
+                    score,
+                    recs_json,
+                    validation: pending_validation.clone(),
+                    interruption_reason: interruption_reason(
+                        progress.succeeded_count(),
+                        total_steps as u32,
+                        progress.failed_steps(),
+                        &steps_to_redo,
+                    ),
+                };
+                db_for_complete.with_conn(move |conn| write_terminal_state(conn, &write))
+                    .await
+                    .map_err(|e| format!("terminal write failed: {e}"))
             }
             Err(e) => Err(format!("completion metrics task failed: {e}")),
         };
@@ -2137,18 +2517,21 @@ pub async fn full_audit(
         let _ = ws_broadcast.send(crate::models::WsMessage::AuditFinished {
             project_id: project_id.clone(),
             status: if audit_fully_succeeded { "complete".into() } else { "interrupted".into() },
-            last_completed_step: last_successful_step,
+            last_completed_step: progress.succeeded_count(),
             total_steps: total_steps as u32,
-            warned_steps: warned_steps.clone(),
+            warned_steps: progress.failed_steps().to_vec(),
             discussion_id: disc_id.clone(),
         });
 
-        // The done event mirrors what was DURABLY persisted.
+        // The done event mirrors what was DURABLY persisted. An interrupted
+        // run may carry a `discussion_id` (KT-931: the validation of its
+        // successful steps) — `steps_to_redo` is what a resume will re-run.
         let done = serde_json::json!({
             "status": if audit_fully_succeeded { "complete" } else { "interrupted" },
             "total_steps": total_steps,
-            "last_completed_step": last_successful_step,
-            "warned_steps": warned_steps,
+            "last_completed_step": progress.succeeded_count(),
+            "warned_steps": progress.failed_steps(),
+            "steps_to_redo": steps_to_redo,
             "discussion_id": disc_id,
             "template_was_installed": template_installed,
             "audit_run_id": audit_run_id,
@@ -2156,7 +2539,316 @@ pub async fn full_audit(
         yield Event::default().event("done").data(done.to_string());
     });
 
-    Sse::new(stream)
+    // The response only subscribes; the producer owns the run lifecycle.
+    Sse::new(detach_sse_stream(stream))
+}
+
+/// What the user sees a step as: its target file, or "Final review" for the
+/// synthetic review step.
+pub(crate) fn step_file_label(step: &super::AnalysisStep) -> &'static str {
+    if step.target_file == "REVIEW" {
+        "Final review"
+    } else {
+        step.target_file
+    }
+}
+
+/// KT-931 — what a finished Full run is worth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunOutcome {
+    /// Every step of the chain succeeded.
+    Complete,
+    /// Some steps succeeded, the others failed or never ran: the successful
+    /// ones are validated, the rest is named for a targeted resume.
+    Partial,
+    /// Nothing succeeded: there is nothing to validate.
+    Nothing,
+}
+
+/// KT-931 — the target file of the founding step of a Full chain: the entry
+/// point every other document hangs off.
+pub(crate) const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
+
+/// KT-931 — the 1-based position in `steps` of the founding step, found by its
+/// target file and never by a hard-coded index (the chain is assembled, its
+/// order is not this function's to know). `None` when no step of the chain
+/// writes the entry point.
+pub(crate) fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> {
+    steps
+        .iter()
+        .position(|step| step.target_file == FOUNDING_STEP_TARGET)
+        .map(|position| position as u32 + 1)
+}
+
+/// KT-931 — the exact progress of one run: which steps succeeded (the ones a
+/// resumed predecessor completed included) and which failed. A run no longer
+/// reduces to "the last step that succeeded" or "did anything warn": a failed
+/// step in the middle of the chain says nothing about the ones after it.
+#[derive(Debug)]
+pub(crate) struct RunProgress {
+    total_steps: u32,
+    succeeded: std::collections::BTreeSet<u32>,
+    /// Steps that ran THIS run and did not succeed, in execution order.
+    failed: Vec<u32>,
+    /// The step producing the entry point (`founding_step_index`), when the
+    /// chain has one.
+    founding_step: Option<u32>,
+}
+
+impl RunProgress {
+    /// `carried` is the set of steps a predecessor completed cleanly (empty on
+    /// a fresh run); indices outside `1..=total_steps` are ignored.
+    pub(crate) fn new(total_steps: u32, carried: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            total_steps,
+            succeeded: carried
+                .into_iter()
+                .filter(|step| (1..=total_steps).contains(step))
+                .collect(),
+            failed: Vec::new(),
+            founding_step: None,
+        }
+    }
+
+    /// Name the step producing the entry point (`founding_step_index`).
+    pub(crate) fn with_founding_step(mut self, step: Option<u32>) -> Self {
+        self.founding_step = step;
+        self
+    }
+
+    /// Record a success and return the exact number of steps that succeeded so
+    /// far — the figure the run row persists.
+    pub(crate) fn record_success(&mut self, step: u32) -> u32 {
+        self.failed.retain(|failed| *failed != step);
+        self.succeeded.insert(step);
+        self.succeeded_count()
+    }
+
+    pub(crate) fn record_failure(&mut self, step: u32) {
+        if !self.succeeded.contains(&step) && !self.failed.contains(&step) {
+            self.failed.push(step);
+        }
+    }
+
+    /// A post-generation gate found a blocker in an earlier successful step.
+    pub(crate) fn invalidate_success(&mut self, step: u32) {
+        self.succeeded.remove(&step);
+        self.record_failure(step);
+    }
+
+    pub(crate) fn succeeded_count(&self) -> u32 {
+        self.succeeded.len() as u32
+    }
+
+    /// Steps that ran this run and failed.
+    pub(crate) fn failed_steps(&self) -> &[u32] {
+        &self.failed
+    }
+
+    /// Every step a resume has to run: the failed ones AND the ones that never
+    /// ran (a stream that ended early).
+    pub(crate) fn steps_to_redo(&self) -> Vec<u32> {
+        (1..=self.total_steps)
+            .filter(|step| !self.succeeded.contains(step))
+            .collect()
+    }
+
+    pub(crate) fn outcome(&self) -> RunOutcome {
+        if self.succeeded.is_empty() {
+            RunOutcome::Nothing
+        } else if self.succeeded_count() == self.total_steps {
+            RunOutcome::Complete
+        } else {
+            RunOutcome::Partial
+        }
+    }
+
+    /// The founding step succeeded, in this run or in a predecessor this one
+    /// carries over. A chain with no founding step (every sub-audit: each is
+    /// one step, so it is never `Partial` anyway) has none to gate on, so
+    /// this holds vacuously.
+    pub(crate) fn founding_step_succeeded(&self) -> bool {
+        match self.founding_step {
+            Some(step) => self.succeeded.contains(&step),
+            None => true,
+        }
+    }
+
+    /// Whether the run has something to validate. A complete run always does.
+    /// A partial one does only if its founding step succeeded: without the
+    /// entry point the documentation has nowhere to start from, so the run
+    /// stays Interrupted with no validation and a resume names what is left.
+    pub(crate) fn is_validatable(&self) -> bool {
+        match self.outcome() {
+            RunOutcome::Complete => true,
+            RunOutcome::Partial => self.founding_step_succeeded(),
+            RunOutcome::Nothing => false,
+        }
+    }
+}
+
+/// Why a run ended Interrupted, as stored on its row (`report_path`).
+pub(crate) fn interruption_reason(
+    succeeded: u32,
+    total_steps: u32,
+    failed: &[u32],
+    steps_to_redo: &[u32],
+) -> String {
+    if failed.is_empty() && steps_to_redo.is_empty() {
+        // Every step succeeded: something after the chain blocked the run
+        // (the drift baseline, the documentary optimization).
+        format!("interrupted after the last step ({succeeded}/{total_steps} steps succeeded)")
+    } else if failed.is_empty() {
+        format!("interrupted: {succeeded}/{total_steps} steps succeeded (stream-end), to redo: {steps_to_redo:?}")
+    } else {
+        format!("interrupted: {succeeded}/{total_steps} steps succeeded (warned steps: {failed:?}), to redo: {steps_to_redo:?}")
+    }
+}
+
+/// Everything the run's terminal transaction writes.
+pub(crate) struct TerminalWrite {
+    pub run_id: String,
+    pub ended_at: chrono::DateTime<Utc>,
+    /// The run ends `Completed` (else `Interrupted`).
+    pub fully_succeeded: bool,
+    pub counts: SeverityCounts,
+    pub resolved: u32,
+    pub new: u32,
+    pub carried: u32,
+    pub score: u8,
+    pub recs_json: Option<String>,
+    /// The validation discussion and its prompt, inserted with the status in
+    /// the SAME transaction. Present for a `Completed` run and — KT-931 — for
+    /// an `Interrupted` partial run (the validation of its successful steps).
+    pub validation: Option<(Discussion, DiscussionMessage)>,
+    pub interruption_reason: String,
+}
+
+/// The run's terminal transaction: status, TD counters, and the validation
+/// discussion with its durable link — all or nothing, so a validation
+/// discussion never exists without the status that goes with it.
+pub(crate) fn write_terminal_state(
+    conn: &rusqlite::Connection,
+    write: &TerminalWrite,
+) -> anyhow::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let counts = &write.counts;
+    if write.fully_succeeded {
+        if let Some((disc, msg)) = write.validation.as_ref() {
+            crate::db::discussions::insert_discussion(&tx, disc)?;
+            crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
+        }
+        crate::db::audit_runs::complete(
+            &tx,
+            &write.run_id,
+            write.ended_at,
+            "Completed",
+            counts.critical,
+            counts.high,
+            counts.medium,
+            counts.low,
+            write.resolved,
+            write.new,
+            write.carried,
+            write.score,
+            None,
+            write.recs_json.as_deref(),
+        )?;
+        // 076 — durable run→validation link, same commit:
+        // the validate endpoint trusts only this.
+        if let Some((disc, _)) = write.validation.as_ref() {
+            crate::db::audit_runs::set_validation_discussion(&tx, &write.run_id, &disc.id)?;
+        }
+    } else {
+        // 0.8.3 (#311) — mark as Interrupted (not Completed, not Failed):
+        // the resume mechanism will pick this row up via `latest_resumable`
+        // and the frontend shows the steps still to redo.
+        crate::db::audit_runs::mark_interrupted(&tx, &write.run_id, &write.interruption_reason)?;
+        // The TD files ARE on disk even when the run ends Interrupted — keep
+        // the counters honest (they read 0 while 14 TD files existed).
+        crate::db::audit_runs::update_td_counts(
+            &tx,
+            &write.run_id,
+            counts.critical,
+            counts.high,
+            counts.medium,
+            counts.low,
+            write.resolved,
+            write.new,
+            write.carried,
+        )?;
+        // KT-931 — a partial run validates what succeeded: the discussion and
+        // its link land in this same commit. The run stays Interrupted, so the
+        // validate endpoint (Completed only) still refuses to stamp the
+        // project Validated on a run with steps left to redo.
+        if let Some((disc, msg)) = write.validation.as_ref() {
+            crate::db::discussions::insert_discussion(&tx, disc)?;
+            crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
+            crate::db::audit_runs::set_validation_discussion(&tx, &write.run_id, &disc.id)?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// KT-841 — the set of 1-based step indices the interrupted predecessor
+/// already completed CLEANLY (`cli_success = true` on a FINISHED row,
+/// `finalize_audit_step` only sets it when there was neither a CLI failure nor
+/// a validation warning). Resume uses this to skip PRECISELY those steps, so a
+/// step that warned is always retried on its own merits regardless of what
+/// later steps did — unlike the old `step <= last_completed_step` contiguous
+/// check, which froze at the first warning and therefore replayed every later
+/// step that had already succeeded once the run was resumed.
+///
+/// KT-931 — a row without `ended_at` never finished (its agent was killed, or
+/// the step stopped before reaching its gates): `insert_audit_step_start`
+/// defaults `cli_success` to 1, so the flag alone would skip a step that never
+/// completed.
+pub(crate) fn already_succeeded_step_indices(
+    steps: &[crate::models::AuditRunStep],
+) -> std::collections::HashSet<u32> {
+    steps
+        .iter()
+        .filter(|s| s.cli_success && s.ended_at.is_some())
+        .map(|s| s.step_index)
+        .collect()
+}
+
+/// KT-841 — outcome of the Full pipeline's rewrite-proof gate.
+#[derive(Debug, PartialEq)]
+pub(crate) enum RewriteProofVerdict {
+    /// The synthetic "REVIEW" pseudo-step (or an empty target) writes no
+    /// file — same exemption as `validate_step_output`.
+    Skipped,
+    /// A real rewrite was confirmed — the step's success stands.
+    Proven,
+    /// The post-agent snapshot could not be read (≠ absent).
+    Unreadable(String),
+    /// The target is BYTE-IDENTICAL (post-normalization) to before the
+    /// agent ran — a reported success that changed nothing.
+    Unchanged(String),
+}
+
+/// Pure decision for the rewrite-proof gate (parity with `drift.rs`'s
+/// partial pipeline): given the step's pre-agent snapshot and the freshly
+/// read post-agent snapshot, decide whether the step actually rewrote its
+/// target. Isolated from the SSE stream so it's unit-testable without a
+/// mocked agent process.
+pub(crate) fn rewrite_proof_verdict(
+    target_file: &str,
+    pre: &super::validation::TargetSnapshot,
+    post: Result<super::validation::TargetSnapshot, String>,
+) -> RewriteProofVerdict {
+    if target_file == "REVIEW" || target_file.is_empty() {
+        return RewriteProofVerdict::Skipped;
+    }
+    match post {
+        Err(reason) => RewriteProofVerdict::Unreadable(reason),
+        Ok(post) if &post == pre => RewriteProofVerdict::Unchanged(
+            "step reported success but rewrote nothing — target file unchanged from before the agent ran".to_string(),
+        ),
+        Ok(_) => RewriteProofVerdict::Proven,
+    }
 }
 
 /// Resolve a resume-by-run-id request against the persisted row. The row is
@@ -2392,6 +3084,10 @@ pub async fn cancel_audit(
             ));
         };
         tracker.cancelled.insert(project_id.clone());
+        // An HTTP agent runs in a task, not in the process killed below.
+        if let Some(cancel) = tracker.agent_cancels.remove(&project_id) {
+            cancel.cancel();
+        }
         if let Some(pid) = tracker.running_pids.remove(&project_id) {
             tracing::info!(
                 "Killing audit agent process (PID {}) for project {}",
@@ -2527,8 +3223,29 @@ pub(crate) struct SeverityCounts {
     pub low: u32,
 }
 
+/// True when a TD detail file's `- **Status**: <value>` line (mirrors the
+/// latest `audit_history` entry — see `mod.rs`'s Step 8 template) is
+/// `Rejected`. The user explicitly dismissed the finding during validation
+/// (Phase 2 "reject all/selected"); the file stays on disk as an audit
+/// trail (its row is removed from the index, not the detail file itself),
+/// so it must not keep weighing on the health score or severity tallies.
+fn td_status_is_rejected(content: &str) -> bool {
+    content.lines().any(|l| {
+        let lc = l.trim().to_ascii_lowercase();
+        let Some(value) = lc
+            .strip_prefix("- **status**:")
+            .or_else(|| lc.strip_prefix("**status**:"))
+            .or_else(|| lc.strip_prefix("status:"))
+        else {
+            return false;
+        };
+        value.trim().starts_with("rejected")
+    })
+}
+
 /// Scan every `TD-*.md` file in the tech-debt directory (skipping
-/// scaffolding/reconciliation reports) and tally findings by severity.
+/// scaffolding/reconciliation reports and TDs the user explicitly
+/// `Rejected` during validation) and tally findings by severity.
 ///
 /// The severity is matched from the line shape:
 ///   `- **Severity**: Critical | High | Medium | Low`
@@ -2556,6 +3273,9 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
+        if td_status_is_rejected(&content) {
+            continue;
+        }
         // Pick the FIRST Severity line — multiple lines in the same
         // file would be a malformed TD anyway.
         let Some(sev_line) = content.lines().find(|l| {
@@ -2792,9 +3512,7 @@ mod drop_guard_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn abandoned_run_is_finalized_as_interrupted() {
-        // The SSE consumer vanishing drops the pipeline generator: the
-        // guard must settle the run row (observed live: zombie tracker +
-        // row stuck on Running until the next boot reconcile).
+        // Only an internal pipeline failure can reach the armed guard.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         {
             let db = db.clone();
@@ -2850,7 +3568,7 @@ mod drop_guard_tests {
             .report_path
             .as_deref()
             .unwrap_or("")
-            .contains("sse consumer dropped"));
+            .contains("audit pipeline dropped before completion"));
         assert!(
             tracker.lock().unwrap().progress.is_empty(),
             "tracker entry must be cleared"
@@ -3114,8 +3832,8 @@ mod cancel_ack_tests {
 
 #[cfg(test)]
 mod resume_resolution_tests {
-    use super::resolve_resume_row;
-    use crate::models::{AuditKind, AuditRun};
+    use super::{already_succeeded_step_indices, resolve_resume_row};
+    use crate::models::{AuditKind, AuditRun, AuditRunStep};
 
     fn run(kind: &str, status: &str, project_id: &str, step: u32) -> AuditRun {
         serde_json::from_value(serde_json::json!({
@@ -3173,6 +3891,668 @@ mod resume_resolution_tests {
         let r = run("Nonsense", "Interrupted", "p1", 3);
         let err = resolve_resume_row("r1", Some(&r), "p1").unwrap_err();
         assert!(err.contains("unknown kind"), "{err}");
+    }
+
+    /// A FINISHED step row (`ended_at` set, as `finalize_audit_step` does).
+    fn step(index: u32, cli_success: bool) -> AuditRunStep {
+        serde_json::from_value(serde_json::json!({
+            "audit_run_id": "r1", "step_index": index, "file_label": "x",
+            "started_at": "2026-07-20T00:00:00Z", "ended_at": "2026-07-20T00:00:05Z",
+            "cli_success": cli_success,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_step_that_never_finished_is_not_already_succeeded() {
+        // KT-931 — `insert_audit_step_start` defaults `cli_success` to 1 and
+        // only `finalize_audit_step` settles it: a row that was started and
+        // never finished (agent killed, Mac asleep, step aborted before its
+        // gates) must be retried, not skipped as "succeeded".
+        let unfinished: AuditRunStep = serde_json::from_value(serde_json::json!({
+            "audit_run_id": "r1", "step_index": 5, "file_label": "x",
+            "started_at": "2026-07-20T00:00:00Z", "cli_success": true,
+        }))
+        .unwrap();
+        let already = already_succeeded_step_indices(&[step(4, true), unfinished]);
+        assert!(already.contains(&4));
+        assert!(!already.contains(&5), "{already:?}");
+    }
+
+    #[test]
+    fn a_warned_step_never_shows_up_as_already_succeeded() {
+        // KT-841 — step 3 warned (cli_success=false), steps 1,2,4,5 succeeded
+        // cleanly. The set must exclude 3 (must be retried) and include
+        // every other index — even though 4 and 5 are AFTER the warning,
+        // unlike the old contiguous `<= last_completed_step` checkpoint that
+        // used to freeze at 2 and replay 3..=5 wholesale.
+        let steps = vec![
+            step(1, true),
+            step(2, true),
+            step(3, false),
+            step(4, true),
+            step(5, true),
+        ];
+        let already = already_succeeded_step_indices(&steps);
+        assert!(already.contains(&1) && already.contains(&2));
+        assert!(already.contains(&4) && already.contains(&5), "{already:?}");
+        assert!(
+            !already.contains(&3),
+            "the warned step must be retried, never skipped: {already:?}"
+        );
+    }
+
+    #[test]
+    fn a_step_that_never_ran_is_not_already_succeeded() {
+        let steps = vec![step(1, true)];
+        let already = already_succeeded_step_indices(&steps);
+        assert!(already.contains(&1));
+        assert!(
+            !already.contains(&2),
+            "an unattempted step is not in the set"
+        );
+    }
+}
+
+// KT-931 — a Full run some of whose steps failed no longer voids the others.
+#[cfg(test)]
+mod partial_run_tests {
+    use super::{
+        already_succeeded_step_indices, founding_step_index, interruption_reason,
+        write_terminal_state, RunOutcome, RunProgress, SeverityCounts, TerminalWrite,
+    };
+    use crate::api::audit::helpers::partial_run_block;
+    use crate::api::audit::AnalysisStep;
+    use crate::models::{Discussion, DiscussionMessage};
+    use std::sync::Arc;
+
+    /// The step the bench run lost to the Mac going to sleep.
+    const FAILED_STEP: u32 = 5;
+    const TOTAL: u32 = 16;
+
+    #[test]
+    fn final_documentary_gate_reopens_successes_and_blocks_validation_until_repaired() {
+        let mut progress = RunProgress::new(TOTAL, 1..=TOTAL).with_founding_step(Some(1));
+        assert!(progress.is_validatable());
+        progress.invalidate_success(1);
+        progress.invalidate_success(3);
+        assert_eq!(progress.steps_to_redo(), vec![1, 3]);
+        assert_eq!(progress.succeeded_count(), 14);
+        assert!(!progress.is_validatable());
+        progress.record_success(1);
+        progress.record_success(3);
+        assert!(progress.steps_to_redo().is_empty());
+        assert!(progress.is_validatable());
+    }
+
+    /// The audit loop of the bench run (room af0af6de, run A1): 16 steps, the
+    /// fifth fails for an external cause, every other one succeeds.
+    fn run_with_step_5_failed() -> RunProgress {
+        let mut progress = RunProgress::new(TOTAL, []);
+        for step in 1..=TOTAL {
+            if step == FAILED_STEP {
+                progress.record_failure(step);
+            } else {
+                progress.record_success(step);
+            }
+        }
+        progress
+    }
+
+    #[test]
+    fn one_failed_step_leaves_a_partial_run_naming_the_step_to_redo() {
+        let progress = run_with_step_5_failed();
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert_eq!(progress.steps_to_redo(), vec![FAILED_STEP]);
+        assert_eq!(progress.failed_steps(), &[FAILED_STEP]);
+    }
+
+    #[test]
+    fn the_progress_counts_every_success_including_those_after_the_failure() {
+        let mut progress = RunProgress::new(TOTAL, []);
+        let mut persisted = Vec::new();
+        for step in 1..=TOTAL {
+            if step == FAILED_STEP {
+                progress.record_failure(step);
+            } else {
+                persisted.push(progress.record_success(step));
+            }
+        }
+        // 4 before the failure, 11 after: the count never freezes at 4 and
+        // never claims the 16th step's index.
+        assert_eq!(progress.succeeded_count(), 15);
+        assert_eq!(persisted.first(), Some(&1));
+        assert_eq!(persisted.last(), Some(&15));
+        assert_eq!(persisted.len(), 15);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_run_row_records_the_exact_number_of_successful_steps() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let count = db
+            .with_conn(|conn| {
+                seed_project_and_run(conn, "run-a1")?;
+                let mut progress = RunProgress::new(TOTAL, []);
+                for step in 1..=TOTAL {
+                    if step == FAILED_STEP {
+                        progress.record_failure(step);
+                    } else {
+                        // What the pipeline persists after each success.
+                        let succeeded = progress.record_success(step);
+                        crate::db::audit_runs::update_last_completed_step(
+                            conn, "run-a1", succeeded,
+                        )?;
+                    }
+                }
+                Ok(crate::db::audit_runs::get_by_id(conn, "run-a1")?
+                    .unwrap()
+                    .last_completed_step)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 15, "15 of the 16 steps succeeded — not 4, not 16");
+    }
+
+    #[test]
+    fn a_run_where_every_step_succeeded_is_complete() {
+        let mut progress = RunProgress::new(TOTAL, []);
+        for step in 1..=TOTAL {
+            progress.record_success(step);
+        }
+        assert_eq!(progress.outcome(), RunOutcome::Complete);
+        assert!(progress.steps_to_redo().is_empty());
+    }
+
+    #[test]
+    fn a_run_where_nothing_succeeded_has_nothing_to_validate() {
+        let mut progress = RunProgress::new(TOTAL, []);
+        progress.record_failure(1);
+        progress.record_failure(2);
+        assert_eq!(progress.outcome(), RunOutcome::Nothing);
+    }
+
+    #[test]
+    fn steps_that_never_ran_are_to_redo_too() {
+        // The stream ended after step 3 (rate limit, crash): 4..=16 never ran.
+        let mut progress = RunProgress::new(TOTAL, []);
+        for step in 1..=3 {
+            progress.record_success(step);
+        }
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert_eq!(progress.steps_to_redo(), (4..=TOTAL).collect::<Vec<_>>());
+        assert!(progress.failed_steps().is_empty());
+    }
+
+    #[test]
+    fn a_resume_reruns_only_the_failed_steps() {
+        // The predecessor completed 1..=16 but the 5th.
+        let carried = (1..=TOTAL).filter(|step| *step != FAILED_STEP);
+        let mut progress = RunProgress::new(TOTAL, carried);
+        assert_eq!(
+            progress.steps_to_redo(),
+            vec![FAILED_STEP],
+            "the loop skips every carried step and runs this one only"
+        );
+        assert_eq!(progress.succeeded_count(), 15);
+        // The step now succeeds: the run is complete, with no step run twice.
+        assert_eq!(progress.record_success(FAILED_STEP), 16);
+        assert_eq!(progress.outcome(), RunOutcome::Complete);
+    }
+
+    #[test]
+    fn a_checkpoint_outside_the_chain_is_ignored() {
+        let progress = RunProgress::new(3, [0, 1, 2, 3, 4, 99]);
+        assert_eq!(progress.succeeded_count(), 3);
+        assert_eq!(progress.outcome(), RunOutcome::Complete);
+    }
+
+    fn step_targeting(target_file: &'static str) -> AnalysisStep {
+        AnalysisStep {
+            target_file,
+            prompt: "",
+            sources: &[],
+        }
+    }
+
+    #[test]
+    fn founding_step_index_finds_the_step_that_writes_the_entry_point() {
+        let steps = [
+            step_targeting("docs/glossary.md"),
+            step_targeting("docs/AGENTS.md"),
+            step_targeting("docs/repo-map.md"),
+        ];
+        assert_eq!(founding_step_index(&steps), Some(2));
+    }
+
+    #[test]
+    fn founding_step_index_is_none_without_an_entry_point_step() {
+        let steps = [step_targeting("docs/inconsistencies-security.md")];
+        assert_eq!(founding_step_index(&steps), None);
+    }
+
+    // KT-931 review (Romuald) — a partial run is only validatable if its
+    // founding step (the one producing `docs/AGENTS.md`, step 1 of the Full
+    // chain) succeeded: without the entry point the documentation has
+    // nowhere to start from.
+
+    #[test]
+    fn a_partial_run_is_validatable_when_the_founding_step_succeeded() {
+        // (a) the founding step succeeds, another step (5) fails.
+        let mut progress = RunProgress::new(TOTAL, []).with_founding_step(Some(1));
+        for step in 1..=TOTAL {
+            if step == FAILED_STEP {
+                progress.record_failure(step);
+            } else {
+                progress.record_success(step);
+            }
+        }
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert!(progress.founding_step_succeeded());
+        assert!(progress.is_validatable());
+    }
+
+    #[test]
+    fn a_partial_run_is_not_validatable_when_the_founding_step_failed() {
+        // (b) the founding step fails, every other step succeeds: no
+        // validation, and `steps_to_redo` names the founding step.
+        let mut progress = RunProgress::new(TOTAL, []).with_founding_step(Some(1));
+        progress.record_failure(1);
+        for step in 2..=TOTAL {
+            progress.record_success(step);
+        }
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert!(!progress.founding_step_succeeded());
+        assert!(!progress.is_validatable());
+        assert!(
+            progress.steps_to_redo().contains(&1),
+            "{:?}",
+            progress.steps_to_redo()
+        );
+    }
+
+    #[test]
+    fn a_lone_success_that_is_not_the_founding_step_is_not_validatable() {
+        // (c) 1 success out of 16, and it isn't the founding step.
+        let mut progress = RunProgress::new(TOTAL, []).with_founding_step(Some(1));
+        progress.record_success(7);
+        assert_eq!(progress.outcome(), RunOutcome::Partial);
+        assert!(!progress.is_validatable());
+    }
+
+    #[test]
+    fn the_real_full_chain_s_founding_step_is_step_1() {
+        // The pipeline wires `founding_step_index(&steps)` on the chain it
+        // actually assembles — pin the real Full chain's answer so the tests
+        // above (`Some(1)`) stay true to it.
+        let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+        assert_eq!(founding_step_index(&chain), Some(1));
+    }
+
+    #[test]
+    fn a_chain_with_no_founding_step_is_unaffected_by_the_gate() {
+        // Every sub-audit kind is one step, so it is never `Partial`
+        // anyway — but the gate must not retroactively block a kind whose
+        // chain has no `docs/AGENTS.md` step.
+        let progress = RunProgress::new(1, []);
+        assert_eq!(progress.outcome(), RunOutcome::Nothing);
+        assert!(progress.founding_step_succeeded());
+    }
+
+    fn seed_project_and_run(conn: &rusqlite::Connection, run_id: &str) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('p1', 'P', '/tmp', ?1, ?1)",
+            rusqlite::params![now],
+        )?;
+        crate::db::audit_runs::insert_running(
+            conn,
+            run_id,
+            "p1",
+            "Full",
+            "ClaudeCode",
+            chrono::Utc::now(),
+        )
+    }
+
+    /// Insert a finished step row the way `step_start` + `step_done` do.
+    fn finish_step(conn: &rusqlite::Connection, run_id: &str, step: u32, success: bool) {
+        let now = chrono::Utc::now();
+        crate::db::audit_runs::insert_audit_step_start(conn, run_id, step, "docs/x.md", now)
+            .unwrap();
+        crate::db::audit_runs::finalize_audit_step(
+            conn,
+            run_id,
+            step,
+            now,
+            10,
+            &crate::db::audit_runs::StepTokens::UNKNOWN,
+            None,
+            success,
+            (!success).then_some("rate limited"),
+            false,
+        )
+        .unwrap();
+    }
+
+    fn validation_pair(disc_id: &str, prompt: &str) -> (Discussion, DiscussionMessage) {
+        let message: DiscussionMessage = serde_json::from_value(serde_json::json!({
+            "id": format!("m-{disc_id}"), "role": "User", "content": prompt,
+            "timestamp": "2026-10-01T00:00:00Z",
+        }))
+        .unwrap();
+        let discussion: Discussion = serde_json::from_value(serde_json::json!({
+            "id": disc_id, "project_id": "p1", "title": "Validation audit AI",
+            "agent": "ClaudeCode", "language": "fr", "participants": ["ClaudeCode"],
+            "messages": [], "created_at": "2026-10-01T00:00:00Z",
+            "updated_at": "2026-10-01T00:00:00Z",
+        }))
+        .unwrap();
+        (discussion, message)
+    }
+
+    fn terminal_write(
+        run_id: &str,
+        fully_succeeded: bool,
+        validation: Option<(Discussion, DiscussionMessage)>,
+    ) -> TerminalWrite {
+        TerminalWrite {
+            run_id: run_id.to_string(),
+            ended_at: chrono::Utc::now(),
+            fully_succeeded,
+            counts: SeverityCounts::default(),
+            resolved: 0,
+            new: 0,
+            carried: 0,
+            score: 100,
+            recs_json: None,
+            validation,
+            interruption_reason: interruption_reason(15, TOTAL, &[FAILED_STEP], &[FAILED_STEP]),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_partial_run_gets_a_validation_discussion_listing_the_step_to_redo() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        // The prompt the pipeline builds for the partial run: the block that
+        // names the step to redo, ahead of the validation protocol.
+        let block = partial_run_block(
+            &[(FAILED_STEP, "docs/inconsistencies-security.md".into())],
+            TOTAL,
+            false,
+            "fr",
+        );
+        let prompt = format!("{block}## Phase 1 — Auto-correction");
+        let (run, disc, first_message, resumable, belongs) = db
+            .with_conn(move |conn| {
+                seed_project_and_run(conn, "run-a1")?;
+                // The 15 successes the pipeline persisted as they happened.
+                crate::db::audit_runs::update_last_completed_step(conn, "run-a1", 15)?;
+                let pair = validation_pair("d-partial", &prompt);
+                write_terminal_state(conn, &terminal_write("run-a1", false, Some(pair)))?;
+                let run = crate::db::audit_runs::get_by_id(conn, "run-a1")?.unwrap();
+                let disc = crate::db::discussions::get_discussion(conn, "d-partial")?;
+                let first = disc
+                    .as_ref()
+                    .and_then(|d| d.messages.first().map(|m| m.content.clone()));
+                let resumable = crate::db::audit_runs::latest_resumable(conn, "p1")?;
+                let belongs = crate::db::audit_runs::validation_discussion_belongs_to_project(
+                    conn,
+                    "d-partial",
+                    "p1",
+                )?;
+                Ok((run, disc, first, resumable, belongs))
+            })
+            .await
+            .unwrap();
+
+        // Validation for the successful steps exists and is linked...
+        assert!(
+            disc.is_some(),
+            "the partial run must get its validation discussion"
+        );
+        assert_eq!(run.validation_discussion_id.as_deref(), Some("d-partial"));
+        assert!(
+            belongs,
+            "its TD cards and redaction boundary must recognise it"
+        );
+        // ...it lists the step to redo...
+        let first_message = first_message.unwrap();
+        assert!(first_message.contains("5/16"), "{first_message}");
+        assert!(first_message.contains("docs/inconsistencies-security.md"));
+        // ...and the run is NOT Completed: resumable, and not validatable.
+        assert_eq!(run.status, "Interrupted");
+        assert_eq!(resumable.map(|r| r.id).as_deref(), Some("run-a1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_run_where_nothing_succeeded_gets_no_discussion() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let (run, linked) = db
+            .with_conn(|conn| {
+                seed_project_and_run(conn, "run-none")?;
+                write_terminal_state(conn, &terminal_write("run-none", false, None))?;
+                let run = crate::db::audit_runs::get_by_id(conn, "run-none")?.unwrap();
+                let linked = conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| {
+                    r.get::<_, i64>(0)
+                })?;
+                Ok((run, linked))
+            })
+            .await
+            .unwrap();
+        assert_eq!(run.status, "Interrupted");
+        assert!(run.validation_discussion_id.is_none());
+        assert_eq!(linked, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_discussion_rolls_back_with_a_failed_partial_terminal_write() {
+        // Same atomicity as a Completed run: no orphan discussion if the
+        // status write fails (unknown run row).
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let outcome = db
+            .with_conn(|conn| {
+                seed_project_and_run(conn, "run-real")?;
+                let pair = validation_pair("d-orphan", "prompt");
+                write_terminal_state(conn, &terminal_write("run-missing", false, Some(pair)))
+            })
+            .await;
+        // `mark_interrupted` on a missing row is a no-op, but the link is not.
+        assert!(outcome.is_err(), "linking a missing run must fail the tx");
+        let orphans = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM discussions WHERE id = 'd-orphan'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successive_resumes_only_ever_rerun_the_failed_step() {
+        // Run A: 15 steps succeed, step 5 fails. Run B resumes it, carries the
+        // 15, and step 5 fails AGAIN. Run C must still only have step 5 left —
+        // it would replay all 16 if B had forgotten what it skipped.
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let (after_a, after_b, count_b) = db
+            .with_conn(|conn| {
+                seed_project_and_run(conn, "run-a")?;
+                for step in 1..=TOTAL {
+                    finish_step(conn, "run-a", step, step != FAILED_STEP);
+                }
+                let a = already_succeeded_step_indices(&crate::db::audit_runs::list_audit_steps(
+                    conn, "run-a",
+                )?);
+
+                crate::db::audit_runs::insert_running(
+                    conn,
+                    "run-b",
+                    "p1",
+                    "Full",
+                    "ClaudeCode",
+                    chrono::Utc::now(),
+                )?;
+                let carried: Vec<(u32, String)> = (1..=TOTAL)
+                    .filter(|step| a.contains(step))
+                    .map(|step| (step, format!("docs/step-{step}.md")))
+                    .collect();
+                crate::db::audit_runs::carry_over_steps(
+                    conn,
+                    "run-b",
+                    &carried,
+                    chrono::Utc::now(),
+                )?;
+                finish_step(conn, "run-b", FAILED_STEP, false);
+                let b = already_succeeded_step_indices(&crate::db::audit_runs::list_audit_steps(
+                    conn, "run-b",
+                )?);
+                let count_b = crate::db::audit_runs::get_by_id(conn, "run-b")?
+                    .unwrap()
+                    .last_completed_step;
+                Ok((a, b, count_b))
+            })
+            .await
+            .unwrap();
+
+        let expected: std::collections::HashSet<u32> =
+            (1..=TOTAL).filter(|step| *step != FAILED_STEP).collect();
+        assert_eq!(after_a, expected);
+        assert_eq!(
+            after_b, expected,
+            "the second resume must not replay what the first skipped"
+        );
+        assert_eq!(
+            count_b, 15,
+            "the resumed run starts from the predecessor's 15 successes"
+        );
+    }
+
+    #[test]
+    fn the_partial_block_names_every_step_to_redo_in_each_language() {
+        let to_redo = [(5, "docs/a.md".to_string()), (9, "docs/b.md".to_string())];
+        for language in ["fr", "en", "es"] {
+            let block = partial_run_block(&to_redo, TOTAL, false, language);
+            assert!(
+                block.contains("5/16") && block.contains("`docs/a.md`"),
+                "{language}: {block}"
+            );
+            assert!(
+                block.contains("9/16") && block.contains("`docs/b.md`"),
+                "{language}: {block}"
+            );
+            assert!(
+                block.contains("14"),
+                "{language}: 14 steps succeeded: {block}"
+            );
+        }
+        assert!(partial_run_block(&[], TOTAL, false, "fr").is_empty());
+    }
+
+    #[test]
+    fn the_partial_block_forbids_a_tech_debt_review_when_the_run_produced_none() {
+        let to_redo = [(8, "docs/inconsistencies-tech-debt.md".to_string())];
+        for language in ["fr", "en", "es"] {
+            let none = partial_run_block(&to_redo, TOTAL, true, language);
+            let some = partial_run_block(&to_redo, TOTAL, false, language);
+            assert!(
+                none.len() > some.len(),
+                "{language}: the no-TD instruction is missing"
+            );
+        }
+    }
+
+    #[test]
+    fn the_interruption_reason_says_what_is_left() {
+        let reason = interruption_reason(15, 16, &[5], &[5]);
+        assert!(
+            reason.contains("15/16") && reason.contains("[5]"),
+            "{reason}"
+        );
+        let early = interruption_reason(3, 16, &[], &[4, 5]);
+        assert!(
+            early.contains("3/16") && early.contains("[4, 5]"),
+            "{early}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_proof_tests {
+    use super::{rewrite_proof_verdict, RewriteProofVerdict};
+    use crate::api::audit::validation::TargetSnapshot;
+
+    #[test]
+    fn a_full_step_that_rewrites_nothing_fails() {
+        // KT-841 DoD #3 — a step that reports success (CLI + validator +
+        // enforce all green) but left its target byte-identical to before
+        // the agent ran must NOT be treated as a genuine success.
+        let pre = TargetSnapshot::Present("hash-a".into());
+        let post = Ok(TargetSnapshot::Present("hash-a".into()));
+        let verdict = rewrite_proof_verdict("docs/AGENTS.md", &pre, post);
+        assert_eq!(
+            verdict,
+            RewriteProofVerdict::Unchanged(
+                "step reported success but rewrote nothing — target file unchanged from before the agent ran".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_full_step_that_actually_rewrites_its_target_passes() {
+        let pre = TargetSnapshot::Present("hash-a".into());
+        let post = Ok(TargetSnapshot::Present("hash-b".into()));
+        assert_eq!(
+            rewrite_proof_verdict("docs/AGENTS.md", &pre, post),
+            RewriteProofVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn missing_to_present_is_a_proven_rewrite_never_equal_to_missing() {
+        let pre = TargetSnapshot::Missing;
+        let post = Ok(TargetSnapshot::Present("hash-a".into()));
+        assert_eq!(
+            rewrite_proof_verdict("docs/tech-debt/TD-x.md", &pre, post),
+            RewriteProofVerdict::Proven
+        );
+    }
+
+    #[test]
+    fn unreadable_post_state_fails_with_its_reason() {
+        let pre = TargetSnapshot::Present("hash-a".into());
+        let post = Err("target unreadable for rewrite proof: permission denied".to_string());
+        assert_eq!(
+            rewrite_proof_verdict("docs/AGENTS.md", &pre, post),
+            RewriteProofVerdict::Unreadable(
+                "target unreadable for rewrite proof: permission denied".into()
+            )
+        );
+    }
+
+    #[test]
+    fn the_synthetic_review_step_is_exempt_even_when_nothing_changed() {
+        // The final chained "REVIEW" pseudo-step writes no file by design —
+        // it must never be flagged as a no-op rewrite.
+        let pre = TargetSnapshot::Missing;
+        let post = Ok(TargetSnapshot::Missing);
+        assert_eq!(
+            rewrite_proof_verdict("REVIEW", &pre, post),
+            RewriteProofVerdict::Skipped
+        );
+    }
+
+    #[test]
+    fn an_empty_target_file_is_exempt() {
+        let pre = TargetSnapshot::Missing;
+        let post = Ok(TargetSnapshot::Missing);
+        assert_eq!(
+            rewrite_proof_verdict("", &pre, post),
+            RewriteProofVerdict::Skipped
+        );
     }
 }
 
@@ -3813,6 +5193,34 @@ mod severity_tests {
         assert_eq!(counts.high, 0);
         assert_eq!(counts.medium, 0);
         assert_eq!(counts.low, 0);
+    }
+
+    #[test]
+    fn count_td_severities_ignores_rejected_tds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let td_dir = tmp.path();
+        // Confirmed by user — still weighs on the score.
+        std::fs::write(
+            td_dir.join("TD-001.md"),
+            "# X\n- **Severity**: Critical\n- **Status**: Confirmed by user\n",
+        )
+        .unwrap();
+        // Rejected — the file stays on disk (only its index row is removed)
+        // but must NOT keep weighing on the health score.
+        std::fs::write(
+            td_dir.join("TD-002.md"),
+            "# Y\n- **Severity**: Critical\n- **Status**: Rejected\n",
+        )
+        .unwrap();
+        std::fs::write(
+            td_dir.join("TD-003.md"),
+            "# Z\n- **Severity**: High\n- **Status**:   Rejected\n",
+        )
+        .unwrap();
+
+        let counts = count_td_severities(td_dir);
+        assert_eq!(counts.critical, 1, "only the confirmed TD counts");
+        assert_eq!(counts.high, 0, "the rejected High TD must not count");
     }
 
     #[test]

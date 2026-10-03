@@ -276,6 +276,145 @@ exact byte counts and an unchanged window through all four family loads.
 [src: file: backend/src/agents/runner.rs]
 [src: file: backend/src/agents/runner_test.rs]
 
+## Audits (KT-924)
+
+An audit's only deliverable is files under `docs/`, so the gate
+`agent_can_audit` admits an agent only if it can write there. It used to
+refuse Ollama and LiteLLM on the premise that the HTTP path "has neither a
+filesystem nor a tool loop". KT-338 had already made that false: the file tools
+above are executed server-side. What was still missing was the scope — those
+tools bound themselves to a discussion's workspace, and the audit pipeline passed
+the agent no executor at all, so lifting the gate alone would have produced steps
+that "succeed" without writing anything.
+
+**Who is accepted.** The CLI agents (Claude Code, Codex, OpenCode, Gemini CLI,
+Kiro, GitHub Copilot), Ollama and LiteLLM
+[src: file: backend/src/api/audit/mod.rs:1239]. NVIDIA is refused because it is
+a hosted service the user was never asked to send a whole repository to; Custom
+because it needs a named connection an audit cannot select; Vibe because it has
+no file tools. Both launch endpoints (Full and partial) share the gate and its
+refusal message, which lists the accepted agents and is pinned to the gate by a
+test [src: file: backend/src/api/audit/mod.rs:1271]. Admitting NVIDIA or Custom
+later is a product decision about what leaves the machine, not a wiring one.
+
+**How an audit step reaches the project.** Both pipelines start the step's agent
+through one launcher [src: file: backend/src/api/audit/agent_launch.rs]. A CLI
+agent is spawned exactly as before. An HTTP agent gets a
+`KronnToolExecutor::audit_arc`, scoped to the project directory the pipeline
+already resolved (`resolve_host_path`, so it is right inside a container) rather
+than a workspace row or a project looked up by id
+[src: file: backend/src/api/agent_tools.rs:181]. The bounds are KT-338's, unchanged:
+every path is canonicalised against that root and refused when it leaves it, by
+`..`, by an absolute path or by a symlink; there is no shell; a truncated read
+says so.
+
+**What the audit's tools are.** Narrower than a workflow Agent step's:
+`read_file`, `list_files`, `find_files`, `search_text`, `git_status`, `git_diff`,
+`git_log` to read, and `write_file`, `edit_file`, `edit_lines`,
+`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:206].
+No `web_fetch` (it would send the model off the project), no `git_commit` (the
+audit never commits), no plan, REST-plugin or discussion tools. A call to any
+other name is refused before a handler sees it.
+
+**What the audit prompt says about other repos (KT-926).** An audit's file tools
+cannot leave the project, and the prompt goes to the model provider. It used to
+list every other project registered in Kronn (name and absolute path), tell the
+agent to read their `docs/AGENTS.md` and to write a `## Suggested companion
+repos` section into the audited repository's own `docs/AGENTS.md` — asking an
+HTTP agent for a read its tools refuse, and copying an unrelated project's name
+into a versioned file. Neither pipeline injects that list any more, and no
+discussion or workflow Agent step does either (the audit's validation and
+briefing are discussions). The only
+other repos a step names are those the user linked to the project
+(`Project.linked_repos`), a voluntary declaration that stays in every step
+[src: file: backend/src/api/audit/full.rs:247]
+[src: file: backend/src/api/audit/drift.rs:105]. What remains: the block for a
+linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
+agent's tools refuse because it is outside the project, so for that agent the
+block is information, not something it can follow. Making that block
+transport-aware is not part of KT-926.
+
+**A step that writes nothing is a failure.** This is not new machinery — it is
+why the gates exist. An HTTP run that answers in prose instead of calling a tool
+ends cleanly, so its exit code says "success"; the output validator and the
+rewrite proof are what record the step as failed when its target is missing,
+still the template, or byte-identical to before the agent ran
+[src: file: backend/src/api/audit/validation.rs]. The final review step has no
+target file and is judged on the exit code alone, for an HTTP agent as for a CLI
+one.
+
+**Stopping.** An HTTP agent's request and tool loop are a task, not a process:
+killing the lifeline PID does not stop it. A Full audit therefore registers a
+cancellation token per step, and `cancel_audit` trips it
+[src: file: backend/src/api/audit/full.rs]. Since KT-927 the partial audit does
+the same, and so does an ACP agent, whose PID is a lifeline too: see
+[auditing with an ACP agent](audit-acp-agents.md).
+
+**What this does not change.** The per-tool call ceilings of a run still apply
+(twelve `write_file` calls, for instance, before the tool is withdrawn), and an
+audit has nobody to ask for more, so a step that hits one ends with what it has
+and is judged by the gates. Whether those ceilings suit a step that writes many
+files is a question for the bench this was built for, not something to tune here
+unmeasured — see the rule at the top of this file.
+
+## Asking for part of an API response (KT-929)
+
+An HTTP agent's context window is fixed when its model loads, and a 200 KB API
+answer does not fit a 32K one. Kronn shortens such a result before the next
+request, which is a protocol fact and stays. What was missing was the other half
+of the sentence the shortened result carried, "ask for a part you have not seen":
+`api_call` had no argument to say which part. The broker already took an
+`extract` (`AgentApiCallRequest.extract`, the workflows' `ExtractSpec`) and the
+CLI bridge already declared it; the native declaration had no such argument and
+its handler passed `extract: None`. The discussion that prompted KT-929 asked
+about the latest Core Web Vitals on SpeedCurve: six successful `/v1/tests` calls,
+each too big for the window, a model re-issuing the same or neighbouring calls
+because it could not select anything, refusals, a forced end of the tool loop, and
+an answer with LCP, FCP, INP and TTFB missing.
+
+This is a capability and an information, not a behavioural aid, so the rule at
+the top of this file does not ask for a measured benefit across models before
+shipping it. Three things changed:
+
+- **`api_call` takes `extract`.** An object `{"path": "<JSONPath>"}`, with the
+  optional `fallback` and `fail_on_empty` of `ExtractSpec`; a bare JSONPath string
+  is accepted as its `path`. An empty or malformed value is refused with a working
+  example before anything is sent. The declaration says why: a large response is
+  shortened and cannot be re-read whole
+  [src: file: backend/src/api/agent_tools.rs:719]
+  [src: file: backend/src/api/agent_tools.rs:4167].
+- **A shortened API result says what it holds.** Its `shape` lists the response's
+  keys (small flat objects such as `meta` and `links` by value, so the paging is
+  visible), the path and length of the main list, and the keys of one element down
+  to its nested objects, up to 40 names per level with the count of those left
+  out. The note gives `extract` examples built from that shape and checked against
+  the original response (each is parsed and run; one that selects nothing is not
+  offered), plus the path of one whole element to see every key. The shape is
+  derived from the original result before any cutting, so a result shortened again
+  on a later turn keeps it. A result that was already an extract gets no paths,
+  which would not apply to the response the next `extract` runs on, and is told to
+  select less. Other tools are shortened exactly as before
+  [src: file: backend/src/agents/runner.rs:5528]
+  [src: file: backend/src/agents/runner.rs:5829].
+- **A call that differs only by its `extract` or its query is not a repeat.** The
+  duplicate guard compares the tool name and every argument, sorted by key, so an
+  identical call is still replayed once and then refused, and a call with another
+  `extract`, page or period runs [src: file: backend/src/agents/runner.rs:854].
+
+Measured by the test that plays the whole exchange on a hundred runs of about 2 KB
+each, with their metrics nested, the full native catalogue (44,634 B) and a 32,768
+token window: the 198,119 B answer is shortened to 8,005 B, of which the shape is
+1,071 B; the model reads the shape, sends one call with
+`$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
+unshortened; the conversation then stands at 19,319 estimated tokens of 32,768
+[src: file: backend/src/agents/runner_test.rs:2175].
+
+What this does not show: how often a model writes the extract it is shown, or
+writes a good one unprompted. The "model" in that test reads the shape and follows
+it; it is not a model. The broker's HTTP path refuses loopback addresses, so the
+test stops at the extraction the broker applies (`apply_extract` on the parsed
+spec) and does not go through a live `agent_api_call`.
+
 ## Judging a future request
 
 ### Workflow authoring (KT-673)
@@ -323,6 +462,9 @@ Ask which side of *execution* it falls on.
 - Reading anything already inside the workspace, or one public URL: **in scope**, subject to
   the existing bounds.
 - Producing or editing files in the workspace: **in scope** since 2026-08-18.
+- Running an audit step: **in scope** since 0.14.2 (KT-924) for Ollama and LiteLLM,
+  with the file tools scoped to the project and nothing beyond them — see
+  [Audits](#audits-kt-924).
 - Running a Quick Exec the human already saved: **in scope** since 0.13.0. It is execution,
   but of an argv Kronn owns, with no shell and inside the project that saved it.
 - Generating an image or a video on a configured connection: **in scope** since 0.13.0, with

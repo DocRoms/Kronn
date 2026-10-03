@@ -183,22 +183,50 @@ pub fn get_directives_by_ids(ids: &[String]) -> Vec<Directive> {
         .collect()
 }
 
-/// Build the combined directive prompt text for injection.
-/// Returns empty string if no directives are selected.
-pub fn build_directives_prompt(directive_ids: &[String]) -> String {
-    let directives = get_directives_by_ids(directive_ids);
+// ─── Run snapshot (ADR-005 slice 1) ─────────────────────────────────────────
+
+static DIRECTIVE_SNAPSHOTS: crate::core::resource_snapshot::RunSnapshotCache<Directive> =
+    crate::core::resource_snapshot::RunSnapshotCache::new();
+
+/// Resolve `ids` like `get_directives_by_ids`, but pin each directive's
+/// content to `run_id`: an edit or deletion made while this run is still
+/// executing doesn't change what this run already loaded.
+pub fn get_directives_snapshot(run_id: &str, ids: &[String]) -> Vec<Directive> {
+    ids.iter()
+        .filter_map(|id| DIRECTIVE_SNAPSHOTS.get_or_resolve(run_id, id, || get_directive(id)))
+        .collect()
+}
+
+/// Drop every directive snapshot pinned to `run_id`. Call once that run
+/// has finished so its resources don't stay pinned in memory.
+pub fn release_directives_snapshot(run_id: &str) {
+    DIRECTIVE_SNAPSHOTS.release(run_id);
+}
+
+fn render_directives_prompt(directives: &[Directive]) -> String {
     if directives.is_empty() {
         return String::new();
     }
 
     let mut prompt = String::from("=== Active Directives ===\n\n");
-    for directive in &directives {
+    for directive in directives {
         prompt.push_str(&format!(
             "--- {} ---\n{}\n\n",
             directive.name, directive.content
         ));
     }
     prompt
+}
+
+/// Build the combined directive prompt text for injection.
+/// Returns empty string if no directives are selected.
+pub fn build_directives_prompt(directive_ids: &[String]) -> String {
+    render_directives_prompt(&get_directives_by_ids(directive_ids))
+}
+
+/// Same as `build_directives_prompt`, resolved through the run snapshot cache.
+pub fn build_directives_prompt_for_run(run_id: &str, directive_ids: &[String]) -> String {
+    render_directives_prompt(&get_directives_snapshot(run_id, directive_ids))
 }
 
 /// Validate that selected directives don't conflict with each other.
@@ -225,27 +253,29 @@ pub fn validate_no_conflicts(directive_ids: &[String]) -> Vec<(String, String)> 
     conflicts
 }
 
-/// Save a custom directive to disk. Returns the generated ID.
-pub fn save_custom_directive(
+/// Slugify a directive's display name. Kept distinct from
+/// `core::native_files::slug` (no hyphen-collapsing) — this predates that
+/// helper and existing custom directive filenames already depend on it.
+fn directive_slug(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+/// Render a custom directive's Markdown+frontmatter file content. Shared by
+/// create and update so renaming only changes the `name:` line, never the
+/// file this is written to.
+fn render_directive_markdown(
     name: &str,
     description: &str,
     icon: &str,
     category: &DirectiveCategory,
     content: &str,
     conflicts: &[String],
-) -> Result<String, String> {
-    let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create directives dir: {}", e))?;
-
-    let slug: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-
-    let id = format!("custom-{}", slug);
+) -> String {
     let cat_str = match category {
         DirectiveCategory::Output => "output",
         DirectiveCategory::Language => "language",
@@ -262,15 +292,84 @@ pub fn save_custom_directive(
     } else {
         format!("description: {}\n", description)
     };
-    let file_content = format!(
+    format!(
         "---\nname: {}\n{}category: {}\nicon: {}\nbuiltin: false\nconflicts: {}\n---\n{}",
         name, desc_line, cat_str, icon, conflicts_str, content
-    );
+    )
+}
+
+/// Find a filename stem for `name` that no existing custom directive file
+/// already uses. Two names that produce the same slug get distinct files
+/// instead of one silently overwriting the other.
+fn unique_directive_slug(dir: &std::path::Path, name: &str) -> String {
+    let base = directive_slug(name);
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+    while dir.join(format!("{}.md", candidate)).exists() {
+        candidate = format!("{}-{}", base, suffix);
+        suffix += 1;
+    }
+    candidate
+}
+
+/// Save a new custom directive to disk. Returns the generated, stable ID.
+pub fn save_custom_directive(
+    name: &str,
+    description: &str,
+    icon: &str,
+    category: &DirectiveCategory,
+    content: &str,
+    conflicts: &[String],
+) -> Result<String, String> {
+    let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create directives dir: {}", e))?;
+
+    let slug = unique_directive_slug(&dir, name);
+    let id = format!("custom-{}", slug);
+    let file_content =
+        render_directive_markdown(name, description, icon, category, content, conflicts);
 
     let path = dir.join(format!("{}.md", slug));
-    std::fs::write(&path, file_content).map_err(|e| format!("Cannot write directive: {}", e))?;
+    crate::core::mcp_scanner::atomic_write(&path, &file_content)
+        .map_err(|e| format!("Cannot write directive: {}", e))?;
 
     Ok(id)
+}
+
+/// Update a custom directive IN PLACE and atomically: same file, same id,
+/// even when `name` changes. Unlike `save_custom_directive`, the file is
+/// located from the EXISTING id — the slug is never recomputed from the
+/// new name.
+pub fn update_custom_directive(
+    id: &str,
+    name: &str,
+    description: &str,
+    icon: &str,
+    category: &DirectiveCategory,
+    content: &str,
+    conflicts: &[String],
+) -> Result<String, String> {
+    let slug = id
+        .strip_prefix("custom-")
+        .ok_or("Cannot modify builtin directives")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
+    let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
+    let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
+    if !path.exists() {
+        return Err(format!("Directive '{}' not found", id));
+    }
+
+    let file_content =
+        render_directive_markdown(name, description, icon, category, content, conflicts);
+    crate::core::mcp_scanner::atomic_write(&path, &file_content)
+        .map_err(|e| format!("Cannot write directive: {}", e))?;
+
+    Ok(id.to_string())
 }
 
 /// Delete a custom directive from disk.
@@ -279,8 +378,14 @@ pub fn delete_custom_directive(id: &str) -> Result<bool, String> {
         return Err("Cannot delete builtin directives".into());
     }
     let slug = id.strip_prefix("custom-").unwrap();
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
     let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
     let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid directive id '{}'", id));
+    }
 
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Cannot delete directive: {}", e))?;
@@ -293,6 +398,230 @@ pub fn delete_custom_directive(id: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// `KRONN_DATA_DIR` is a process-wide env var (see `core::config`).
+    /// Tests that write custom directives to disk run serialized against a
+    /// unique tempdir so parallel tests never share or race a directory.
+    fn scratch_config_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "kronn-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    #[serial]
+    fn update_preserves_the_original_id_and_is_atomic() {
+        let dir = scratch_config_dir("directives-update");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let id = save_custom_directive(
+            "Original Name",
+            "desc",
+            "🔧",
+            &DirectiveCategory::Output,
+            "content v1",
+            &[],
+        )
+        .unwrap();
+
+        let updated_id = update_custom_directive(
+            &id,
+            "Renamed",
+            "desc v2",
+            "🔧",
+            &DirectiveCategory::Output,
+            "content v2",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(updated_id, id, "renaming must keep the same id");
+
+        let directive =
+            get_directive(&id).expect("directive must still resolve under the original id");
+        assert_eq!(directive.name, "Renamed");
+        assert_eq!(directive.content, "content v2");
+
+        let files: Vec<_> = std::fs::read_dir(dir.join("directives"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files.len(), 1, "expected exactly one file, got {:?}", files);
+        assert!(
+            !files[0].contains(".tmp"),
+            "no leftover temp file: {:?}",
+            files
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_of_unknown_id_is_rejected() {
+        let dir = scratch_config_dir("directives-update-missing");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let result = update_custom_directive(
+            "custom-does-not-exist",
+            "Name",
+            "desc",
+            "🔧",
+            &DirectiveCategory::Output,
+            "content",
+            &[],
+        );
+        assert!(result.is_err());
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn colliding_slugs_do_not_overwrite_each_other() {
+        let dir = scratch_config_dir("directives-collision");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let first = save_custom_directive(
+            "Foo Bar",
+            "first",
+            "🅰️",
+            &DirectiveCategory::Output,
+            "content A",
+            &[],
+        )
+        .unwrap();
+        let second = save_custom_directive(
+            "foo-bar",
+            "second",
+            "🅱️",
+            &DirectiveCategory::Output,
+            "content B",
+            &[],
+        )
+        .unwrap();
+
+        assert_ne!(first, second, "colliding names must get distinct ids");
+        assert_eq!(get_directive(&first).unwrap().content, "content A");
+        assert_eq!(get_directive(&second).unwrap().content, "content B");
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_and_delete_reject_a_path_traversal_id() {
+        let dir = scratch_config_dir("directives-traversal");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        // Lives one level above the directives/ dir the traversal id targets.
+        let sentinel = dir.join("sentinel.md");
+        std::fs::write(&sentinel, "untouched").unwrap();
+        let traversal_id = "custom-../sentinel";
+
+        assert!(
+            update_custom_directive(
+                traversal_id,
+                "Name",
+                "desc",
+                "🔧",
+                &DirectiveCategory::Output,
+                "content",
+                &[],
+            )
+            .is_err(),
+            "a path traversal id must be rejected on update"
+        );
+        assert!(
+            delete_custom_directive(traversal_id).is_err(),
+            "a path traversal id must be rejected on delete"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "untouched",
+            "a file outside the directives dir must never be touched"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn run_snapshot_keeps_the_loaded_version_even_after_a_change_or_deletion() {
+        let dir = scratch_config_dir("directives-snapshot");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let id = save_custom_directive(
+            "Snapshot Directive",
+            "desc",
+            "📌",
+            &DirectiveCategory::Output,
+            "content v1",
+            &[],
+        )
+        .unwrap();
+
+        let run_id = format!("run-kt847-{}", std::process::id());
+        let loaded = get_directives_snapshot(&run_id, std::slice::from_ref(&id));
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "content v1");
+
+        update_custom_directive(
+            &id,
+            "Snapshot Directive",
+            "desc",
+            "📌",
+            &DirectiveCategory::Output,
+            "content v2",
+            &[],
+        )
+        .unwrap();
+
+        let still_loaded = get_directives_snapshot(&run_id, std::slice::from_ref(&id));
+        assert_eq!(still_loaded.len(), 1);
+        assert_eq!(still_loaded[0].content, "content v1");
+
+        delete_custom_directive(&id).unwrap();
+        let after_delete = get_directives_snapshot(&run_id, std::slice::from_ref(&id));
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(after_delete[0].content, "content v1");
+
+        let other_run = get_directives_snapshot("run-other-kt847", std::slice::from_ref(&id));
+        assert!(other_run.is_empty());
+
+        release_directives_snapshot(&run_id);
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
 
     #[test]
     fn parse_builtin_directives() {

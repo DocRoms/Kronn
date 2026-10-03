@@ -797,61 +797,98 @@ fn is_heading_or_imperative(s: &str) -> bool {
 ///   never hide real content from a fail-closed consumer (the step-8
 ///   placeholder validator feeds on this).
 pub(crate) fn strip_fenced_code(text: &str) -> String {
-    /// `Some((run_len, suffix))` when the line is a fence marker candidate:
-    /// ≤3 leading spaces then a run of ≥3 backticks. Tabs disqualify.
-    fn fence_marker(line: &str) -> Option<(usize, &str)> {
+    let scan = scan_fences(text, &['`'], false);
+    let mut out = String::with_capacity(text.len());
+    for (line, fenced) in text.lines().zip(&scan.in_fence) {
+        if !fenced {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Where the fenced blocks of a document sit, line by line.
+pub(crate) struct FenceScan {
+    /// One entry per `text.lines()` line: `true` when the line belongs to a
+    /// fenced block (its opening and closing fence lines included).
+    pub in_fence: Vec<bool>,
+    /// A fence opened and the document ended before a valid closer.
+    pub unclosed: bool,
+}
+
+/// The fence state machine behind [`strip_fenced_code`], exposed per line so
+/// a caller that needs line INDICES (the `kronn:section` ownership parser)
+/// can ignore what sits inside code without losing its position in the file.
+///
+/// `fence_chars` picks the fence characters recognised (`` ` `` only for the
+/// prose linters; `` ` `` + `~` for ownership, where a `~~~` block hides a
+/// section from a renderer just as well). An UNCLOSED fence is reported in
+/// `unclosed`; its lines count as code only when `unclosed_is_code` (strict,
+/// CommonMark: the block runs to the end of the document) — otherwise they are
+/// restored as visible, the fail-closed choice for a consumer that must not
+/// lose sight of real content behind a stray fence.
+pub(crate) fn scan_fences(text: &str, fence_chars: &[char], unclosed_is_code: bool) -> FenceScan {
+    /// `Some((char, run_len, suffix))` when the line is a fence marker
+    /// candidate: ≤3 leading spaces then a run of ≥3 fence characters. Tabs
+    /// disqualify.
+    fn fence_marker<'a>(line: &'a str, fence_chars: &[char]) -> Option<(char, usize, &'a str)> {
         let stripped = line.trim_start_matches(' ');
         if line.len() - stripped.len() > 3 {
             return None; // 4+ spaces = indented code, not a fence
         }
-        let run = stripped.chars().take_while(|&c| c == '`').count();
+        let fence_char = stripped
+            .chars()
+            .next()
+            .filter(|c| fence_chars.contains(c))?;
+        let run = stripped.chars().take_while(|&c| c == fence_char).count();
         if run < 3 {
             return None;
         }
-        Some((run, &stripped[run..]))
+        // Fence characters are ASCII: `run` chars == `run` bytes.
+        Some((fence_char, run, &stripped[run..]))
     }
 
-    let mut out = String::with_capacity(text.len());
-    // (opening run length, withheld lines — restored verbatim on EOF)
-    let mut fence: Option<(usize, String)> = None;
-    for line in text.lines() {
-        match fence.as_mut() {
+    let mut in_fence: Vec<bool> = Vec::new();
+    // (opening char, opening run length, index of the opening line)
+    let mut fence: Option<(char, usize, usize)> = None;
+    for (idx, line) in text.lines().enumerate() {
+        match fence {
             None => {
                 // A backtick fence's info string may not contain a backtick
                 // (CommonMark): ```lang`oops is CONTENT, not an opener — a
                 // false opener must never swallow a real slot.
-                match fence_marker(line) {
-                    Some((run, info)) if !info.contains('`') => {
-                        let mut buf = String::new();
-                        buf.push_str(line);
-                        buf.push('\n');
-                        fence = Some((run, buf));
+                match fence_marker(line, fence_chars) {
+                    Some((fence_char, run, info)) if !(fence_char == '`' && info.contains('`')) => {
+                        fence = Some((fence_char, run, idx));
+                        in_fence.push(true);
                     }
-                    _ => {
-                        out.push_str(line);
-                        out.push('\n');
+                    _ => in_fence.push(false),
+                }
+            }
+            Some((open_char, open_run, _)) => {
+                in_fence.push(true);
+                if let Some((fence_char, run, suffix)) = fence_marker(line, fence_chars) {
+                    // Closer suffix: spaces/tabs ONLY — Unicode whitespace
+                    // must not promote a content line into a closer.
+                    if fence_char == open_char
+                        && run >= open_run
+                        && suffix.chars().all(|c| c == ' ' || c == '\t')
+                    {
+                        fence = None; // valid closer: the block is code
                     }
                 }
             }
-            Some((open_run, buf)) => match fence_marker(line) {
-                // Closer suffix: spaces/tabs ONLY — Unicode whitespace must
-                // not promote a content line into a closer.
-                Some((run, suffix))
-                    if run >= *open_run && suffix.chars().all(|c| c == ' ' || c == '\t') =>
-                {
-                    fence = None; // valid closer: the withheld block is code — drop it
-                }
-                _ => {
-                    buf.push_str(line);
-                    buf.push('\n');
-                }
-            },
         }
     }
-    if let Some((_, buf)) = fence {
-        out.push_str(&buf);
+    let unclosed = fence.is_some();
+    if let Some((_, _, start)) = fence {
+        if !unclosed_is_code {
+            // Withheld lines (opening line included) are restored verbatim.
+            in_fence[start..].fill(false);
+        }
     }
-    out
+    FenceScan { in_fence, unclosed }
 }
 
 /// Lines with more backtick runs than this keep their spans (degraded =
@@ -1914,6 +1951,48 @@ mod tests {
             strip_fenced_code("```\n| {{ID}} |\n```\u{00A0}"),
             "```\n| {{ID}} |\n```\u{00A0}\n"
         );
+    }
+
+    #[test]
+    fn scan_fences_marks_every_line_of_a_closed_block_fence_lines_included() {
+        let scan = scan_fences("a\n```rust\nb\n```\nc", &['`'], false);
+        assert_eq!(scan.in_fence, vec![false, true, true, true, false]);
+        assert!(!scan.unclosed);
+    }
+
+    #[test]
+    fn scan_fences_tilde_blocks_only_count_when_asked_for() {
+        let text = "a\n~~~\nb\n~~~\nc";
+        assert_eq!(
+            scan_fences(text, &['`'], false).in_fence,
+            vec![false; 5],
+            "the prose linters stay backtick-only"
+        );
+        assert_eq!(
+            scan_fences(text, &['`', '~'], false).in_fence,
+            vec![false, true, true, true, false]
+        );
+        // A tilde never closes a backtick fence (nor the other way round).
+        assert_eq!(
+            scan_fences("```\n~~~\nx", &['`', '~'], true).in_fence,
+            vec![true, true, true]
+        );
+        // A tilde fence's info string may carry a backtick.
+        assert_eq!(
+            scan_fences("~~~ a`b\nx\n~~~", &['`', '~'], false).in_fence,
+            vec![true, true, true]
+        );
+    }
+
+    #[test]
+    fn scan_fences_unclosed_block_is_visible_or_code_on_request() {
+        let text = "a\n```\nb\nc";
+        let lenient = scan_fences(text, &['`'], false);
+        assert!(lenient.unclosed);
+        assert_eq!(lenient.in_fence, vec![false; 4], "restored as visible");
+        let strict = scan_fences(text, &['`'], true);
+        assert!(strict.unclosed);
+        assert_eq!(strict.in_fence, vec![false, true, true, true]);
     }
 
     // ── Mode ──────────────────────────────────────────────────────────

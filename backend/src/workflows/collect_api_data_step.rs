@@ -108,32 +108,39 @@ pub async fn execute_collect_api_data_step(
                 if source.quick_exec.is_none() && !source.quick_exec_id.trim().is_empty() {
                     let quick_exec_id = source.quick_exec_id.clone();
                     match state
-                        .db
-                        .with_conn(move |conn| {
-                            crate::db::quick_execs::get_quick_exec(conn, &quick_exec_id)
-                        })
-                        .await
-                    {
-                        Ok(Some(exec)) => Some(exec),
-                        Ok(None) => {
-                            return SourceResult::failed(
-                                index,
-                                source.alias,
-                                source.required,
-                                "Saved Quick Exec not found".to_string(),
+                    .db
+                    .with_read_conn(move |conn| {
+                        let exec = crate::db::quick_execs::get_quick_exec(conn, &quick_exec_id)?;
+                        if let Some(exec) = &exec {
+                            crate::core::repository_resources::ensure_quick_exec_execution_approved(
+                                conn, exec,
                             )
-                            .with_kind(source_kind)
+                            .map_err(anyhow::Error::msg)?;
                         }
-                        Err(error) => {
-                            return SourceResult::failed(
-                                index,
-                                source.alias,
-                                source.required,
-                                format!("Cannot load saved Quick Exec: {error}"),
-                            )
-                            .with_kind(source_kind)
-                        }
+                        Ok(exec)
+                    })
+                    .await
+                {
+                    Ok(Some(exec)) => Some(exec),
+                    Ok(None) => {
+                        return SourceResult::failed(
+                            index,
+                            source.alias,
+                            source.required,
+                            "Saved Quick Exec not found".to_string(),
+                        )
+                        .with_kind(source_kind)
                     }
+                    Err(error) => {
+                        return SourceResult::failed(
+                            index,
+                            source.alias,
+                            source.required,
+                            format!("Cannot load saved Quick Exec: {error}"),
+                        )
+                        .with_kind(source_kind)
+                    }
+                }
                 } else {
                     None
                 };

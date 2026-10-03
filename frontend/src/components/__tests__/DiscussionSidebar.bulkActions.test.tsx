@@ -90,8 +90,8 @@ describe('DiscussionSidebar — bulk selection', () => {
 
     view.rerender(<DiscussionSidebar {...props} />);
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
-    expect(screen.getByRole('group', { name: 'disc.sidebar.moreActions' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    expect(screen.getByRole('menu', { name: 'disc.sidebar.moreActions' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
     expect(screen.getByText('disc.bulk.selected:1')).toBeInTheDocument();
   });
@@ -102,7 +102,7 @@ describe('DiscussionSidebar — bulk selection', () => {
 
     expect(screen.getByRole('complementary', { name: 'Discussions' })).toHaveClass('collection-shell-sidebar');
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
-    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
     const compare = screen.getByRole('button', { name: 'disc.bulk.compare' });
     expect(compare).toBeDisabled();
 
@@ -122,7 +122,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     const props = makeProps();
     render(<DiscussionSidebar {...props} />);
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
-    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
     expect(screen.getByRole('button', { name: 'disc.mosaic.open' })).toBeDisabled();
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
     expect(screen.getByRole('button', { name: 'disc.mosaic.open' })).toBeDisabled();
@@ -141,7 +141,7 @@ describe('DiscussionSidebar — bulk selection', () => {
   it('disables mosaic selection above twelve discussions', () => {
     render(<DiscussionSidebar {...makeProps()} discussions={Array.from({ length: 13 }, (_, i) => makeDiscussion(`d-${i}`))} />);
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
-    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
     for (let i = 0; i < 13; i++) fireEvent.click(screen.getByRole('checkbox', { name: new RegExp(`Discussion d-${i}(?:$| )`) }));
     expect(screen.getByRole('button', { name: 'disc.mosaic.open' })).toBeDisabled();
     expect(screen.queryByRole('link', { name: 'disc.mosaic.open' })).toBeNull();
@@ -154,7 +154,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     render(<DiscussionSidebar {...props} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
-    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-b/ }));
 
@@ -178,7 +178,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     render(<DiscussionSidebar {...props} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
-    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
     fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.delete' }));
 
@@ -195,7 +195,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     const { rerender } = render(<DiscussionSidebar {...props} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
-    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-b/ }));
     expect(screen.getByText('disc.bulk.selected:1')).toBeInTheDocument();
 
@@ -219,12 +219,12 @@ describe('DiscussionSidebar — bulk selection', () => {
     const trigger = screen.getByRole('button', { name: 'disc.sidebar.moreActions' });
     fireEvent.click(trigger);
 
-    const action = screen.getByRole('button', { name: 'disc.bulk.start' });
+    const action = screen.getByRole('menuitem', { name: 'disc.bulk.start' });
     await waitFor(() => expect(action).toHaveFocus());
-    expect(screen.getByRole('group', { name: 'disc.sidebar.moreActions' })).toBeInTheDocument();
+    expect(screen.getByRole('menu', { name: 'disc.sidebar.moreActions' })).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(trigger).toHaveFocus());
-    expect(screen.queryByRole('group', { name: 'disc.sidebar.moreActions' })).toBeNull();
+    expect(screen.queryByRole('menu', { name: 'disc.sidebar.moreActions' })).toBeNull();
   });
 });

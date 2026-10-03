@@ -210,6 +210,65 @@ mod tests {
         );
     }
 
+    /// KT-923 — a skill only the repository holds reaches the agent: the prompt
+    /// it receives carries the `SKILL.md`, in the expertise section and apart
+    /// from the catalog skills.
+    #[tokio::test]
+    async fn a_repository_skill_reaches_the_agents_prompt() {
+        let fixture = Arc::new(NativeRouteFixture {
+            created: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::atomic::AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let skill = crate::models::Skill {
+            id: "repository:p1:block-migration".into(),
+            name: "Block migration".into(),
+            description: String::new(),
+            icon: "📂".into(),
+            category: crate::models::SkillCategory::Domain,
+            content: "Move the block, then run the migration checks.".into(),
+            is_builtin: false,
+            token_estimate: 0,
+            license: None,
+            allowed_tools: None,
+            auto_triggers: None,
+            external: false,
+            source_url: None,
+        };
+        let agent = AgentType::OpenCode;
+        let mut process = start_agent_with_config(AgentStartConfig {
+            skill_ids: &["repository:p1:block-migration".to_string()],
+            repository_skills: std::slice::from_ref(&skill),
+            test_acp_transport: Some(fixture.clone()),
+            ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "migrate", &tokens)
+        })
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+
+        let prompts = fixture.prompts.lock().unwrap();
+        let prompt = &prompts[0];
+        let expertise = prompt
+            .find("=== YOUR EXPERTISE ===")
+            .expect("the skills section is in the prompt");
+        let block = prompt
+            .find("=== Repository Skills ===")
+            .expect("the repository block");
+        assert!(block > expertise);
+        assert!(prompt
+            .contains("--- Block migration ---\nMove the block, then run the migration checks."));
+        assert!(prompt.ends_with("migrate"));
+    }
+
     #[test]
     fn acp_mcp_registry_uses_only_command_entries_without_environment_values() {
         let project = tempfile::tempdir().unwrap();
@@ -312,6 +371,24 @@ mod tests {
                 .any(|arg| arg.contains("KRONN_AUTH_TOKEN")),
             "no credential, and no placeholder for one, may travel over ACP"
         );
+
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"kronn-internal":{"command":"project-spoof"}}}"#,
+        )
+        .unwrap();
+        let project_registry = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let own: Vec<_> = project_registry
+            .iter()
+            .filter(|server| server.id == "kronn-internal")
+            .collect();
+        assert_eq!(
+            own.len(),
+            1,
+            "a project copy cannot duplicate the owned bridge"
+        );
+        assert_eq!(own[0], bridge);
 
         match previous {
             Some(value) => std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
@@ -1932,6 +2009,652 @@ mod tests {
         );
     }
 
+    // ── KT-929: a result too big for the window says what it holds and how to ask
+    // for a part of it ──────────────────────────────────────────────────────────
+
+    /// One `/v1/tests` page the way SpeedCurve answers it: a run weighs about
+    /// 2 KB, its metrics are nested under `metrics`, the paging is under `meta`.
+    /// A hundred runs is the ~200 KB answer that used to end a turn half done.
+    fn speedcurve_tests_page(rows: usize) -> serde_json::Value {
+        let metrics = |run: usize| {
+            ["lcp", "fcp", "inp", "ttfb"]
+                .into_iter()
+                .map(str::to_string)
+                .chain((0..32).map(|n| format!("metric_{n:02}")))
+                .enumerate()
+                .map(|(n, name)| (name, serde_json::json!(1000 + (run * 7 + n) % 900)))
+                .collect::<serde_json::Map<_, _>>()
+        };
+        serde_json::json!({
+            "data": (0..rows).map(|run| serde_json::json!({
+                "test_id": format!("t-{run:04}"),
+                "site_id": 4,
+                "url": format!("https://www.euronews.com/2026/09/{:02}/story-{run}", 1 + run % 28),
+                "browser": if run % 2 == 0 { "Chrome" } else { "Firefox" },
+                "day": format!("2026-09-{:02}", 1 + run % 28),
+                "region": "eu-west-1",
+                "status": "completed",
+                "metrics": metrics(run),
+                "waterfall": "GET /static/app.js 200;".repeat(52),
+            })).collect::<Vec<_>>(),
+            "links": { "next": "https://api.speedcurve.com/v1/tests?page=2", "prev": null },
+            "meta": { "current_page": 1, "per_page": rows, "total": 1240, "last_page": 13 },
+        })
+    }
+
+    /// An `api_call` round as the loop records it: what the model asked, and
+    /// what the tool answered, in the envelope `api_call` really returns.
+    fn push_api_call_round(
+        body: &mut serde_json::Value,
+        id: &str,
+        arguments: serde_json::Value,
+        data: serde_json::Value,
+    ) {
+        use crate::agents::tools::{
+            assistant_tool_call_message, tool_result_message, ToolCall, ToolOutcome,
+        };
+        let call = ToolCall {
+            id: id.to_string(),
+            name: "api_call".to_string(),
+            arguments,
+        };
+        let envelope = crate::api::agent_api::AgentApiCallResponse {
+            success: true,
+            duration_ms: 812,
+            data: Some(data),
+            status: "OK".to_string(),
+            summary: "GET https://api.speedcurve.com/v1/tests".to_string(),
+            http_status: Some(200),
+            error: None,
+        };
+        let outcome = ToolOutcome {
+            call: call.clone(),
+            content: serde_json::to_value(&envelope).unwrap(),
+            ok: true,
+        };
+        let messages = body["messages"].as_array_mut().unwrap();
+        messages.push(assistant_tool_call_message(&[call], false));
+        messages.push(tool_result_message(&outcome));
+    }
+
+    /// What a discussion with an Ollama agent sends: its identity and notices,
+    /// the user's question, the full native catalogue, and the window Ollama
+    /// already fixed when it loaded the model.
+    fn discussion_body(window: u64) -> serde_json::Value {
+        let system = format!(
+            "{}\n\n{}",
+            http_agent_identity_context(&AgentType::Ollama, "qwen3.8:27b-mlx"),
+            http_agent_tools_notice(true)
+        );
+        let mut body = build_ollama_chat_body(
+            "qwen3.8:27b-mlx",
+            &system,
+            "Tu peux me vérifier les derniers CWV via SpeedCurve ?",
+            None,
+            window,
+            None,
+        );
+        body["tools"] =
+            serde_json::Value::Array(crate::api::agent_tools::full_discussion_catalogue());
+        body["options"]["num_ctx"] = serde_json::json!(window);
+        body
+    }
+
+    fn last_tool_content(body: &serde_json::Value) -> String {
+        body["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Every `{"path":"…"}` a note offers as an example.
+    fn example_paths(text: &str) -> Vec<String> {
+        text.split("{\"path\":\"")
+            .skip(1)
+            .filter_map(|rest| rest.split("\"}").next().map(str::to_string))
+            .collect()
+    }
+
+    fn selects_something(path: &str, response: &serde_json::Value) -> bool {
+        serde_json_path::JsonPath::parse(path)
+            .is_ok_and(|parsed| !parsed.query(response).all().is_empty())
+    }
+
+    #[test]
+    fn a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part() {
+        let response = speedcurve_tests_page(100);
+        assert!(
+            response.to_string().len() > 195_000,
+            "the fixture stands for a ~200 KB answer"
+        );
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({
+                "api_plugin_slug": "api-speedcurve",
+                "endpoint_path": "/v1/tests",
+                "query": { "site_id": "4", "per_page": "100" },
+            }),
+            response.clone(),
+        );
+
+        clamp_ollama_tool_results(&mut body, 32_768);
+
+        let shortened: serde_json::Value =
+            serde_json::from_str(&last_tool_content(&body)).expect("still valid JSON");
+        assert_eq!(shortened["kronn_shortened"], true);
+        let shape = &shortened["shape"];
+        // The keys of the response, with the paging shown as values: it is what
+        // the model needs to go on, and the first thing a fact budget loses.
+        assert_eq!(shape["keys"]["data"], "array[100]");
+        assert_eq!(shape["keys"]["meta"]["last_page"], 13);
+        assert_eq!(shape["keys"]["meta"]["total"], 1240);
+        // The collection: where it is, how long, what one element holds —
+        // nested metrics included, since that is where the answer is.
+        assert_eq!(shape["collection"]["path"], "$.data");
+        assert_eq!(shape["collection"]["length"], 100);
+        let item = &shape["collection"]["item_keys"];
+        assert_eq!(item["url"], "string");
+        for name in ["lcp", "fcp", "inp", "ttfb"] {
+            assert_eq!(item["metrics"][name], "number", "{name} must be visible");
+        }
+        // And a way to ask, with paths that work on this very response.
+        let note = shortened["note"].as_str().unwrap();
+        assert!(note.contains("`extract`"), "{note}");
+        let examples = example_paths(note);
+        assert!(
+            examples.len() >= 3,
+            "scalar fields, a nested object and one whole element: {examples:?}"
+        );
+        for path in &examples {
+            assert!(
+                selects_something(path, &response),
+                "an example that selects nothing teaches nothing: {path}"
+            );
+        }
+        assert!(examples.contains(&"$.data[0]".to_string()), "{examples:?}");
+        assert!(
+            examples.iter().any(|path| path.contains(".metrics[")),
+            "a nested example: {examples:?}"
+        );
+        assert!(
+            shortened.to_string().len() < 16_000,
+            "the shortened result must leave room: {} B",
+            shortened.to_string().len()
+        );
+    }
+
+    /// The case that started this: the 200 KB answer, a 32K window, and a model
+    /// that has to get LCP, FCP, INP and TTFB out of it. The whole answer cannot
+    /// be kept, so the first result is shortened; one targeted call then returns
+    /// exactly the four metrics of every run, unshortened, inside the window.
+    #[test]
+    fn a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window() {
+        const WINDOW: u64 = 32_768;
+        let response = speedcurve_tests_page(100);
+        let mut body = discussion_body(WINDOW);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({
+                "api_plugin_slug": "api-speedcurve",
+                "endpoint_path": "/v1/tests",
+                "query": { "site_id": "4", "per_page": "100" },
+            }),
+            response.clone(),
+        );
+        let unclamped = estimated_chat_history_tokens(&body);
+        let response_bytes = last_tool_content(&body).len();
+        assert!(
+            unclamped > WINDOW,
+            "unclamped, the answer does not fit the window"
+        );
+
+        clamp_ollama_tool_results(&mut body, WINDOW);
+
+        assert!(estimated_chat_history_tokens(&body) <= WINDOW);
+        let first: serde_json::Value = serde_json::from_str(&last_tool_content(&body)).unwrap();
+        let shortened_bytes = last_tool_content(&body).len();
+        assert!(
+            !first.to_string().contains("t-0099"),
+            "what was lost is what the model cannot answer from: the last runs are not in the first result"
+        );
+
+        // The model's next move, from what the shortened result tells it: the
+        // collection's path, and the member whose object holds the four metrics.
+        let shape = &first["shape"]["collection"];
+        let nested = shape["item_keys"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, value)| {
+                ["lcp", "fcp", "inp", "ttfb"]
+                    .iter()
+                    .all(|name| value.get(name).is_some())
+            })
+            .map(|(key, _)| key.clone())
+            .expect("the shape shows which field holds the metrics");
+        let path = format!(
+            "{}[*].{nested}['lcp','fcp','inp','ttfb']",
+            shape["path"].as_str().unwrap()
+        );
+        let extract = crate::api::agent_tools::api_call_extract(
+            &serde_json::json!({ "extract": { "path": path } }),
+        )
+        .expect("the tool accepts it")
+        .expect("and keeps it");
+        let part = crate::workflows::api_call_step::apply_extract(&extract, &response)
+            .expect("a valid path")
+            .value;
+        push_api_call_round(
+            &mut body,
+            "c2",
+            serde_json::json!({
+                "api_plugin_slug": "api-speedcurve",
+                "endpoint_path": "/v1/tests",
+                "query": { "site_id": "4", "per_page": "100" },
+                "extract": { "path": path },
+            }),
+            part,
+        );
+
+        clamp_ollama_tool_results(&mut body, WINDOW);
+
+        assert!(
+            estimated_chat_history_tokens(&body) <= WINDOW,
+            "the targeted answer fits beside the rest of the conversation"
+        );
+        let answer: serde_json::Value = serde_json::from_str(&last_tool_content(&body))
+            .expect("the targeted result is whole, valid JSON");
+        assert!(
+            answer.get("kronn_shortened").is_none(),
+            "a targeted answer is not shortened again"
+        );
+        let expected: Vec<serde_json::Value> = response["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|run| {
+                ["lcp", "fcp", "inp", "ttfb"]
+                    .iter()
+                    .map(|name| run["metrics"][name].clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(expected.len(), 400);
+        assert_eq!(
+            answer["data"],
+            serde_json::Value::Array(expected),
+            "LCP, FCP, INP and TTFB of every run, in one call"
+        );
+        println!(
+            "\nresponse {response_bytes} B ({unclamped} tokens estimated with the conversation) \
+             -> shortened {shortened_bytes} B, shape {} B -> targeted answer {} B, \
+             conversation {} tokens of {WINDOW} (catalogue {} B)",
+            first["shape"].to_string().len(),
+            last_tool_content(&body).len(),
+            estimated_chat_history_tokens(&body),
+            body["tools"].to_string().len(),
+        );
+    }
+
+    #[test]
+    fn a_wide_record_is_listed_up_to_a_bound_and_one_whole_element_stays_one_call_away() {
+        // The real /v1/tests row is flat with 80+ fields: listing them all would
+        // spend the room the shortening just made.
+        let rows: Vec<serde_json::Value> = (0..60)
+            .map(|run| {
+                let mut row = serde_json::Map::new();
+                for n in 0..84 {
+                    row.insert(format!("field_{n:02}"), serde_json::json!(run * 100 + n));
+                }
+                row.insert("notes".into(), serde_json::json!("x".repeat(3_000)));
+                serde_json::Value::Object(row)
+            })
+            .collect();
+        let response = serde_json::json!({ "data": rows, "meta": { "last_page": 3 } });
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({ "api_plugin_slug": "p", "endpoint_path": "/v1/tests" }),
+            response.clone(),
+        );
+
+        clamp_ollama_tool_results(&mut body, 32_768);
+
+        let shortened: serde_json::Value = serde_json::from_str(&last_tool_content(&body)).unwrap();
+        let item = shortened["shape"]["collection"]["item_keys"]
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            item.len(),
+            SHAPE_MAX_KEYS + 1,
+            "the bound, and the count left out"
+        );
+        assert_eq!(item["…"], "45 more keys");
+        assert!(
+            shortened["shape"].to_string().len() < 4_000,
+            "{} B",
+            shortened["shape"].to_string().len()
+        );
+        // What is not listed is one call away.
+        let examples = example_paths(shortened["note"].as_str().unwrap());
+        assert!(examples.contains(&"$.data[0]".to_string()), "{examples:?}");
+        assert!(examples
+            .iter()
+            .all(|path| selects_something(path, &response)));
+    }
+
+    #[test]
+    fn a_result_that_was_already_an_extract_is_told_to_select_less_not_given_paths_that_do_not_apply(
+    ) {
+        // Paths over an extract's output are not paths over the response the next
+        // `extract` runs on: offering them would send the model to empty results.
+        let response = speedcurve_tests_page(100);
+        let run = |extracted: serde_json::Value| {
+            let mut body = discussion_body(32_768);
+            push_api_call_round(
+                &mut body,
+                "c1",
+                serde_json::json!({
+                    "api_plugin_slug": "api-speedcurve",
+                    "endpoint_path": "/v1/tests",
+                    "extract": { "path": "$.data" },
+                }),
+                extracted,
+            );
+            clamp_ollama_tool_results(&mut body, 32_768);
+            last_tool_content(&body)
+        };
+
+        // An extract that came back as a list keeps its items and a note after them.
+        let as_list = run(response["data"].clone());
+        let (_, note) = as_list
+            .split_once("\n\n[compacted by Kronn:")
+            .expect("the list keeps its items");
+        assert!(
+            note.contains("already the result of your `extract`"),
+            "{note}"
+        );
+        assert!(example_paths(note).is_empty(), "{note}");
+
+        // One that came back as an object is shortened to an envelope.
+        let as_object = run(serde_json::json!({ "runs": response["data"].clone() }));
+        let shortened: serde_json::Value = serde_json::from_str(&as_object).unwrap();
+        assert_eq!(shortened["kronn_shortened"], true);
+        assert!(shortened.get("shape").is_none());
+        let note = shortened["note"].as_str().unwrap();
+        assert!(
+            note.contains("already the result of your `extract`"),
+            "{note}"
+        );
+        assert!(example_paths(note).is_empty(), "{note}");
+    }
+
+    #[test]
+    fn a_collection_note_offers_paths_that_work_when_the_tool_can_take_an_extract() {
+        let response = serde_json::Value::Array(
+            (0..43)
+                .map(|i| {
+                    serde_json::json!({
+                        "id": format!("svc-{i}"),
+                        "name": format!("service-{i}"),
+                        "versions": (0..400).collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+        );
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({ "api_plugin_slug": "api-fastly", "endpoint_path": "/service" }),
+            response.clone(),
+        );
+
+        clamp_ollama_tool_results(&mut body, 32_768);
+
+        let trimmed = last_tool_content(&body);
+        let (_, note) = trimmed
+            .split_once("\n\n[compacted by Kronn:")
+            .expect("the inventory keeps its items");
+        let examples = example_paths(note);
+        assert!(
+            examples.contains(&"$[*]['id','name']".to_string()),
+            "{examples:?}"
+        );
+        assert!(examples.contains(&"$[0]".to_string()), "{examples:?}");
+        assert!(examples
+            .iter()
+            .all(|path| selects_something(path, &response)));
+    }
+
+    #[test]
+    fn shortening_a_result_twice_keeps_its_note_and_shape_and_still_shrinks() {
+        let response = speedcurve_tests_page(100);
+        let mut body = discussion_body(32_768);
+        push_api_call_round(
+            &mut body,
+            "c1",
+            serde_json::json!({ "api_plugin_slug": "api-speedcurve", "endpoint_path": "/v1/tests" }),
+            response,
+        );
+        clamp_ollama_tool_results(&mut body, 32_768);
+        let once = last_tool_content(&body);
+
+        // Another result arrives and the same message has to give up more.
+        let again = compact_tool_result(&once, 600, None).expect("it can still give something up");
+        let twice: serde_json::Value = serde_json::from_str(&again).unwrap();
+
+        assert!(again.len() < once.len());
+        assert_eq!(
+            twice["original_bytes"],
+            serde_json::from_str::<serde_json::Value>(&once).unwrap()["original_bytes"],
+            "the size reported is the response's, not the envelope's"
+        );
+        assert_eq!(twice["shape"]["collection"]["path"], "$.data");
+        assert!(twice["note"].as_str().unwrap().contains("`extract`"));
+    }
+
+    #[test]
+    fn a_tool_without_an_extract_is_shortened_as_before() {
+        let mut body = discussion_body(32_768);
+        body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "role": "tool", "tool_call_id": "c1", "name": "read_file",
+                "content": serde_json::json!({
+                    "path": "src/main.rs", "content_sha256": "ab12", "content": "x".repeat(90_000),
+                }).to_string(),
+            }));
+        clamp_ollama_tool_results(&mut body, 32_768);
+        let kept = last_tool_content(&body);
+        assert!(
+            !kept.contains("extract") && !kept.contains("\"shape\""),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("ask for a part you have not seen yet"),
+            "{kept}"
+        );
+    }
+
+    /// A call that differs from an earlier one only by its `extract`, or by a
+    /// query parameter, is a new question with a new answer. Answering it as a
+    /// repeat told the model to stop, about the very call meant to get past a
+    /// shortened result.
+    #[test]
+    fn an_api_call_that_only_changes_its_extract_or_its_query_is_not_a_repeat() {
+        let base = serde_json::json!({
+            "api_plugin_slug": "api-speedcurve",
+            "endpoint_path": "/v1/tests",
+            "query": { "site_id": "4" },
+        });
+        let with_extract = |path: &str| {
+            let mut arguments = base.clone();
+            arguments["extract"] = serde_json::json!({ "path": path });
+            arguments
+        };
+        let signature =
+            |arguments: &serde_json::Value| tool_call_signature("api_call", arguments).1;
+
+        // The whole response, then two different parts of it.
+        assert_ne!(
+            signature(&base),
+            signature(&with_extract("$.data[*]['lcp']"))
+        );
+        assert_ne!(
+            signature(&with_extract("$.data[*]['lcp']")),
+            signature(&with_extract("$.data[*]['fcp']"))
+        );
+        // The same call for another page, or another period.
+        let mut next_page = base.clone();
+        next_page["query"]["page"] = serde_json::json!("2");
+        assert_ne!(signature(&base), signature(&next_page));
+        let mut other_period = base.clone();
+        other_period["query"]["start_timestamp"] = serde_json::json!("1790000000");
+        assert_ne!(signature(&base), signature(&other_period));
+        // A call that really is the same stays the same, however its keys are ordered.
+        let reordered = serde_json::json!({
+            "query": { "site_id": "4" },
+            "endpoint_path": "/v1/tests",
+            "api_plugin_slug": "api-speedcurve",
+        });
+        assert_eq!(signature(&base), signature(&reordered));
+        assert_eq!(
+            signature(&with_extract("$.data[*]['lcp']")),
+            signature(&with_extract("$.data[*]['lcp']"))
+        );
+    }
+
+    /// KT-943 — the same model on the same machine once its attention shape and
+    /// its weights are known: a discussion gets the model's whole window instead
+    /// of the memory band, and a worker is still held at the MLX ceiling.
+    #[test]
+    fn once_its_cache_cost_is_known_qwen38_mlx_gets_its_whole_window_on_a_64_gb_mac() {
+        use crate::agents::ollama_memory::{
+            ceiling_for_model, gpu_budget_bytes, kv_shape_from_config, CeilingInputs, KvCacheType,
+        };
+        use crate::agents::tools::ToolRunMode;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MODEL: &str = "qwen3.8:27b-mlx";
+        const TRAINED: u64 = 262_144;
+
+        // The `config.json` of the model: 16 of its 64 layers cache anything.
+        let layer_types: Vec<&str> = (1..=64)
+            .map(|n| {
+                if n % 4 == 0 {
+                    "full_attention"
+                } else {
+                    "linear_attention"
+                }
+            })
+            .collect();
+        let shape = kv_shape_from_config(&serde_json::json!({
+            "text_config": {
+                "num_hidden_layers": 64,
+                "full_attention_interval": 4,
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "layer_types": layer_types,
+            }
+        }));
+        let ceiling = ceiling_for_model(&CeilingInputs {
+            total_ram_bytes: Some(64 * GIB),
+            gpu_budget_bytes: Some(gpu_budget_bytes(64 * GIB, None)),
+            weights_bytes: Some(18_200_000_000),
+            measured_kv_bytes_per_token: None,
+            shape,
+            kv_cache_type: Some(KvCacheType::F16),
+        });
+        let resolved = resolve_ctx_cap_within(None, Some(TRAINED), ceiling);
+        assert_eq!(resolved.value, TRAINED, "the band said 65,536");
+        assert_eq!(resolved.origin, CtxCapOrigin::ModelWindow);
+
+        let policy = worker_exploration_policy(MODEL, Some("safetensors"), false, true);
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::General, policy),
+            TRAINED,
+            "a discussion runs at the model's whole window"
+        );
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::Worker, policy),
+            32_768,
+            "a worker is still held at the MLX ceiling"
+        );
+    }
+
+    /// What `qwen3.8:27b-mlx` is given on a 64 GB Mac, by each rule that can
+    /// decide it, computed by the functions a run calls. A discussion is not a
+    /// worker: the 32K MLX ceiling exists for a worker's long exploration and
+    /// never applies to the principal the user talks to.
+    #[test]
+    fn the_window_qwen38_mlx_gets_on_a_64_gb_mac_depends_on_who_is_running_it() {
+        use crate::agents::tools::ToolRunMode;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const MODEL: &str = "qwen3.8:27b-mlx";
+        const TRAINED: u64 = 262_144;
+
+        // Nothing is known of the weights or the cache yet: the memory band.
+        let ceiling = ram_ceiling_for_model(Some(64 * GIB), None, None);
+        assert_eq!(ceiling, 65_536);
+        let resolved = resolve_ctx_cap_within(None, Some(TRAINED), ceiling);
+        assert_eq!(resolved.value, 65_536);
+        assert_eq!(
+            resolved.origin,
+            CtxCapOrigin::MachineCeiling {
+                model_limit: TRAINED
+            }
+        );
+
+        let policy = worker_exploration_policy(MODEL, Some("safetensors"), false, true);
+        assert!(policy.mlx_mitigation, "the model is detected as native MLX");
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::General, policy),
+            65_536,
+            "a discussion runs at the memory band"
+        );
+        assert_eq!(
+            worker_effective_ctx_cap(resolved.value, ToolRunMode::Worker, policy),
+            32_768,
+            "a worker is held at the MLX ceiling"
+        );
+
+        // A persistent per-model override replaces the band — lower or higher —
+        // and a worker stays under the MLX ceiling whatever it says.
+        for (override_tokens, discussion, worker) in [
+            (32_768, 32_768, 32_768),
+            (100_000, 100_000, 32_768),
+            (16_384, 16_384, 16_384),
+        ] {
+            let overrides = std::collections::HashMap::from([(MODEL.to_string(), override_tokens)]);
+            let cap = resolve_ctx_cap_for_model(None, MODEL, &overrides, Some(TRAINED), ceiling);
+            assert_eq!(cap.origin, CtxCapOrigin::ModelOverride);
+            assert_eq!(
+                worker_effective_ctx_cap(cap.value, ToolRunMode::General, policy),
+                discussion
+            );
+            assert_eq!(
+                worker_effective_ctx_cap(cap.value, ToolRunMode::Worker, policy),
+                worker
+            );
+        }
+        // The operator's break-glass variable beats the override.
+        let overrides = std::collections::HashMap::from([(MODEL.to_string(), 100_000)]);
+        let env = resolve_ctx_cap_for_model(
+            Some("24576".into()),
+            MODEL,
+            &overrides,
+            Some(TRAINED),
+            ceiling,
+        );
+        assert_eq!(env.value, 24_576);
+        assert_eq!(env.origin, CtxCapOrigin::OperatorOverride);
+    }
+
     #[test]
     fn clamp_trims_against_the_window_actually_granted() {
         // Regression: a one-line question sized the window near the floor, then
@@ -1987,6 +2710,27 @@ mod tests {
             grown,
             "a smaller cap must not shrink a window already sized for these messages"
         );
+    }
+
+    #[test]
+    fn resize_num_ctx_grows_the_output_budget_with_the_window() {
+        // KT-967 — measured on runs s27 and s35: num_predict stayed at the
+        // first-turn 1909 while num_ctx grew to 65536, so the write_file
+        // holding a whole document was cut off ("done_reason": "length").
+        let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 65536, None);
+        let first = body["options"]["num_predict"].as_i64().unwrap();
+        body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "role": "tool", "tool_call_id": "c1", "name": "read_file",
+                "content": "x".repeat(120_000),
+            }));
+        resize_ollama_num_ctx(&mut body, 65536);
+        let num_ctx = body["options"]["num_ctx"].as_u64().unwrap();
+        let num_predict = body["options"]["num_predict"].as_i64().unwrap();
+        assert!(num_predict > first, "{first} -> {num_predict}");
+        assert_eq!(Some(num_predict), num_predict_for(num_ctx, None));
     }
 
     #[test]
@@ -4899,7 +5643,7 @@ mod tests {
                     .as_array()
                     .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
                 if after_tool {
-                    ResponseTemplate::new(503).set_body_string("temporarily unavailable")
+                    ResponseTemplate::new(429).set_body_string("quota exhausted; private-provider-body")
                 } else {
                     ResponseTemplate::new(200).set_body_string(sse(&[
                         r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"write-1","function":{"name":"write_file","arguments":"{}"}}]}}]}"#,
@@ -4950,6 +5694,314 @@ mod tests {
                 .any(|line| line.starts_with("[provider-retry:")),
             "no retry trace should exist after an external effect"
         );
+        let trace = process.captured_stderr();
+        assert!(
+            !trace
+                .iter()
+                .any(|line| line
+                    .contains("verify that this route/model supports native tool calling")),
+            "a 429 is not evidence of unsupported tools: {trace:?}"
+        );
+        let warning = crate::api::audit::validation::with_http_diagnostics(
+            false,
+            Some(crate::api::audit::validation::StepValidationWarning {
+                reason: "Expected audit index is incomplete".into(),
+                repaired: false,
+            }),
+            &trace,
+        )
+        .expect("the audit retains its provider failure");
+        assert!(warning.reason.contains("429"), "{}", warning.reason);
+        assert!(warning.reason.contains("rate limit"), "{}", warning.reason);
+        assert!(warning.reason.contains("index is incomplete"));
+        assert!(!warning.reason.contains("private-provider-body"));
+    }
+
+    /// KT-942 — the exact text observed in production, and the failures that
+    /// must keep their own handling.
+    const UNREADABLE_TOOL_CALL: &str =
+        "XML syntax error on line 13: element <parameter> closed by </function>";
+
+    #[test]
+    fn unreadable_tool_call_failure_is_told_apart_from_other_stream_errors() {
+        assert!(is_unreadable_tool_call_failure(UNREADABLE_TOOL_CALL));
+        assert!(is_unreadable_tool_call_failure(
+            "Ollama error: XML syntax error on line 2: unexpected EOF"
+        ));
+        assert!(is_unreadable_tool_call_failure(
+            "error parsing tool call: raw='<function=x>'"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "model runner has unexpectedly stopped"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "ResourceExhausted: Worker local total request limit reached (22/16)"
+        ));
+        assert!(!is_unreadable_tool_call_failure(
+            "the prompt outgrew the context window"
+        ));
+        assert_eq!(
+            provider_failure_label(None, UNREADABLE_TOOL_CALL),
+            "unreadable tool call"
+        );
+    }
+
+    /// Mounts `/api/show` and an `/api/chat` that fails with the tool-parser error
+    /// on its first `failures` requests, then answers normally. `/api/show`
+    /// returns no context size, so the run carries the portable-fallback context
+    /// note — the one that used to lead the failure.
+    async fn ollama_failing_tool_parser(
+        failures: usize,
+    ) -> (
+        wiremock::MockServer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chats_for_mock = chats.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = chats_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < failures {
+                    ResponseTemplate::new(200).set_body_string(format!(
+                        "{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"recovered answer\"},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                    )
+                }
+            })
+            .mount(&server)
+            .await;
+        (server, chats)
+    }
+
+    async fn drain(process: &mut AgentProcess) -> (String, bool) {
+        let mut out = String::new();
+        while let Some(chunk) = process.next_line().await {
+            out.push_str(&chunk);
+        }
+        let success = process.child.wait().await.expect("lifeline").success();
+        (out, success)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_is_replayed_and_the_turn_succeeds() {
+        let (server, chats) = ollama_failing_tool_parser(1).await;
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(success, "the second attempt produced a valid call: {out:?}");
+        assert!(out.contains("recovered answer"), "{out:?}");
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one refusal, one replay of the same request"
+        );
+        let trace = process.stderr_capture.lock().unwrap().join("\n");
+        assert!(
+            trace.contains("attempt 1/3 failed (unreadable tool call); retrying attempt 2/3")
+                && trace.contains("completed on attempt 2/3"),
+            "every replay must be journalled: {trace}"
+        );
+        assert!(
+            !trace.contains("could not read a tool call"),
+            "a recovered turn owes no failure message: {trace}"
+        );
+    }
+
+    /// The replay is a pure model invocation: nothing ran for the refused call,
+    /// and the results of earlier rounds are already in the request. A tool must
+    /// therefore not run again, nor the turn be lost because one had run.
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_after_a_tool_ran_is_replayed_without_rerunning_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refused_after_tool = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (chats_for_mock, refused_for_mock) = (chats.clone(), refused_after_tool.clone());
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |request: &wiremock::Request| {
+                use std::sync::atomic::Ordering::SeqCst;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let after_tool = body["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"));
+                chats_for_mock.fetch_add(1, SeqCst);
+                if !after_tool {
+                    return ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"mcp_list\",\"arguments\":{}}}]},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}\n",
+                    );
+                }
+                if refused_for_mock.fetch_add(1, SeqCst) == 0 {
+                    return ResponseTemplate::new(200).set_body_string(format!(
+                        "{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ));
+                }
+                ResponseTemplate::new(200).set_body_string(
+                    "{\"message\":{\"content\":\"2 servers\"},\"done\":false}\n\
+                     {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                )
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "which servers?",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(
+            success,
+            "the replay after the tool round must succeed: {out:?}"
+        );
+        assert!(out.contains("2 servers"), "{out:?}");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &["mcp_list".to_string()],
+            "the tool ran once; the replay re-sent a request, not the call"
+        );
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "tool request, refused follow-up, replayed follow-up"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_tool_call_that_never_clears_stops_at_the_cap_and_says_so() {
+        let (server, chats) = ollama_failing_tool_parser(usize::MAX).await;
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(
+            !success,
+            "past the cap the failure stays a failure: {out:?}"
+        );
+        assert_eq!(
+            chats.load(std::sync::atomic::Ordering::SeqCst),
+            HTTP_PROVIDER_MAX_ATTEMPTS,
+            "the original request plus at most two replays"
+        );
+        let lines = process.stderr_capture.lock().unwrap().clone();
+        let head = lines.first().expect("a failure always says something");
+        assert!(
+            head.contains("unreadable tool call") && head.contains("test-model"),
+            "the message leads with the real cause: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("KRONN_OLLAMA_NUM_CTX_CAP")
+                    || line.contains("portable fallback")),
+            "the context note is not the cause and must not appear: {lines:?}"
+        );
+        let trace = lines.join("\n");
+        assert!(
+            trace.contains("attempt 1/3 failed (unreadable tool call); retrying attempt 2/3")
+                && trace
+                    .contains("attempt 2/3 failed (unreadable tool call); retrying attempt 3/3")
+                && trace
+                    .contains("attempt 3/3 failed (unreadable tool call); retry budget exhausted"),
+            "each replay and the exhausted budget are journalled: {trace}"
+        );
+        assert!(
+            trace.contains(UNREADABLE_TOOL_CALL),
+            "the parser's own error stays visible: {trace}"
+        );
+    }
+
+    /// The terminal message replaces the context note rather than sitting behind it.
+    #[test]
+    fn an_unreadable_tool_call_failure_takes_the_place_of_the_context_note() {
+        let note = "qwen3.8:27b-mlx supports a 262144-token context; Kronn is running it at 65536";
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(vec![
+            note.to_string(),
+            "Ollama error: XML syntax error on line 13".to_string(),
+        ]));
+        record_unreadable_tool_call_failure(&stderr, "Ollama", "qwen3.8:27b-mlx", Some(note), 3);
+        let lines = stderr.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("unreadable tool call"), "{lines:?}");
+        assert!(!lines.iter().any(|line| line == note), "{lines:?}");
     }
 
     /// The Ollama wire, which the LiteLLM test above does NOT cover. This is
@@ -6191,6 +7243,432 @@ mod tests {
         }
     }
 
+    /// Audit executor whose reads fail on any path containing `missing` and
+    /// whose directory listing always fails; writes always succeed.
+    struct AuditStuckReaderTools {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for AuditStuckReaderTools {
+        fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+            crate::agents::tools::ToolRunMode::Audit
+        }
+
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            ["read_file", "list_files", "write_file"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function", "function": {
+                            "name": name, "description": name,
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                        }
+                    })
+                })
+                .collect()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            let path = call.arguments["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{}:{path}", call.name));
+            let ok = match call.name.as_str() {
+                "read_file" => !path.contains("missing"),
+                "list_files" => false,
+                _ => true,
+            };
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content: if ok {
+                    serde_json::json!({ "content": format!("{} ok for {path}", call.name) })
+                } else {
+                    serde_json::json!({ "error": format!("{} failed for {path}", call.name) })
+                },
+                ok,
+            }
+        }
+    }
+
+    fn declared_names(body: &serde_json::Value) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// KT-967 — a local model stuck on failing reads used to lose every tool,
+    /// writers included, so the audit step could never write its file. The
+    /// forced convergence must leave an audit its writers.
+    #[tokio::test]
+    async fn audit_convergence_keeps_the_writers_so_the_step_can_deliver() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wrote = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (turn_for_mock, wrote_for_mock) = (turn.clone(), wrote.clone());
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let call = |name: &str, path: &str| {
+                    ResponseTemplate::new(200).set_body_string(sse(&[&format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"c{current}","function":{{"name":"{name}","arguments":"{{\"path\":\"{path}\"}}"}}}}]}}}}]}}"#
+                    )]))
+                };
+                // As observed with qwen3.8 on run O1: it keeps asking for
+                // read_file even after Kronn withdrew it.
+                if !names.is_empty() && names != ["write_file"] {
+                    call("read_file", &format!("missing-{current}.md"))
+                } else if names == ["write_file"]
+                    && !wrote_for_mock.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    call("write_file", "docs/glossary.md")
+                } else {
+                    ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"Glossary written; unverified terms marked unknown."}}]}"#,
+                    ]))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "fill docs/glossary.md",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(AuditStuckReaderTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let mut out = String::new();
+        while let Some(line) = process.next_line().await {
+            out.push_str(&line);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+
+        let calls = seen.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"write_file:docs/glossary.md".to_string()),
+            "the deliverable must still be writable after convergence: {calls:?}"
+        );
+        assert!(status.success(), "{out:?}");
+        assert!(out.contains("Glossary written"), "{out:?}");
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(captured.contains("forced tool convergence"), "{captured}");
+
+        let requests = server.received_requests().await.expect("requests");
+        let converged: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .filter(|body: &serde_json::Value| declared_names(body) == ["write_file"])
+            .collect();
+        assert!(
+            !converged.is_empty(),
+            "convergence must keep write_file only"
+        );
+        assert!(converged[0]["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.iter().any(|message| message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Write your deliverable now")))));
+    }
+
+    /// KT-967 — a native Ollama audit that keeps exploring successfully used
+    /// to hit its round ceiling with the file unwritten. Before the ceiling
+    /// only the writers must remain, and the write must go through.
+    #[tokio::test]
+    async fn audit_still_exploring_near_its_ceiling_gets_a_write_window() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wrote = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (turn_for_mock, wrote_for_mock) = (turn.clone(), wrote.clone());
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let call = |name: &str, path: String| {
+                    ResponseTemplate::new(200).set_body_string(format!(
+                        "{{\"message\":{{\"content\":\"\",\"tool_calls\":[{{\"function\":{{\"name\":\"{name}\",\"arguments\":{{\"path\":\"{path}\"}}}}}}]}},\"done\":false}}\n\
+                         {{\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}}\n"
+                    ))
+                };
+                if names == ["write_file"] {
+                    if !wrote_for_mock.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return call("write_file", "docs/AGENTS.md".into());
+                    }
+                } else if !names.is_empty() {
+                    // Always one more distinct, successful observation.
+                    let tool = if current % 2 == 0 { "read_file" } else { "search_text" };
+                    return call(tool, format!("src/file-{current}.js"));
+                }
+                ResponseTemplate::new(200).set_body_string(
+                    "{\"message\":{\"content\":\"AGENTS.md written.\"},\"done\":false}\n\
+                     {\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}\n",
+                )
+            })
+            .mount(&server)
+            .await;
+
+        struct ExploringAuditTools {
+            seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::agents::tools::ToolExecutor for ExploringAuditTools {
+            fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+                crate::agents::tools::ToolRunMode::Audit
+            }
+            fn catalogue(&self) -> Vec<serde_json::Value> {
+                ["read_file", "search_text", "write_file"]
+                    .into_iter()
+                    .map(|name| {
+                        serde_json::json!({"type": "function", "function": {
+                            "name": name, "description": name,
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                        }})
+                    })
+                    .collect()
+            }
+            async fn execute(
+                &self,
+                call: &crate::agents::tools::ToolCall,
+            ) -> crate::agents::tools::ToolOutcome {
+                let path = call.arguments["path"].as_str().unwrap_or_default();
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{path}", call.name));
+                crate::agents::tools::ToolOutcome {
+                    call: call.clone(),
+                    content: serde_json::json!({ "content": format!("ok {path}") }),
+                    ok: true,
+                }
+            }
+        }
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "fill docs/AGENTS.md",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(ExploringAuditTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let mut out = String::new();
+        while let Some(line) = process.next_line().await {
+            out.push_str(&line);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+
+        let calls = seen.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"write_file:docs/AGENTS.md".to_string()),
+            "the deliverable must be written before the ceiling: {} calls",
+            calls.len()
+        );
+        assert!(status.success(), "{out:?}");
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(captured.contains("audit write window opened"), "{captured}");
+    }
+
+    /// KT-967 — on run O4, qwen3.8 wrote docs/AGENTS.md seven times in its
+    /// write window and never stopped; the ceiling then failed a step whose
+    /// file was complete. A written deliverable ends the step at the ceiling.
+    #[tokio::test]
+    async fn audit_that_keeps_rewriting_its_deliverable_ends_at_the_ceiling_as_delivered() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let turn_for_mock = turn.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let (tool, path) = if names == ["write_file"] {
+                    ("write_file", format!("docs/AGENTS-{current}.md"))
+                } else {
+                    ("read_file", format!("missing-{current}.md"))
+                };
+                ResponseTemplate::new(200).set_body_string(format!(
+                    "{{\"message\":{{\"content\":\"\",\"tool_calls\":[{{\"function\":{{\"name\":\"{tool}\",\"arguments\":{{\"path\":\"{path}\"}}}}}}]}},\"done\":false}}\n\
+                     {{\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}}\n"
+                ))
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "fill docs/AGENTS.md",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(AuditStuckReaderTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        while process.next_line().await.is_some() {}
+        let status = process.child.wait().await.expect("lifeline");
+
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("write_file:")));
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(status.success(), "{captured}");
+        assert!(
+            captured.contains("wrote its audit deliverable and was stopped"),
+            "{captured}"
+        );
+    }
+
+    /// KT-967 — one failing path repeated verbatim is refused, but an audit
+    /// keeps `read_file` for the other files it still has to read.
+    #[tokio::test]
+    async fn audit_repeated_failing_read_keeps_read_file_declared() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let still_declared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (turn_for_mock, declared_for_mock) = (turn.clone(), still_declared.clone());
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let read = |path: &str| {
+                    ResponseTemplate::new(200).set_body_string(sse(&[&format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"r{current}","function":{{"name":"read_file","arguments":"{{\"path\":\"{path}\"}}"}}}}]}}}}]}}"#
+                    )]))
+                };
+                match current {
+                    0..=2 => read("missing.md"),
+                    3 => {
+                        declared_for_mock.store(
+                            declared_names(&body).iter().any(|name| name == "read_file"),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        read("package.json")
+                    }
+                    _ => ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"Read package.json."}}]}"#,
+                    ])),
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "read the manifest",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(AuditStuckReaderTools {
+                seen: seen.clone(),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        while process.next_line().await.is_some() {}
+        let status = process.child.wait().await.expect("lifeline");
+
+        assert!(status.success());
+        assert!(
+            still_declared.load(std::sync::atomic::Ordering::SeqCst),
+            "a refused repeat must not withdraw read_file from an audit"
+        );
+        assert!(seen
+            .lock()
+            .unwrap()
+            .contains(&"read_file:package.json".to_string()));
+    }
+
     /// MSG-09618d74 — varying arguments and alternating tool names used to
     /// evade exact-call deduplication until the 50-round hard cap. Repeated
     /// error-only rounds must now open the circuits and yield a bounded partial
@@ -7122,6 +8600,88 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn claude_code_without_full_access_allows_only_kronn_internal_tools() {
+        for context in ["", "mcp context"] {
+            let (_, _, args, _, _, _) = super::super::agent_command(
+                &AgentType::ClaudeCode,
+                "test prompt",
+                false,
+                context,
+                None,
+            );
+            assert!(
+                args.contains(&"--allowedTools=mcp__kronn-internal".to_string()),
+                "`--print` cannot ask for permission: Kronn's tools must be allowed. {args:?}"
+            );
+            // A space-separated value would let the variadic flag swallow the prompt.
+            assert!(!args.contains(&"--allowedTools".to_string()), "{args:?}");
+            assert_eq!(args.last().map(String::as_str), Some("test prompt"));
+        }
+    }
+
+    #[test]
+    fn a_discussion_without_project_gets_its_own_folder_not_the_system_temp_dir() {
+        let home = tempfile::tempdir().unwrap();
+
+        let dir = super::super::discussion_scratch_dir_under(
+            home.path(),
+            "5ad1d4d3-cd66-4699-8cd2-89706f29388e",
+        )
+        .expect("a plain discussion id gets a folder");
+        assert_eq!(
+            dir,
+            home.path()
+                .join(".kronn/discussions/5ad1d4d3-cd66-4699-8cd2-89706f29388e")
+        );
+        assert!(dir.is_dir());
+        assert_ne!(dir, std::env::temp_dir());
+        // Each discussion is kept apart from the others.
+        let other =
+            super::super::discussion_scratch_dir_under(home.path(), "other-discussion").unwrap();
+        assert_ne!(dir, other);
+
+        for unsafe_id in ["", "..", "../escape", "a/b", "a\\b", "id with space"] {
+            assert!(
+                super::super::discussion_scratch_dir_under(home.path(), unsafe_id).is_err(),
+                "{unsafe_id:?} must not become a path segment"
+            );
+        }
+    }
+
+    #[test]
+    fn discussion_directory_creation_failure_never_returns_a_shared_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".kronn"),
+            "a file blocks directory creation",
+        )
+        .unwrap();
+        let error = super::super::discussion_scratch_dir_under(home.path(), "test-discussion")
+            .expect_err("creation failure must stop the launch, not select the system temp dir");
+        assert!(error.contains("Cannot create the discussion working directory"));
+    }
+
+    #[test]
+    fn claude_task_worker_keeps_its_narrow_tool_allowance() {
+        let worktree = tempfile::tempdir().unwrap();
+        let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "test prompt",
+            false,
+            "worker context",
+            None,
+            None,
+            true,
+            Some(worktree.path()),
+            None,
+        );
+        assert!(
+            !args.contains(&"--allowedTools=mcp__kronn-internal".to_string()),
+            "{args:?}"
+        );
+    }
+
+    #[test]
     fn claude_task_worker_uses_fail_closed_workspace_sandbox() {
         let worktree = tempfile::tempdir().unwrap();
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
@@ -7836,6 +9396,166 @@ Suite de la réponse.";
         );
     }
 
+    /// Runs a stand-in binary named `program` through the real `try_spawn` and
+    /// returns what it saw of the auto-memory switch.
+    #[cfg(unix)]
+    async fn auto_memory_switch_seen_by(
+        program: &str,
+        discussion_id: Option<&str>,
+        worker: Option<&TaskWorkerBridgeContext>,
+        room_agent: Option<&RoomAgentBridgeContext>,
+        workflow_step: Option<&WorkflowStepBridgeContext>,
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(program);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s' \"${CLAUDE_CODE_DISABLE_AUTO_MEMORY-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let child = try_spawn(
+            path.to_str().unwrap(),
+            None,
+            &[],
+            dir.path(),
+            "ANTHROPIC_API_KEY",
+            None,
+            SpawnIo::Direct(None),
+            discussion_id,
+            worker,
+            room_agent,
+            workflow_step,
+        )
+        .expect("the stand-in binary starts");
+        let output = child.wait_with_output().await.expect("the child exits");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn worker_context() -> TaskWorkerBridgeContext {
+        TaskWorkerBridgeContext {
+            execution_id: "exec".into(),
+            discussion_id: "disc".into(),
+            agent_type: "ClaudeCode".into(),
+            dispatch_job_id: "job".into(),
+            source_message_id: "msg".into(),
+        }
+    }
+
+    fn room_agent_context() -> RoomAgentBridgeContext {
+        RoomAgentBridgeContext {
+            discussion_id: "disc".into(),
+            agent_type: "ClaudeCode".into(),
+            dispatch_job_id: "job".into(),
+            source_message_id: "msg".into(),
+        }
+    }
+
+    fn workflow_step_context() -> WorkflowStepBridgeContext {
+        WorkflowStepBridgeContext {
+            discussion_id: "disc".into(),
+            run_id: "run".into(),
+            step_key: "step".into(),
+            capability: "capability".into(),
+        }
+    }
+
+    /// The opt-in must never reach a step, a principal or a worker, so these
+    /// three hold whatever the operator's environment says.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn claude_step_principal_and_worker_launch_without_the_workstation_memory() {
+        let previous = std::env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
+        for opt_in in [None, Some("1")] {
+            match opt_in {
+                Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+                None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+            }
+            let worker = worker_context();
+            let principal = room_agent_context();
+            let step = workflow_step_context();
+            let roomless_step = auto_memory_switch_seen_by("claude", None, None, None, None).await;
+            let in_step =
+                auto_memory_switch_seen_by("claude", Some("disc"), None, None, Some(&step)).await;
+            let as_principal =
+                auto_memory_switch_seen_by("claude", Some("disc"), None, Some(&principal), None)
+                    .await;
+            let as_worker =
+                auto_memory_switch_seen_by("claude", Some("disc"), Some(&worker), None, None).await;
+            for (mode, seen) in [
+                ("roomless workflow step", roomless_step),
+                ("workflow step", in_step),
+                ("task_exec principal", as_principal),
+                ("task worker", as_worker),
+            ] {
+                assert_eq!(
+                    seen, "1",
+                    "{mode} (opt-in {opt_in:?}) must not load MEMORY.md"
+                );
+            }
+        }
+        match previous {
+            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn claude_native_discussion_drops_the_workstation_memory_unless_opted_in() {
+        let previous = std::env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
+        std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY");
+        assert_eq!(
+            auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
+            "1",
+            "off by default"
+        );
+        std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", "1");
+        assert_eq!(
+            auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
+            "unset",
+            "the operator keeps it for a native discussion"
+        );
+        match previous {
+            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_memory_switch_is_only_set_for_claude_code() {
+        // Another CLI inherits the parent's value untouched: Kronn neither sets
+        // nor clears it (a session launched by Kronn already carries it).
+        let inherited =
+            std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY").unwrap_or_else(|_| "unset".into());
+        assert_eq!(
+            auto_memory_switch_seen_by("codex", Some("disc"), None, None, None).await,
+            inherited
+        );
+    }
+
+    #[test]
+    fn the_opt_in_keeps_the_memory_for_a_bare_discussion_turn_only() {
+        let worker = worker_context();
+        let principal = room_agent_context();
+        let step = workflow_step_context();
+        let kept = |worker, principal, step| {
+            claude_auto_memory_kept(true, Some("d"), worker, principal, step)
+        };
+        assert!(kept(None, None, None));
+        assert!(!claude_auto_memory_kept(false, Some("d"), None, None, None));
+        assert!(!claude_auto_memory_kept(true, None, None, None, None));
+        assert!(!kept(Some(&worker), None, None));
+        assert!(!kept(None, Some(&principal), None));
+        assert!(!kept(None, None, Some(&step)));
+    }
+
     #[test]
     fn codex_task_worker_forces_workspace_write_despite_full_access() {
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
@@ -7910,6 +9630,40 @@ Suite de la réponse.";
             parsed["mcp_servers"].as_table().map(toml::Table::len),
             Some(1),
             "an isolated worker must inherit no user MCP server"
+        );
+    }
+
+    #[test]
+    fn codex_discussion_pins_a_complete_and_approved_kronn_entry() {
+        let overrides = super::super::render_codex_discussion_mcp_overrides(Some(
+            super::super::InternalMcpCommand::script("/tmp/disc-introspection-mcp.py".into()),
+        ));
+        let values: Vec<&str> = overrides
+            .chunks(2)
+            .map(|pair| {
+                assert_eq!(pair[0], "-c");
+                pair[1].as_str()
+            })
+            .collect();
+        // Dotted keys only: a `mcp_servers={…}` table would wipe the user's servers.
+        assert!(values
+            .iter()
+            .all(|v| v.starts_with("mcp_servers.kronn-internal.")));
+        assert!(values.contains(&"mcp_servers.kronn-internal.command=\"python3\""));
+        assert!(values
+            .iter()
+            .any(|v| v.starts_with("mcp_servers.kronn-internal.args=")
+                && v.contains("/tmp/disc-introspection-mcp.py")));
+        assert!(
+            values.contains(&"mcp_servers.kronn-internal.default_tools_approval_mode=\"approve\"")
+        );
+
+        // No bridge script: no approval key that would stand alone as an entry
+        // without transport and make Codex reject its configuration.
+        let without = super::super::render_codex_discussion_mcp_overrides(None);
+        assert!(
+            without.is_empty(),
+            "even env_vars alone creates an invalid MCP entry"
         );
     }
 
@@ -8985,7 +10739,9 @@ Suite de la réponse.";
             .mount(&server)
             .await;
 
-        let limit = ollama_model_ctx_limit(&server.uri(), "qwen3-slow-load").await;
+        let limit = ollama_model_profile(&server.uri(), "qwen3-slow-load")
+            .await
+            .and_then(|profile| profile.context_length());
 
         assert_eq!(
             limit,
@@ -9012,7 +10768,9 @@ Suite de la réponse.";
             .mount(&server)
             .await;
 
-        let limit = ollama_model_ctx_limit(&server.uri(), "qwen3-always-down").await;
+        let limit = ollama_model_profile(&server.uri(), "qwen3-always-down")
+            .await
+            .and_then(|profile| profile.context_length());
 
         assert_eq!(limit, None, "a persistent failure still falls back");
         assert_eq!(
@@ -9243,6 +11001,8 @@ Suite de la réponse.";
             OllamaModelProfile {
                 context_length: Some(262144),
                 storage_format: Some("safetensors".into()),
+                kv_shape: None,
+                vision: crate::agents::vision::ImageSupport::Unknown,
             }
         );
 
@@ -9251,6 +11011,8 @@ Suite de la réponse.";
             OllamaModelProfile {
                 context_length: None,
                 storage_format: None,
+                kv_shape: None,
+                vision: crate::agents::vision::ImageSupport::Unknown,
             }
         );
     }
@@ -9896,7 +11658,7 @@ Suite de la réponse.";
         assert_eq!(bin, "copilot");
         assert_eq!(npx, Some("@github/copilot"));
         assert_eq!(env_key, "GH_TOKEN");
-        assert_eq!(args, vec!["-p", "hello"]);
+        assert_eq!(args, vec!["--allow-tool=kronn-internal", "-p", "hello"]);
     }
 
     #[test]
@@ -9915,7 +11677,35 @@ Suite de la réponse.";
             "",
             Some("gpt-4o-mini"),
         );
-        assert_eq!(args, vec!["--model", "gpt-4o-mini", "-p", "hello"]);
+        assert_eq!(
+            args,
+            vec![
+                "--model",
+                "gpt-4o-mini",
+                "--allow-tool=kronn-internal",
+                "-p",
+                "hello"
+            ]
+        );
+    }
+
+    #[test]
+    fn copilot_task_worker_gets_no_kronn_internal_allowance() {
+        let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::CopilotCli,
+            "test prompt",
+            false,
+            "worker context",
+            None,
+            None,
+            true,
+            None,
+            None,
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--allow-tool")),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -10315,6 +12105,7 @@ sleep 3600
                 input_tokens: 3,
                 output_tokens: 5,
                 prompt_cache: PromptCacheUsage::default(),
+                ..AgentUsage::default()
             })),
             stderr_task: None,
             http_cancel: None,
@@ -12303,6 +14094,338 @@ sleep 3600
         assert_eq!(body["tools"].as_array().unwrap().len(), before);
     }
 
+    struct AuditMutationTools {
+        revision: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for AuditMutationTools {
+        fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+            crate::agents::tools::ToolRunMode::Audit
+        }
+
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            ["read_file", "write_file"].into_iter().map(|name| serde_json::json!({
+                "type": "function", "function": {
+                    "name": name, "description": name,
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                }
+            })).collect()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            if call.name == "write_file" {
+                self.revision
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                ok: true,
+                content: serde_json::json!({"revision": self.revision.load(std::sync::atomic::Ordering::SeqCst)}),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_reads_new_content_after_a_write_even_when_reader_was_withdrawn() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for initial_reads in [1, 3] {
+            let server = MockServer::start().await;
+            let round = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = Arc::new(Mutex::new(None));
+            let captured = observed.clone();
+            Mock::given(method("POST")).and(path("/v1/chat/completions"))
+                .respond_with(move |request: &wiremock::Request| {
+                    let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    let final_read_id = format!("c{}", initial_reads + 3);
+                    if let Some(message) = body["messages"].as_array().unwrap().iter()
+                        .find(|m| m["role"] == "tool" && m["tool_call_id"] == final_read_id) {
+                        *captured.lock().unwrap() = Some(serde_json::from_str::<serde_json::Value>(message["content"].as_str().unwrap()).unwrap());
+                    }
+                    let tool = if n < initial_reads || n == initial_reads + 1 || n == initial_reads + 3 {
+                        Some("read_file")
+                    } else if n == initial_reads || n == initial_reads + 2 {
+                        Some("write_file")
+                    } else { None };
+                    let tool = tool.filter(|name| body["tools"].as_array().is_some_and(|tools|
+                        tools.iter().any(|t| t["function"]["name"] == *name)));
+                    let frame = match tool {
+                        Some(name) => serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                            "index":0,"id":format!("c{n}"),"function":{"name":name,"arguments":"{\"path\":\"docs/result.md\"}"}
+                        }]}}]}),
+                        None => serde_json::json!({"choices":[{"index":0,"delta":{"content":"done"}}]}),
+                    };
+                    ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string()]))
+                }).mount(&server).await;
+            let executor = Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut process = start_ollama_http(
+                &AgentType::LiteLlm,
+                "write then verify the audit document",
+                "",
+                "test-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(executor.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(
+                process.reported_usage_counters(),
+                None,
+                "missing provider usage stays unknown"
+            );
+            assert_eq!(
+                executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "an identical write must remain cached, even after a read refresh"
+            );
+            let observed = observed
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("post-write read reached the provider");
+            let result = observed.get("result").unwrap_or(&observed);
+            assert_eq!(
+                result["revision"], 1,
+                "fresh content after {initial_reads} initial reads: {observed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_structured_usage_sums_turns_and_preserves_unknown_cache() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let round = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let frame = if n == 0 {
+                    serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                        "index":0,"id":"r1","function":{"name":"read_file","arguments":"{\"path\":\"docs/result.md\"}"}
+                    }]}}]})
+                } else { serde_json::json!({"choices":[{"index":0,"delta":{"content":"done"}}]}) };
+                // Repeated cumulative frames for one response count only once.
+                let usage = if n == 0 {
+                    serde_json::json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":40}}})
+                } else { serde_json::json!({"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":7}}) };
+                ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string(), &usage.to_string(), &usage.to_string()]))
+            }).expect(2).mount(&server).await;
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "read the audit document",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+        let usage = process
+            .reported_usage_counters()
+            .expect("HTTP usage must reach audit consumers");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (300, 12));
+        assert_eq!(process.reported_token_usage(), Some(312));
+        assert_eq!(usage.prompt_cache.cached_prompt_tokens, Some(40));
+        assert_eq!(usage.prompt_cache.cache_write_prompt_tokens, None);
+        // KT-994 — the card shows what an HTTP agent is doing, as for a CLI.
+        assert_eq!(
+            process.tool_activity_probe().read(),
+            Some(("read_file · docs/result.md".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn http_audit_reader_restoration_preserves_call_ceilings_and_error_circuits() {
+        use crate::agents::tools::{CeilingAllowance, ToolRunMode};
+        let withdrawn = ["read_file", "git_status", "git_diff", "api_call"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let circuits = ["git_status"].into_iter().map(str::to_string).collect();
+        let counts = std::collections::HashMap::from([("read_file".into(), MAX_READ_FILE_CALLS)]);
+        let restored = observation_readers_to_restore(
+            &withdrawn,
+            &circuits,
+            &counts,
+            ToolRunMode::General,
+            &CeilingAllowance::default(),
+            is_workspace_observation_tool,
+        );
+        assert_eq!(
+            restored,
+            vec!["git_diff"],
+            "only a repetition-withdrawn reader below its ceiling returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_audit_writes_many_findings_and_index_on_both_wires() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for agent in [AgentType::LiteLlm, AgentType::Ollama] {
+            let server = MockServer::start().await;
+            let openai = agent == AgentType::LiteLlm;
+            let round = std::sync::atomic::AtomicUsize::new(0);
+            Mock::given(method("POST"))
+                .and(path(if openai {
+                    "/v1/chat/completions"
+                } else {
+                    "/api/chat"
+                }))
+                .respond_with(move |_: &wiremock::Request| {
+                    let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let arguments = serde_json::json!({"path": if n == 16 {
+                        "docs/index.md".to_string()
+                    } else { format!("docs/TD-{n}.md") }});
+                    let call = serde_json::json!({"index":0,"id":format!("w{n}"),"function":{
+                        "name":"write_file", "arguments": if openai {
+                            serde_json::Value::String(arguments.to_string())
+                        } else { arguments }
+                    }});
+                    let delta = if n < 17 {
+                        serde_json::json!({"tool_calls":[call]})
+                    } else {
+                        serde_json::json!({"content":"done"})
+                    };
+                    let wire = if openai {
+                        sse(&[
+                            &serde_json::json!({"choices":[{"index":0,"delta":delta}]}).to_string()
+                        ])
+                    } else {
+                        format!(
+                            "{}\n{}\n",
+                            serde_json::json!({"message":delta,"done":false}),
+                            serde_json::json!({"done":true})
+                        )
+                    };
+                    ResponseTemplate::new(200).set_body_string(wire)
+                })
+                .mount(&server)
+                .await;
+            let executor = Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut process = start_ollama_http(
+                &agent,
+                "write sixteen findings then their index",
+                "",
+                "test-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(executor.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(
+                executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+                17,
+                "{agent:?}: every finding and the final index must execute"
+            );
+            assert!(parse_ceiling_report(&process.captured_stderr()).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn http_audit_write_budget_stays_bounded_and_reports_its_cause() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let round = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let delta = if n == 0 {
+                    let calls: Vec<_> = (0..=MAX_AUDIT_WRITE_CALLS).map(|i|
+                        serde_json::json!({"index":i,"id":format!("w{i}"),"function":{
+                            "name":"write_file","arguments":serde_json::json!({"path":format!("docs/TD-{i}.md")}).to_string()
+                        }})).collect();
+                    serde_json::json!({"tool_calls":calls})
+                } else { serde_json::json!({"content":"Partial output; index still missing"}) };
+                ResponseTemplate::new(200).set_body_string(sse(&[
+                    &serde_json::json!({"choices":[{"index":0,"delta":delta}]}).to_string()
+                ]))
+            }).mount(&server).await;
+        let executor = Arc::new(AuditMutationTools {
+            revision: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "write findings",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(executor.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+        assert_eq!(
+            executor.revision.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_AUDIT_WRITE_CALLS
+        );
+        let report = parse_ceiling_report(&process.captured_stderr())
+            .expect("audit telemetry without a human grant");
+        assert_eq!(report.tools[0].tool, "write_file");
+        assert_eq!(report.tools[0].limit, MAX_AUDIT_WRITE_CALLS);
+        assert_eq!(report.tools[0].refused, 1);
+        assert_eq!(
+            max_calls_for_tool("write_file", crate::agents::tools::ToolRunMode::General),
+            12
+        );
+        assert_eq!(
+            max_calls_for_tool("write_file", crate::agents::tools::ToolRunMode::Worker),
+            12
+        );
+    }
+
     /// Un exécuteur de plan minimal : `task_get` rend un numéro de révision,
     /// `task_update_dod` l'incrémente. Assez pour prouver qu'une lecture
     /// d'après-mutation rapporte bien la nouvelle valeur.
@@ -12470,6 +14593,91 @@ sleep 3600
         assert_eq!(
             livree["revision"], 1,
             "le message d'outil c4 renvoyé au modèle porte la révision d'après-mutation: {livree}"
+        );
+    }
+}
+
+// ─── #223: text blocks never share a line ──────────────────────────────────
+#[cfg(test)]
+mod text_block_tests {
+    use crate::agents::runner::*;
+
+    /// Accumulates a Claude stream the way the discussion loop does.
+    fn joined_stream(lines: &[&str]) -> String {
+        let mut joiner = TextBlockJoiner::default();
+        let mut out = String::new();
+        for line in lines {
+            match parse_claude_stream_line(line) {
+                StreamJsonEvent::Text(text) => out.push_str(&joiner.join(text)),
+                StreamJsonEvent::ToolEnd => joiner.block_ended(),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn text_delta(text: &str) -> String {
+        serde_json::json!({
+        "type": "stream_event",
+        "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}
+    })
+    .to_string()
+    }
+
+    const BLOCK_STOP: &str =
+        r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
+
+    #[test]
+    fn a_question_fence_closed_at_the_end_of_a_block_stays_closed_when_the_next_turn_follows() {
+        // Issue #223: the second turn (relaunched by a Stop hook) was glued after
+        // the closing fence, which then never closed and the card was refused.
+        let first = text_delta("Une question :\n```kronn-question\n{\"version\":1}\n```");
+        let second = text_delta("Je ne modifie pas `docs/css-style-guide.md`.");
+        let out = joined_stream(&[&first, BLOCK_STOP, &second]);
+        assert_eq!(
+        out,
+        "Une question :\n```kronn-question\n{\"version\":1}\n```\n\nJe ne modifie pas `docs/css-style-guide.md`."
+    );
+    }
+
+    #[test]
+    fn deltas_inside_one_block_are_joined_as_they_come() {
+        let out = joined_stream(&[&text_delta("Hel"), &text_delta("lo")]);
+        assert_eq!(out, "Hello");
+    }
+
+    #[test]
+    fn a_new_block_adds_only_the_newlines_that_are_missing() {
+        assert_eq!(
+            joined_stream(&[&text_delta("a\n"), BLOCK_STOP, &text_delta("b")]),
+            "a\n\nb"
+        );
+        assert_eq!(
+            joined_stream(&[&text_delta("a\n\n"), BLOCK_STOP, &text_delta("b")]),
+            "a\n\nb"
+        );
+        assert_eq!(
+            joined_stream(&[&text_delta("a"), BLOCK_STOP, &text_delta("\nb")]),
+            "a\n\nb"
+        );
+        assert_eq!(
+            joined_stream(&[
+                &text_delta("a"),
+                &text_delta("\n"),
+                BLOCK_STOP,
+                &text_delta("b")
+            ]),
+            "a\n\nb",
+            "a newline-only delta still counts as the end of the text"
+        );
+    }
+
+    #[test]
+    fn a_block_that_ends_before_any_text_adds_no_separator() {
+        // A tool call first, then the answer: nothing precedes it.
+        assert_eq!(
+            joined_stream(&[BLOCK_STOP, &text_delta("Réponse")]),
+            "Réponse"
         );
     }
 }

@@ -283,11 +283,16 @@ impl TaskExecutionStatus {
         }
         match self {
             Pending => matches!(to, Provisioning),
-            Provisioning => matches!(to, Working | Blocked | Failed),
+            // `Approved` is the KT-862 re-validation: the principal takes back an
+            // integration send-back whose failure did not come from the delivery.
+            // The move is only accepted while the approval is restorable — see
+            // `db::orchestration::restorable_approval`, enforced by the transition
+            // primitive, not by this coarse structural gate.
+            Provisioning => matches!(to, Working | Blocked | Failed | Approved),
             // Structural gate only; the resume target is narrowed to
             // `blocked_from_status` by the checkpoint guard.
             Blocked => matches!(to, Provisioning | Applying),
-            Working => matches!(to, AwaitingReview),
+            Working => matches!(to, AwaitingReview | Approved),
             AwaitingReview => matches!(to, Approved | ChangesRequested),
             Approved => matches!(to, Integrating),
             // `Provisioning` is the KT-319 rework re-offer path: a CLI worker must re-accept
@@ -1235,6 +1240,11 @@ pub struct TaskWorkerCatalogue {
 pub struct ProviderQuotaState {
     pub provider: AgentType,
     pub blocked: bool,
+    /// UTC instant (RFC 3339) at which the provider's own refusal said the
+    /// quota resets, when it said so. Shown as "rearmable at HH:MM"; nothing
+    /// re-arms automatically on it (KT-593).
+    #[serde(default)]
+    pub reset_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1378,10 +1388,19 @@ pub struct TaskExecutionHttpUsage {
 #[ts(export)]
 pub struct TaskExecutionUsage {
     pub duration_ms: i64,
+    /// Total reported by the agents, cache reads included for Codex.
     pub in_app_tokens: i64,
     pub in_app_messages: i64,
+    /// `in_app_tokens` split into real input, cache and output — for the replies
+    /// that reported those counters only (KT-894). `None` when none did.
+    #[serde(default)]
+    pub in_app_breakdown: Option<crate::db::message_usage::InAppTokenBreakdown>,
+    /// `None` is unknown, never free.
     pub in_app_cost_usd: Option<f64>,
     pub in_app_cost_is_partial: bool,
+    /// Why replies have no cost, when they do not (see `DiscussionTokenCost`).
+    #[serde(default)]
+    pub in_app_cost_unknown_reasons: Vec<String>,
     pub cli_traffic_tokens: Option<i64>,
     pub cli_billable_tokens: Option<i64>,
     pub cli_sessions: i64,
@@ -1465,6 +1484,27 @@ pub struct TaskExecutionAttemptDetail {
     pub review: Option<ReviewDecisionV1>,
 }
 
+/// One CLI session of a task worker: the process one dispatch started, for one
+/// attempt. `session_id` is what the CLI reported on its init line, which is the
+/// name of its transcript (KT-911).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskExecutionWorkerSession {
+    /// The semantic worker attempt (`0` is the first; each rework adds one).
+    pub attempt_no: u32,
+    /// The dispatch that launched this process. A retried dispatch lists one
+    /// session per process it started.
+    pub dispatch_job_id: String,
+    pub agent_type: String,
+    pub session_id: String,
+    /// `None` is unknown, never free — `cost_unknown_reason` says why. Also
+    /// `None` while the session is still running.
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_unknown_reason: Option<String>,
+    pub started_at: DateTime<Utc>,
+}
+
 /// One-call projection for the execution detail UI (KT-323). Durable state stays
 /// sourced from the orchestration aggregate; task DoD, manifests, validations
 /// and telemetry are joined here so clients never reconstruct lineage from chat.
@@ -1475,6 +1515,10 @@ pub struct TaskExecutionDetail {
     pub target_branch: Option<String>,
     pub definition_of_done: Vec<PlanningDodItem>,
     pub attempts: Vec<TaskExecutionAttemptDetail>,
+    /// Every CLI session the worker ran, attempts and relaunches included, oldest
+    /// first (KT-911). Empty for a worker with no CLI session (HTTP providers).
+    #[serde(default)]
+    pub worker_sessions: Vec<TaskExecutionWorkerSession>,
     pub validation_runs: Vec<TaskExecutionValidationRun>,
     pub recovery: Option<TaskExecutionRecovery>,
     pub usage: TaskExecutionUsage,

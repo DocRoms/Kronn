@@ -15,6 +15,7 @@ vi.mock('../../lib/api', () => ({
     createConfig: vi.fn(),
     updateConfig: vi.fn(),
     probeConfig: vi.fn(),
+    testAll: vi.fn(),
     updateCustomSpec: vi.fn(),
     cleanupOrphanEnv: vi.fn(),
     deleteConfig: vi.fn(),
@@ -40,9 +41,9 @@ import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, 
 // Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
 // scroll animation) from leaking across tests and causing timeout issues.
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.useFakeTimers();
   localStorage.clear();
-  vi.mocked(mcpsApi.deleteConfig).mockClear();
   vi.stubGlobal('confirm', () => true);
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: false, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
 });
@@ -80,6 +81,16 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   host_sync: opts?.host_sync ?? 'None',
   preferred_interface: opts?.preferred_interface ?? 'mcp',
   registry_drift: opts?.registry_drift,
+  // KT-828 — these mirror what the backend computes once
+  // (`registry::effective_plugin_kind` / `available_plugin_interfaces` /
+  // `credential_source`); tests that exercise a specific classification
+  // override them explicitly instead of relying on a derivation from
+  // `mcpRegistry`/`mcpOverview.servers` the components no longer do.
+  interfaces: opts?.interfaces ?? ['mcp'],
+  effective_kind: opts?.effective_kind ?? 'mcp',
+  effective_preferred_interface: opts?.effective_preferred_interface ?? opts?.preferred_interface ?? 'mcp',
+  credential_source: opts?.credential_source ?? 'stored',
+  last_probes: opts?.last_probes ?? [],
 });
 
 const makeProject = (id: string, name: string): Project => ({
@@ -101,13 +112,30 @@ const getAddPluginButton = () => {
   if (!button) throw new Error('Add plugin button not found');
   return button;
 };
+const openPlugin = (label: string) => {
+  fireEvent.click(screen.getAllByRole('button', { name: `${label} — Voir les détails` })[0]);
+};
+const openFilters = () => {
+  const trigger = screen.getByRole('button', { name: 'Filtrer les plugins' });
+  if (trigger.getAttribute('aria-expanded') !== 'true') fireEvent.click(trigger);
+};
+const setFilter = (name: string, value: string) => {
+  openFilters();
+  fireEvent.change(screen.getByRole('combobox', { name }), { target: { value } });
+};
+const listedConfigIds = (container: HTMLElement) => Array.from(
+  container.querySelectorAll<HTMLElement>('.mcp-sidebar-plugin-row'),
+  row => row.dataset.configId,
+);
 
 describe('McpPage', () => {
   it('keeps the built-in plugin visible when no configurable plugin exists', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.getByTestId('mcp-kronn-internal-card')).toHaveTextContent('Intégré');
-    expect(document.body.textContent).not.toContain('Aucun plugin');
+    // The sidebar's own empty-filter message (KT-855: Plugins now has its own
+    // "mcp.filter.empty" copy, distinct from Automation's) is expected here —
+    // the static built-in card below the shell stays the one thing to check.
   });
 
   it('flags an endpoint that keeps failing, and says which kind of fault it is', async () => {
@@ -163,8 +191,8 @@ describe('McpPage', () => {
     ];
     const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    expect(screen.getByText('GitHub')).toBeTruthy();
-    expect(screen.getByText('Slack')).toBeTruthy();
+    expect(screen.getAllByText('GitHub')).not.toHaveLength(0);
+    expect(screen.getAllByText('Slack')).not.toHaveLength(0);
   });
 
   it('renders config labels as cards', () => {
@@ -180,7 +208,7 @@ describe('McpPage', () => {
     expect(container.textContent).toContain('GitHub Secondary');
   });
 
-  it('uses the shared detail placeholder until a plugin is selected', () => {
+  it('shows the project access overview until a plugin is selected', () => {
     const config = makeConfig('c1', 'github', 'GitHub');
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
@@ -189,8 +217,106 @@ describe('McpPage', () => {
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    expect(screen.getByText('Sélectionnez un plugin pour afficher ses détails.'))
-      .toHaveClass('collection-shell-detail-empty-hint');
+    expect(screen.getByRole('heading', { name: 'Ce que reçoivent les agents de tous les projets' }))
+      .toBeInTheDocument();
+    expect(screen.getByText('Chargés dans l’agent')).toBeInTheDocument();
+  });
+
+  it('shows project counters and per-access health with the last test timestamp', () => {
+    const config = makeConfig('c1', 'github', 'GitHub', {
+      label: 'GitHub hybrid',
+      include_general: false,
+      project_ids: ['p1'],
+      project_names: ['Alpha'],
+      interfaces: ['mcp', 'api', 'cli'],
+      effective_kind: 'hybrid',
+      effective_preferred_interface: 'api',
+      last_probes: [
+        { access: 'mcp', ok: true, code: 'ok', summary: 'raw backend text', tested_at: '2026-09-27T12:00:00Z' },
+        { access: 'api', ok: false, code: 'unauthorized', summary: 'raw backend text', tested_at: '2026-09-27T12:01:00Z' },
+      ],
+    });
+    const other = makeConfig('c2', 'slack', 'Slack', {
+      include_general: false, project_ids: ['p2'], project_names: ['Beta'],
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')], configs: [config, other], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const { container } = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    setFilter('Projet', 'p1');
+    expect(listedConfigIds(container)).toEqual(['c1']);
+    expect(screen.getByRole('heading', { name: 'Ce que reçoivent les agents de Alpha' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('1 plugins');
+    expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('1 en erreur');
+    expect(container.querySelector('.mcp-access-lane[data-access="mcp"]')).toHaveTextContent('Accès vérifié.');
+    expect(container.querySelector('.mcp-access-lane[data-access="api"]')).toHaveTextContent('L’authentification a été refusée.');
+    expect(container.querySelector('.mcp-access-lane[data-access="api"] time')).toHaveAttribute('datetime', '2026-09-27T12:01:00Z');
+    expect(container.querySelector('.mcp-access-lane[data-access="cli"]')).toHaveTextContent('Cet accès n’a pas encore été testé.');
+    expect(screen.getByText('Utilisé par l’agent')).toBeInTheDocument();
+    expect(container).not.toHaveTextContent('raw backend text');
+  });
+
+  it('tests only the selected project, and uses the bulk endpoint for all plugins', async () => {
+    const alpha = makeConfig('alpha-config', 'alpha-server', 'Alpha plugin', {
+      include_general: false, project_ids: ['p1'], project_names: ['Alpha'],
+    });
+    const beta = makeConfig('beta-config', 'beta-server', 'Beta plugin', {
+      include_general: false, project_ids: ['p2'], project_names: ['Beta'],
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('alpha-server', 'Alpha plugin'), makeServer('beta-server', 'Beta plugin')],
+      configs: [alpha, beta], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    vi.mocked(mcpsApi.probeConfig).mockResolvedValue({
+      server_id: 'alpha-server', ready: true, checks: [{ id: 'mcp', label: 'MCP', ok: true, required: true, detail: 'raw', code: 'ok' }],
+    });
+    vi.mocked(mcpsApi.testAll).mockResolvedValue({ results: [] });
+    wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
+
+    setFilter('Projet', 'p1');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester le projet');
+    await act(async () => { fireEvent.click(screen.getByTestId('mcp-test-project')); });
+    expect(mcpsApi.probeConfig).toHaveBeenCalledTimes(1);
+    expect(mcpsApi.probeConfig).toHaveBeenCalledWith('alpha-config');
+
+    setFilter('Projet', '__all__');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
+    await act(async () => { fireEvent.click(screen.getByTestId('mcp-test-project')); });
+    expect(mcpsApi.testAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('previews a rescan before applying it', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    vi.mocked(mcpsApi.refresh)
+      .mockResolvedValueOnce({ dry_run: true, configs_created: 2, configs_merged: 1, configs_deleted: 0, overview })
+      .mockResolvedValueOnce({ dry_run: false, configs_created: 2, configs_merged: 1, configs_deleted: 0, projects_rewritten: 1, overview });
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    await act(async () => { fireEvent.click(screen.getByTestId('mcp-rescan-preview-button')); });
+    expect(mcpsApi.refresh).toHaveBeenCalledWith(true);
+    expect(screen.getByRole('region', { name: 'Aperçu du rescan' })).toHaveTextContent('2');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Appliquer le rescan' })); });
+    expect(mcpsApi.refresh).toHaveBeenLastCalledWith(false);
+  });
+
+  it('surfaces a label save failure and keeps the editor open', async () => {
+    const config = makeConfig('c1', 'github', 'GitHub');
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    vi.mocked(mcpsApi.updateConfig).mockRejectedValueOnce(new Error('save unavailable'));
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    openPlugin('GitHub');
+    fireEvent.click(screen.getByRole('heading', { name: /GitHub/ }));
+    const input = screen.getByDisplayValue('GitHub');
+    fireEvent.change(input, { target: { value: 'GitHub renamed' } });
+    await act(async () => { fireEvent.blur(input); });
+
+    expect(screen.getByText(/save unavailable/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue('GitHub renamed')).toBeInTheDocument();
   });
 
   it('covers the narrow rail, empty overview, selection, and open menu on the real Plugins page', async () => {
@@ -301,12 +427,14 @@ describe('McpPage', () => {
     expect(within(footer).getByText('/')).toBeInTheDocument();
   });
 
-  it('orders Favorites before the persistent canonical scope tree without a Recent section', () => {
+  it('lists every plugin once, Favorites first, with no project tree', () => {
     localStorage.setItem('kronn:collection-favorites:plugins', JSON.stringify(['general-config']));
     const configs = [
       makeConfig('global-config', 'global', 'Global plugin', {
         is_global: true,
         include_general: false,
+        project_ids: ['p1', 'p2', 'p3'],
+        project_names: ['Alpha', 'Beta', 'Gamma'],
       }),
       makeConfig('general-config', 'general', 'General plugin'),
       makeConfig('shared-config', 'shared', 'Shared plugin', {
@@ -323,41 +451,166 @@ describe('McpPage', () => {
       configs,
       customized_contexts: [], incompatibilities: [], incomplete_configs: [],
     };
-    const projects = [makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')];
+    const projects = [makeProject('p1', 'Alpha'), makeProject('p2', 'Beta'), makeProject('p3', 'Gamma')];
     const first = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     const list = first.container.querySelector('.mcp-sidebar-items') as HTMLElement;
     const topSections = list.querySelectorAll(':scope > .disc-sidebar-section');
     expect(topSections).toHaveLength(2);
     expect(topSections[0]).toHaveClass('disc-sidebar-favorites');
-    expect(topSections[1]).toHaveClass('disc-sidebar-projects');
+    expect(topSections[1]).toHaveClass('mcp-sidebar-all');
     expect(within(topSections[0] as HTMLElement).getByRole('button', { name: 'General plugin — Voir les détails' })).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'General plugin — Voir les détails' })).toHaveLength(2);
-    expect(screen.getAllByRole('button', { name: 'Shared plugin — Voir les détails' })).toHaveLength(2);
-    expect(screen.queryByRole('button', { name: /Récents/ })).toBeNull();
 
-    const scopeOrder = [...list.querySelectorAll<HTMLElement>('[data-mcp-group]')]
-      .map(group => group.dataset.mcpGroup);
-    expect(scopeOrder).toEqual(['global', 'general', 'project:p1', 'project:p2', 'unassigned']);
-    expect(within(list.querySelector('[data-mcp-group="global"]') as HTMLElement).getByRole('button', { name: 'Global plugin — Voir les détails' })).toBeInTheDocument();
-    expect(within(list.querySelector('[data-mcp-group="unassigned"]') as HTMLElement).getByRole('button', { name: 'Orphan plugin — Voir les détails' })).toBeInTheDocument();
+    // A global plugin visible to three projects is still one row, and so is every other plugin.
+    for (const label of ['Global plugin', 'General plugin', 'Shared plugin', 'Orphan plugin']) {
+      expect(screen.getAllByRole('button', { name: `${label} — Voir les détails` })).toHaveLength(1);
+    }
+    expect(listedConfigIds(first.container)).toHaveLength(4);
+    const globalRow = list.querySelector('[data-config-id="global-config"]') as HTMLElement;
+    expect(within(globalRow).getByText('Tous les projets · 3 projets')).toBeInTheDocument();
 
-    const alphaGroup = list.querySelector('[data-mcp-group="project:p1"]') as HTMLElement;
-    const alphaHeader = alphaGroup.querySelector(':scope > button') as HTMLButtonElement;
-    fireEvent.click(alphaHeader);
-    expect(alphaHeader).toHaveAttribute('aria-expanded', 'false');
-    expect(within(alphaGroup).queryByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeNull();
-    expect(localStorage.getItem('kronn:mcpCollapsedGroups')).toContain('project:p1');
+    // No per-project tree, group or selector any more.
+    expect(list.querySelector('.disc-sidebar-projects, .disc-project-tree')).toBeNull();
+    expect(document.querySelector('.mcp-project-selector')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Sans projet/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Alpha/ })).toBeNull();
+
+    const allHeader = screen.getByRole('button', { name: /Tous les plugins/ });
+    fireEvent.click(allHeader);
+    expect(allHeader).toHaveAttribute('aria-expanded', 'false');
+    expect(within(topSections[1] as HTMLElement).queryByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeNull();
+    expect(JSON.parse(localStorage.getItem('kronn:mcpCollapsedGroups') ?? '[]')).toEqual(['all']);
 
     first.unmount();
-    const second = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    const restoredAlphaGroup = second.container.querySelector('[data-mcp-group="project:p1"]') as HTMLElement;
-    expect(restoredAlphaGroup.querySelector(':scope > button')).toHaveAttribute('aria-expanded', 'false');
+    wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const restoredHeader = screen.getByRole('button', { name: /Tous les plugins/ });
+    expect(restoredHeader).toHaveAttribute('aria-expanded', 'false');
     fireEvent.change(screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' }), {
       target: { value: 'Shared plugin' },
     });
-    expect(restoredAlphaGroup.querySelector(':scope > button')).toHaveAttribute('aria-expanded', 'true');
-    expect(within(restoredAlphaGroup).getByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeInTheDocument();
+    expect(restoredHeader).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeInTheDocument();
+  });
+
+  it('keeps favorite and recently tested plugins out of the full list', () => {
+    localStorage.setItem('kronn:collection-favorites:plugins', JSON.stringify(['fav-config']));
+    const probe = [{ access: 'mcp' as const, ok: true, code: 'ok' as const, summary: '', tested_at: '2026-09-27T12:00:00Z' }];
+    const configs = [
+      makeConfig('fav-config', 'fav', 'Fav plugin', { last_probes: probe }),
+      makeConfig('tested-config', 'tested', 'Tested plugin', { last_probes: probe }),
+      makeConfig('plain-config', 'plain', 'Plain plugin'),
+    ];
+    const overview: McpOverview = {
+      servers: configs.map(config => makeServer(config.server_id, config.server_name)),
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    const idsIn = (selector: string) => Array.from(
+      container.querySelectorAll<HTMLElement>(`${selector} .mcp-sidebar-plugin-row`),
+      row => row.dataset.configId,
+    );
+    expect(idsIn('.disc-sidebar-favorites')).toEqual(['fav-config']);
+    expect(idsIn('.mcp-sidebar-recent')).toEqual(['tested-config']);
+    expect(idsIn('.mcp-sidebar-all')).toEqual(['plain-config']);
+    expect(listedConfigIds(container)).toHaveLength(3);
+  });
+
+  it('filters by project, health and local sync, and clears every filter at once', () => {
+    const alpha = makeConfig('alpha-config', 'alpha', 'Alpha plugin', {
+      include_general: false, project_ids: ['p1'], project_names: ['Alpha'],
+      last_probes: [{ access: 'mcp', ok: true, code: 'ok', summary: '', tested_at: '2026-09-27T12:00:00Z' }],
+    });
+    const beta = makeConfig('beta-config', 'beta', 'Beta plugin', {
+      include_general: false, project_ids: ['p2'], project_names: ['Beta'], secrets_broken: true,
+    });
+    const shared = makeConfig('shared-config', 'shared', 'Shared plugin', {
+      is_global: true, include_general: false, host_sync: 'GlobalOnly',
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('alpha', 'Alpha plugin'), makeServer('beta', 'Beta plugin'), makeServer('shared', 'Shared plugin')],
+      configs: [alpha, beta, shared], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const { container } = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const ids = () => listedConfigIds(container).sort();
+    const trigger = screen.getByRole('button', { name: 'Filtrer les plugins' });
+    const panelClear = () => within(document.getElementById('mcp-filter-options') as HTMLElement)
+      .queryByRole('button', { name: 'Effacer les filtres' });
+
+    expect(ids()).toEqual(['alpha-config', 'beta-config', 'shared-config']);
+    expect(trigger).toHaveAttribute('data-active', 'false');
+
+    // The panel offers Type, Project, Health and Local sync.
+    openFilters();
+    expect(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' })).toBeInTheDocument();
+    const projectOptions = within(screen.getByRole('combobox', { name: 'Projet' })).getAllByRole('option');
+    expect(projectOptions.map(option => option.textContent)).toEqual(['Tous les projets', 'Sans projet', 'Alpha', 'Beta']);
+    expect(within(screen.getByRole('combobox', { name: 'Santé' })).getAllByRole('option')).toHaveLength(4);
+    expect(screen.getByRole('combobox', { name: 'Synchro locale' })).toBeInTheDocument();
+    expect(panelClear()).toBeNull();
+
+    // Project: restricts the list, the summary and the test button.
+    setFilter('Projet', 'p2');
+    expect(ids()).toEqual(['beta-config', 'shared-config']);
+    expect(screen.getByRole('heading', { name: 'Ce que reçoivent les agents de Beta' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('2 plugins');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester le projet');
+    expect(localStorage.getItem('kronn:mcpSelectedProject')).toBe('p2');
+
+    // Health, then local sync, narrow it down further.
+    setFilter('Santé', 'error');
+    expect(ids()).toEqual(['beta-config']);
+    expect(screen.getByLabelText('Résumé de santé des plugins')).toHaveTextContent('1 en erreur');
+    setFilter('Synchro locale', 'local');
+    expect(ids()).toEqual([]);
+    expect(screen.getByText('Aucun plugin ne correspond à ce filtre.')).toBeInTheDocument();
+
+    // The filter icon stays active while the panel is closed.
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(trigger).toHaveAttribute('data-active', 'true');
+
+    // Clearing from the empty state resets every filter.
+    fireEvent.click(screen.getByRole('button', { name: 'Effacer les filtres' }));
+    expect(ids()).toEqual(['alpha-config', 'beta-config', 'shared-config']);
+    expect(trigger).toHaveAttribute('data-active', 'false');
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
+    expect(localStorage.getItem('kronn:mcpSelectedProject')).toBe('__all__');
+    openFilters();
+    expect(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' })).toHaveValue('all');
+    expect(screen.getByRole('combobox', { name: 'Projet' })).toHaveValue('__all__');
+    expect(screen.getByRole('combobox', { name: 'Santé' })).toHaveValue('all');
+    expect(screen.getByRole('combobox', { name: 'Synchro locale' })).toHaveValue('all');
+
+    // ... and so does the panel's own button.
+    setFilter('Projet', 'p1');
+    setFilter('Santé', 'ok');
+    expect(ids()).toEqual(['alpha-config']);
+    fireEvent.click(panelClear() as HTMLElement);
+    expect(ids()).toEqual(['alpha-config', 'beta-config', 'shared-config']);
+    expect(screen.getByRole('combobox', { name: 'Projet' })).toHaveValue('__all__');
+    expect(screen.getByRole('combobox', { name: 'Santé' })).toHaveValue('all');
+    expect(panelClear()).toBeNull();
+  });
+
+  it('falls back to all projects when the filtered project no longer exists', () => {
+    const configs = [
+      makeConfig('alpha-config', 'alpha', 'Alpha plugin', { include_general: false, project_ids: ['p1'], project_names: ['Alpha'] }),
+      makeConfig('beta-config', 'beta', 'Beta plugin', { include_general: false, project_ids: ['p2'], project_names: ['Beta'] }),
+    ];
+    const overview: McpOverview = {
+      servers: [makeServer('alpha', 'Alpha plugin'), makeServer('beta', 'Beta plugin')],
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const view = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    setFilter('Projet', 'p1');
+    expect(listedConfigIds(view.container)).toEqual(['alpha-config']);
+
+    view.rerender(<I18nProvider>
+      <McpPage projects={[makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />
+    </I18nProvider>);
+    expect(listedConfigIds(view.container).sort()).toEqual(['alpha-config', 'beta-config']);
+    expect(screen.getByTestId('mcp-test-project')).toHaveTextContent('Tester tout');
   });
 
   it('opens plugin creation in an accessible modal and restores focus when it closes', () => {
@@ -430,9 +683,9 @@ describe('McpPage', () => {
       server_id: 'mcp-fastly',
       ready: true,
       checks: [
-        { id: 'cli', label: 'Fastly CLI', ok: true, required: true, detail: 'Fastly CLI version 15.4.0' },
-        { id: 'api', label: 'Fastly API', ok: true, required: true, detail: 'Authenticated API request succeeded' },
-        { id: 'mcp', label: 'Fastly MCP', ok: false, required: false, detail: 'Optional exploratory MCP is unavailable' },
+        { id: 'cli', label: 'Fastly CLI', ok: true, required: true, detail: 'Fastly CLI version 15.4.0', code: 'ok' },
+        { id: 'api', label: 'Fastly API', ok: true, required: true, detail: 'Authenticated API request succeeded', code: 'ok' },
+        { id: 'mcp', label: 'Fastly MCP', ok: false, required: false, detail: 'Optional exploratory MCP is unavailable', code: 'cli_missing' },
       ],
     };
     let resolveProbe!: (response: McpProbeResponse) => void;
@@ -449,7 +702,7 @@ describe('McpPage', () => {
     expect(document.querySelector('.mcp-modal-overlay')).toBeNull();
     expect(document.querySelector('[data-testid="mcp-plugin-probe"]')).not.toBeNull();
 
-    const probeButton = screen.getByRole('button', { name: 'Tester' });
+    const probeButton = screen.getByTestId('mcp-probe-button');
     fireEvent.click(probeButton);
     fireEvent.click(probeButton);
     expect(mcpsApi.probeConfig).toHaveBeenCalledTimes(1);
@@ -458,9 +711,9 @@ describe('McpPage', () => {
 
     expect(mcpsApi.probeConfig).toHaveBeenCalledWith('fastly-config');
     expect(screen.getByTestId('mcp-probe-status')).toHaveTextContent('Prêt');
-    expect(screen.getByText('Fastly CLI version 15.4.0')).toBeTruthy();
+    expect(screen.getAllByText('Accès vérifié.').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Optionnel')).toBeTruthy();
-    expect(screen.getByText('Optional exploratory MCP is unavailable')).toBeTruthy();
+    expect(screen.getAllByText('Le CLI requis n’est pas installé.').length).toBeGreaterThan(0);
   });
 
   it('surfaces registry drift with stored and expected key names', () => {
@@ -543,7 +796,11 @@ describe('McpPage', () => {
       servers: [githubServer, chartbeatServer],
       configs: [
         makeConfig('github-config', 'github', 'GitHub'),
-        makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat'),
+        makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat', {
+          interfaces: ['api'],
+          effective_kind: 'api',
+          effective_preferred_interface: 'api',
+        }),
       ],
       customized_contexts: [],
       incompatibilities: [],
@@ -555,7 +812,7 @@ describe('McpPage', () => {
     );
     const search = screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' });
     const searchHeader = search.closest('.collection-shell-header');
-    const filterTrigger = screen.getByRole('button', { name: 'Filtrer les plugins par type' });
+    const filterTrigger = screen.getByRole('button', { name: 'Filtrer les plugins' });
     const sortTrigger = screen.getByRole('button', { name: 'Trier les plugins' });
 
     expect(filterTrigger).toHaveClass('collection-shell-search-action', 'collection-shell-search-action-icon');
@@ -584,7 +841,7 @@ describe('McpPage', () => {
     const filterOptions = document.querySelector('.collection-shell-search-options');
     expect(filterOptions).toBe(searchHeader?.nextElementSibling);
     expect(filterOptions?.nextElementSibling).toHaveClass('mcp-collection-toolbar');
-    expect(filterOptions?.querySelector('.list-controls')).not.toBeNull();
+    expect(filterOptions?.querySelector('.mcp-filter-stack')).not.toBeNull();
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
       target: { value: 'api' },
@@ -712,6 +969,9 @@ describe('McpPage', () => {
     };
     const config = makeConfig('fastly-config', 'mcp-fastly', 'Fastly', {
       preferred_interface: 'api',
+      interfaces: ['api', 'mcp', 'cli'],
+      effective_kind: 'cli',
+      effective_preferred_interface: 'api',
     });
     const overview: McpOverview = {
       servers: [server],
@@ -759,6 +1019,9 @@ describe('McpPage', () => {
       servers: [server],
       configs: [makeConfig('api-config', 'api-only', 'API only', {
         preferred_interface: 'api',
+        interfaces: ['api'],
+        effective_kind: 'api',
+        effective_preferred_interface: 'api',
       })],
       customized_contexts: [],
       incompatibilities: [],
@@ -815,9 +1078,9 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [mcpServer, apiServer, cliServer],
       configs: [
-        makeConfig('mcp-config', 'mcp', 'MCP server', { label: 'Zulu MCP' }),
-        makeConfig('api-config', 'api', 'API server', { label: 'Alpha API' }),
-        makeConfig('cli-config', 'cli', 'CLI server', { label: 'Beta CLI' }),
+        makeConfig('mcp-config', 'mcp', 'MCP server', { label: 'Zulu MCP', interfaces: ['mcp'], effective_kind: 'mcp' }),
+        makeConfig('api-config', 'api', 'API server', { label: 'Alpha API', interfaces: ['api'], effective_kind: 'api' }),
+        makeConfig('cli-config', 'cli', 'CLI server', { label: 'Beta CLI', interfaces: ['mcp', 'cli'], effective_kind: 'cli' }),
       ],
       customized_contexts: [],
       incompatibilities: [],
@@ -841,7 +1104,7 @@ describe('McpPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Inverser l’ordre' }));
     expect(cardOrder()).toEqual(['cli-config', 'api-config', 'mcp-config']);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Filtrer les plugins par type' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Filtrer les plugins' }));
     fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
       target: { value: 'api' },
     });
@@ -857,7 +1120,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Global badge should be rendered on the card
-    expect(container.textContent).toContain('Global');
+    expect(container.textContent).toContain('Tous les projets');
   });
 
   it('flags an orphan config and repairs it by enabling General scope', async () => {
@@ -879,7 +1142,6 @@ describe('McpPage', () => {
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    expect(screen.getAllByText('Invisible des agents').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: 'Resend — Voir les détails' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Cette configuration n’est visible par aucun agent');
 
@@ -960,7 +1222,7 @@ describe('McpPage', () => {
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     const rows = screen.getAllByTestId('mcp-kronn-internal-card');
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(1);
     expect(rows.every(row => row.dataset.configId === 'kronn-config')).toBe(true);
     expect(rows.every(row => row.textContent?.includes('Intégré'))).toBe(true);
   });
@@ -975,7 +1237,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Click the plugin card to open the detail panel
-    fireEvent.click(screen.getByText('GitLab'));
+    openPlugin('GitLab');
 
     // The incompatibility badge should show the agent name in the detail panel
     expect(container.textContent).toContain('Kiro');
@@ -1043,7 +1305,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Click card to expand detail panel
-    fireEvent.click(screen.getByText('GitLab'));
+    openPlugin('GitLab');
 
     // Direct API credentials are explicitly distinguished from local CLI auth.
     expect(container.textContent).toContain("Identifiants utilisés par l’API");
@@ -1060,7 +1322,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
-    fireEvent.click(screen.getByText('GitLab'));
+    openPlugin('GitLab');
 
     // Eye buttons should be present for each env field (title = "Afficher")
     const eyeButtons = container.querySelectorAll('button[title="Afficher"]');
@@ -1078,7 +1340,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
-    fireEvent.click(screen.getByText('GitLab'));
+    openPlugin('GitLab');
 
     // Click pencil edit button
     const editBtn = container.querySelector('button[title="Modifier les clés"]') as HTMLElement;
@@ -1104,7 +1366,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
-    fireEvent.click(screen.getByText('GitLab'));
+    openPlugin('GitLab');
 
     // All inputs should be password type initially
     const inputBefore = container.querySelector('input.mcp-input-mono') as HTMLInputElement;
@@ -1130,7 +1392,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
-    fireEvent.click(screen.getByText('TestMCP'));
+    openPlugin('TestMCP');
 
     // Click eye to reveal (enters edit mode + shows)
     const eyeBtn = container.querySelector('button[title="Afficher"]') as HTMLElement;
@@ -1157,7 +1419,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail, enter edit mode
-    fireEvent.click(screen.getByText('TestMCP'));
+    openPlugin('TestMCP');
     const editBtn = container.querySelector('button[title="Modifier les clés"]') as HTMLElement;
     await act(async () => { fireEvent.click(editBtn); });
 
@@ -1180,7 +1442,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail
-    fireEvent.click(screen.getByText('GitLab'));
+    openPlugin('GitLab');
 
     // Field labels should be visible
     expect(container.textContent).toContain('GITLAB_API_URL');
@@ -1196,7 +1458,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
-    fireEvent.click(screen.getByText('GitLab'));
+    openPlugin('GitLab');
 
     // Click pencil edit button
     const editBtn = container.querySelector('button[title="Modifier les clés"]') as HTMLElement;
@@ -1218,7 +1480,7 @@ describe('McpPage', () => {
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
-    fireEvent.click(screen.getByText('TestMCP'));
+    openPlugin('TestMCP');
 
     // Click eye button
     const eyeBtn = container.querySelector('button[title="Afficher"]') as HTMLElement;
@@ -1289,8 +1551,17 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [makeServer('mcp-fastly', 'Fastly'), makeServer('api-direct', 'Direct API')],
       configs: [
-        makeConfig('fastly-config', 'mcp-fastly', 'Fastly'),
-        makeConfig('api-config', 'api-direct', 'Direct API', { env_keys: ['DIRECT_API_TOKEN'] }),
+        makeConfig('fastly-config', 'mcp-fastly', 'Fastly', {
+          interfaces: ['api', 'mcp', 'cli'],
+          effective_kind: 'cli',
+          credential_source: 'cli_token',
+        }),
+        makeConfig('api-config', 'api-direct', 'Direct API', {
+          env_keys: ['DIRECT_API_TOKEN'],
+          interfaces: ['api'],
+          effective_kind: 'api',
+          credential_source: 'stored',
+        }),
       ],
       customized_contexts: [],
       incompatibilities: [],
@@ -1336,31 +1607,30 @@ describe('McpPage', () => {
       { id: 'mcp-redis', name: 'Redis', description: 'Cache server', transport: { Stdio: { command: 'uvx', args: ['redis-mcp'] } }, env_keys: [], tags: ['cache'], token_url: null, token_help: null, publisher: 'Redis Ltd', official: true },
     ];
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('Redis'));
+    openPlugin('Redis');
     expect(container.textContent).toContain('Officiel');
     expect(container.textContent).toContain('Redis Ltd');
   });
 
-  // ─── Delete confirmation (regression: previously fired on click) ──────
-  it('Delete config button asks for confirmation before deleting', async () => {
+  // ─── Delete confirmation in the Advanced danger zone ──────
+  it('danger-zone cancel keeps the plugin sheet open without deleting', async () => {
     const servers = [makeServer('mcp-redis', 'Redis')];
     const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
     const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
 
-    // Reject the confirm dialog → handleDeleteMcpConfig must NOT call the API.
-    // happy-dom doesn't ship `window.confirm`, so install a stub before spying.
-    window.confirm = vi.fn();
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('Redis'));
+    openPlugin('Redis');
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['État', 'Accès', 'Identifiants', 'Avancé']);
+    fireEvent.click(screen.getByRole('tab', { name: 'Avancé' }));
 
     const deleteBtn = screen.getByText(/Supprimer cette config/);
     await act(async () => { fireEvent.click(deleteBtn); });
+    expect(screen.getByText(/Cette action est irréversible/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Annuler' }));
 
-    expect(confirmSpy).toHaveBeenCalled();
     expect(mcpsApi.deleteConfig).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    expect(screen.getByTestId('mcp-plugin-detail')).toBeInTheDocument();
+    expect(screen.queryByText(/Cette action est irréversible/)).toBeNull();
   });
 
   it('Delete confirmed → API called + success toast', async () => {
@@ -1368,22 +1638,20 @@ describe('McpPage', () => {
     const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
     const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
 
-    window.confirm = vi.fn();
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.mocked(mcpsApi.deleteConfig).mockResolvedValue(undefined);
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('Redis'));
+    openPlugin('Redis');
+    fireEvent.click(screen.getByRole('tab', { name: 'Avancé' }));
 
     const deleteBtn = screen.getByText(/Supprimer cette config/);
+    fireEvent.click(deleteBtn);
     await act(async () => {
-      fireEvent.click(deleteBtn);
+      fireEvent.click(screen.getByRole('button', { name: 'Supprimer définitivement' }));
       await Promise.resolve();
     });
 
-    expect(confirmSpy).toHaveBeenCalled();
     expect(mcpsApi.deleteConfig).toHaveBeenCalledWith('c1');
-    confirmSpy.mockRestore();
   });
 
   it('Incomplete-config banner lists each broken plugin with its missing keys', async () => {
@@ -1508,6 +1776,123 @@ describe('McpPage', () => {
     expect(payload.custom_spec.name).toBe('MyAPI');
     expect(payload.custom_spec.base_url).toBe('https://my.example.com');
     expect(payload.custom_spec.fields).toEqual([{ label: 'My Token', value: 'secret123' }]);
+  });
+
+  // ─── KT-831 — single scope editor at add time, opened fiche, merge ──
+
+  it('Add flow: the scope editor proposes specific projects, and the created fiche opens once it appears', async () => {
+    const project = makeProject('p1', 'Website');
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom',
+      name: 'Custom API',
+      description: 'Define your own API.',
+      transport: 'ApiOnly',
+      env_keys: [],
+      tags: ['custom', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'You',
+      official: false,
+    };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
+    const created = makeConfig('new-cfg-1', 'custom-myapi-abc', 'MyAPI', { label: 'MyAPI', project_ids: ['p1'] });
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValue(created);
+
+    const view = wrap(<McpPage projects={[project]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
+
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement);
+    fireEvent.change(screen.getByPlaceholderText(/Salesforce Sales API/), { target: { value: 'MyAPI' } });
+    fireEvent.change(screen.getByPlaceholderText(/my-org\.salesforce\.com/), { target: { value: 'https://my.example.com' } });
+
+    // Pick a specific project; the pre-KT-831 add form only offered an
+    // all-projects on/off toggle and could never populate `project_ids`.
+    fireEvent.click(screen.getByRole('button', { name: 'Website' }));
+    fireEvent.click(screen.getByText('Enregistrer'));
+    await act(async () => { await Promise.resolve(); });
+
+    const payload = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.is_global).toBe(false);
+    expect(payload.project_ids).toEqual(['p1']);
+
+    // The fiche can't select a config `mcpOverview` doesn't know about yet —
+    // simulate `refetchMcps()` landing by re-rendering with the created
+    // config now present, then it should open on its own.
+    view.rerender(
+      <I18nProvider>
+        <McpPage projects={[project]} mcpOverview={{ ...overview, configs: [created] }} mcpRegistry={[customApi]} refetchMcps={noop} />
+      </I18nProvider>,
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId('mcp-plugin-detail')).toHaveTextContent('MyAPI');
+  });
+
+  it('Add flow: an MCP can select both projects and local CLI sync before creation', async () => {
+    const project = makeProject('p1', 'Website');
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const definition: McpDefinition = {
+      id: 'test-mcp',
+      name: 'Test MCP',
+      description: 'A test server',
+      transport: { Stdio: { command: 'node', args: [] } },
+      env_keys: [],
+      tags: ['core'],
+      token_url: null,
+      token_help: null,
+      publisher: 'Anthropic',
+      official: false,
+    };
+    const created = makeConfig('new-mcp-1', definition.id, definition.name, {
+      project_ids: [project.id],
+      host_sync: 'GlobalOnly',
+    });
+    vi.mocked(mcpsApi.createConfig).mockClear();
+    vi.mocked(mcpsApi.createConfig).mockResolvedValue(created);
+    wrap(<McpPage projects={[project]} mcpOverview={overview} mcpRegistry={[definition]} refetchMcps={noop} />);
+
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(screen.getByText('Test MCP'));
+    const scope = screen.getByTestId('mcp-add-scope');
+    fireEvent.click(within(scope).getByRole('button', { name: 'Website' }));
+    fireEvent.click(within(scope).getByRole('checkbox', { name: 'Aussi disponible dans mes CLIs locaux' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Configurer Test MCP' })).getByRole('button', { name: 'Ajouter' }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(mcpsApi.createConfig).toHaveBeenCalledWith(expect.objectContaining({
+      project_ids: ['p1'],
+      host_sync: 'GlobalOnly',
+    }));
+  });
+
+  it('Add flow: merging into an existing identical config is announced, not silently reported as "created"', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom',
+      name: 'Custom API',
+      description: 'Define your own API.',
+      transport: 'ApiOnly',
+      env_keys: [],
+      tags: ['custom', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'You',
+      official: false,
+    };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
+    const merged: McpConfigDisplay = { ...makeConfig('existing-1', 'custom-myapi-abc', 'MyAPI', { label: 'MyAPI', is_global: true }), merged_into_existing: 'existing-1' };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValue(merged);
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
+
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement);
+    fireEvent.change(screen.getByPlaceholderText(/Salesforce Sales API/), { target: { value: 'MyAPI' } });
+    fireEvent.change(screen.getByPlaceholderText(/my-org\.salesforce\.com/), { target: { value: 'https://my.example.com' } });
+    fireEvent.click(screen.getByText('Enregistrer'));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByText(/existait déjà avec les mêmes identifiants/)).toBeTruthy();
   });
 
   // ─── 0.8.6 — Unified Custom plugin edit form ─────────────────────────
@@ -1690,6 +2075,40 @@ describe('McpPage', () => {
     expect(mcpsApi.updateConfig).not.toHaveBeenCalled();
   });
 
+  // ─── KT-831 — the scope block inside "Modifier le plugin" ───────────
+
+  it('Modifier le plugin: the Global toggle reflects the real config (not always unchecked) and PATCHes on change', async () => {
+    // Pre-KT-831 bug: the Global checkbox was never seeded from `cfg.is_global`
+    // (always opened unchecked) and `updateCustomSpec` has no scope fields, so
+    // toggling it silently did nothing on save.
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.setConfigProjects as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (mcpsApi.setConfigProjects as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-3');
+
+    const globalToggle = screen.getByRole('button', { name: 'Tous les projets' });
+    expect(globalToggle).toHaveClass('mcp-project-toggle-off');
+    fireEvent.click(globalToggle);
+
+    const saveBtn = screen.getByText(/Enregistrer les modifications/);
+    fireEvent.click(saveBtn);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mcpsApi.updateConfig).toHaveBeenCalledWith('cfg-example-3', {
+      is_global: true,
+      include_general: true,
+    });
+    expect(mcpsApi.setConfigProjects).toHaveBeenCalledWith('cfg-example-3', { project_ids: [] });
+  });
+
   // ─── 0.8.6 (#60) Orphan env warning ──────────────────────────────────
 
   it('Modifier le plugin: prompts the user when updateCustomSpec reports orphan env keys', async () => {
@@ -1839,7 +2258,7 @@ describe('McpPage', () => {
       incompatibilities: [], incomplete_configs: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('LegacyAPI'));
+    openPlugin('LegacyAPI');
     const banner = document.querySelector('[data-testid="mcp-autodiscovery-banner"]');
     expect(banner).not.toBeNull();
     // Banner has the CTA button (uses Sparkles icon + i18n key).
@@ -1871,7 +2290,7 @@ describe('McpPage', () => {
       incompatibilities: [], incomplete_configs: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('GoodAPI'));
+    openPlugin('GoodAPI');
     expect(
       document.querySelector('[data-testid="mcp-autodiscovery-banner"]'),
     ).toBeNull();
@@ -1912,7 +2331,7 @@ describe('McpPage', () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('ExportMe'));
+    openPlugin('ExportMe');
     const exportBtn = document.querySelector('[data-testid="mcp-custom-export-json"]') as HTMLButtonElement | null;
     expect(exportBtn).not.toBeNull();
     await act(async () => {
@@ -1965,7 +2384,7 @@ describe('McpPage', () => {
     };
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn().mockResolvedValue(undefined) }, configurable: true });
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('ModalMe'));
+    openPlugin('ModalMe');
     await act(async () => {
       fireEvent.click(document.querySelector('[data-testid="mcp-custom-export-json"]') as HTMLButtonElement);
       await Promise.resolve();
@@ -2007,7 +2426,7 @@ describe('McpPage', () => {
     document.execCommand = vi.fn().mockReturnValue(false) as unknown as typeof document.execCommand;
     try {
       wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-      fireEvent.click(screen.getByText('FailClip'));
+      openPlugin('FailClip');
       await act(async () => {
         fireEvent.click(document.querySelector('[data-testid="mcp-custom-export-json"]') as HTMLButtonElement);
         await Promise.resolve();
@@ -2039,7 +2458,7 @@ describe('McpPage', () => {
       incompatibilities: [], incomplete_configs: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('Chartbeat'));
+    openPlugin('Chartbeat');
     expect(document.querySelector('[data-testid="mcp-custom-export-json"]')).toBeNull();
   });
 
@@ -2148,7 +2567,7 @@ describe('McpPage', () => {
       incompatibilities: [], incomplete_configs: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('Chartbeat'));
+    openPlugin('Chartbeat');
     expect(
       document.querySelector('[data-testid="mcp-autodiscovery-banner"]'),
     ).toBeNull();

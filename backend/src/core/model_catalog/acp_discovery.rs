@@ -7,24 +7,35 @@
 //! ever sent, so discovery never spends a token turn — matching KT-531's
 //! "aucun token agent n'est consommé" invariant for preflight-style checks.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::acp::{
-    acp_agent, AcpConfigOption, AcpError, AcpHost, AcpInitialize, AcpJsonRpcTransport,
-    AcpSessionScope, AcpTransport, ClaudeAcpAdapter,
+    acp_agent, is_model_option_id, AcpConfigOption, AcpError, AcpHost, AcpInitialize,
+    AcpJsonRpcTransport, AcpSessionScope, AcpTransport, ClaudeAcpAdapter,
 };
 use crate::db::model_catalog::DiscoveredModel;
 use crate::models::AgentType;
 
 use super::DiscoveryOutcome;
 
+/// What the runtime offers from a neutral directory: its user-level
+/// configuration and credentials, and nothing a project adds on top.
 pub async fn discover(agent_type: &AgentType) -> DiscoveryOutcome {
+    // Discovery sends no prompt and writes no project data; the existing OS
+    // temporary directory is sufficient and avoids a runtime-only dependency.
+    discover_in(agent_type, &std::env::temp_dir()).await
+}
+
+/// What the runtime offers for a session opened in `dir`. OpenCode loads its
+/// providers per working directory — the user-level config plus the
+/// `opencode.json[c]` found for that directory — so a provider only a project
+/// declares (typically a local Ollama) is listed here and not by `discover`.
+pub async fn discover_in(agent_type: &AgentType, dir: &Path) -> DiscoveryOutcome {
     let Some(acp_agent_id) = acp_agent(agent_type) else {
         return DiscoveryOutcome::Unsupported;
     };
-    // Discovery sends no prompt and writes no project data; the existing OS
-    // temporary directory is sufficient and avoids a runtime-only dependency.
-    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    let cwd = dir.to_string_lossy().into_owned();
 
     let scope = AcpSessionScope::new(None, "model-catalog-discovery");
     let transport =
@@ -119,6 +130,8 @@ fn models_from_config_options(options: &[AcpConfigOption]) -> Option<Vec<Discove
                 .map(|value| DiscoveredModel {
                     model_id: value.id.clone(),
                     display_name: value.name.clone(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: Vec::new(),
                     reasoning_modes: reasoning_modes.clone(),
                     default_reasoning_mode: default_reasoning_mode.clone(),
@@ -128,7 +141,7 @@ fn models_from_config_options(options: &[AcpConfigOption]) -> Option<Vec<Discove
 }
 
 fn is_model_option(id: &str) -> bool {
-    id.to_lowercase().contains("model")
+    is_model_option_id(id)
 }
 
 fn is_reasoning_option(id: &str) -> bool {

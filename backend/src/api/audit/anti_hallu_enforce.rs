@@ -13,7 +13,7 @@
 //! testable; the streaming generator in [`super::full`] owns the IO and the
 //! retry loop, and only calls into these helpers.
 
-use crate::core::anti_halluc::{self, SourceCheck};
+use crate::core::anti_halluc::{self, scan_fences, FenceScan, SourceCheck};
 use std::path::Path;
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
@@ -108,11 +108,9 @@ Do NOT invent a path just to pass the check. Re-write the file, then finish.\n",
     out
 }
 
-/// Idempotently stamp `audit="<today>"` on every `curated="ai"` section opener
-/// in `content`. Returns `Some(new_content)` when something changed, `None`
-/// when every `curated="ai"` marker already carries today's date (no write
-/// needed). The audit just (re)generated this file, so today's date honestly
-/// reflects "verified conformant today".
+/// Idempotently stamp `audit="<today>"` on every audit-owned section opener.
+/// Template v2 emits `owner="audit"`; legacy `curated="ai"` markers remain
+/// accepted. A human-owned marker always wins if both attributes are present.
 pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
     let today_attr = format!("audit=\"{today}\"");
     let mut changed = false;
@@ -120,7 +118,10 @@ pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
 
     for line in &mut lines {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with("<!-- kronn:section") || !line.contains("curated=\"ai\"") {
+        if !trimmed.starts_with("<!-- kronn:section")
+            || is_human_owned_marker(line)
+            || !(line.contains("owner=\"audit\"") || line.contains("curated=\"ai\""))
+        {
             continue;
         }
         if line.contains(&today_attr) {
@@ -149,6 +150,215 @@ pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
         out.push('\n');
     }
     Some(out)
+}
+
+/// One human-owned section whose content an audit step changed (or deleted)
+/// between the pre- and post-agent snapshot of the same file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HumanSectionDiff {
+    pub name: String,
+    pub pre_block: String,
+    /// `None` when the agent deleted the section entirely (restored by
+    /// appending it back).
+    pub post_block: Option<String>,
+}
+
+struct SectionSpan {
+    name: String,
+    is_human: bool,
+    start: usize,
+    end: usize,
+}
+
+/// Fence characters that hide a `kronn:section` marker from the ownership
+/// parser. A `~~~` block is code to a renderer exactly like a ``` one.
+const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
+
+/// Which lines of `text` sit inside a fenced code block. A marker on such a
+/// line is documentation (an example, a quoted report), never a live section
+/// boundary: it neither opens nor closes a protected section.
+///
+/// An unclosed fence is read leniently (its lines stay visible, so a stray
+/// fence in a human's own document does not strip protection) — except when
+/// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
+pub(super) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
+    scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
+}
+
+/// Scan `lines` for `<!-- kronn:section name="X" ... -->` … `<!-- kronn:section:end -->`
+/// pairs. `in_code` flags the lines inside fenced code (index-aligned with
+/// `lines`, shorter is fine): their markers are ignored on both ends. An
+/// opener with no matching closer is skipped — there is nothing well-formed to
+/// protect there.
+fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<SectionSpan> {
+    let is_code = |idx: usize| in_code.get(idx).copied().unwrap_or(false);
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if !is_code(i)
+            && trimmed.starts_with("<!-- kronn:section")
+            && !trimmed.starts_with("<!-- kronn:section:end")
+        {
+            if let Some(name) = extract_attr(lines[i], "name") {
+                let is_human = is_human_owned_marker(lines[i]);
+                if let Some(end) = ((i + 1)..lines.len()).find(|&j| {
+                    !is_code(j) && lines[j].trim_start().starts_with("<!-- kronn:section:end")
+                }) {
+                    spans.push(SectionSpan {
+                        name,
+                        is_human,
+                        start: i,
+                        end,
+                    });
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    spans
+}
+
+pub(super) fn extract_attr(line: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let end = line[start..].find('"')?;
+    Some(line[start..start + end].to_string())
+}
+
+pub(super) fn is_human_owned_marker(line: &str) -> bool {
+    line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
+}
+
+pub fn contains_human_owned_section(content: &str) -> bool {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let scan = code_line_mask(content, false);
+    parse_named_sections(&lines, &scan.in_fence)
+        .iter()
+        .any(|span| span.is_human)
+}
+
+/// Lines of `content` an inserted block must not land on: inside a fenced
+/// code block, or inside a named section (markers included). Index-aligned
+/// with `content.split('\n')`, so it also covers `content.lines()`.
+pub(super) fn section_or_code_lines(content: &str) -> Vec<bool> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut occupied = code_line_mask(content, false).in_fence;
+    occupied.resize(lines.len(), false);
+    let spans = parse_named_sections(&lines, &occupied);
+    for span in spans {
+        occupied[span.start..=span.end].fill(true);
+    }
+    occupied
+}
+
+/// KT-843 mechanical backstop: restore every human-owned section found in
+/// `pre` to its exact original text wherever `post` changed or removed it,
+/// and return the audit-proposed diff. Template v2 uses `owner="human"`;
+/// legacy `curated="human"` sections receive the same protection.
+///
+/// Returns `None` when every human-owned section in `pre` survived
+/// byte-identical in `post`, including the common case of no human
+/// section at all. Runs independently of the anti-hallu citation gate: this
+/// is an ownership guarantee, not a provenance one.
+pub fn enforce_human_owned_sections(
+    pre: &str,
+    post: &str,
+) -> Option<(String, Vec<HumanSectionDiff>)> {
+    let pre_lines: Vec<&str> = pre.split('\n').collect();
+    let post_lines: Vec<&str> = post.split('\n').collect();
+    let pre_scan = code_line_mask(pre, false);
+    let mut post_scan = code_line_mask(post, false);
+    // An audit that leaves a fence open where the document had none turns
+    // everything after it into one code block: read `post` the way a renderer
+    // does, or a human section behind that fence would pass as untouched.
+    if post_scan.unclosed && !pre_scan.unclosed {
+        post_scan = code_line_mask(post, true);
+    }
+    let pre_spans = parse_named_sections(&pre_lines, &pre_scan.in_fence);
+    let post_spans = parse_named_sections(&post_lines, &post_scan.in_fence);
+
+    let mut replacements: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let mut diffs: Vec<HumanSectionDiff> = Vec::new();
+    let mut appended: Vec<String> = Vec::new();
+
+    for pre_span in pre_spans.iter().filter(|s| s.is_human) {
+        let pre_block_lines: Vec<String> = pre_lines[pre_span.start..=pre_span.end]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let pre_block = pre_block_lines.join("\n");
+        match post_spans.iter().find(|s| s.name == pre_span.name) {
+            Some(post_span) => {
+                let post_block = post_lines[post_span.start..=post_span.end].join("\n");
+                if post_block != pre_block {
+                    replacements.push((post_span.start, post_span.end, pre_block_lines));
+                    diffs.push(HumanSectionDiff {
+                        name: pre_span.name.clone(),
+                        pre_block,
+                        post_block: Some(post_block),
+                    });
+                }
+            }
+            None => {
+                appended.push(pre_block.clone());
+                diffs.push(HumanSectionDiff {
+                    name: pre_span.name.clone(),
+                    pre_block,
+                    post_block: None,
+                });
+            }
+        }
+    }
+
+    if diffs.is_empty() {
+        return None;
+    }
+
+    // Replace from the bottom up so an earlier range's indices stay valid
+    // even when a restored block has a different line count than the text
+    // it replaces.
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
+    let mut out_lines: Vec<String> = post_lines.iter().map(|s| s.to_string()).collect();
+    for (start, end, lines) in replacements {
+        out_lines.splice(start..=end, lines);
+    }
+    for block in appended {
+        if out_lines.last().is_some_and(|l| !l.is_empty()) {
+            out_lines.push(String::new());
+        }
+        out_lines.push(String::new());
+        out_lines.extend(block.split('\n').map(String::from));
+    }
+
+    Some((out_lines.join("\n"), diffs))
+}
+
+/// Render the audit-proposed changes for a human to review by hand.
+pub fn format_human_section_diff_report(
+    file_label: &str,
+    diffs: &[HumanSectionDiff],
+    today: &str,
+) -> String {
+    let mut out = format!(
+        "# Proposed changes to human-owned sections — {today}\n\n\
+The audit tried to update the following `owner=\"human\"` section(s) in \
+`{file_label}` but left them untouched, as the convention requires. Review \
+each diff below and apply it by hand if you agree with it.\n"
+    );
+    for d in diffs {
+        out.push_str(&format!(
+            "\n## Section `{}`\n\n### Kept (current)\n\n```\n{}\n```\n\n### Audit-proposed\n\n```\n{}\n```\n",
+            d.name,
+            d.pre_block,
+            d.post_block
+                .as_deref()
+                .unwrap_or("(the audit removed this section — it was restored)"),
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -232,12 +442,19 @@ mod tests {
 
     #[test]
     fn stamp_inserts_missing_audit_attr() {
-        let input = "<!-- kronn:section name=\"stack\" curated=\"ai\" -->\nBODY\n<!-- kronn:section:end -->\n";
+        let input = "<!-- kronn:section name=\"stack\" curated=\"ai\" owner=\"audit\" -->\nBODY\n<!-- kronn:section:end -->\n";
         let out = stamp_curated_audit_dates(input, "2026-06-14").expect("should change");
         assert!(out.contains("audit=\"2026-06-14\""));
         assert!(out.contains("curated=\"ai\""));
         // closing marker untouched
         assert!(out.contains("<!-- kronn:section:end -->"));
+    }
+
+    #[test]
+    fn stamp_accepts_owner_audit_without_legacy_curated_attribute() {
+        let input = "<!-- kronn:section name=\"stack\" owner=\"audit\" -->\nBODY\n<!-- kronn:section:end -->\n";
+        let out = stamp_curated_audit_dates(input, "2026-06-14").expect("should change");
+        assert!(out.contains("owner=\"audit\" audit=\"2026-06-14\""));
     }
 
     #[test]
@@ -258,11 +475,292 @@ mod tests {
 
     #[test]
     fn stamp_ignores_human_sections() {
-        let input = "<!-- kronn:section name=\"notes\" curated=\"human\" -->\nfree form\n";
+        let input =
+            "<!-- kronn:section name=\"notes\" curated=\"ai\" owner=\"human\" -->\nfree form\n";
         assert_eq!(
             stamp_curated_audit_dates(input, "2026-06-14"),
             None,
             "human-curated sections are never stamped"
+        );
+    }
+
+    // ─── KT-843: `owner="human"` sections survive full/partial audit ───────
+
+    #[test]
+    fn human_section_untouched_is_a_noop() {
+        let content = "# Doc\n\n\
+            <!-- kronn:section name=\"team\" owner=\"human\" -->\n\
+            Free-form human notes.\n\
+            <!-- kronn:section:end -->\n\
+            \n## Rest\nSame either way.\n";
+        assert_eq!(
+            enforce_human_owned_sections(content, content),
+            None,
+            "byte-identical human section must be a no-op"
+        );
+    }
+
+    #[test]
+    fn human_section_edited_by_the_audit_is_restored_and_diffed() {
+        let pre = "# Doc\n\
+            <!-- kronn:section name=\"team\" curated=\"human\" owner=\"human\" -->\n\
+            Original human note.\n\
+            <!-- kronn:section:end -->\n\
+            <!-- kronn:section name=\"stack\" owner=\"audit\" -->\n\
+            Rust.\n\
+            <!-- kronn:section:end -->\n";
+        // The agent rewrote BOTH the human section (must be restored) and
+        // the ai section (must survive untouched — not this function's job).
+        let post = "# Doc\n\
+            <!-- kronn:section name=\"team\" owner=\"human\" -->\n\
+            Agent-rewritten note — NOT what the human wrote.\n\
+            <!-- kronn:section:end -->\n\
+            <!-- kronn:section name=\"stack\" owner=\"audit\" -->\n\
+            Rust, updated.\n\
+            <!-- kronn:section:end -->\n";
+
+        let (restored, diffs) = enforce_human_owned_sections(pre, post)
+            .expect("an edited human section must be reported");
+
+        assert_eq!(
+            diffs.len(),
+            1,
+            "only the human section is a diff: {diffs:?}"
+        );
+        assert_eq!(diffs[0].name, "team");
+        assert!(diffs[0].pre_block.contains("Original human note."));
+        assert!(diffs[0]
+            .post_block
+            .as_deref()
+            .unwrap()
+            .contains("Agent-rewritten note"));
+
+        // The human section is back to its original text …
+        assert!(restored.contains("Original human note."));
+        assert!(!restored.contains("Agent-rewritten note"));
+        // … while the ai section's real update survives (never this
+        // function's concern).
+        assert!(restored.contains("Rust, updated."));
+    }
+
+    #[test]
+    fn human_section_removed_by_the_audit_is_restored_at_the_end() {
+        let pre = "# Doc\n\
+            <!-- kronn:section name=\"team\" curated=\"human\" owner=\"human\" -->\n\
+            Do not lose this.\n\
+            <!-- kronn:section:end -->\n";
+        // The agent deleted the section entirely.
+        let post = "# Doc\nNothing left.\n";
+
+        let (restored, diffs) = enforce_human_owned_sections(pre, post)
+            .expect("a deleted human section must be flagged");
+
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].name, "team");
+        assert!(diffs[0].post_block.is_none(), "removal is reported as None");
+        assert!(restored.contains("Do not lose this."));
+        assert!(
+            restored.contains("Nothing left."),
+            "the rest of post survives"
+        );
+    }
+
+    #[test]
+    fn no_human_sections_at_all_is_a_noop() {
+        let pre = "# Doc\n<!-- kronn:section name=\"s\" curated=\"ai\" -->\nA\n<!-- kronn:section:end -->\n";
+        let post = "# Doc\n<!-- kronn:section name=\"s\" curated=\"ai\" -->\nB (audit updated)\n<!-- kronn:section:end -->\n";
+        assert_eq!(
+            enforce_human_owned_sections(pre, post),
+            None,
+            "no owner=\"human\" section exists — nothing to protect"
+        );
+    }
+
+    #[test]
+    fn human_marker_inside_a_fenced_report_excerpt_is_not_a_live_section() {
+        let report = "# Report\n\n```\n<!-- kronn:section name=\"quoted\" owner=\"human\" -->\nQuoted.\n<!-- kronn:section:end -->\n```\n";
+        assert!(!contains_human_owned_section(report));
+    }
+
+    #[test]
+    fn legacy_curated_human_section_remains_protected() {
+        let pre = "<!-- kronn:section name=\"legacy\" curated=\"human\" -->\nOriginal.\n<!-- kronn:section:end -->\n";
+        let post = "<!-- kronn:section name=\"legacy\" curated=\"human\" -->\nChanged.\n<!-- kronn:section:end -->\n";
+        let (restored, diffs) = enforce_human_owned_sections(pre, post)
+            .expect("legacy human ownership must remain supported");
+        assert_eq!(diffs.len(), 1);
+        assert!(restored.contains("Original."));
+        assert!(!restored.contains("Changed."));
+    }
+
+    // ─── KT-933: a marker inside a code block is documentation ─────────────
+
+    /// A human section that documents the convention: its example shows both
+    /// a section opener and the closing marker inside a fence.
+    const HUMAN_WITH_EXAMPLE: &str = "<!-- kronn:section name=\"howto\" owner=\"human\" -->\n\
+        Wrap a section like this:\n\
+        ```\n\
+        <!-- kronn:section name=\"demo\" owner=\"human\" -->\n\
+        <!-- kronn:section:end -->\n\
+        ```\n\
+        Rule that follows the example.\n\
+        <!-- kronn:section:end -->";
+
+    #[test]
+    fn fenced_section_end_does_not_close_a_human_section_early() {
+        let pre = format!("# Doc\n{HUMAN_WITH_EXAMPLE}\n## Rest\nfree\n");
+        // The agent rewrites the rule AFTER the documented example. With the
+        // fenced marker taken as the closer, protection stopped above it.
+        let post = pre.replace("Rule that follows the example.", "Agent-made rule.");
+
+        let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("a change below a documented section:end must be caught");
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        assert_eq!(diffs[0].name, "howto");
+        assert!(
+            diffs[0]
+                .pre_block
+                .contains("Rule that follows the example."),
+            "the protected block runs to the REAL closer"
+        );
+        assert_eq!(restored, pre, "restored byte-for-byte");
+    }
+
+    #[test]
+    fn fenced_section_end_does_not_close_a_human_section_early_with_tildes() {
+        let pre = HUMAN_WITH_EXAMPLE.replace("```", "~~~");
+        let post = pre.replace("Rule that follows the example.", "Agent-made rule.");
+        let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("a ~~~ fence hides markers just like a ``` one");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(restored, pre);
+    }
+
+    #[test]
+    fn fenced_example_opener_does_not_open_a_protected_section() {
+        // Only an EXAMPLE of a human section: nothing live to protect.
+        let pre = "# Doc\n```\n<!-- kronn:section name=\"demo\" owner=\"human\" -->\nQuoted.\n<!-- kronn:section:end -->\n```\n";
+        let post = "# Doc\nThe example is gone.\n";
+        assert_eq!(enforce_human_owned_sections(pre, post), None);
+        assert!(!contains_human_owned_section(pre));
+    }
+
+    #[test]
+    fn fenced_example_opener_before_a_real_section_does_not_swallow_it() {
+        let pre = "```\n<!-- kronn:section name=\"fake\" owner=\"human\" -->\n```\n\
+            <!-- kronn:section name=\"real\" owner=\"human\" -->\nKeep.\n<!-- kronn:section:end -->\n";
+        let post = pre.replace("Keep.", "Changed.");
+        let (_, diffs) = enforce_human_owned_sections(pre, &post).expect("real is protected");
+        assert_eq!(
+            diffs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            vec!["real"],
+            "the quoted opener must not become a section of its own"
+        );
+    }
+
+    #[test]
+    fn wrapping_a_human_section_in_a_fence_is_caught_and_the_live_copy_restored() {
+        let section = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{section}\n## Rest\n");
+        for fence in ["```", "~~~", "````"] {
+            // Same bytes, but the section is now an example to any renderer.
+            let post = format!("# Doc\n{fence}\n{section}\n{fence}\n## Rest\n");
+            let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+                .unwrap_or_else(|| panic!("fence-wrapped section must not pass ({fence})"));
+            assert_eq!(diffs.len(), 1, "{fence}");
+            assert!(
+                diffs[0].post_block.is_none(),
+                "no live copy left in post ({fence})"
+            );
+            // The live copy is back, and the guard is now satisfied.
+            assert!(contains_human_owned_section(&restored), "{fence}");
+            assert_eq!(
+                enforce_human_owned_sections(&pre, &restored),
+                None,
+                "a second pass over the restored text is a no-op ({fence})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fenced_decoy_copy_cannot_stand_in_for_a_deleted_human_section() {
+        let section = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{section}\n");
+        // The agent deletes the live section but leaves an identical quoted copy.
+        let post = format!("# Doc\nSee the example:\n```\n{section}\n```\n");
+        let (restored, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("the decoy must not satisfy the guard");
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].post_block.is_none());
+        assert!(contains_human_owned_section(&restored));
+    }
+
+    #[test]
+    fn a_fence_left_open_above_a_human_section_is_caught() {
+        let section = "<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep me live.\n<!-- kronn:section:end -->";
+        let pre = format!("# Doc\n{section}\n");
+        // One stray ``` and no closer: a renderer treats the rest as code.
+        let post = format!("# Doc\n```\n{section}\n");
+        let (_, diffs) = enforce_human_owned_sections(&pre, &post)
+            .expect("an unclosed fence swallowing the section must not pass");
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].post_block.is_none());
+    }
+
+    #[test]
+    fn a_fence_already_open_in_the_original_does_not_make_every_audit_a_diff() {
+        // The human's own doc has a stray unclosed fence above the section.
+        // Lenient reading on both sides: protected, and untouched = no-op.
+        let pre = "# Doc\n```\n<!-- kronn:section name=\"team\" owner=\"human\" -->\nKeep.\n<!-- kronn:section:end -->\n";
+        assert!(contains_human_owned_section(pre));
+        assert_eq!(enforce_human_owned_sections(pre, pre), None);
+        let post = pre.replace("Keep.", "Changed.");
+        assert!(enforce_human_owned_sections(pre, &post).is_some());
+    }
+
+    #[test]
+    fn tilde_fenced_report_excerpt_is_not_a_live_section() {
+        let report = "# Report\n\n~~~\n<!-- kronn:section name=\"quoted\" owner=\"human\" -->\nQuoted.\n<!-- kronn:section:end -->\n~~~\n";
+        assert!(!contains_human_owned_section(report));
+    }
+
+    #[test]
+    fn section_or_code_lines_covers_sections_and_fences_only() {
+        let content = "# Doc\n```\nx\n```\n<!-- kronn:section name=\"s\" owner=\"audit\" -->\nA\n<!-- kronn:section:end -->\nplain\n";
+        let occupied = section_or_code_lines(content);
+        // # Doc | ``` x ``` | open A close | plain | (trailing empty element)
+        assert_eq!(
+            occupied,
+            vec![false, true, true, true, true, true, true, false, false]
+        );
+    }
+
+    #[test]
+    fn diff_report_names_the_file_and_every_section() {
+        let diffs = vec![
+            HumanSectionDiff {
+                name: "team".to_string(),
+                pre_block: "kept text".to_string(),
+                post_block: Some("agent text".to_string()),
+            },
+            HumanSectionDiff {
+                name: "roadmap".to_string(),
+                pre_block: "kept roadmap".to_string(),
+                post_block: None,
+            },
+        ];
+        let report = format_human_section_diff_report("docs/AGENTS.md", &diffs, "2026-09-27");
+        assert!(report.contains("docs/AGENTS.md"));
+        assert!(report.contains("2026-09-27"));
+        assert!(
+            report.contains("team")
+                && report.contains("kept text")
+                && report.contains("agent text")
+        );
+        assert!(report.contains("roadmap") && report.contains("kept roadmap"));
+        assert!(
+            report.contains("restored"),
+            "the removed section notes it was restored"
         );
     }
 

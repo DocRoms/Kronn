@@ -549,12 +549,18 @@ pub async fn disc_append(
                             .iter()
                             .find(|view| view.id == pk)
                             .ok_or_else(|| anyhow::anyhow!("resolved CLI session is missing"))?;
-                        Ok(MessageTarget::cli(
-                            crate::db::discussions::parse_agent_type(&view.agent_type)?,
+                        Ok(crate::db::discussions::session_cli_target(
+                            &view.agent_type,
                             pk,
                         ))
                     })
                     .collect::<anyhow::Result<Vec<_>>>()
+                    .map(|targets| {
+                        targets
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<MessageTarget>>()
+                    })
             })
             .await
         {
@@ -614,8 +620,13 @@ pub async fn disc_append(
             (true, false, false)
         };
     let dispatch_routes = if requested_targets.is_empty() {
+        // A native runner also supplies its runtime session id to the MCP
+        // bridge. Only a joined CLI author may implicitly hand the turn back
+        // to the principal; otherwise the runner's own append starts it again.
+        // Explicit targets remain available to native agents.
         vec![route_joined_peer_turn(
-            routing_candidate,
+            routing_candidate
+                && (author_cli_session_id.is_some() || legacy_requested_target.is_some()),
             no_agent_room,
             legacy_requested_target.as_ref(),
             legacy_target_is_eligible,
@@ -930,8 +941,9 @@ pub async fn disc_append(
     //   Claude peer can wake an absent Codex principal, while a live Codex MCP
     //   session must not spawn a second Codex process for its own append.
     //
-    // A session id distinguishes a live joined peer from historical imports.
-    // Bulk appends, duplicates and no-agent rooms never trigger execution.
+    // The durable CLI author identity above distinguishes joined peers from
+    // native runners that also carry a session id. Bulk appends, duplicates
+    // and no-agent rooms never trigger execution.
     let appended_live_turn =
         is_live_peer_turn(live_agent_append, req.session_id.as_deref(), appended);
     if appended_live_turn && !dispatch_agents.is_empty() {
@@ -2353,6 +2365,13 @@ mod tests {
                     "UPDATE discussions SET no_agent = 0 WHERE id = 'd-lint'",
                     [],
                 )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("joined-session"),
+                    "peer",
+                )?;
                 Ok(())
             })
             .await
@@ -2384,6 +2403,97 @@ mod tests {
             crate::db::agent_dispatch::DispatchStatus::Pending
         );
         assert!(awaiting);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn native_mcp_append_with_an_unjoined_session_never_restarts_the_principal() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions SET no_agent = 0, agent = 'Codex' WHERE id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // Native MCP bridges have a runtime session id without a disc_join.
+        let receipt = append_as(
+            &state,
+            vec![agent_msg("native-tool-post", "MCP write succeeded")],
+            Some("native-runtime-session"),
+        )
+        .await;
+        let retry = append_as(
+            &state,
+            vec![agent_msg("native-tool-post", "MCP write succeeded")],
+            Some("native-runtime-session"),
+        )
+        .await;
+        assert_eq!(receipt.appended, 1);
+        assert_eq!(retry.appended, 0);
+        state
+            .db
+            .with_read_conn(|conn| {
+                let messages = crate::db::discussions::list_messages(conn, "d-lint")?;
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "MCP write succeeded");
+                assert!(crate::db::discussions::message_cli_author_target(
+                    conn,
+                    "d-lint",
+                    &messages[0].id,
+                )?
+                .is_none());
+                assert!(
+                    crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?
+                        .is_none(),
+                    "a native runner's own tool post must not queue another answer"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn unjoined_native_mcp_agent_can_still_address_an_explicit_responder() {
+        crate::core::anti_halluc::set_mode("off");
+        for typed in [false, true] {
+            let (state, _tmp) = lint_state(false).await;
+            state
+                .db
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE discussions SET no_agent = 0 WHERE id = 'd-lint'",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let mut message = agent_msg("explicit-native-target", "Ollama, confirm this result");
+            if typed {
+                message.targets = vec![MessageTarget::agent(AgentType::Ollama)];
+            } else {
+                message.target_agent = Some(AgentType::Ollama);
+            }
+            append_as(&state, vec![message], Some("native-runtime-session")).await;
+            let job = state
+                .db
+                .with_read_conn(|conn| {
+                    crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")
+                })
+                .await
+                .unwrap()
+                .expect("an explicit addressee still receives a durable job");
+            assert_eq!(job.agent_override, Some(AgentType::Ollama));
+        }
     }
 
     #[tokio::test]

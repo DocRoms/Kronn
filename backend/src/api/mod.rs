@@ -51,6 +51,8 @@ pub mod nvidia;
 pub mod ollama;
 pub mod openapi;
 pub mod orchestration;
+#[cfg(all(test, unix))]
+pub(crate) mod other_projects_fixture;
 pub mod planning;
 pub mod plugin_portability;
 pub mod profiles;

@@ -5,6 +5,8 @@ import { MediaGenerateForm } from './MediaGenerateForm';
 import { AgentSwitchPicker, type AgentSwitchTarget } from './AgentSwitchPicker';
 import { MarkdownEditor } from './MarkdownComposerTools';
 import { SearchableSelect } from './SearchableSelect';
+import { DiscussionSkillPicker } from './DiscussionSkillPicker';
+import { withoutForeignRepositorySkills } from '../lib/discussionSkills';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
@@ -501,7 +503,11 @@ export function NewDiscussionForm({
   const selectProject = (projectId: string) => {
     setNewDiscProjectId(projectId);
     const project = projects.find(candidate => candidate.id === projectId);
-    if (project?.default_skill_ids?.length) setNewDiscSkillIds(project.default_skill_ids);
+    // The previous project's repository skills do not follow to this one.
+    setNewDiscSkillIds(previous => withoutForeignRepositorySkills(
+      project?.default_skill_ids?.length ? project.default_skill_ids : previous,
+      projectId,
+    ));
     setNewDiscWorkspaceMode('Direct');
     setNewDiscBranchName('');
     setNewDiscBaseBranch('main');
@@ -1326,19 +1332,17 @@ export function NewDiscussionForm({
                       {newDiscSkillIds.length > 0 && <span className="disc-advanced-count">{newDiscSkillIds.length}</span>}
                     </button>
                     {expandedAdvanced === 'skills' && (
-                      <div className="disc-advanced-chips">
-                        {availableSkills.map(skill => {
-                          const selected = newDiscSkillIds.includes(skill.id);
-                          return (
-                            <button key={skill.id} type="button" className="disc-chip" data-active={selected} data-color="accent"
-                              onClick={() => setNewDiscSkillIds(prev => selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id])}
-                              title={skill.description || skill.name}
-                            >
-                              {selected && <Check size={9} />} {skill.name}
-                            </button>
-                          );
-                        })}
-                      </div>
+                      <DiscussionSkillPicker
+                        projectId={newDiscProjectId || null}
+                        projects={projects}
+                        catalog={availableSkills}
+                        selectedIds={newDiscSkillIds}
+                        onToggle={skillId => setNewDiscSkillIds(prev => (
+                          prev.includes(skillId) ? prev.filter(id => id !== skillId) : [...prev, skillId]
+                        ))}
+                        t={t}
+                        chipClassName="disc-chip"
+                      />
                     )}
                   </div>
                 )}

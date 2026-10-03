@@ -469,6 +469,17 @@ async fn orchestration_cli_tool_routes_require_server_verifiable_identity() {
                 "reason": "test"
             }),
         ),
+        // KT-839: replacing the gates rides the same route, so it needs the same
+        // server-verifiable identity — it must not be a way around it.
+        (
+            format!("/api/orchestration/tool/executions/{missing_execution}/reassign"),
+            serde_json::json!({
+                "source_agent": "",
+                "source_session_id": "",
+                "validations": [{"command": "cargo test"}],
+                "reason": "test"
+            }),
+        ),
     ];
 
     for (path, body) in calls {
@@ -2444,7 +2455,7 @@ async fn artifact_import_rollback_leaves_no_origin_mapping_or_partial_resource()
         .db
         .with_conn(|conn| {
             assert_eq!(
-                conn.query_row("SELECT COUNT(*) FROM artifact_import_origins", [], |r| r
+                conn.query_row("SELECT COUNT(*) FROM resource_identities", [], |r| r
                     .get::<_, i64>(0))?,
                 0
             );
@@ -2557,6 +2568,354 @@ async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_ide
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn artifact_import_identities_are_scoped_per_project_and_deduplicated_on_reimport() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let content = serde_json::to_string(&exported["data"]).unwrap();
+    let state = test_state();
+    let now = chrono::Utc::now();
+    for id in ["project-a", "project-b"] {
+        let project = kronn::models::Project {
+            id: id.into(),
+            name: id.into(),
+            path: format!("/tmp/kronn-test-{id}"),
+            repo_url: None,
+            token_override: None,
+            ai_config: kronn::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: kronn::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .db
+            .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+    }
+    let app = build_router_with_auth(state.clone(), false);
+    for project_id in ["project-a", "project-a", "project-b"] {
+        let (_, preview) = post_json(
+            app.clone(),
+            "/api/pages/import/preview",
+            serde_json::json!({
+                "content":content,"project_id":project_id,"approved_quick_exec_ids":["qe-portable"]
+            }),
+        )
+        .await;
+        assert_eq!(preview["data"]["can_import"], true, "{preview}");
+        let (_, imported) = post_json(
+            app.clone(),
+            "/api/pages/import",
+            serde_json::json!({
+                "content":content,"project_id":project_id,"approved_quick_exec_ids":["qe-portable"],
+                "preview_digest":preview["data"]["digest"]
+            }),
+        )
+        .await;
+        assert_eq!(imported["success"], true, "{imported}");
+    }
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                kronn::db::quick_prompts::list_quick_prompts(conn)?.len(),
+                2,
+                "one copy per distinct project; reimporting the same project must reuse it"
+            );
+            let identities: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM resource_identities WHERE kind = 'quick_prompt'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                identities, 2,
+                "one identity row per project — reimporting project-a must update it, not add a row"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn artifact_import_reuses_a_pre_migration_global_identity_when_importing_into_a_project() {
+    // Migration 196 placed every identity recorded before this table existed
+    // into the global scope (project_key = ""). Importing the same slug into
+    // a project whose repo_url is known must still find that row — first the
+    // project scope, then the global one — and reuse it, not create a copy.
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let content = serde_json::to_string(&exported["data"]).unwrap();
+
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "proj-repo".into(),
+        name: "proj-repo".into(),
+        path: "/tmp/kronn-test-proj-repo".into(),
+        repo_url: Some("https://github.com/acme/demo.git".into()),
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    // A quick_prompt already imported previously (e.g. with no project), and
+    // the identity row a pre-slice-3 import — or this table's own migration —
+    // left in the global scope.
+    let existing_quick_prompt = kronn::models::QuickPrompt {
+        id: "existing-qp".into(),
+        pinned: false,
+        name: "Portable analysis".into(),
+        icon: "✨".into(),
+        prompt_template: "Analyse the collected data".into(),
+        variables: vec![],
+        agent: kronn::models::AgentType::ClaudeCode,
+        connection_id: None,
+        project_id: Some("proj-repo".into()),
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: kronn::models::ModelTier::Default,
+        agent_settings: None,
+        description: "Bundled prompt".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::quick_prompts::insert_quick_prompt(conn, &existing_quick_prompt)?;
+            kronn::db::resource_identities::upsert(
+                conn,
+                "",
+                "quick_prompt",
+                "qp-portable",
+                "existing-qp",
+            )
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({
+            "content":content,"project_id":"proj-repo","approved_quick_exec_ids":["qe-portable"]
+        }),
+    )
+    .await;
+    assert_eq!(preview["data"]["can_import"], true, "{preview}");
+    let entries = preview["data"]["entries"].as_array().unwrap();
+    let qp_entry = entries
+        .iter()
+        .find(|entry| entry["kind"] == "quick_prompt")
+        .unwrap();
+    assert_eq!(qp_entry["disposition"], "reuse", "{qp_entry}");
+    assert_eq!(
+        qp_entry["existing_id"], "existing-qp",
+        "the global-scope identity left by the migration must be proposed as the candidate: {qp_entry}"
+    );
+
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/pages/import",
+        serde_json::json!({
+            "content":content,"project_id":"proj-repo","approved_quick_exec_ids":["qe-portable"],
+            "preview_digest":preview["data"]["digest"]
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                kronn::db::quick_prompts::list_quick_prompts(conn)?.len(),
+                1,
+                "reusing the existing resource must not create a duplicate copy"
+            );
+            let identities: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM resource_identities WHERE kind = 'quick_prompt'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                identities, 1,
+                "reuse must not add a second identity row next to the global one"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn artifact_import_resolves_workflow_skill_profile_directive_ids_and_warns_on_the_rest() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut bundle = exported["data"].clone();
+    bundle["referenced_workflows"][0]["steps"][0]["skill_ids"] =
+        serde_json::json!(["rust", "custom-does-not-exist"]);
+    bundle["referenced_workflows"][0]["steps"][0]["profile_ids"] =
+        serde_json::json!(["architect", "does-not-exist-profile"]);
+    bundle["referenced_workflows"][0]["steps"][0]["directive_ids"] =
+        serde_json::json!(["token-saver", "does-not-exist-directive"]);
+    // A real registry slug, so a local config for it can be inserted below —
+    // the fixture's own placeholder ("chartbeat") isn't a registered server.
+    bundle["referenced_quick_apis"][0]["api_plugin_slug"] = serde_json::json!("api-chartbeat");
+    let content = bundle.to_string();
+    let state = test_state();
+    // A local, globally-scoped config for the same plugin as the bundled
+    // Quick API's dangling `api_config_id` — exercising the same
+    // `rebind_quick_api_config` the legacy workflow-import endpoint already
+    // reuses for this exact case (ADR-005 slice 3).
+    state
+        .db
+        .with_conn(|conn| {
+            let definition = kronn::core::registry::builtin_registry()
+                .into_iter()
+                .find(|definition| definition.id == "api-chartbeat")
+                .unwrap();
+            kronn::db::mcps::upsert_server(
+                conn,
+                &kronn::models::McpServer {
+                    id: definition.id.clone(),
+                    name: definition.name,
+                    description: definition.description,
+                    transport: definition.transport,
+                    source: kronn::models::McpSource::Registry,
+                    api_spec: definition.api_spec,
+                },
+            )?;
+            kronn::db::mcps::insert_config(
+                conn,
+                &kronn::models::McpConfig {
+                    id: "local-chartbeat-config".into(),
+                    server_id: "api-chartbeat".into(),
+                    label: "Chartbeat".into(),
+                    env_keys: vec![],
+                    env_encrypted: String::new(),
+                    args_override: None,
+                    is_global: true,
+                    include_general: false,
+                    config_hash: "hash".into(),
+                    project_ids: vec![],
+                    host_sync: kronn::models::HostSyncMode::None,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["can_import"], true,
+        "a missing instance-bound requirement must not block the import: {preview}"
+    );
+    let warnings = preview["data"]["warnings"].as_array().unwrap();
+    for (kind, id) in [
+        ("skill", "custom-does-not-exist"),
+        ("profile", "does-not-exist-profile"),
+        ("directive", "does-not-exist-directive"),
+    ] {
+        assert!(
+            warnings.iter().any(|w| w["kind"] == kind && w["id"] == id),
+            "missing {kind} {id} must be signalled clearly: {warnings:?}"
+        );
+    }
+    let (_, imported) = post_json(
+        app,
+        "/api/pages/import",
+        serde_json::json!({
+            "content":content,"approved_quick_exec_ids":["qe-portable"],
+            "preview_digest":preview["data"]["digest"]
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    state
+        .db
+        .with_conn(|conn| {
+            let workflows = kronn::db::workflows::list_workflows(conn)?;
+            let copy = workflows
+                .iter()
+                .find(|w| w.id != "workflow-portable")
+                .unwrap();
+            let step = &copy.steps[0];
+            assert_eq!(
+                step.skill_ids,
+                vec!["rust".to_string()],
+                "the resolvable skill is kept, the dangling one is dropped, not silently kept"
+            );
+            assert_eq!(step.profile_ids, vec!["architect".to_string()]);
+            assert_eq!(step.directive_ids, vec!["token-saver".to_string()]);
+            let apis = kronn::db::quick_apis::list_quick_apis(conn)?;
+            let copied_api = apis.iter().find(|a| a.id != "qa-portable").unwrap();
+            assert_eq!(
+                copied_api.api_config_id, "local-chartbeat-config",
+                "a dangling api_config_id must be rebound to the local config for the same plugin"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2771,6 +3130,1095 @@ async fn transform_data_preview_uses_runtime_recipe() {
     assert_eq!(body["data"]["error"], Value::Null);
     assert_eq!(body["data"]["value"]["summary"]["requests"], 42.0);
     assert_eq!(body["data"]["value"]["summary"]["errors"], 5.0);
+}
+
+#[tokio::test]
+async fn live_page_list_filters_by_project_without_changing_the_unfiltered_contract() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, name) in [("page-project-a", "Project A"), ("page-project-b", "Project B")] {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![id, name, format!("/tmp/{id}"), now],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    for (title, project_id) in [
+        ("Project A report", Some("page-project-a")),
+        ("Project B report", Some("page-project-b")),
+        ("General report", None),
+    ] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/pages",
+            serde_json::json!({
+                "title": title,
+                "html": format!("<h1>{title}</h1>"),
+                "datasets": [],
+                "project_id": project_id,
+            }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+    }
+
+    let (status, filtered) = get_json(app.clone(), "/api/pages?project_id=page-project-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered["success"], true, "{filtered}");
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["data"][0]["title"], "Project A report");
+
+    let (_, unfiltered) = get_json(app, "/api/pages").await;
+    assert_eq!(unfiltered["data"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn project_repository_resources_lists_project_artifacts_without_publishing_them() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["repository-project", "Repository project", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Project health",
+            "html": "<h1>Health</h1>",
+            "datasets": [],
+            "project_id": "repository-project",
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+
+    let (status, response) =
+        get_json(app, "/api/projects/repository-project/repository-resources").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["kronn_exists"], false);
+    let resources = response["data"]["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["kind"], "artifact");
+    assert_eq!(resources[0]["status"], "kronn_only");
+    assert_eq!(
+        resources[0]["repository_paths"],
+        serde_json::json!([
+            "kronn/artifacts/project-health/artifact.yaml",
+            "kronn/artifacts/project-health/index.html",
+        ]),
+    );
+}
+
+#[tokio::test]
+async fn project_repository_resources_expose_uses_and_used_by_with_missing_references() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["linked-project", "Linked project", project_path, now.to_rfc3339()],
+                )?;
+                kronn::db::quick_execs::insert_quick_exec(
+                    conn,
+                    &kronn::models::QuickExec {
+                        id: "qe-lint".into(),
+                        name: "Lint".into(),
+                        icon: "terminal".into(),
+                        description: String::new(),
+                        project_id: Some("linked-project".into()),
+                        command: "cargo".into(),
+                        args: vec!["check".into()],
+                        timeout_secs: 30,
+                        output_format: Default::default(),
+                        variables: Vec::new(),
+                        pinned: false,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                let workflow: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
+                    "id": "wf-nightly", "name": "Nightly triage", "project_id": "linked-project",
+                    "trigger": {"type": "Manual"},
+                    "steps": [
+                        {"name": "lint", "step_type": {"type": "CollectApiData"},
+                         "collect_api_data": {"sources": [{"alias": "lint", "quick_exec_id": "qe-lint"}]}},
+                        {"name": "ask", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-gone"}
+                    ],
+                    "actions": [], "safety": {}, "workspace_config": null,
+                    "concurrency_limit": null, "enabled": false,
+                    "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339()
+                }))
+                .unwrap();
+                kronn::db::workflows::insert_workflow(conn, &workflow)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, response) =
+        get_json(app, "/api/projects/linked-project/repository-resources").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    let resources = response["data"]["resources"].as_array().unwrap();
+    let find = |id: &str| resources.iter().find(|item| item["id"] == id).unwrap();
+    assert_eq!(
+        find("wf-nightly")["uses"],
+        serde_json::json!([
+            {"kind": "quick_exec", "id": "qe-lint", "slug": "lint", "name": "Lint", "missing": false},
+            {"kind": "quick_prompt", "id": "qp-gone", "name": "qp-gone", "missing": true},
+        ])
+    );
+    assert_eq!(find("wf-nightly")["used_by"], serde_json::json!([]));
+    assert_eq!(find("qe-lint")["uses"], serde_json::json!([]));
+    assert_eq!(
+        find("qe-lint")["used_by"],
+        serde_json::json!([
+            {"kind": "workflow", "id": "wf-nightly", "slug": "nightly-triage", "name": "Nightly triage", "missing": false},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn repository_resource_publish_align_import_and_hash_approval_round_trip() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![
+                        "portable-project",
+                        "Portable project",
+                        project_path,
+                        now.to_rfc3339(),
+                    ],
+                )?;
+                kronn::db::quick_execs::insert_quick_exec(
+                    conn,
+                    &kronn::models::QuickExec {
+                        id: "qe-portable".into(),
+                        name: "Deploy".into(),
+                        icon: "terminal".into(),
+                        description: String::new(),
+                        project_id: Some("portable-project".into()),
+                        command: "deploy".into(),
+                        args: vec!["--token".into(), "literal-secret-value".into()],
+                        timeout_secs: 30,
+                        output_format: Default::default(),
+                        variables: Vec::new(),
+                        pinned: false,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, before) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(before["data"]["kronn_exists"], false);
+    assert!(!project_directory.path().join("kronn").exists());
+
+    let (_, published) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/publish",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "id": "qe-portable",
+            "overwrite_repository_changes": false,
+        }),
+    )
+    .await;
+    assert_eq!(published["success"], true, "{published}");
+    let resource_path = project_directory
+        .path()
+        .join("kronn/quick-execs/deploy.yaml");
+    let published_text = std::fs::read_to_string(&resource_path).unwrap();
+    assert!(!published_text.contains("literal-secret-value"));
+    assert!(published_text.contains("secret://KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
+    let config_text =
+        std::fs::read_to_string(project_directory.path().join("kronn/kronn.toml")).unwrap();
+    assert!(config_text.contains("KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
+    assert!(!config_text.contains("literal-secret-value"));
+    for relative in [
+        "kronn/kronn.lock",
+        "kronn/kronn.toml",
+        "kronn/INDEX.md",
+        ".agents/skills/kronn/SKILL.md",
+        "docs/AGENTS.md",
+    ] {
+        assert!(
+            project_directory.path().join(relative).is_file(),
+            "{relative}"
+        );
+    }
+
+    let (_, aligned) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(aligned["data"]["resources"][0]["status"], "up_to_date");
+
+    std::fs::write(&resource_path, format!("{published_text}\n")).unwrap();
+    let (_, repository_changed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(
+        repository_changed["data"]["resources"][0]["status"],
+        "repository_newer"
+    );
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
+            item.description = "Kronn edit".into();
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, conflict) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(conflict["data"]["resources"][0]["status"], "conflict");
+    // The listing says that the two sides differ, never how, and holds no secret…
+    assert!(conflict["data"]["resources"][0].get("diff").is_none());
+    assert!(conflict["data"]["resources"][0].get("file_diffs").is_none());
+    assert!(conflict["data"]["resources"][0].get("files").is_none());
+    assert!(!conflict.to_string().contains("literal-secret-value"));
+    // …the diff and the text of each side are asked for when the sheet opens,
+    // masked like the file.
+    let (comparison_status, comparison) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/comparison?kind=quick_exec&id=qe-portable",
+    )
+    .await;
+    assert_eq!(comparison_status, StatusCode::OK);
+    assert_eq!(comparison["success"], true, "{comparison}");
+    assert!(comparison["data"]["diff"]
+        .as_str()
+        .unwrap()
+        .contains("--- repository"));
+    let files = comparison["data"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{comparison}");
+    assert!(files[0]["repository"].is_string() && files[0]["kronn"].is_string());
+    assert_ne!(files[0]["repository"], files[0]["kronn"]);
+    assert!(files[0]["kronn"].as_str().unwrap().contains("Kronn edit"));
+    assert!(!comparison.to_string().contains("literal-secret-value"));
+
+    // A secret typed by hand into the repository file, which Kronn never held,
+    // is masked in the answer too: in the text of that side, in the diff and in
+    // the field-by-field view.
+    let typed_text = std::fs::read_to_string(&resource_path).unwrap().replace(
+        "\"description\": \"\"",
+        "\"description\": \"run with api_key=typed-by-hand-e2e\"",
+    );
+    assert!(typed_text.contains("typed-by-hand-e2e"));
+    std::fs::write(&resource_path, typed_text).unwrap();
+    let (_, typed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/comparison?kind=quick_exec&id=qe-portable",
+    )
+    .await;
+    assert_eq!(typed["success"], true, "{typed}");
+    assert!(
+        !typed.to_string().contains("typed-by-hand-e2e"),
+        "a secret typed into the repository file leaked: {typed}"
+    );
+    assert!(typed["data"]["files"][0]["repository"]
+        .as_str()
+        .unwrap()
+        .contains("api_key=***REDACTED***"));
+    assert!(typed["data"]["diff"]
+        .as_str()
+        .unwrap()
+        .contains("api_key=***REDACTED***"));
+    // The rest of the flow starts again from the file as it was.
+    std::fs::write(&resource_path, format!("{published_text}\n")).unwrap();
+
+    let (_, refused) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/import",
+        serde_json::json!({ "kind": "quick_exec", "slug": "deploy" }),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("confirm"),
+        "an import must not silently replace Kronn's edits: {refused}"
+    );
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/import",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "slug": "deploy",
+            "overwrite_kronn_changes": true,
+        }),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let (_, awaiting) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(
+        awaiting["data"]["resources"][0]["status"],
+        "approval_required"
+    );
+    assert_eq!(awaiting["data"]["resources"][0]["approval_required"], true);
+
+    let (_, blocked) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(blocked["data"]["success"], false, "{blocked}");
+    assert!(blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
+            item.description = "Changed after repository import".into();
+            item.command = "echo".into();
+            item.args = vec![r#"{"approved":true}"#.into()];
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, changed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    // An unapproved imported change surfaces as approval_required first.
+    assert_eq!(
+        changed["data"]["resources"][0]["status"],
+        "approval_required"
+    );
+    assert_eq!(changed["data"]["resources"][0]["approval_required"], true);
+
+    let (_, republished) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/publish",
+        serde_json::json!({
+            "kind": "quick_exec",
+            "id": "qe-portable",
+            "overwrite_repository_changes": true,
+        }),
+    )
+    .await;
+    assert_eq!(republished["success"], true, "{republished}");
+    assert_eq!(republished["data"]["approved"], false, "{republished}");
+
+    let (_, republished_state) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(
+        republished_state["data"]["resources"][0]["status"],
+        "approval_required"
+    );
+    assert_eq!(
+        republished_state["data"]["resources"][0]["approval_required"],
+        true
+    );
+    assert_eq!(republished_state["data"]["resources"][0]["approved"], false);
+
+    let (_, republished_blocked) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(republished_blocked["data"]["success"], false);
+    assert!(republished_blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+
+    let (_, approved) = post_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/approve",
+        serde_json::json!({ "kind": "quick_exec", "id": "qe-portable" }),
+    )
+    .await;
+    assert_eq!(approved["success"], true, "{approved}");
+    assert_eq!(approved["data"]["approved"], true);
+    let (_, settled) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources",
+    )
+    .await;
+    assert_eq!(settled["data"]["resources"][0]["status"], "up_to_date");
+    assert_eq!(settled["data"]["resources"][0]["approval_required"], false);
+
+    let (_, accepted) = post_json(
+        app.clone(),
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(accepted["data"]["success"], true, "{accepted}");
+    assert_eq!(accepted["data"]["data"]["approved"], true, "{accepted}");
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
+            item.args.push("--dry-run".into());
+            item.updated_at = chrono::Utc::now();
+            kronn::db::quick_execs::update_quick_exec(conn, &item)
+        })
+        .await
+        .unwrap();
+    let (_, changed_hash_blocked) = post_json(
+        app,
+        "/api/quick-execs/qe-portable/run",
+        serde_json::json!({ "variables": {} }),
+    )
+    .await;
+    assert_eq!(changed_hash_blocked["data"]["success"], false);
+    assert!(changed_hash_blocked["data"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("approved"));
+}
+
+#[tokio::test]
+async fn imported_quick_prompt_and_api_execution_require_current_hash_approval() {
+    let state = test_state();
+    state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+    let now = chrono::Utc::now();
+    let imported_prompt = kronn::models::QuickPrompt {
+        id: "qp-repository-import".into(),
+        name: "Repository prompt".into(),
+        icon: "prompt".into(),
+        prompt_template: "Review this repository".into(),
+        variables: Vec::new(),
+        agent: kronn::models::AgentType::ClaudeCode,
+        connection_id: None,
+        project_id: None,
+        skill_ids: Vec::new(),
+        profile_ids: Vec::new(),
+        directive_ids: Vec::new(),
+        tier: kronn::models::ModelTier::default(),
+        agent_settings: None,
+        description: String::new(),
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let mut local_prompt = imported_prompt.clone();
+    local_prompt.id = "qp-local".into();
+    local_prompt.name = "Local prompt".into();
+    let imported_api = kronn::models::QuickApi {
+        id: "qa-repository-import".into(),
+        name: "Repository API".into(),
+        icon: "api".into(),
+        description: String::new(),
+        project_id: None,
+        api_plugin_slug: "missing-test-plugin".into(),
+        api_config_id: "missing-test-config".into(),
+        api_endpoint_path: "/imported".into(),
+        api_method: Some("GET".into()),
+        api_query: None,
+        api_path_params: None,
+        api_headers: None,
+        api_body: None,
+        api_extract: None,
+        api_pagination: None,
+        api_timeout_ms: None,
+        api_max_retries: None,
+        variables: Vec::new(),
+        profile_ids: Vec::new(),
+        directive_ids: Vec::new(),
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let mut local_api = imported_api.clone();
+    local_api.id = "qa-local".into();
+    local_api.name = "Local API".into();
+
+    state
+        .db
+        .with_conn({
+            let imported_prompt = imported_prompt.clone();
+            let local_prompt = local_prompt.clone();
+            let imported_api = imported_api.clone();
+            let local_api = local_api.clone();
+            move |conn| {
+                kronn::db::quick_prompts::insert_quick_prompt(conn, &imported_prompt)?;
+                kronn::db::quick_prompts::insert_quick_prompt(conn, &local_prompt)?;
+                kronn::db::quick_apis::insert_quick_api(conn, &imported_api)?;
+                kronn::db::quick_apis::insert_quick_api(conn, &local_api)?;
+                kronn::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repository-test",
+                    "quick_prompt",
+                    "repository-prompt",
+                    &imported_prompt.id,
+                    "repository-hash",
+                    "database-hash",
+                    &now.to_rfc3339(),
+                    true,
+                )?;
+                kronn::db::repository_resources::upsert_alignment(
+                    conn,
+                    "repository-test",
+                    "quick_api",
+                    "repository-api",
+                    &imported_api.id,
+                    "repository-hash",
+                    "database-hash",
+                    &now.to_rfc3339(),
+                    true,
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, blocked_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(blocked_prompt["success"], false, "{blocked_prompt}");
+    assert!(blocked_prompt["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let (_, blocked_prompt_batch) = post_json(
+        app.clone(),
+        "/api/mcp/qp-batch-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "items": [{"vars": {}}]}),
+    )
+    .await;
+    assert_eq!(blocked_prompt_batch["success"], false);
+    assert!(blocked_prompt_batch["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+    let (_, blocked_ui_prompt_batch) = post_json(
+        app.clone(),
+        "/api/quick-prompts/qp-repository-import/batch",
+        serde_json::json!({
+            "items": [{"title": "Blocked", "variables": {}}],
+            "batch_name": "Blocked repository prompt",
+        }),
+    )
+    .await;
+    assert_eq!(blocked_ui_prompt_batch["success"], false);
+    assert!(blocked_ui_prompt_batch["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+
+    let (_, blocked_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(blocked_api["data"]["success"], false, "{blocked_api}");
+    assert!(blocked_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let blocked_api_run_id = blocked_api["data"]["run_id"].as_str().unwrap().to_string();
+    let blocked_status = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &blocked_api_run_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        blocked_status.status,
+        kronn::models::SharedRunStatus::PreflightFailed
+    ));
+    let (_, blocked_api_batch) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/batch",
+        serde_json::json!({"items": ["one"]}),
+    )
+    .await;
+    assert!(blocked_api_batch["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+
+    state
+        .db
+        .with_conn({
+            let imported_prompt = imported_prompt.clone();
+            let imported_api = imported_api.clone();
+            move |conn| {
+                let prompt = kronn::core::repository_resources::render_quick_prompt(
+                    &imported_prompt,
+                    "repository-prompt",
+                )
+                .map_err(anyhow::Error::msg)?;
+                kronn::db::repository_resources::approve(
+                    conn,
+                    "repository-test",
+                    "quick_prompt",
+                    "repository-prompt",
+                    &kronn::core::repository_resources::approval_hash(&prompt.document),
+                )?;
+                let api = kronn::core::repository_resources::render_quick_api(
+                    &imported_api,
+                    "repository-api",
+                )
+                .map_err(anyhow::Error::msg)?;
+                kronn::db::repository_resources::approve(
+                    conn,
+                    "repository-test",
+                    "quick_api",
+                    "repository-api",
+                    &kronn::core::repository_resources::approval_hash(&api.document),
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let (_, approved_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": imported_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(approved_prompt["success"], true, "{approved_prompt}");
+    let (_, approved_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(approved_api["success"], true, "{approved_api}");
+    assert!(approved_api["data"]["run_id"].is_string());
+    assert!(!approved_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+    let approved_api_run_id = approved_api["data"]["run_id"].as_str().unwrap().to_string();
+    let approved_status = state
+        .db
+        .with_read_conn(move |conn| kronn::db::shared_runs::get(conn, &approved_api_run_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(
+        approved_status.status,
+        kronn::models::SharedRunStatus::PreflightFailed
+    ));
+
+    state
+        .db
+        .with_conn(|conn| {
+            let mut prompt =
+                kronn::db::quick_prompts::get_quick_prompt(conn, "qp-repository-import")?.unwrap();
+            prompt.prompt_template = "Changed after approval".into();
+            prompt.updated_at = chrono::Utc::now();
+            kronn::db::quick_prompts::update_quick_prompt(conn, &prompt)?;
+            let mut api =
+                kronn::db::quick_apis::get_quick_api(conn, "qa-repository-import")?.unwrap();
+            api.api_endpoint_path = "/changed-after-approval".into();
+            api.updated_at = chrono::Utc::now();
+            kronn::db::quick_apis::update_quick_api(conn, &api)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, changed_prompt) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": "qp-repository-import", "vars": {}}),
+    )
+    .await;
+    assert_eq!(changed_prompt["success"], false);
+    assert!(changed_prompt["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+    let (_, changed_api) = post_json(
+        app.clone(),
+        "/api/quick-apis/qa-repository-import/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert!(changed_api["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("preflight_failed:"));
+
+    let (_, local_prompt_run) = post_json(
+        app.clone(),
+        "/api/mcp/qp-run",
+        serde_json::json!({"qp_id": local_prompt.id, "vars": {}}),
+    )
+    .await;
+    assert_eq!(local_prompt_run["success"], true, "{local_prompt_run}");
+    let (_, local_api_run) = post_json(
+        app,
+        "/api/quick-apis/qa-local/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(local_api_run["success"], true, "{local_api_run}");
+    assert!(local_api_run["data"]["run_id"].is_string());
+    assert!(!local_api_run["data"]["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("approved"));
+}
+
+#[tokio::test]
+async fn project_repository_resources_classifies_repository_and_kronn_skills() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    for relative in [
+        "kronn/skills/rust/SKILL.md",
+        ".claude/skills/rust/SKILL.md",
+        ".agents/skills/repo-review/SKILL.md",
+    ] {
+        let path = project_directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let name = if relative.contains("repo-review") {
+            "Repository review"
+        } else {
+            "Rust"
+        };
+        std::fs::write(
+            path,
+            format!("---\nname: {name}\ndescription: Test skill\n---\n\nInstructions\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project_directory.path().join("Cargo.toml"),
+        "[package]\nname='demo'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project_directory.path().join("go.mod"),
+        "module example.test/demo\n",
+    )
+    .unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at, default_skill_ids_json) VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                    rusqlite::params![
+                        "skills-project",
+                        "Skills project",
+                        project_path,
+                        now,
+                        r#"["rust","python"]"#,
+                    ],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, response) =
+        get_json(app, "/api/projects/skills-project/repository-resources").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    let present = response["data"]["skills_present"].as_array().unwrap();
+    let rust = present
+        .iter()
+        .find(|skill| skill["id"] == "rust")
+        .expect("attached Rust skill");
+    assert_eq!(rust["provenance"], "both");
+    assert_eq!(
+        rust["repository_paths"],
+        serde_json::json!([".claude/skills/rust/SKILL.md", "kronn/skills/rust/SKILL.md",]),
+    );
+    let attached = present
+        .iter()
+        .find(|skill| skill["id"] == "python")
+        .expect("attached Kronn-only skill");
+    assert_eq!(attached["provenance"], "kronn");
+    assert_eq!(attached["status"], "kronn_only");
+    let detected = present
+        .iter()
+        .find(|skill| skill["id"] == "go")
+        .expect("filesystem-detected skill");
+    // A detected skill is a Kronn suggestion, not a file of the repository.
+    assert_eq!(detected["provenance"], "kronn");
+    assert_eq!(detected["suggested"], true);
+    assert!(detected["suggested_reason"].is_string(), "{detected}");
+    let repository_only = present
+        .iter()
+        .find(|skill| skill["slug"] == "repo-review")
+        .expect("repository-only native skill");
+    assert_eq!(repository_only["name"], "Repository review");
+    assert_eq!(repository_only["provenance"], "repository");
+    assert!(response["data"]["skills_available"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["id"] == "typescript" && skill["provenance"] == "kronn"));
+}
+
+#[tokio::test]
+async fn skill_migration_routes_show_the_recap_then_move_without_overwriting() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    for (relative, body) in [
+        (".claude/skills/review/SKILL.md", "Claude version."),
+        (".agents/skills/review/SKILL.md", "Agents version."),
+        (".gemini/skills/lint/SKILL.md", "Lint."),
+    ] {
+        let path = project_directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!("---\nname: skill\ndescription: Test skill\n---\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["migrating-project", "Migrating", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, plan) = get_json(
+        app.clone(),
+        "/api/projects/migrating-project/repository-resources/skills/migration",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(plan["success"], true, "{plan}");
+    assert_eq!(plan["data"]["target_root"], ".agents/skills");
+    assert_eq!(plan["data"]["moves"][0]["source"], ".gemini/skills/lint");
+    assert_eq!(plan["data"]["moves"][0]["target"], ".agents/skills/lint");
+    assert_eq!(plan["data"]["conflicts"][0]["slug"], "review");
+    assert_eq!(
+        plan["data"]["conflicts"][0]["versions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        project_directory
+            .path()
+            .join(".gemini/skills/lint")
+            .is_dir(),
+        "the recap moves nothing"
+    );
+
+    let (_, migrated) = post_json(
+        app,
+        "/api/projects/migrating-project/repository-resources/skills/migrate",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(migrated["success"], true, "{migrated}");
+    assert_eq!(migrated["data"]["moved"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        migrated["data"]["unresolved"],
+        serde_json::json!(["review"])
+    );
+    assert!(project_directory
+        .path()
+        .join(".agents/skills/lint/SKILL.md")
+        .is_file());
+    assert!(!project_directory
+        .path()
+        .join(".gemini/skills/lint")
+        .exists());
+    assert!(std::fs::read_to_string(
+        project_directory
+            .path()
+            .join(".agents/skills/review/SKILL.md")
+    )
+    .unwrap()
+    .contains("Agents version."));
+    assert!(project_directory
+        .path()
+        .join(".claude/skills/review/SKILL.md")
+        .is_file());
+}
+
+// KT-921 — a native skill "used in Kronn" from a repository is listed for its
+// project by the Automation page, and its SKILL.md is served from the repository.
+#[tokio::test]
+async fn a_native_skill_used_in_kronn_is_listed_with_its_folder_and_its_skill_md_is_served() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    let skill_path = project_directory
+        .path()
+        .join(".agents/skills/block-migration/SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill_path,
+        "---\nname: Block migration\ndescription: Moves a block\n---\n\nRun the codemod.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project_directory.path().join(".agents/skills/unused")).unwrap();
+    std::fs::write(
+        project_directory
+            .path()
+            .join(".agents/skills/unused/SKILL.md"),
+        "---\nname: Unused\ndescription: Nobody uses it\n---\n\nNot referenced.\n",
+    )
+    .unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["front-euronews", "front_euronews", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    // Nothing is used yet: the static route answers, not `/api/projects/{id}`.
+    let (status, none) = get_json(app.clone(), "/api/projects/used-skills").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(none["success"], true, "{none}");
+    assert_eq!(none["data"], serde_json::json!([]));
+
+    let (_, used) = post_json(
+        app.clone(),
+        "/api/projects/front-euronews/repository-resources/skills/use",
+        serde_json::json!({ "relative_path": ".agents/skills/block-migration/SKILL.md" }),
+    )
+    .await;
+    assert_eq!(used["success"], true, "{used}");
+
+    let (_, listed) = get_json(app.clone(), "/api/projects/used-skills").await;
+    assert_eq!(
+        listed["data"],
+        serde_json::json!([{
+            "project_id": "front-euronews",
+            "slug": "block-migration",
+            "name": "Block migration",
+            "root": ".agents/skills",
+            "relative_path": ".agents/skills/block-migration/SKILL.md",
+            "referenced": true,
+            "published": false,
+        }]),
+        "the folder skill nobody referenced stays out"
+    );
+
+    let (status, file) = get_json(
+        app.clone(),
+        "/api/projects/front-euronews/repository-resources/skills/content?relative_path=.agents%2Fskills%2Fblock-migration%2FSKILL.md",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(file["success"], true, "{file}");
+    assert!(file["data"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Run the codemod."));
+    assert_eq!(file["data"]["truncated"], false);
+
+    let (_, refused) = get_json(
+        app,
+        "/api/projects/front-euronews/repository-resources/skills/content?relative_path=.agents%2Fskills%2Funused%2FSKILL.md",
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(refused["data"].is_null());
 }
 
 #[tokio::test]
@@ -4837,6 +6285,42 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
     assert_eq!(accepted["success"], true, "{accepted}");
     assert_eq!(accepted["data"]["child_discussion_id"], child_id);
 
+    // Compatibility fixture: pre-KT-837 bridges physically moved both the live
+    // membership and the durable source binding into the execution child after
+    // accepting. Keep exercising the authenticated return-resume route against
+    // exactly that persisted legacy state, independently of the new acceptance model.
+    state
+        .db
+        .with_conn({
+            let child_id = child_id.clone();
+            move |conn| {
+                kronn::db::discussion_sessions::move_session_to_discussion(conn, 657, &child_id)?;
+                kronn::db::disc_source::bind_to_source(conn, &child_id, "Codex", "stable-binding")?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let legacy_child_state = state
+        .db
+        .with_conn(|conn| {
+            let membership: String = conn.query_row(
+                "SELECT disc_id FROM discussion_sessions WHERE id = 657",
+                [],
+                |row| row.get(0),
+            )?;
+            let binding = kronn::db::disc_source::find_disc_by_source_session(
+                conn,
+                "Codex",
+                "stable-binding",
+            )?;
+            Ok((membership, binding))
+        })
+        .await
+        .unwrap();
+    assert_eq!(legacy_child_state.0, child_id);
+    assert_eq!(legacy_child_state.1.as_deref(), Some(child_id.as_str()));
+
     let (status, brief) = get_json(
         app.clone(),
         &format!(
@@ -5196,6 +6680,80 @@ async fn put_json_root(app: Router, uri: &str, body: Value) -> (StatusCode, Valu
     (status, json)
 }
 
+#[tokio::test]
+async fn a_project_can_switch_its_agent_files_outside_its_repository_and_back() {
+    // KT-971 — the setting is read, switched both ways, and refused for an
+    // unknown project.
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "p-agent-files".into(),
+        name: "agent-files".into(),
+        path: repo.path().to_string_lossy().into_owned(),
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    let uri = "/api/projects/p-agent-files/agent-files";
+
+    let (_, read) = get_json(build_router_with_auth(state.clone(), false), uri).await;
+    assert_eq!(read["data"]["policy"], "repo", "{read}");
+    assert!(read["data"].get("outside_dir").is_none());
+
+    let (_, outside) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        uri,
+        serde_json::json!({"policy": "outside"}),
+    )
+    .await;
+    assert_eq!(outside["data"]["policy"], "outside", "{outside}");
+    assert!(outside["data"]["outside_dir"]
+        .as_str()
+        .unwrap()
+        .contains("project-agent-files"));
+    let (_, read) = get_json(build_router_with_auth(state.clone(), false), uri).await;
+    assert_eq!(read["data"]["policy"], "outside");
+
+    let (_, back) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        uri,
+        serde_json::json!({"policy": "repo"}),
+    )
+    .await;
+    assert_eq!(back["data"]["policy"], "repo", "{back}");
+
+    let (_, unknown) = put_json_root(
+        build_router_with_auth(state, false),
+        "/api/projects/nope/agent-files",
+        serde_json::json!({"policy": "outside"}),
+    )
+    .await;
+    assert_eq!(unknown["error_code"], "not_found", "{unknown}");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Health endpoint tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5410,10 +6968,9 @@ async fn stats_tokens_mixed_known_and_unknown_totals_are_partial() {
 }
 
 #[tokio::test]
-async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
-    // A justified pricing-table estimate for a non-Claude agent must use
-    // that agent's own price, never Claude's — and must be flagged as an
-    // estimate, not presented as an exact measurement.
+async fn stats_tokens_a_bare_codex_total_is_unknown_not_priced_by_a_split() {
+    // A token total without its input/cache/output split has no honest price:
+    // it is counted as unknown, never estimated with any agent's table.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -5438,12 +6995,9 @@ async fn stats_tokens_estimates_use_the_agents_own_pricing_not_claudes() {
         .iter()
         .find(|p| p["provider"] == "OpenAI")
         .expect("Codex buckets into OpenAI");
-    assert_eq!(openai["cost"]["has_estimate"], true);
+    assert_eq!(openai["cost"]["has_estimate"], false);
     assert_eq!(openai["cost"]["has_recorded"], false);
-    let known = openai["cost"]["estimated_usd"].as_f64().unwrap();
-    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44 — well under
-    // Claude's 0.78 for the same token count, proving no cross-pricing.
-    assert!((known - 0.44).abs() < 0.01, "expected ~0.44, got {known}");
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 100000);
 }
 
 #[tokio::test]
@@ -5727,11 +7281,9 @@ async fn stats_tokens_recorded_zero_cost_stays_distinct_from_a_sibling_null_row(
 }
 
 #[tokio::test]
-async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and_estimated() {
-    // An agent WITH pricing-table coverage (Codex) can still have some rows
-    // recorded and others missing entirely. The missing sub-part must be
-    // priced with Codex's own table (estimated_usd), never folded into the
-    // recorded sum and never treated as fully covered by the recorded rows.
+async fn stats_tokens_a_missing_sub_part_stays_unknown_beside_the_recorded_rows() {
+    // Some Codex rows carry a cost and others only a total. The missing part
+    // is never folded into the recorded sum, nor priced by a guessed split.
     let state = test_state();
     let did = create_test_discussion(&state).await;
     state
@@ -5764,15 +7316,8 @@ async fn stats_tokens_estimable_agent_with_a_missing_sub_part_mixes_recorded_and
     assert_eq!(openai["tokens_used"], 101000);
     assert_eq!(openai["cost"]["recorded_usd"], 0.05);
     assert_eq!(openai["cost"]["has_recorded"], true);
-    assert_eq!(openai["cost"]["has_estimate"], true);
-    let estimated = openai["cost"]["estimated_usd"].as_f64().unwrap();
-    // Codex: 100K tokens -> (60K*2.0 + 40K*8.0)/1M = 0.44, computed only
-    // over the 100K missing tokens, not the 1K that were already recorded.
-    assert!(
-        (estimated - 0.44).abs() < 0.01,
-        "expected ~0.44, got {estimated}"
-    );
-    assert_eq!(openai["cost"]["unknown_cost_tokens"], 0);
+    assert_eq!(openai["cost"]["has_estimate"], false);
+    assert_eq!(openai["cost"]["unknown_cost_tokens"], 100000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -10899,6 +12444,116 @@ async fn external_api_test_route_probes_a_chat_model_not_the_first_one_listed() 
 }
 
 #[tokio::test]
+async fn external_api_billing_error_stops_model_probes_without_leaking_upstream_details() {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for (preset, models) in [
+        ("other", serde_json::json!([])),
+        ("other", serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"])),
+        ("nvidia", serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"])),
+        (
+            "open_router",
+            serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"]),
+        ),
+    ] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/key"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "mimo-v2.5"}, {"id": "mimo-v2.5-tts"}]
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer sk-or-v1-billing-test-secret"))
+            .and(body_partial_json(serde_json::json!({"model": "mimo-v2.5"})))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "402",
+                    "type": "insufficient_balance",
+                    "message": "Insufficient account balance — private account 私密 sk-or-v1-billing-test-secret"
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "mimo-v2.5-tts"}),
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_string("TTS needs an assistant role"))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+
+        let (status, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": format!("{}/v1", upstream.uri()),
+                "api_key": "sk-or-v1-billing-test-secret",
+                "origin_preset": preset,
+                "models": models
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["ok"], false, "{preset}: {response}");
+        assert_eq!(
+            response["data"]["status"], "billing_error",
+            "{preset}: {response}"
+        );
+        let hint = response["data"]["hint"].as_str().unwrap();
+        assert!(hint.contains("402") && hint.contains("balance"), "{hint}");
+        assert_eq!(response["data"]["models"], serde_json::json!([]));
+        assert!(!response.to_string().contains("billing-test-secret"));
+        assert!(!response.to_string().contains("private account"));
+        assert!(!response.to_string().contains("TTS"));
+        upstream.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn external_api_billing_error_is_reported_during_catalogue_and_key_checks() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for (preset, endpoint) in [("other", "/v1/models"), ("open_router", "/v1/key")] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(402).set_body_string("private billing details"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let (_, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": upstream.uri(),
+                "api_key": "sk-or-v1-billing-test-secret",
+                "origin_preset": preset
+            }),
+        )
+        .await;
+        assert_eq!(response["data"]["ok"], false);
+        assert_eq!(response["data"]["status"], "billing_error", "{response}");
+        assert!(!response.to_string().contains("private billing details"));
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -10986,6 +12641,758 @@ async fn external_api_test_route_public_catalogue_rejects_non_successful_chat_st
         assert!(!response.to_string().contains("wrong-secret"));
         assert!(!response.to_string().contains("secret upstream diagnostic"));
     }
+}
+
+/// A LiteLLM proxy as observed on 01/10 (KT-941): it lists every alias it was
+/// configured with, but only some answer. `gemini-3.6-flash` works, the Vertex
+/// alias is a 404 from the upstream project, the Fable alias is refused by the
+/// proxy's tag routing.
+const LITELLM_PRIVATE_404: &str =
+    "Publisher model `projects/enws-private-project/models/claude-sonnet-5` was not found or your project does not have access";
+const LITELLM_PRIVATE_TAGS: &str =
+    "Not allowed to access model vertex_ai/claude-fable-5 due to tags configuration: private-team-tag";
+
+async fn mount_simulated_litellm_proxy(upstream: &wiremock::MockServer) {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "gemini-3.6-flash"},
+                {"id": "vertex_ai/claude-sonnet-5"},
+                {"id": "vertex_ai/claude-fable-5"},
+                {"id": "claude-sonnet-4-6"}
+            ]
+        })))
+        .mount(upstream)
+        .await;
+    let chat = |model: &'static str, response: ResponseTemplate| {
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer proxy-secret"))
+            .and(body_partial_json(serde_json::json!({
+                "model": model, "max_tokens": 1
+            })))
+            .respond_with(response)
+    };
+    chat(
+        "gemini-3.6-flash",
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": "pong"}}]
+        })),
+    )
+    .mount(upstream)
+    .await;
+    chat(
+        "claude-sonnet-4-6",
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": "pong"}}]
+        })),
+    )
+    .mount(upstream)
+    .await;
+    chat(
+        "vertex_ai/claude-sonnet-5",
+        ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": {"message": LITELLM_PRIVATE_404, "code": "404"}
+        })),
+    )
+    .mount(upstream)
+    .await;
+    chat(
+        "vertex_ai/claude-fable-5",
+        ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": {"message": LITELLM_PRIVATE_TAGS, "code": "401"}
+        })),
+    )
+    .mount(upstream)
+    .await;
+}
+
+fn tier_models_body(
+    endpoint: &str,
+    economy: &str,
+    default: &str,
+    reasoning: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "endpoint": endpoint,
+        "api_key": "proxy-secret",
+        "origin_preset": "lite_llm",
+        "tier_models": [
+            {"tier": "economy", "model": economy},
+            {"tier": "default", "model": default},
+            {"tier": "reasoning", "model": reasoning}
+        ]
+    })
+}
+
+#[tokio::test]
+async fn litellm_test_probes_each_tier_and_says_which_model_answers() {
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+
+    let (status, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        tier_models_body(
+            &upstream.uri(),
+            "gemini-3.6-flash",
+            "vertex_ai/claude-sonnet-5",
+            "vertex_ai/claude-fable-5",
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let data = &response["data"];
+    // The connection itself works: the catalogue stays, so the operator can
+    // still open the pickers and choose another model.
+    assert_eq!(data["ok"], true, "{response}");
+    assert_eq!(data["status"], "model_error", "{response}");
+    assert_eq!(data["models"].as_array().unwrap().len(), 4, "{response}");
+
+    let checks = data["tier_checks"].as_array().unwrap();
+    let check = |tier: &str| checks.iter().find(|check| check["tier"] == tier).unwrap();
+    assert_eq!(check("economy")["model"], "gemini-3.6-flash");
+    assert_eq!(check("economy")["ok"], true);
+    assert_eq!(check("economy")["status"], "ok");
+    assert_eq!(check("default")["model"], "vertex_ai/claude-sonnet-5");
+    assert_eq!(check("default")["ok"], false);
+    assert_eq!(check("default")["status"], "not_found");
+    assert_eq!(check("default")["http_status"], 404);
+    assert_eq!(check("reasoning")["status"], "access_denied");
+    assert_eq!(check("reasoning")["http_status"], 401);
+
+    // The hint names the failing tiers' models and how to move on.
+    let hint = data["hint"].as_str().unwrap();
+    assert!(hint.contains("vertex_ai/claude-sonnet-5"), "{hint}");
+    assert!(hint.contains("Choose another model"), "{hint}");
+
+    // No secret, no upstream body in the result.
+    let text = response.to_string();
+    for private in [
+        "proxy-secret",
+        "enws-private-project",
+        "private-team-tag",
+        "Publisher model",
+    ] {
+        assert!(!text.contains(private), "{private} leaked: {text}");
+    }
+    // One call per distinct listed model, one token each: the tiers' three
+    // plus `claude-sonnet-4-6`, which the sweep calls too (KT-957).
+    assert_eq!(
+        upstream
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "POST")
+            .count(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn litellm_test_reports_a_fully_working_tier_set_as_success() {
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        // Two tiers share one model: it is called once, reported twice.
+        tier_models_body(
+            &upstream.uri(),
+            "gemini-3.6-flash",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6",
+        ),
+    )
+    .await;
+
+    assert_eq!(response["data"]["ok"], true, "{response}");
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    let checks = response["data"]["tier_checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 3);
+    assert!(checks.iter().all(|check| check["ok"] == true), "{response}");
+    assert!(response["data"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("2 configured model(s) answered"));
+}
+
+#[tokio::test]
+async fn litellm_test_still_blames_the_key_when_nothing_shows_it_was_accepted() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "model-a"}, {"id": "model-b"}]
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": {"message": "Authentication Error, Invalid proxy server token passed"}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        tier_models_body(&upstream.uri(), "model-a", "model-b", "model-b"),
+    )
+    .await;
+
+    // A bare 401 on every model is a verdict on the credential, not on three
+    // models at once: no per-tier "access denied" is invented.
+    assert_eq!(response["data"]["ok"], false, "{response}");
+    assert_eq!(response["data"]["status"], "auth_error", "{response}");
+    assert_eq!(response["data"]["tier_checks"], serde_json::json!([]));
+}
+
+async fn litellm_saved_connection_state(endpoint: String) -> AppState {
+    let state = test_state();
+    let connection = kronn::models::ExternalApiConnection {
+        id: "litellm-saved".into(),
+        display_name: "Euronews proxy".into(),
+        mention_alias: "euronews".into(),
+        endpoint: Some(endpoint),
+        credential_slug: "conn-euronews".into(),
+        origin_preset: kronn::models::ExternalApiConnectionPreset::LiteLlm,
+        economy_model: Some("gemini-3.6-flash".into()),
+        default_model: Some("vertex_ai/claude-sonnet-5".into()),
+        reasoning_model: Some("vertex_ai/claude-fable-5".into()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        image_model: None,
+        video_model: None,
+        media_endpoint: None,
+    };
+    let insert = connection.clone();
+    state
+        .db
+        .with_conn(move |conn| kronn::db::external_api_connections::insert(conn, &insert))
+        .await
+        .unwrap();
+    state
+        .config
+        .write()
+        .await
+        .tokens
+        .keys
+        .push(kronn::models::ApiKey {
+            id: "euronews-key".into(),
+            name: "proxy credential".into(),
+            provider: connection.credential_slug,
+            value: "proxy-secret".into(),
+            active: true,
+        });
+    state
+}
+
+/// The body of a save of the `litellm-saved` connection with these tiers.
+fn litellm_save_body(endpoint: &str, tiers: [&str; 3], confirm: bool) -> Value {
+    serde_json::json!({
+        "display_name": "Euronews proxy",
+        "mention_alias": "euronews",
+        "endpoint": endpoint,
+        "origin_preset": "lite_llm",
+        "economy_model": tiers[0],
+        "default_model": tiers[1],
+        "reasoning_model": tiers[2],
+        "confirm_unreachable_models": confirm,
+    })
+}
+
+#[tokio::test]
+async fn saving_a_litellm_tier_on_a_model_the_proxy_refuses_needs_a_confirmation() {
+    // KT-957 — the proxy lists `vertex_ai/claude-sonnet-5` but answers 404:
+    // assigning it to a tier must not pass silently, as it did on 02/10.
+    use kronn::models::{ModelAvailability, ModelUnavailableReason};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    // Fill the catalogue the way a connection test does.
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+            "models": ["gemini-3.6-flash"],
+        }),
+    )
+    .await;
+    assert_eq!(tested["data"]["ok"], true, "{tested}");
+    let healthy = ["gemini-3.6-flash", "claude-sonnet-4-6", "claude-sonnet-4-6"];
+    let (_, saved) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(&upstream.uri(), healthy, false),
+    )
+    .await;
+    assert_eq!(saved["success"], true, "{saved}");
+    // Its own call proved the new model: the pickers can say so.
+    assert!(saved_litellm_catalogue(&state).await["claude-sonnet-4-6"]
+        .last_answered_at
+        .is_some());
+
+    let refused_tiers = [
+        "gemini-3.6-flash",
+        "vertex_ai/claude-sonnet-5",
+        "claude-sonnet-4-6",
+    ];
+    let (_, refused) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(&upstream.uri(), refused_tiers, false),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert_eq!(refused["error_code"], "unreachable_model");
+    let message = refused["error"].as_str().unwrap();
+    assert!(
+        message.contains("vertex_ai/claude-sonnet-5") && message.contains("default tier"),
+        "{message}"
+    );
+    assert!(!message.contains("enws-private-project"), "{message}");
+    let stored = state
+        .db
+        .with_read_conn(|conn| kronn::db::external_api_connections::get(conn, "litellm-saved"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.default_model.as_deref(), Some("claude-sonnet-4-6"));
+
+    let (_, confirmed) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(&upstream.uri(), refused_tiers, true),
+    )
+    .await;
+    assert_eq!(confirmed["success"], true, "{confirmed}");
+    let entry = &saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"];
+    assert_eq!(entry.availability, ModelAvailability::Unavailable);
+    assert_eq!(
+        entry.unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn testing_a_litellm_connection_calls_every_listed_model_and_flags_the_refused_ones() {
+    // KT-957 — a ❌ only on the tier models left every other refused model
+    // looking usable; the test now calls each listed chat model once.
+    use kronn::models::{ModelAvailability, ModelUnavailableReason};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+    assert_eq!(tested["data"]["ok"], true, "{tested}");
+    let checks: std::collections::HashMap<String, String> = tested["data"]["model_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| {
+            (
+                check["model"].as_str().unwrap().to_string(),
+                check["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(checks.len(), 4, "{checks:?}");
+    assert_eq!(checks["gemini-3.6-flash"], "ok");
+    assert_eq!(checks["claude-sonnet-4-6"], "ok");
+    assert_eq!(checks["vertex_ai/claude-sonnet-5"], "not_found");
+    assert_eq!(checks["vertex_ai/claude-fable-5"], "access_denied");
+    assert!(!tested.to_string().contains("enws-private-project"));
+
+    let catalogue = saved_litellm_catalogue(&state).await;
+    assert_eq!(
+        catalogue["vertex_ai/claude-sonnet-5"].unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+    assert_eq!(
+        catalogue["vertex_ai/claude-fable-5"].unavailable_reason,
+        Some(ModelUnavailableReason::AccessDenied)
+    );
+    let healthy = &catalogue["claude-sonnet-4-6"];
+    assert_eq!(healthy.availability, ModelAvailability::Available);
+    assert!(healthy.last_answered_at.is_some());
+}
+
+#[tokio::test]
+async fn a_litellm_test_reads_each_model_mode_and_reports_its_progress() {
+    // KT-957 — what each model is for comes from the proxy (`model_info.mode`),
+    // so image and embedding deployments are offered as such and never called
+    // as chat; the sweep reports how far it got under the caller's id.
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/model/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"model_name": "gemini-3.6-flash", "model_info": {"mode": "chat", "supports_vision": true}},
+                {"model_name": "claude-sonnet-4-6", "model_info": {"mode": "chat"}},
+                {"model_name": "vertex_ai/claude-sonnet-5", "model_info": {"mode": "image_generation"}},
+                {"model_name": "vertex_ai/claude-fable-5", "model_info": {"mode": "embedding"}}
+            ]
+        })))
+        .mount(&upstream)
+        .await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+            "progress_id": "progress-kt957",
+        }),
+    )
+    .await;
+    let data = &tested["data"];
+    assert_eq!(data["ok"], true, "{tested}");
+    assert_eq!(data["capability_source"], "model_info");
+    assert_eq!(data["image_capability_known"], true);
+    let capabilities = |id: &str| {
+        data["catalog"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap()["capabilities"]
+            .clone()
+    };
+    assert_eq!(
+        capabilities("gemini-3.6-flash"),
+        serde_json::json!(["chat", "vision"])
+    );
+    assert_eq!(
+        capabilities("vertex_ai/claude-sonnet-5"),
+        serde_json::json!(["image"])
+    );
+    assert_eq!(
+        capabilities("vertex_ai/claude-fable-5"),
+        serde_json::json!(["embedding"])
+    );
+    let swept: Vec<&str> = data["model_checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["model"].as_str().unwrap())
+        .collect();
+    assert_eq!(swept.len(), 2, "only chat models are called: {swept:?}");
+    assert!(!swept.contains(&"vertex_ai/claude-sonnet-5"));
+
+    let (_, progress) = get_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test/progress/progress-kt957",
+    )
+    .await;
+    assert_eq!(progress["data"], serde_json::json!({"done": 2, "total": 2}));
+    let (_, unknown) = get_json(
+        build_router_with_auth(state, false),
+        "/api/external-api/connections/test/progress/never-started",
+    )
+    .await;
+    assert_eq!(unknown["data"], serde_json::json!({"done": 0, "total": 0}));
+}
+
+#[tokio::test]
+async fn a_slow_refusal_still_blocks_a_litellm_save() {
+    // The proxy took 9 s to refuse `vertex_ai/claude-fable-5@default` on 02/10;
+    // a 6 s probe read that as a timeout and let the save through.
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(
+            serde_json::json!({"model": "vertex_ai/claude-fable-5@default"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_delay(std::time::Duration::from_secs(7))
+                .set_body_json(
+                    serde_json::json!({"error": {"message": LITELLM_PRIVATE_TAGS, "code": "401"}}),
+                ),
+        )
+        .mount(&upstream)
+        .await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, refused) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "gemini-3.6-flash",
+                "vertex_ai/claude-fable-5@default",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(refused["error_code"], "unreachable_model", "{refused}");
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("vertex_ai/claude-fable-5@default"));
+}
+
+#[tokio::test]
+async fn a_litellm_save_refuses_a_model_the_catalogue_knows_is_refused() {
+    // The call proves nothing this time (the proxy fails), but the catalogue
+    // remembers the model was refused: keeping it still needs a confirmation.
+    use kronn::models::ModelUnavailableReason;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, tested) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+    assert_eq!(tested["data"]["ok"], true, "{tested}");
+    assert_eq!(
+        saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"].unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+
+    upstream.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream unavailable"))
+        .mount(&upstream)
+        .await;
+    let (_, refused) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "vertex_ai/claude-sonnet-5",
+                "claude-sonnet-4-6",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(refused["error_code"], "unreachable_model", "{refused}");
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("vertex_ai/claude-sonnet-5 (economy tier"));
+}
+
+#[tokio::test]
+async fn a_litellm_save_is_not_blocked_by_what_it_cannot_judge() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    // Every call refused with a bare 401: the key, not the model, is in doubt.
+    let upstream = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid key"))
+        .mount(&upstream)
+        .await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let (_, saved) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "gemini-3.6-flash",
+                "claude-sonnet-4-6",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(saved["success"], true, "{saved}");
+
+    // A model left as it was is not called again.
+    upstream.reset().await;
+    let (_, unchanged) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/litellm-saved",
+        litellm_save_body(
+            &upstream.uri(),
+            [
+                "gemini-3.6-flash",
+                "claude-sonnet-4-6",
+                "vertex_ai/claude-fable-5",
+            ],
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(unchanged["success"], true, "{unchanged}");
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+async fn saved_litellm_catalogue(
+    state: &AppState,
+) -> std::collections::HashMap<String, kronn::models::CatalogModelEntry> {
+    state
+        .db
+        .with_read_conn(|conn| {
+            kronn::db::model_catalog::list_for_target(conn, "http:litellm-saved")
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.model_id.clone(), entry))
+        .collect()
+}
+
+#[tokio::test]
+async fn litellm_test_marks_models_that_refuse_a_call_unavailable_in_the_catalogue() {
+    use kronn::models::{ModelAvailability, ModelUnavailableReason};
+
+    let upstream = wiremock::MockServer::start().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+    let body = serde_json::json!({
+        "endpoint": upstream.uri(),
+        "connection_id": "litellm-saved",
+        "origin_preset": "lite_llm",
+        "tier_models": [
+            {"tier": "economy", "model": "gemini-3.6-flash"},
+            {"tier": "default", "model": "vertex_ai/claude-sonnet-5"},
+            {"tier": "reasoning", "model": "vertex_ai/claude-fable-5"}
+        ]
+    });
+
+    let (_, response) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(response["data"]["status"], "model_error", "{response}");
+
+    let catalogue = saved_litellm_catalogue(&state).await;
+    // All four were listed `live`; before this change all four read "available".
+    assert_eq!(catalogue.len(), 4);
+    let not_found = &catalogue["vertex_ai/claude-sonnet-5"];
+    assert_eq!(not_found.availability, ModelAvailability::Unavailable);
+    assert_eq!(
+        not_found.unavailable_reason,
+        Some(ModelUnavailableReason::NotFound)
+    );
+    let detail = not_found.unavailable_detail.as_deref().unwrap();
+    assert!(
+        detail.contains("404") && detail.contains("Choose another model"),
+        "{detail}"
+    );
+    assert!(!detail.contains("enws-private-project"), "{detail}");
+    let denied = &catalogue["vertex_ai/claude-fable-5"];
+    assert_eq!(denied.availability, ModelAvailability::Unavailable);
+    assert_eq!(
+        denied.unavailable_reason,
+        Some(ModelUnavailableReason::AccessDenied)
+    );
+    assert_eq!(
+        catalogue["gemini-3.6-flash"].availability,
+        ModelAvailability::Available
+    );
+    // Never probed, never accused.
+    assert_eq!(
+        catalogue["claude-sonnet-4-6"].availability,
+        ModelAvailability::Available
+    );
+    // What a picker receives: the flag and its reason, as serialised.
+    let wire = serde_json::to_value(not_found).unwrap();
+    assert_eq!(wire["availability"], "unavailable");
+    assert_eq!(wire["unavailable_reason"], "not_found");
+    assert_eq!(
+        serde_json::to_value(denied).unwrap()["unavailable_reason"],
+        "access_denied"
+    );
+
+    // Testing again while the proxy still refuses keeps the verdict: being
+    // listed is not being served.
+    let (_, again) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(again["data"]["status"], "model_error", "{again}");
+    assert_eq!(
+        saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"].availability,
+        ModelAvailability::Unavailable
+    );
+
+    // The proxy is fixed: the next test of that model clears the flag.
+    upstream.reset().await;
+    mount_simulated_litellm_proxy(&upstream).await;
+    {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "vertex_ai/claude-sonnet-5"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "pong"}}]
+            })))
+            .with_priority(1)
+            .mount(&upstream)
+            .await;
+    }
+    let (_, fixed) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/test",
+        body,
+    )
+    .await;
+    assert_eq!(fixed["data"]["tier_checks"][1]["status"], "ok", "{fixed}");
+    let recovered = &saved_litellm_catalogue(&state).await["vertex_ai/claude-sonnet-5"];
+    assert_eq!(recovered.availability, ModelAvailability::Available);
+    assert_eq!(recovered.unavailable_reason, None);
 }
 
 #[tokio::test]
@@ -13844,6 +16251,331 @@ async fn mcp_update_config_persists_only_available_plugin_interfaces() {
     assert!(rejected["error"]
         .as_str()
         .is_some_and(|error| error.contains("unavailable")));
+}
+
+#[tokio::test]
+async fn mcp_create_config_from_registry_defaults_host_sync_to_none_when_omitted() {
+    // "registre" creation path: no `host_sync` in the request body must
+    // resolve to the documented default, never a silent unrelated value.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "mcp-github",
+            "label": "GitHub default host_sync",
+            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_test" },
+            "args_override": null,
+            "is_global": false,
+            "project_ids": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_create_config_custom_api_defaults_host_sync_to_none_when_omitted() {
+    // "Custom API" creation path — same `/api/mcps/configs` endpoint as the
+    // registry path, routed through `custom_spec` instead of a registry id.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "api-custom",
+            "label": "Custom plugin default host_sync",
+            "env": {},
+            "args_override": null,
+            "is_global": false,
+            "project_ids": [],
+            "custom_spec": {
+                "name": "Custom plugin default host_sync",
+                "base_url": "https://example.test",
+                "description": "test",
+                "docs_url": null,
+                "fields": [],
+                "endpoints": [],
+                "auth": "None"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_custom_import_file_defaults_host_sync_to_none() {
+    // "JSON" creation path: `/api/mcps/custom/import-file` is a distinct
+    // endpoint from `/api/mcps/configs` (reads a `.kronn-plugin.json` file,
+    // not a `custom_spec` on the create request) — its own explicit,
+    // documented default must be exercised separately.
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, imported) = post_json(
+        app,
+        "/api/mcps/custom/import-file",
+        serde_json::json!({
+            "name": "Imported plugin default host_sync",
+            "base_url": "https://example.test",
+            "description": "test",
+            "docs_url": null,
+            "fields": [],
+            "endpoints": [],
+            "auth": "None"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "import failed: {imported:?}");
+    assert_eq!(imported["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_create_config_reports_merge_into_existing_config() {
+    // Re-adding an identical plugin (same server + env + args) must signal
+    // the merge instead of silently discarding the second request's label,
+    // scope and CLI-exposure choice.
+    let state = test_state();
+    let first_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "GitHub original",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_same_token" },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": [],
+        "host_sync": "None"
+    });
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, first) = post_json(app, "/api/mcps/configs", first_body).await;
+    assert_eq!(status, StatusCode::OK, "first create failed: {first:?}");
+    assert_eq!(
+        first["data"]["merged_into_existing"],
+        Value::Null,
+        "a genuinely new config must not report a merge"
+    );
+    let existing_id = first["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(first["data"]["label"], "GitHub original");
+
+    // Same server, same env/args → identical config_hash → merge branch.
+    let second_body = serde_json::json!({
+        "server_id": "mcp-github",
+        "label": "GitHub duplicate attempt",
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_same_token" },
+        "args_override": null,
+        "is_global": false,
+        "project_ids": [],
+        "host_sync": "GlobalOnly"
+    });
+    let app = build_router_with_auth(state, false);
+    let (status, second) = post_json(app, "/api/mcps/configs", second_body).await;
+    assert_eq!(status, StatusCode::OK, "second create failed: {second:?}");
+    assert_eq!(second["data"]["id"], existing_id);
+    assert_eq!(
+        second["data"]["merged_into_existing"], existing_id,
+        "re-adding an identical plugin must flag the merge with the existing id"
+    );
+    // Label/host_sync of the pre-existing config are untouched by the
+    // duplicate request — only project scope gets merged.
+    assert_eq!(second["data"]["label"], "GitHub original");
+    assert_eq!(second["data"]["host_sync"], "None");
+}
+
+#[tokio::test]
+async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
+    // "rescan" creation path: a plugin surfaced from a project's own
+    // `.mcp.json` must never be silently opted into host sync.
+    let state = test_state();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
+
+    let mut mcp_servers = std::collections::HashMap::new();
+    mcp_servers.insert(
+        "github".to_string(),
+        kronn::core::mcp_scanner::McpServerEntry {
+            command: Some("npx".to_string()),
+            args: Some(vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ]),
+            url: None,
+            env: std::collections::HashMap::new(),
+        },
+    );
+    kronn::core::mcp_scanner::write_mcp_json(
+        &project_path,
+        &kronn::core::mcp_scanner::McpJsonFile { mcp_servers },
+    )
+    .unwrap();
+
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "rescan-test-proj".to_string(),
+        name: "Rescan Test".to_string(),
+        path: project_path,
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state, false);
+    let (status, refreshed) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "refresh failed: {refreshed:?}");
+    assert_eq!(refreshed["success"], true, "{refreshed:?}");
+    assert_eq!(
+        refreshed["data"]["dry_run"], false,
+        "a real (non-dry-run) refresh must say so"
+    );
+
+    let configs = refreshed["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    let detected = configs
+        .iter()
+        .find(|c| c["server_id"] == "mcp-github")
+        .expect("rescan should have detected the github entry from .mcp.json");
+    assert_eq!(
+        detected["host_sync"], "None",
+        "a config detected from a project's own .mcp.json must not be opted into host sync"
+    );
+}
+
+#[tokio::test]
+async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates_it() {
+    // KT-829 — `?dry_run=true` must report exactly what a real scan would do
+    // (via the returned counts + preview overview) while leaving the
+    // database and the filesystem untouched; only a subsequent real run
+    // may actually create anything.
+    let state = test_state();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
+
+    let mut mcp_servers = std::collections::HashMap::new();
+    mcp_servers.insert(
+        "github".to_string(),
+        kronn::core::mcp_scanner::McpServerEntry {
+            command: Some("npx".to_string()),
+            args: Some(vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ]),
+            url: None,
+            env: std::collections::HashMap::new(),
+        },
+    );
+    kronn::core::mcp_scanner::write_mcp_json(
+        &project_path,
+        &kronn::core::mcp_scanner::McpJsonFile { mcp_servers },
+    )
+    .unwrap();
+
+    let now = chrono::Utc::now();
+    let project = kronn::models::Project {
+        id: "dry-run-test-proj".to_string(),
+        name: "Dry Run Test".to_string(),
+        path: project_path,
+        repo_url: None,
+        token_override: None,
+        ai_config: kronn::models::AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
+        audit_status: kronn::models::AiAuditStatus::NoTemplate,
+        ai_todo_count: 0,
+        tech_debt_count: 0,
+        needs_docs_migration: false,
+        path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
+        default_skill_ids: vec![],
+        default_profile_id: None,
+        briefing_notes: None,
+        linked_repos: vec![],
+        workspace: None,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, dry) =
+        post_json(app, "/api/mcps/refresh?dry_run=true", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "dry-run refresh failed: {dry:?}");
+    assert_eq!(dry["success"], true, "{dry:?}");
+    assert_eq!(dry["data"]["dry_run"], true);
+    assert_eq!(dry["data"]["configs_created"], 1, "{dry:?}");
+    assert!(
+        dry["data"]["projects_rewritten"].is_null(),
+        "a dry run never touches the filesystem, so this cannot be established: {dry:?}"
+    );
+    let preview_configs = dry["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(
+        preview_configs
+            .iter()
+            .any(|c| c["server_id"] == "mcp-github"),
+        "the preview must show what a real run WOULD create: {dry:?}"
+    );
+
+    // The rollback is real: a plain read afterwards sees nothing new.
+    let app = build_router_with_auth(state.clone(), false);
+    let (status, overview_after_dry) = get_json(app, "/api/mcps").await;
+    assert_eq!(status, StatusCode::OK);
+    let configs_after_dry = overview_after_dry["data"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(
+        configs_after_dry.is_empty(),
+        "a dry run must not persist anything: {overview_after_dry:?}"
+    );
+
+    // A real run performs exactly what the preview showed.
+    let app = build_router_with_auth(state, false);
+    let (status, real) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "real refresh failed: {real:?}");
+    assert_eq!(real["data"]["dry_run"], false);
+    assert_eq!(real["data"]["configs_created"], 1, "{real:?}");
+    assert!(
+        real["data"]["projects_rewritten"].is_number(),
+        "a real run always establishes how many projects were rewritten: {real:?}"
+    );
+    let configs_after_real = real["data"]["overview"]["configs"]
+        .as_array()
+        .expect("configs array");
+    assert!(configs_after_real
+        .iter()
+        .any(|c| c["server_id"] == "mcp-github"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -18803,15 +21535,25 @@ mod cold_api_handlers_tests {
     #[tokio::test]
     async fn redirectors_sync_repairs_recognized_template_without_touching_user_content() {
         let (_dir, repo) = seed_repo("redirectors-upgrade");
-        let old_template = include_str!("../../templates/CLAUDE.md")
-            .replace(
-                "Test: {{TEST_CMD}}",
-                "Test: {{TEST_CMD}} [ex: \"cargo test && npm test\"]",
-            )
-            .replace(
-                "Lint: {{LINT_CMD}}",
-                "Lint: {{LINT_CMD}} [ex: \"cargo clippy && npx tsc --noEmit\"]",
-            );
+        // The pre-KT-841 shape a project audited earlier still has on disk.
+        let old_template = "\
+# {{PROJECT_NAME}} — {{STACK_SUMMARY}}
+
+Working language: {{PROJECT_LANGUAGE}}
+
+<!-- KRONN:FACTS — regenerated by audit, do not edit manually -->
+Test: {{TEST_CMD}} [ex: \"cargo test && npm test\"]
+Lint: {{LINT_CMD}} [ex: \"cargo clippy && npx tsc --noEmit\"]
+<!-- END KRONN:FACTS -->
+
+## Critical rules (follow these BEFORE any action)
+- {{DO_NOT_1}}
+- {{DO_NOT_2}}
+- DO NOT guess when info is missing — say NOT_FOUND and ask.
+
+## More context
+Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what each task needs). Source of truth.
+";
         let prefix = "<!-- user prefix stays -->\n";
         let suffix = "\n## User rules\nKeep {{USER_TOKEN}} byte-identical.\n";
         std::fs::write(

@@ -3,17 +3,24 @@
 // 4 states:
 // 1. not_installed → Install instructions + link
 // 2. offline/unreachable → Launch instructions (contextual WSL/macOS/Linux)
-// 3. online, 0 models → Pull suggestions
-// 4. online + models → Context-window controls
+// 3. online, 0 models → Pull suggestions (block open: first use)
+// 4. online + models → Context-window controls; the download block is folded
 // Durable catalogue model choices remain visible in every settled state.
+// A download or an update in flight stays visible whether the block is folded
+// or not.
+// What the official library says (an update is available, a suggestion's size)
+// arrives from a separate, slower call and fills in when it lands; the card
+// never waits on it, and anything it could not confirm reads as "not checked",
+// never as "up to date".
 
 import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { ollama as ollamaApi, config as configApi, modelCatalogApi, type OllamaPullProgress } from '../../lib/api';
 import { useApi } from '../../hooks/useApi';
+import { usePersistentFold } from '../../hooks/usePersistentFold';
 import { catalogModelOptions, catalogTierEntry, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
-import type { OllamaHealthResponse, OllamaModel, ModelTiersConfig } from '../../types/generated';
-import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw } from 'lucide-react';
-import { SUGGESTED_MODELS } from './ollamaModels';
+import type { OllamaHealthResponse, OllamaModel, OllamaRegistryResponse, OllamaUpdateStatus, ModelTiersConfig } from '../../types/generated';
+import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw, ChevronRight } from 'lucide-react';
+import { suggestedModelsFor } from './ollamaModels';
 import { SearchableSelect } from '../SearchableSelect';
 import '../../pages/SettingsPage.css';
 
@@ -39,6 +46,8 @@ interface PullState {
 
 const CONTEXT_FLOOR = 2_048;
 const CONTEXT_OVERRIDE_MAX = 1_048_576;
+/** The user's own fold of the download block; absent until they touch it. */
+const DOWNLOAD_FOLD_KEY = 'kronn:ollamaDownloadOpen';
 
 function formatContextTokens(value: number | null): string {
   return value == null ? '—' : value.toLocaleString();
@@ -72,6 +81,55 @@ function CaniRunHint({ t }: { t: (key: string) => string }) {
   );
 }
 
+/** What the official library says about an installed model, next to its Update
+ *  action. Nothing until the library has answered; "not checked" (with the
+ *  reason on hover) whenever it could not confirm either way. */
+function FreshnessBadge({ status, t }: { status: OllamaUpdateStatus | undefined; t: OllamaCardProps['t'] }) {
+  if (!status) return null;
+  return (
+    <span
+      className={`set-ollama-fresh set-ollama-fresh-${status}`}
+      title={status === 'unknown' ? t('ollama.fresh.unknownHint') : undefined}
+    >
+      {t(`ollama.fresh.${status}`)}
+    </span>
+  );
+}
+
+/** One download or update, with its progress and its cancel. Rendered outside
+ *  the foldable block, so a pull started from inside it is not hidden by
+ *  folding it back. */
+function PullProgressRow({ model, state, active, onCancel, t }: {
+  model: string;
+  state: PullState;
+  active: boolean;
+  onCancel: (model: string) => void;
+  t: OllamaCardProps['t'];
+}) {
+  const { progress, error } = state;
+  return (
+    <div className="set-ollama-pull-progress" role="status">
+      <div className="set-ollama-pull-progress-head">
+        <code className="set-ollama-model-name">{model}</code>
+        <span>{progress.status}</span>
+        {active && (
+          <button type="button" className="set-ollama-pull-cancel" onClick={() => onCancel(model)}>
+            {t('ollama.pullCancel')}
+          </button>
+        )}
+      </div>
+      {progress.total != null && (
+        <progress value={progress.completed ?? 0} max={progress.total ?? undefined} />
+      )}
+      <span className="set-ollama-suggestion-desc">
+        {formatDownloadBytes(progress.completed)} / {formatDownloadBytes(progress.total)}
+        {progress.total != null && ` · ${Math.round(((progress.completed ?? 0) / (progress.total ?? 1)) * 100)}%`}
+      </span>
+      {error && <div className="set-ollama-context-error" role="alert">{error}</div>}
+    </div>
+  );
+}
+
 export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: OllamaCardProps) {
   const [health, setHealth] = useState<OllamaHealthResponse | null>(null);
   const [models, setModels] = useState<OllamaModel[]>([]);
@@ -94,6 +152,17 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
   const [pulls, setPulls] = useState<Record<string, PullState>>({});
   const [activePulls, setActivePulls] = useState<Set<string>>(() => new Set());
   const pullControllers = useRef(new Map<string, AbortController>());
+  // Open for a first use (nothing installed yet), folded once there is a model:
+  // the block is a way to ADD one, and should not take the card over forever.
+  const [downloadOpen, toggleDownload] = usePersistentFold(DOWNLOAD_FOLD_KEY, models.length === 0);
+  // The official library's answer, `null` until it lands. Bumping the tick asks
+  // again (after a refresh, after an update changed what is installed).
+  const [registry, setRegistry] = useState<OllamaRegistryResponse | null>(null);
+  const [registryTick, setRegistryTick] = useState(0);
+  const recheckedTick = useRef(0);
+  // Tags just pulled: what the library said about them described the copy that
+  // was replaced, so they show no verdict until it has been asked again.
+  const [withheld, setWithheld] = useState<Set<string>>(() => new Set());
 
   const syncModels = useCallback((nextModels: OllamaModel[]) => {
     setModels(nextModels);
@@ -106,6 +175,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
     if (refreshingRef.current || savingTierRef.current || savingContextRef.current) return;
     refreshingRef.current = true;
     setLoading(true);
+    setRegistryTick(tick => tick + 1);
     try {
       const [h, t] = await Promise.all([
         ollamaApi.health(),
@@ -123,7 +193,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
         syncModels([]);
       }
     } catch {
-      setHealth({ status: 'offline', version: null, endpoint: '', models_count: 0, hint: null });
+      setHealth({ status: 'offline', version: null, endpoint: '', models_count: 0, hint: null, mlx_capable: false });
     } finally {
       reloadCatalog();
       refreshingRef.current = false;
@@ -151,7 +221,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
       })
       .catch(() => {
         if (active) {
-          setHealth({ status: 'offline', version: null, endpoint: '', models_count: 0, hint: null });
+          setHealth({ status: 'offline', version: null, endpoint: '', models_count: 0, hint: null, mlx_capable: false });
         }
       })
       .finally(() => {
@@ -274,6 +344,8 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
           syncModels(refreshed.models);
           reloadCatalog();
           setHealth(prev => prev ? { ...prev, models_count: refreshed.models.length } : prev);
+          setWithheld(prev => new Set(prev).add(model));
+          setRegistryTick(tick => tick + 1);
         } catch (error) {
           setPulls(prev => ({
             ...prev,
@@ -329,6 +401,58 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
       : health?.status === 'unreachable'
         ? t('ollama.unreachable')
         : t('ollama.notInstalled');
+
+  // The backend decides whether `-mlx` builds will run here (a Mac on Apple
+  // Silicon, an Ollama that runs MLX) — never this browser's user agent.
+  const suggestions = suggestedModelsFor(health?.mlx_capable === true);
+
+  const online = health?.status === 'online';
+  const suggestedTags = suggestions.map(m => m.name).join(',');
+  const installedTags = models.map(m => m.name).join(',');
+  useEffect(() => {
+    if (!online) {
+      setRegistry(null);
+      return;
+    }
+    let active = true;
+    // The first look may use what the backend cached for hours. A Refresh, or
+    // a model just updated, asks the library again: the cached manifest may
+    // predate the copy now installed, and would call it outdated. Marked done
+    // only once an answer has landed, so a request superseded by another
+    // render is followed by a fresh one, never by a cached one that raced it.
+    const tick = registryTick;
+    const fresh = tick !== recheckedTick.current;
+    // Deliberately apart from `loading`: the card is drawn from the local
+    // answers, and this fills in whatever the library says whenever it
+    // arrives, or never. A failure is an empty answer, so every installed
+    // model reads "not checked" instead of silently showing nothing.
+    Promise.resolve()
+      .then(() => ollamaApi.registry(suggestedTags ? suggestedTags.split(',') : [], fresh))
+      .then(answer => {
+        if (!active) return;
+        recheckedTick.current = tick;
+        setRegistry(answer);
+        setWithheld(new Set());
+      })
+      .catch(() => {
+        if (!active) return;
+        recheckedTick.current = tick;
+        setRegistry({ models: [], suggestions: [] });
+        setWithheld(new Set());
+      });
+    return () => { active = false; };
+  }, [online, suggestedTags, installedTags, registryTick]);
+
+  /** `undefined` until the library has answered (and while a verdict is
+   *  withheld); then the verdict, or "unknown" for a model it said nothing
+   *  about. */
+  const freshnessOf = (name: string): OllamaUpdateStatus | undefined =>
+    registry && !withheld.has(name)
+      ? (registry.models.find(item => item.name === name)?.status ?? 'unknown')
+      : undefined;
+  const sizeOf = (name: string): string | undefined =>
+    registry?.suggestions.find(item => item.name === name)?.size;
+  const updatesAvailable = models.filter(model => freshnessOf(model.name) === 'update_available').length;
 
   const savedTarget = catalog.data?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId('Ollama'));
   const target = savedTarget && (!savedTarget.live_refresh_ok || catalog.error || catalog.loading || health?.status !== 'online')
@@ -406,56 +530,104 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
             </div>
           )}
 
-          {/* ── Online, no models ── */}
+          {/* ── Online: downloads in flight, then the download block ── */}
+          {health.status === 'online' && Object.keys(pulls).length > 0 && (
+            <div className="set-ollama-pulls">
+              {Object.entries(pulls).map(([model, state]) => (
+                <PullProgressRow
+                  key={model}
+                  model={model}
+                  state={state}
+                  active={activePulls.has(model)}
+                  onCancel={cancelPull}
+                  t={t}
+                />
+              ))}
+            </div>
+          )}
           {health.status === 'online' && (
-            <div className="set-ollama-wizard">
-              <div className="set-ollama-wizard-title">
-                <Download size={14} /> {t('ollama.pullTitle')}
-              </div>
+            <details className="set-ollama-wizard set-ollama-download" open={downloadOpen}>
+              {/* Driven by state, not by the browser's own toggle: the fold is
+                  remembered, and has to behave the same wherever it runs. */}
+              <summary
+                className="set-ollama-download-summary"
+                onClick={event => { event.preventDefault(); toggleDownload(); }}
+              >
+                <ChevronRight size={12} className="set-accordion-chevron" data-expanded={downloadOpen} aria-hidden="true" />
+                <Download size={14} />
+                <span className="set-ollama-download-title">{t('ollama.pullTitle')}</span>
+                {!downloadOpen && (
+                  <span className="set-ollama-download-meta">
+                    {t('ollama.pullSummarySuggestions', suggestions.length)}
+                    {updatesAvailable > 0 && ` · ${t('ollama.pullSummaryUpdates', updatesAvailable)}`}
+                    {activePulls.size > 0 && ` · ${t('ollama.pullSummaryActive', activePulls.size)}`}
+                  </span>
+                )}
+              </summary>
               <p className="set-ollama-wizard-desc">{t(models.length === 0 ? 'ollama.pullDesc' : 'ollama.pullMoreDesc')}</p>
               <div className="set-ollama-suggestions">
-                {SUGGESTED_MODELS.map(m => (
-                  <div key={m.name} className="set-ollama-suggestion">
-                    <div className="set-ollama-suggestion-head">
-                      <code className="set-ollama-cmd">{m.name}</code>
-                      <span className={`set-ollama-tier set-ollama-tier-${m.tier}`}>
-                        {t(`ollama.tier.${m.tier}`)}
-                      </span>
-                      <button
-                        type="button"
-                        className="set-ollama-pull-button"
-                        disabled={activePulls.has(m.name) || models.some(model => model.name === m.name)}
-                        onClick={() => startPull(m.name)}
-                      >
-                        {activePulls.has(m.name) ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
-                        {models.some(model => model.name === m.name) ? t('ollama.pullInstalled') : t('ollama.pullButton')}
-                      </button>
+                {suggestions.map(m => {
+                  const installed = models.some(model => model.name === m.name);
+                  return (
+                    <div key={m.name} className="set-ollama-suggestion">
+                      <div className="set-ollama-suggestion-head">
+                        <code className="set-ollama-cmd">{m.name}</code>
+                        <span className={`set-ollama-tier set-ollama-tier-${m.tier}`}>
+                          {t(`ollama.tier.${m.tier}`)}
+                        </span>
+                        {m.mlx && (
+                          <span className="set-ollama-tier set-ollama-tier-mlx">{t('ollama.mlxBadge')}</span>
+                        )}
+                        {sizeOf(m.name) && (
+                          <span className="set-ollama-suggestion-desc">{sizeOf(m.name)}</span>
+                        )}
+                        <button
+                          type="button"
+                          className="set-ollama-pull-button"
+                          disabled={activePulls.has(m.name) || installed}
+                          onClick={() => startPull(m.name)}
+                        >
+                          {activePulls.has(m.name) ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                          {installed ? t('ollama.pullInstalled') : t('ollama.pullButton')}
+                        </button>
+                      </div>
+                      <span className="set-ollama-suggestion-desc">{t(m.descKey)}</span>
                     </div>
-                    <span className="set-ollama-suggestion-desc">{t(m.descKey)} · {m.size}</span>
-                    {pulls[m.name] && (
-                      <div className="set-ollama-pull-progress" role="status">
-                        <div className="set-ollama-pull-progress-head">
-                          <span>{pulls[m.name].progress.status}</span>
-                          {activePulls.has(m.name) && (
-                            <button type="button" className="set-ollama-pull-cancel" onClick={() => cancelPull(m.name)}>
-                              {t('ollama.pullCancel')}
+                  );
+                })}
+              </div>
+              {models.length > 0 && (
+                <div className="set-ollama-installed">
+                  <div className="set-ollama-installed-title">{t('ollama.installedModels')}</div>
+                  <div className="set-ollama-suggestions">
+                    {models.map(model => (
+                      <div key={model.name} className="set-ollama-suggestion">
+                        <div className="set-ollama-suggestion-head">
+                          <code className="set-ollama-cmd">{model.name}</code>
+                          <span className="set-ollama-suggestion-desc">{model.size}</span>
+                          <FreshnessBadge status={freshnessOf(model.name)} t={t} />
+                          {/* A model the registry confirmed current has nothing to update;
+                              "not checked" keeps the action, since nothing was confirmed. */}
+                          {(freshnessOf(model.name) !== 'up_to_date' || activePulls.has(model.name)) && (
+                            <button
+                              type="button"
+                              className="set-ollama-pull-button"
+                              disabled={activePulls.has(model.name)}
+                              aria-label={t('ollama.updateFor', model.name)}
+                              onClick={() => startPull(model.name)}
+                            >
+                              {activePulls.has(model.name) ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />}
+                              {t('ollama.updateButton')}
                             </button>
                           )}
                         </div>
-                        {pulls[m.name].progress.total != null && (
-                          <progress value={pulls[m.name].progress.completed ?? 0} max={pulls[m.name].progress.total ?? undefined} />
-                        )}
-                        <span className="set-ollama-suggestion-desc">
-                          {formatDownloadBytes(pulls[m.name].progress.completed)} / {formatDownloadBytes(pulls[m.name].progress.total)}
-                          {pulls[m.name].progress.total != null && ` · ${Math.round(((pulls[m.name].progress.completed ?? 0) / (pulls[m.name].progress.total ?? 1)) * 100)}%`}
-                        </span>
-                        {pulls[m.name].error && <div className="set-ollama-context-error" role="alert">{pulls[m.name].error}</div>}
                       </div>
-                    )}
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
+                  <p className="set-ollama-suggestion-desc">{t('ollama.updateHint')}</p>
+                </div>
+              )}
+            </details>
           )}
 
           {/* Catalogue choices remain visible offline; installed inventory is

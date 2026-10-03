@@ -1,6 +1,6 @@
 use crate::models::{
-    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpServer, McpTransport,
-    OAuth2ExtraHeader, PluginInterface, TokenInjection,
+    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, CredentialSource, McpDefinition, McpServer,
+    McpTransport, OAuth2ExtraHeader, PluginInterface, PluginKind, TokenInjection,
 };
 
 /// Sentinel id surfaced at the top of the registry. Picking it in the UI
@@ -56,6 +56,42 @@ pub fn api_readiness_probe(server_id: &str) -> Option<ApiReadinessProbe> {
         "api-microsoft-365" => ApiReadinessProbe {
             path: "/me",
             query_from_config: &[],
+        },
+        _ => return None,
+    };
+    Some(probe)
+}
+
+/// KT-829 — a CLI access probe declared per plugin: binary presence,
+/// version, and active authentication, checked without ever storing or
+/// logging the CLI's own credential. `binary` MUST be present in
+/// `quick_exec::ALLOWED_BINARIES` — the probe runs through that engine
+/// (no shell, no caller-supplied argv).
+pub struct CliAccessProbe {
+    pub binary: &'static str,
+    pub version_args: &'static [&'static str],
+    /// Minimum accepted version (`major.minor.patch`). `None` = no floor —
+    /// neither Fastly nor GitLab's CLI declares one today, but a future
+    /// plugin that depends on a specific fixed CLI bug can set one.
+    pub min_version: Option<&'static str>,
+    /// Exits 0 only when the CLI is actively authenticated (not merely
+    /// installed) — e.g. `fastly whoami`, `glab auth status`.
+    pub auth_check_args: &'static [&'static str],
+}
+
+pub fn cli_access_probe(server_id: &str) -> Option<CliAccessProbe> {
+    let probe = match server_id {
+        "mcp-fastly" => CliAccessProbe {
+            binary: "fastly",
+            version_args: &["version"],
+            min_version: None,
+            auth_check_args: &["whoami"],
+        },
+        "mcp-gitlab" => CliAccessProbe {
+            binary: "glab",
+            version_args: &["--version"],
+            min_version: None,
+            auth_check_args: &["auth", "status"],
         },
         _ => return None,
     };
@@ -2500,6 +2536,17 @@ pub fn search(query: &str) -> Vec<McpDefinition> {
         .collect()
 }
 
+/// Whether the builtin registry entry for `server_id` carries the `cli`
+/// tag. The single lookup both `available_plugin_interfaces` and
+/// `effective_plugin_kind` read, so a plugin's CLI-wrapper status is never
+/// computed two different ways.
+fn has_cli_tag(server_id: &str) -> bool {
+    builtin_registry()
+        .iter()
+        .find(|definition| definition.id == server_id)
+        .is_some_and(|definition| definition.tags.iter().any(|tag| tag == "cli"))
+}
+
 pub fn available_plugin_interfaces(server: &McpServer) -> Vec<PluginInterface> {
     let mut interfaces = Vec::with_capacity(3);
     if server.api_spec.is_some() {
@@ -2508,14 +2555,40 @@ pub fn available_plugin_interfaces(server: &McpServer) -> Vec<PluginInterface> {
     if !matches!(server.transport, McpTransport::ApiOnly) {
         interfaces.push(PluginInterface::Mcp);
     }
-    if builtin_registry()
-        .iter()
-        .find(|definition| definition.id == server.id)
-        .is_some_and(|definition| definition.tags.iter().any(|tag| tag == "cli"))
-    {
+    if has_cli_tag(&server.id) {
         interfaces.push(PluginInterface::Cli);
     }
     interfaces
+}
+
+/// Single canonical classification of a plugin's invocation surface,
+/// computed once from `transport` + `api_spec` + the registry's `cli` tag.
+/// The CLI check runs FIRST so a CLI wrapper that also exposes MCP/API
+/// (Fastly) stays bucketed as `Cli` — the prerequisite the user must
+/// satisfy — rather than `Hybrid`.
+pub fn effective_plugin_kind(server: &McpServer) -> PluginKind {
+    if has_cli_tag(&server.id) {
+        PluginKind::Cli
+    } else if matches!(server.transport, McpTransport::ApiOnly) {
+        PluginKind::Api
+    } else if server.api_spec.is_some() {
+        PluginKind::Hybrid
+    } else {
+        PluginKind::Mcp
+    }
+}
+
+/// Where this plugin's outbound API credential comes from, derived once
+/// from `ApiAuthKind` — independent of the `cli` tag, so Microsoft 365
+/// (`CliToken`, no `cli` tag) and Fastly (`CliToken`, `cli` tag) both
+/// report `CliToken` rather than only the tagged one.
+pub fn credential_source(server: &McpServer) -> CredentialSource {
+    match server.api_spec.as_ref().map(|spec| &spec.auth) {
+        Some(ApiAuthKind::CliToken { .. }) => CredentialSource::CliToken,
+        Some(ApiAuthKind::None) => CredentialSource::None,
+        Some(_) => CredentialSource::Stored,
+        None => CredentialSource::Stored,
+    }
 }
 
 #[cfg(test)]
@@ -2552,6 +2625,84 @@ mod tests {
         assert!(api_readiness_probe(CUSTOM_API_SERVER_ID).is_none());
         assert!(api_readiness_probe("api-google-search").is_none());
     }
+
+    fn registry_server(server_id: &str) -> McpServer {
+        let definition = builtin_registry()
+            .into_iter()
+            .find(|definition| definition.id == server_id)
+            .expect("registry definition");
+        McpServer {
+            id: definition.id,
+            name: definition.name,
+            description: definition.description,
+            transport: definition.transport,
+            source: crate::models::McpSource::Registry,
+            api_spec: definition.api_spec,
+        }
+    }
+
+    #[test]
+    fn effective_plugin_kind_microsoft_365_is_api_only_no_stored_token() {
+        // CliToken auth, ApiOnly transport, no `cli` tag: the badge must say
+        // API — there is no MCP transport and no CLI wrapper to satisfy.
+        let server = registry_server("api-microsoft-365");
+        assert_eq!(effective_plugin_kind(&server), PluginKind::Api);
+        assert_eq!(
+            available_plugin_interfaces(&server),
+            vec![PluginInterface::Api]
+        );
+    }
+
+    #[test]
+    fn effective_plugin_kind_fastly_is_cli_first_even_with_api() {
+        // Stdio transport + api_spec + `cli` tag: CLI wins over Hybrid
+        // because the CLI prerequisite is what the user must satisfy first.
+        let server = registry_server("mcp-fastly");
+        assert_eq!(effective_plugin_kind(&server), PluginKind::Cli);
+        assert_eq!(
+            available_plugin_interfaces(&server),
+            vec![
+                PluginInterface::Api,
+                PluginInterface::Mcp,
+                PluginInterface::Cli
+            ]
+        );
+    }
+
+    #[test]
+    fn effective_plugin_kind_github_is_hybrid_mcp_and_api() {
+        // Stdio transport + api_spec, no `cli` tag: MCP + API, no CLI prereq.
+        let server = registry_server("mcp-github");
+        assert_eq!(effective_plugin_kind(&server), PluginKind::Hybrid);
+        assert_eq!(
+            available_plugin_interfaces(&server),
+            vec![PluginInterface::Api, PluginInterface::Mcp]
+        );
+    }
+
+    #[test]
+    fn credential_source_microsoft_365_is_cli_token_with_no_stored_fallback() {
+        // KT-821: no `cli` tag, `CliToken` auth, no `fallback_env_key` — the
+        // old tag-based frontend guess called this "stored API credentials".
+        let server = registry_server("api-microsoft-365");
+        assert_eq!(credential_source(&server), CredentialSource::CliToken);
+    }
+
+    #[test]
+    fn credential_source_fastly_is_cli_token_despite_the_cli_tag_and_fallback_key() {
+        // Same `CliToken` auth as Microsoft 365, but Fastly ALSO carries the
+        // `cli` tag and a `fallback_env_key` — credential_source is derived
+        // from the auth kind alone, not the tag, so both report CliToken.
+        let server = registry_server("mcp-fastly");
+        assert_eq!(credential_source(&server), CredentialSource::CliToken);
+    }
+
+    #[test]
+    fn credential_source_github_is_stored() {
+        let server = registry_server("mcp-github");
+        assert_eq!(credential_source(&server), CredentialSource::Stored);
+    }
+
     use std::collections::HashSet;
 
     /// Packages whose upstream switched runtime (e.g. to bun) and MUST stay pinned to a Node-compatible version.

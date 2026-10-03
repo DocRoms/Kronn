@@ -103,6 +103,10 @@ struct CodexMcpEntry {
     /// Always written explicitly so Codex reads it.
     #[serde(default = "default_startup_timeout")]
     startup_timeout_sec: u32,
+    /// Kronn launches Codex with approval policy `never`: a tool left on
+    /// `prompt` is refused outright, so Kronn's own server must say `approve`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_tools_approval_mode: Option<String>,
 }
 
 pub(crate) fn default_startup_timeout() -> u32 {
@@ -201,11 +205,16 @@ pub(crate) fn mcp_args_carry_secret(args: &[String]) -> bool {
 }
 
 /// A server is credential-bearing — and must never enter an ACP payload,
-/// adapter argv, or client event — when it has a non-empty `env` map OR any
+/// adapter argv, or client event — when its `env` holds a value OR any
 /// `args` entry names a credential flag (KT-542 review: the no-secret
-/// promise covers `args`, not only `env`).
+/// promise covers `args`, not only `env`). A Docker `${KRONN_MCP_…}`
+/// reference is not a value: the agent's own environment resolves it.
 pub(crate) fn mcp_entry_leaks_secret(entry: &McpServerEntry) -> bool {
-    !entry.env.is_empty() || entry.args.as_deref().is_some_and(mcp_args_carry_secret)
+    entry
+        .env
+        .values()
+        .any(|value| !crate::core::mcp_secret_refs::is_reference(value))
+        || entry.args.as_deref().is_some_and(mcp_args_carry_secret)
 }
 
 /// Custom Debug impl that masks env values (may contain secrets like API keys).
@@ -297,9 +306,112 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
                 .collect(),
             enabled: true,
             startup_timeout_sec: default_startup_timeout(),
+            // Kronn authorizes these calls server-side; user servers keep Codex's default.
+            default_tools_approval_mode: Some("approve".into()),
         },
     );
     true
+}
+
+/// Take back out of a repository the agent files Kronn wrote there, when its
+/// project switches its agent files outside it (KT-971). Only the entries Kronn
+/// recorded as its own are removed; a file or folder left empty goes too, and a
+/// user's own MCP entries are never touched. Returns the paths it cleaned.
+pub fn remove_kronn_agent_files(project_path: &str) -> Result<Vec<String>, String> {
+    let _sync_guard = lock_project_config_sync();
+    let resolved = resolve_host_path(project_path);
+    let root = Path::new(&resolved);
+    let mut cleaned = Vec::new();
+    let empty = McpJsonFile {
+        mcp_servers: HashMap::new(),
+    };
+    for subpath in [
+        ".mcp.json",
+        ".kiro/settings/mcp.json",
+        ".ai/mcp/mcp.json",
+        ".gemini/settings.json",
+    ] {
+        let file = root.join(subpath);
+        if !file.is_file() {
+            continue;
+        }
+        write_owned_mcp_json_to_subpath(project_path, subpath, &empty)?;
+        let left_empty = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|object| {
+                object.keys().all(|key| key == "mcpServers")
+                    && object
+                        .get("mcpServers")
+                        .and_then(|servers| servers.as_object())
+                        .is_none_or(|servers| servers.is_empty())
+            });
+        if left_empty {
+            std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+        }
+        cleaned.push(subpath.to_string());
+    }
+
+    let vibe_config = root.join(".vibe/config.toml");
+    if vibe_config.is_file() {
+        let mut state = load_mcp_ownership(project_path)?;
+        let previous = state
+            .files
+            .get(".vibe/config.toml")
+            .cloned()
+            .unwrap_or_default();
+        merge_vibe_config(project_path, &vibe_config, &[], &previous)?;
+        state.files.remove(".vibe/config.toml");
+        save_mcp_ownership(project_path, &state)?;
+        let left_empty = std::fs::read_to_string(&vibe_config)
+            .ok()
+            .and_then(|content| content.parse::<toml::Table>().ok())
+            .is_some_and(|table| {
+                table.keys().all(|key| key == "mcp_servers")
+                    && table
+                        .get("mcp_servers")
+                        .and_then(|servers| servers.as_array())
+                        .is_none_or(|servers| servers.is_empty())
+            });
+        if left_empty {
+            std::fs::remove_file(&vibe_config).map_err(|e| e.to_string())?;
+        }
+        cleaned.push(".vibe/config.toml".into());
+    }
+
+    // Folders Kronn created for those files, once nothing else is in them.
+    for dir in [
+        ".kiro/settings",
+        ".kiro",
+        ".ai/mcp",
+        ".ai",
+        ".gemini",
+        ".vibe",
+    ] {
+        let _ = std::fs::remove_dir(root.join(dir));
+    }
+    Ok(cleaned)
+}
+
+/// The Kronn-owned directory that stands in for a project's repository when
+/// its agent files go outside it (KT-971): one per project path, under
+/// Kronn's data directory. Claude Code reads its `.mcp.json` there by path.
+pub fn outside_agent_files_dir(project_path: &str) -> Option<PathBuf> {
+    use sha2::Digest;
+    let resolved = resolve_host_path(project_path);
+    let digest = sha2::Sha256::digest(resolved.as_bytes());
+    let key: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(
+        crate::core::config::config_dir()
+            .ok()?
+            .join("project-agent-files")
+            .join(key),
+    )
 }
 
 /// Write `.mcp.json` (+ Kiro `.kiro/settings/mcp.json` & `.ai/mcp/mcp.json`,
@@ -324,11 +436,19 @@ pub(crate) fn write_kronn_internal_only(project_path: &str) -> Result<bool, Stri
     ensure_gitignore(project_path, ".mcp.json");
     let merged = read_mcp_json(project_path).unwrap_or_else(|| only_internal.clone());
     sync_claude_enabled_servers(project_path, &merged.mcp_servers);
-    for (subpath, ignore) in [
-        (".kiro/settings/mcp.json", ".kiro/settings/"),
-        (".ai/mcp/mcp.json", ".ai/mcp/"),
-        (".gemini/settings.json", ".gemini/"),
+    for (subpath, ignore, agent) in [
+        (
+            ".kiro/settings/mcp.json",
+            ".kiro/settings/",
+            AgentType::Kiro,
+        ),
+        (".ai/mcp/mcp.json", ".ai/mcp/", AgentType::Kiro),
+        (".gemini/settings.json", ".gemini/", AgentType::GeminiCli),
     ] {
+        // KT-971 — no file for a CLI this machine does not have.
+        if !crate::agents::installed_or_unknown(&agent) {
+            continue;
+        }
         write_owned_mcp_json_to_subpath(project_path, subpath, &only_internal)?;
         ensure_gitignore(project_path, ignore);
     }
@@ -356,10 +476,28 @@ fn backup_before_refusal(project_path: &str, file: &Path) -> Result<(), String> 
     let backup = configs_dir.join(format!("{safe_name}.backup"));
     refuse_symlink(&backup, "MCP backup file")?;
     if backup.exists() {
+        // A backup taken before Kronn kept these values encrypted holds them.
+        if crate::core::mcp_secret_refs::enabled() {
+            if let Some(redacted) = std::fs::read_to_string(&backup)
+                .ok()
+                .and_then(|content| redact_mcp_env_values(&content))
+            {
+                std::fs::write(&backup, format!("{redacted}\n"))
+                    .map_err(|e| format!("Failed to redact backup {}: {e}", backup.display()))?;
+            }
+        }
         return Ok(());
     }
     ensure_gitignore(project_path, ".kronn/");
-    std::fs::copy(file, &backup).map_err(|e| {
+    let redacted = crate::core::mcp_secret_refs::enabled()
+        .then(|| std::fs::read_to_string(file).ok())
+        .flatten()
+        .and_then(|content| redact_mcp_env_values(&content));
+    match redacted {
+        Some(content) => std::fs::write(&backup, format!("{content}\n")),
+        None => std::fs::copy(file, &backup).map(|_| ()),
+    }
+    .map_err(|e| {
         format!(
             "Failed to back up {} to {}: {e}",
             file.display(),
@@ -373,6 +511,42 @@ fn backup_before_refusal(project_path: &str, file: &Path) -> Result<(), String> 
             .map_err(|e| format!("Failed to secure backup {}: {e}", backup.display()))?;
     }
     Ok(())
+}
+
+/// Under Docker an entry Kronn did not write but that runs the very server of a
+/// config it manages (same command and arguments, or same URL) was imported
+/// from this file: Kronn owns it now, so its token values give way to
+/// references. Left alone, a token written by hand or by the old `kronn mcp
+/// sync` stayed readable by every agent of the container.
+fn takes_over_under_docker(current: &serde_json::Value, wanted: &serde_json::Value) -> bool {
+    if !crate::core::mcp_secret_refs::enabled() {
+        return false;
+    }
+    let identity = |entry: &serde_json::Value| {
+        (
+            entry.get("command").cloned(),
+            entry.get("args").cloned(),
+            entry.get("url").cloned(),
+        )
+    };
+    let (command, args, url) = identity(wanted);
+    (command.is_some() || url.is_some()) && identity(current) == (command, args, url)
+}
+
+/// The backup of a config whose values Kronn now keeps encrypted, without
+/// them: under Docker the backup sits in the repository, where every agent of
+/// the container reads.
+fn redact_mcp_env_values(content: &str) -> Option<String> {
+    let mut root: serde_json::Value = serde_json::from_str(content).ok()?;
+    let servers = root.get_mut("mcpServers")?.as_object_mut()?;
+    for entry in servers.values_mut() {
+        if let Some(env) = entry.get_mut("env").and_then(|env| env.as_object_mut()) {
+            for value in env.values_mut() {
+                *value = serde_json::Value::String("<kept encrypted by Kronn>".into());
+            }
+        }
+    }
+    serde_json::to_string_pretty(&root).ok()
 }
 
 fn secure_file_0600(file: &Path) -> Result<(), String> {
@@ -506,7 +680,11 @@ fn merge_mcp_json_file(
     let mut collisions: Vec<String> = Vec::new();
     for (name, wanted) in desired {
         match existing.get(&name) {
-            Some(current) if previously_owned.contains(&name) || current == &wanted => {
+            Some(current)
+                if previously_owned.contains(&name)
+                    || current == &wanted
+                    || takes_over_under_docker(current, &wanted) =>
+            {
                 existing.insert(name.clone(), wanted);
                 now_owned.insert(name);
             }
@@ -1125,12 +1303,25 @@ pub fn write_general_mcp_json(
         servers.iter().map(|s| (s.id.clone(), s)).collect();
 
     let mut mcp_servers = HashMap::new();
+    let secret_refs = crate::core::mcp_secret_refs::enabled();
+    let mut reference_values: Vec<(String, String)> = Vec::new();
+    let mut secret_bearing: std::collections::HashSet<String> = std::collections::HashSet::new();
     for config in &general_configs {
         let server = match server_map.get(&config.server_id) {
             Some(s) => s,
             None => continue,
         };
         let env = decrypt_env_strict(config, secret)?;
+        let carries_secrets = secret_refs && !env.is_empty();
+        let env = if carries_secrets {
+            let (references, values) =
+                crate::core::mcp_secret_refs::as_references(&config.id, &env);
+            reference_values.extend(values);
+            secret_bearing.insert(config.label.clone());
+            references
+        } else {
+            env
+        };
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
@@ -1159,6 +1350,9 @@ pub fn write_general_mcp_json(
         let key = config.label.clone();
         mcp_servers.insert(key, entry);
     }
+    if secret_refs {
+        crate::core::mcp_secret_refs::remember(target_dir, reference_values);
+    }
 
     // Always write `.mcp.json` for general discussions, even when the
     // user has zero MCPs marked `include_general`. We still inject the
@@ -1185,6 +1379,10 @@ pub fn write_general_mcp_json(
         if !data.mcp_servers.is_empty() || injected {
             write_owned_mcp_json_to_subpath(target_dir, ".mcp.json", &data)?;
         }
+
+        // Kiro, Gemini and Vibe get no secret-bearing MCP under Docker
+        // (KT-964): only Claude Code resolves the references.
+        mcp_servers.retain(|key, _| !secret_bearing.contains(key));
 
         // ── Kiro: .kiro/settings/mcp.json + .ai/mcp/mcp.json (filter incompatible) ──
         let kiro_servers: HashMap<String, McpServerEntry> = mcp_servers
@@ -1248,6 +1446,20 @@ pub fn sync_project_mcps_to_disk(
         .find(|p| p.id == project_id)
         .ok_or_else(|| format!("Project {} not found", project_id))?;
 
+    // KT-971 — with `outside`, every agent file goes to a Kronn-owned stand-in
+    // directory and the repository is not touched.
+    let policy = db::projects::agent_files_policy(conn, project_id).map_err(|e| e.to_string())?;
+    let target = match policy {
+        crate::models::AgentFilesPolicy::Repo => project.path.clone(),
+        crate::models::AgentFilesPolicy::Outside => {
+            let dir = outside_agent_files_dir(&project.path)
+                .ok_or("Kronn's data directory is unavailable for this project's agent files")?;
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            dir.to_string_lossy().into_owned()
+        }
+    };
+    let in_repo = policy == crate::models::AgentFilesPolicy::Repo;
+
     // Get all configs for this project (direct + global)
     let configs = db::mcps::configs_for_project(conn, project_id).map_err(|e| e.to_string())?;
 
@@ -1273,6 +1485,10 @@ pub fn sync_project_mcps_to_disk(
     // Build the McpJsonFile
     let mut mcp_servers = HashMap::new();
     let mut synced_config_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // KT-964 — under Docker, secret-bearing entries carry references only.
+    let secret_refs = crate::core::mcp_secret_refs::enabled();
+    let mut reference_values: Vec<(String, String)> = Vec::new();
+    let mut secret_bearing: std::collections::HashSet<String> = std::collections::HashSet::new();
     for config in &configs {
         let server = match server_map.get(&config.server_id) {
             Some(s) => s,
@@ -1291,6 +1507,15 @@ pub fn sync_project_mcps_to_disk(
         // both "write with empty env" and "drop the entry from the regenerated
         // file" clobber the good secrets already on disk (2026-06-30 class).
         let env = decrypt_env_strict(config, secret)?;
+        let carries_secrets = secret_refs && !env.is_empty();
+        let env = if carries_secrets {
+            let (references, values) =
+                crate::core::mcp_secret_refs::as_references(&config.id, &env);
+            reference_values.extend(values);
+            references
+        } else {
+            env
+        };
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
@@ -1327,8 +1552,14 @@ pub fn sync_project_mcps_to_disk(
         // Always use config label as key — avoids case mismatch between
         // server.name (e.g. "Fastly") and lowercased variants ("fastly")
         let key = config.label.clone();
+        if carries_secrets {
+            secret_bearing.insert(key.clone());
+        }
         mcp_servers.insert(key, entry);
         synced_config_ids.insert(config.id.clone());
+    }
+    if secret_refs {
+        crate::core::mcp_secret_refs::remember(&project.path, reference_values);
     }
 
     if mcp_servers.is_empty() {
@@ -1339,7 +1570,7 @@ pub fn sync_project_mcps_to_disk(
         // `write_general_mcp_json` ("always write, even when only the injected
         // bridge is present"). Without this, a project with no other MCPs lost
         // kronn-internal entirely (the file was deleted) — reported 2026-06-26.
-        if write_kronn_internal_only(&project.path)? {
+        if write_kronn_internal_only(&target)? {
             tracing::info!(
                 "Synced kronn-internal-only MCP configs for {} (no user MCPs)",
                 project.path
@@ -1356,12 +1587,14 @@ pub fn sync_project_mcps_to_disk(
                 ".gemini/settings.json",
                 ".ai/mcp/mcp.json",
             ] {
-                write_owned_mcp_json_to_subpath(&project.path, filename, &empty)?;
+                write_owned_mcp_json_to_subpath(&target, filename, &empty)?;
             }
         }
         // Vibe's host CLI supports stdio MCPs. The sync helper injects the
         // kronn-internal bridge even when the project has no user MCPs.
-        sync_vibe_project_config(&project.path, &configs, &server_map, secret, true)?;
+        if crate::agents::installed_or_unknown(&AgentType::Vibe) {
+            sync_vibe_project_config(&target, &configs, &server_map, secret, true)?;
+        }
     } else {
         // ── Claude Code: .mcp.json ──
         // Claude Code only supports stdio servers in .mcp.json.
@@ -1379,8 +1612,8 @@ pub fn sync_project_mcps_to_disk(
         // for project-bound discussions too. Disc id is forwarded via
         // the agent process env (KRONN_DISCUSSION_ID) — see runner.rs.
         inject_kronn_internal(&mut claude_data);
-        write_owned_mcp_json_to_subpath(&project.path, ".mcp.json", &claude_data)?;
-        ensure_gitignore(&project.path, ".mcp.json");
+        write_owned_mcp_json_to_subpath(&target, ".mcp.json", &claude_data)?;
+        ensure_gitignore(&target, ".mcp.json");
         tracing::info!(
             "Synced .mcp.json for {} ({} stdio MCPs)",
             project.path,
@@ -1388,12 +1621,24 @@ pub fn sync_project_mcps_to_disk(
         );
 
         // ── Claude Code settings.local.json: keep enabledMcpjsonServers in sync ──
-        let merged_claude = read_mcp_json(&project.path).unwrap_or_else(|| claude_data.clone());
-        sync_claude_enabled_servers(&project.path, &merged_claude.mcp_servers);
+        let merged_claude = read_mcp_json(&target).unwrap_or_else(|| claude_data.clone());
+        sync_claude_enabled_servers(&target, &merged_claude.mcp_servers);
 
         // Full data — but filter out localhost SSE/Streamable (unreachable in Docker)
         let docker_safe: HashMap<String, McpServerEntry> = mcp_servers
             .into_iter()
+            .filter(|(key, _)| {
+                // Kiro and Gemini are not proven to resolve references, Vibe
+                // does not: under Docker they get no secret-bearing MCP at all.
+                let keep = !secret_bearing.contains(key);
+                if !keep {
+                    tracing::warn!(
+                        "MCP '{key}' carries secrets: left out of Kiro/Gemini files under Docker \
+                         (only Claude Code resolves the ${{KRONN_MCP_…}} references)"
+                    );
+                }
+                keep
+            })
             .filter(|(_, entry)| {
                 if let Some(ref url) = entry.url {
                     !(url.contains("localhost")
@@ -1409,7 +1654,9 @@ pub fn sync_project_mcps_to_disk(
         };
 
         // ── Vibe: .vibe/config.toml ──
-        sync_vibe_project_config(&project.path, &configs, &server_map, secret, true)?;
+        if crate::agents::installed_or_unknown(&AgentType::Vibe) {
+            sync_vibe_project_config(&target, &configs, &server_map, secret, true)?;
+        }
 
         // ── Kiro: filter out incompatible servers ──
         let kiro_servers: HashMap<String, McpServerEntry> = {
@@ -1444,8 +1691,11 @@ pub fn sync_project_mcps_to_disk(
         inject_kronn_internal(&mut kiro_data);
 
         // ── Kiro: .kiro/settings/mcp.json ──
-        write_owned_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &kiro_data)?;
-        ensure_gitignore(&project.path, ".kiro/settings/");
+        let kiro = crate::agents::installed_or_unknown(&AgentType::Kiro);
+        if kiro {
+            write_owned_mcp_json_to_subpath(&target, ".kiro/settings/mcp.json", &kiro_data)?;
+            ensure_gitignore(&target, ".kiro/settings/");
+        }
         tracing::info!(
             "Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
             project.path,
@@ -1456,13 +1706,17 @@ pub fn sync_project_mcps_to_disk(
         // ── Gemini CLI: .gemini/settings.json (same JSON format as Claude) ──
         let mut gemini_data = data.clone();
         inject_kronn_internal(&mut gemini_data);
-        write_owned_mcp_json_to_subpath(&project.path, ".gemini/settings.json", &gemini_data)?;
-        ensure_gitignore(&project.path, ".gemini/");
+        if crate::agents::installed_or_unknown(&AgentType::GeminiCli) {
+            write_owned_mcp_json_to_subpath(&target, ".gemini/settings.json", &gemini_data)?;
+            ensure_gitignore(&target, ".gemini/");
+        }
         tracing::info!("Synced .gemini/settings.json for {}", project.path);
 
         // ── Kiro (new format): .ai/mcp/mcp.json ──
-        write_owned_mcp_json_to_subpath(&project.path, ".ai/mcp/mcp.json", &kiro_data)?;
-        ensure_gitignore(&project.path, ".ai/mcp/");
+        if kiro {
+            write_owned_mcp_json_to_subpath(&target, ".ai/mcp/mcp.json", &kiro_data)?;
+            ensure_gitignore(&target, ".ai/mcp/");
+        }
         tracing::info!("Synced .ai/mcp/mcp.json for {}", project.path);
 
         // NOTE: per-MCP usage-context files (`<docs>/operations/mcp-servers/<slug>.md`)
@@ -1473,6 +1727,11 @@ pub fn sync_project_mcps_to_disk(
         // project docs and drifted from the registry. The per-MCP context remains
         // MANUALLY editable via the McpPage drawer (read/write_mcp_context API);
         // we just stop seeding it automatically.
+    }
+
+    if !in_repo {
+        // Skills and profiles still reach agents through their prompt.
+        return Ok(());
     }
 
     // ── Native skill & profile files (SKILL.md, agent files) ──
@@ -1512,6 +1771,13 @@ fn ensure_redirectors(project_path: &str) {
     // (or ai/) at all there's no point dropping CLAUDE.md redirectors.
     let docs_dir = crate::core::scanner::detect_docs_dir(project_dir);
     if !docs_dir.is_dir() {
+        return;
+    }
+    // KT-841 — a redirector's whole purpose is to point at the canonical
+    // entry file (`docs/AGENTS.md`, or the legacy `ai/index.md`); posting
+    // one before that file exists (bootstrap-only `docs/` skeleton, audit
+    // never ran) is a dead link, not a redirect. Wait for the real target.
+    if !crate::core::scanner::detect_docs_entry(project_dir).is_file() {
         return;
     }
 
@@ -1662,6 +1928,9 @@ fn sync_vibe_project_config(
     track_ownership: bool,
 ) -> Result<(), String> {
     let mut entries = Vec::new();
+    // Vibe neither resolves `${VAR}` nor passes its environment to MCP servers
+    // (probed 02/10): under Docker it gets no secret-bearing MCP (KT-964).
+    let without_secrets = crate::core::mcp_secret_refs::enabled();
 
     for config in configs {
         // The bridge is a reserved, runtime-derived entry. Never copy a
@@ -1678,6 +1947,13 @@ fn sync_vibe_project_config(
 
         // Abort the whole Vibe write on decrypt failure — see decrypt_env_strict.
         let env = decrypt_env_strict(config, secret)?;
+        if without_secrets && !env.is_empty() {
+            tracing::warn!(
+                "MCP '{}' carries secrets: left out of Vibe's config under Docker",
+                config.label
+            );
+            continue;
+        }
 
         let name = config.label.clone();
 
@@ -1963,6 +2239,9 @@ impl HostMcpSync for CodexSync {
                 // Abort the whole Codex sync plan — see decrypt_env_strict.
                 Err(_) => return None,
             };
+            if withheld_from_host_config(config, &env, "Codex") {
+                continue;
+            }
             // Codex requires names matching ^[a-zA-Z0-9_-]+$ — slugify
             let raw_key = config.label.clone();
             let key = slugify_label(&raw_key);
@@ -1981,6 +2260,7 @@ impl HostMcpSync for CodexSync {
                     env_vars: Vec::new(),
                     enabled: true,
                     startup_timeout_sec: timeout,
+                    default_tools_approval_mode: None,
                 },
             );
         }
@@ -2137,6 +2417,9 @@ impl HostMcpSync for CopilotSync {
                 // Abort the whole Copilot sync plan — see decrypt_env_strict.
                 Err(_) => return None,
             };
+            if withheld_from_host_config(config, &env, "Copilot") {
+                continue;
+            }
 
             let key = config.label.clone();
             mcp_servers.insert(
@@ -2467,6 +2750,25 @@ fn warn_missing_host_binaries(conn: &rusqlite::Connection) {
 
 /// Whether a config opts in to outbound host sync. Anything other than
 /// `None` means Kronn should write it to the relevant CLI config file.
+/// Under Docker the host CLIs' global configs are mounted read-write from the
+/// user's home and read by every agent in the container, whatever its
+/// project: an MCP that carries secrets stays out of them (KT-965), like the
+/// project files of CLIs that cannot resolve references (KT-964).
+fn withheld_from_host_config(
+    config: &crate::models::McpConfig,
+    env: &HashMap<String, String>,
+    cli: &str,
+) -> bool {
+    if !crate::core::mcp_secret_refs::enabled() || env.is_empty() {
+        return false;
+    }
+    tracing::warn!(
+        "MCP '{}' carries secrets: left out of {cli}'s global config under Docker",
+        config.label
+    );
+    true
+}
+
 pub(crate) fn should_host_sync(config: &crate::models::McpConfig) -> bool {
     use crate::models::HostSyncMode;
     matches!(
@@ -2523,6 +2825,14 @@ fn build_kronn_managed_json_entry(
     // Err = decrypt failure with expected keys → the caller must abort its
     // whole host-config write (see decrypt_env_strict).
     let env = decrypt_env_strict(config, secret)?;
+    let cli = if use_http_url_for_streamable {
+        "Gemini"
+    } else {
+        "Claude Code"
+    };
+    if withheld_from_host_config(config, &env, cli) {
+        return Ok(None);
+    }
 
     let mut obj = serde_json::Map::new();
     match &server.transport {
@@ -2799,7 +3109,7 @@ impl HostMcpSync for ClaudeSync {
             };
             let entry = match build_kronn_managed_json_entry(config, server, secret, false, true) {
                 Ok(Some(e)) => e,
-                Ok(None) => continue, // ApiOnly skipped
+                Ok(None) => continue, // ApiOnly, or withheld under Docker
                 // Decrypt failure: abort the whole Claude host sync so the
                 // existing on-disk secrets are preserved (already logged).
                 Err(_) => return None,
@@ -3194,7 +3504,7 @@ impl HostMcpSync for GeminiSync {
                         serde_json::Value::String(config.label.clone()),
                     );
                 }
-                Ok(None) => {} // ApiOnly skipped
+                Ok(None) => {} // ApiOnly, or withheld under Docker
                 // Decrypt failure: abort the whole Gemini host sync (logged).
                 Err(_) => return None,
             }

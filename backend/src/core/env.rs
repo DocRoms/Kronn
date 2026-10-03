@@ -71,10 +71,36 @@ pub fn host_os_label() -> String {
     "Unknown".into()
 }
 
+/// Whether the host is a Mac with an Apple Silicon chip (KT-930).
+///
+/// The OS comes from `host_os_label`, so a Kronn in Docker on a Mac still
+/// answers for the Mac, not for its Linux container. The chip is the build's
+/// own architecture: Docker Desktop runs arm64 containers natively on Apple
+/// Silicon and x86_64 ones on an Intel Mac. An amd64 image emulated on Apple
+/// Silicon reads as Intel, which errs on the side of not offering MLX.
+pub fn host_is_apple_silicon() -> bool {
+    apple_silicon_from(&host_os_label(), std::env::consts::ARCH)
+}
+
+fn apple_silicon_from(host_os: &str, arch: &str) -> bool {
+    host_os == "macOS" && arch == "aarch64"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn apple_silicon_needs_both_a_mac_and_an_arm_chip() {
+        assert!(apple_silicon_from("macOS", "aarch64"));
+        // An Intel Mac, and a Linux or WSL box that happens to be arm64.
+        assert!(!apple_silicon_from("macOS", "x86_64"));
+        assert!(!apple_silicon_from("Linux", "aarch64"));
+        assert!(!apple_silicon_from("WSL", "aarch64"));
+        assert!(!apple_silicon_from("Windows", "aarch64"));
+        assert!(!apple_silicon_from("Unknown", "aarch64"));
+    }
 
     #[test]
     #[serial]

@@ -27,8 +27,10 @@ use tokio::time::timeout;
 use crate::db::model_catalog::{self as db, DiscoveredModel};
 use crate::db::Database;
 use crate::models::{
-    AgentType, AppConfig, CatalogPreflightFailure, ModelAvailability, ModelCatalogView, ModelTier,
-    ModelTierConfig, ModelTiersConfig, ModelUnavailableReason,
+    AgentType, AppConfig, CatalogModelEntry, CatalogPreflightFailure, CatalogPreflightResolution,
+    CatalogPreflightWarning, CatalogReplacementSource, ModelAvailability, ModelCatalogAlert,
+    ModelCatalogReference, ModelCatalogReferenceKind, ModelCatalogView, ModelProvenance, ModelTier,
+    ModelTierConfig, ModelTiersConfig, ModelUnavailableReason, StepType,
 };
 
 /// How long a successful live snapshot is trusted before a consumer should
@@ -82,10 +84,11 @@ pub fn reasoning_modes_for_agent_model(
         .and_then(|catalog| catalog.get(&(target, model_id.to_owned())).cloned())
 }
 
-/// Historical unit-test expectations only, never a runtime resolver fallback.
-/// The one-time migration below writes its own durable seed rows.
-#[cfg(test)]
-pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
+/// Historical per-agent tier defaults used by the one-time seed migration and
+/// as the last same-agent fallback when a configured model disappears. A
+/// fallback is still accepted only when this exact identity is live in the
+/// durable catalogue; these literals never bypass discovery.
+pub fn agent_default_for_tier(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
     match (agent_type, tier) {
         (AgentType::ClaudeCode, ModelTier::Economy) => Some("haiku".into()),
         (AgentType::ClaudeCode, ModelTier::Default) => Some("sonnet".into()),
@@ -98,6 +101,11 @@ pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<Strin
         (AgentType::Ollama, ModelTier::Reasoning) => Some("qwen3:30b-a3b".into()),
         _ => None,
     }
+}
+
+#[cfg(test)]
+pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
+    agent_default_for_tier(agent_type, tier)
 }
 
 pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
@@ -371,12 +379,157 @@ pub async fn refresh_agent_catalog(
     refresh_if_stale(db, agent_type, true).await
 }
 
+/// Files OpenCode reads as a project's own configuration, relative to the
+/// project directory. Their presence alone decides whether a project can offer
+/// models the user-level configuration does not: the files are never opened, so
+/// nothing they hold (a key, a header) can reach the catalogue.
+const OPENCODE_PROJECT_CONFIGS: [&str; 4] = [
+    "opencode.json",
+    "opencode.jsonc",
+    ".opencode/opencode.json",
+    ".opencode/opencode.jsonc",
+];
+
+/// A project scope is one extra OpenCode process per refresh, so the number of
+/// projects consulted is bounded; going past it is logged, never silent.
+const MAX_OPENCODE_PROJECT_SCOPES: usize = 16;
+
+/// OpenCode builds its model list per working directory, and a launch runs in
+/// the project directory while discovery runs in a neutral one. A provider
+/// declared only by a project's `opencode.json` — a local Ollama is the usual
+/// case — is therefore offered to every run in that project yet invisible to
+/// discovery. Keep, among `projects` (name, resolved directory), those that
+/// carry their own OpenCode config; they are the only ones worth asking.
+fn opencode_project_scopes(
+    projects: &[(String, std::path::PathBuf)],
+) -> Vec<(String, std::path::PathBuf)> {
+    let mut scopes: Vec<(String, std::path::PathBuf)> = projects
+        .iter()
+        .filter(|(_, dir)| {
+            dir.is_dir()
+                && OPENCODE_PROJECT_CONFIGS
+                    .iter()
+                    .any(|config| dir.join(config).is_file())
+        })
+        .cloned()
+        .collect();
+    if scopes.len() > MAX_OPENCODE_PROJECT_SCOPES {
+        tracing::warn!(
+            projects = scopes.len(),
+            limit = MAX_OPENCODE_PROJECT_SCOPES,
+            "more projects carry an OpenCode config than one refresh consults; the rest are left out"
+        );
+        scopes.truncate(MAX_OPENCODE_PROJECT_SCOPES);
+    }
+    scopes
+}
+
+/// Fold what OpenCode offers inside some projects into what it offers
+/// everywhere. Every model comes from an OpenCode session response — nothing is
+/// added by Kronn — and one already offered everywhere is not repeated. A model
+/// only a project offers says so in its description, since it is absent from a
+/// run in any other directory. A failed project scope is left out and logged
+/// (its reason only): it never turns the refresh into a failure, because one
+/// project's broken config must not take OpenCode away from every other project.
+/// A failed global discovery is returned as it is, project results or not.
+fn merge_project_scopes(
+    global: DiscoveryOutcome,
+    scoped: Vec<(String, DiscoveryOutcome)>,
+) -> DiscoveryOutcome {
+    let DiscoveryOutcome::Live(mut models) = global else {
+        return global;
+    };
+    for (project, outcome) in scoped {
+        match outcome {
+            DiscoveryOutcome::Live(offered) => {
+                for model in offered {
+                    if models.iter().any(|known| known.model_id == model.model_id) {
+                        continue;
+                    }
+                    let note = format!("Offered by OpenCode only inside the project {project}.");
+                    models.push(DiscoveredModel {
+                        description: Some(match model.description {
+                            Some(description) => format!("{description} {note}"),
+                            None => note,
+                        }),
+                        ..model
+                    });
+                }
+            }
+            other => {
+                let reason = reason_for(&other).map(|(reason, _)| reason);
+                tracing::warn!(
+                    project = %project,
+                    ?reason,
+                    "OpenCode discovery failed in a project directory; its own models are left out of this snapshot"
+                );
+            }
+        }
+    }
+    DiscoveryOutcome::Live(models)
+}
+
+/// OpenCode discovery: the neutral directory and every project scope, run
+/// together so the whole refresh keeps one discovery bound.
+async fn discover_opencode(db: &Database) -> DiscoveryOutcome {
+    discover_opencode_with(db, |dir| async move {
+        match timeout(
+            DISCOVERY_TIMEOUT,
+            acp_discovery::discover_in(&AgentType::OpenCode, &dir),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => DiscoveryOutcome::Timeout,
+        }
+    })
+    .await
+}
+
+/// `discover_opencode` with the per-directory discovery supplied, so the
+/// project listing, the scope choice and the merge are testable without an
+/// OpenCode process.
+async fn discover_opencode_with<F, Fut>(db: &Database, discover_scope: F) -> DiscoveryOutcome
+where
+    F: Fn(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = DiscoveryOutcome>,
+{
+    let projects = db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+        .map(|projects| {
+            projects
+                .into_iter()
+                .map(|project| {
+                    let dir = crate::core::scanner::resolve_host_path(&project.path);
+                    (project.name, dir)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not list projects for OpenCode discovery; only the user-level catalogue is read");
+            Vec::new()
+        });
+    let scopes = opencode_project_scopes(&projects);
+    let discover_scope = &discover_scope;
+    let scoped = futures::future::join_all(
+        scopes
+            .into_iter()
+            .map(|(name, dir)| async move { (name, discover_scope(dir).await) }),
+    );
+    let (global, scoped) = tokio::join!(discover(&AgentType::OpenCode), scoped);
+    merge_project_scopes(global, scoped)
+}
+
 async fn discover_and_reconcile(
     db: &Database,
     agent_type: AgentType,
 ) -> anyhow::Result<ModelCatalogView> {
     let runtime_target_id = db::agent_runtime_target_id(&agent_type);
-    let outcome = discover(&agent_type).await;
+    let outcome = match agent_type {
+        AgentType::OpenCode => discover_opencode(db).await,
+        _ => discover(&agent_type).await,
+    };
     let at = agent_type.clone();
     let target = runtime_target_id.clone();
     match outcome {
@@ -527,7 +680,214 @@ pub async fn build_view(
         last_attempt_at: log.as_ref().map(|l| l.last_attempt_at),
         last_error_reason: log.as_ref().and_then(|l| l.last_error_reason),
         last_error_detail: log.as_ref().and_then(|l| l.last_error_detail.clone()),
+        alerts: Vec::new(),
     })
+}
+
+fn live_replacement_for_entry(
+    entries: &[CatalogModelEntry],
+    missing: &CatalogModelEntry,
+) -> Option<String> {
+    let resolved = missing.resolved_model.as_deref()?;
+    let alias_stem = missing.model_id.split_once('[').map(|(stem, _suffix)| stem);
+    entries
+        .iter()
+        .filter(|candidate| {
+            candidate.model_id != missing.model_id
+                && candidate.provenance == ModelProvenance::Live
+                && candidate.availability == ModelAvailability::Available
+                && candidate.resolved_model.as_deref() == Some(resolved)
+        })
+        .min_by_key(|candidate| {
+            (
+                alias_stem != Some(candidate.model_id.as_str()),
+                candidate.model_id == "default",
+                candidate.model_id.clone(),
+            )
+        })
+        .map(|candidate| candidate.model_id.clone())
+}
+
+fn available_chat_entry<'a>(
+    entries: &'a [CatalogModelEntry],
+    model_id: &str,
+) -> Option<&'a CatalogModelEntry> {
+    entries.iter().find(|entry| {
+        entry.model_id == model_id
+            && entry.availability == ModelAvailability::Available
+            && crate::http_transport::entry_supports_capability(
+                entry,
+                crate::http_transport::CAPABILITY_CHAT,
+            )
+    })
+}
+
+fn tier_replacement_for_entry(
+    entries: &[CatalogModelEntry],
+    missing: &CatalogModelEntry,
+    agent_type: &AgentType,
+    selected_tier: ModelTier,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Option<(String, ModelTier)> {
+    let equivalent_tier = missing.tier_assignment.unwrap_or(selected_tier);
+    let configured =
+        crate::agents::runner::configured_model_flag(agent_type, equivalent_tier, model_tiers);
+    configured
+        .as_deref()
+        .filter(|candidate| *candidate != missing.model_id)
+        .and_then(|candidate| available_chat_entry(entries, candidate))
+        .or_else(|| {
+            db::resolve_tier_entry(entries, equivalent_tier).filter(|candidate| {
+                crate::http_transport::entry_supports_capability(
+                    candidate,
+                    crate::http_transport::CAPABILITY_CHAT,
+                )
+            })
+        })
+        .filter(|candidate| candidate.model_id != missing.model_id)
+        .or_else(|| {
+            agent_default_for_tier(agent_type, equivalent_tier)
+                .filter(|candidate| *candidate != missing.model_id)
+                .and_then(|candidate| available_chat_entry(entries, &candidate))
+        })
+        .map(|candidate| (candidate.model_id.clone(), equivalent_tier))
+}
+
+fn configured_tier_models(
+    config: &ModelTiersConfig,
+    agent_type: &AgentType,
+) -> Vec<(ModelTier, String)> {
+    let tier_config = match agent_type {
+        AgentType::ClaudeCode => Some(&config.claude_code),
+        AgentType::Codex => Some(&config.codex),
+        AgentType::OpenCode => Some(&config.open_code),
+        AgentType::GeminiCli => Some(&config.gemini_cli),
+        AgentType::Kiro => Some(&config.kiro),
+        AgentType::Vibe => Some(&config.vibe),
+        AgentType::CopilotCli => Some(&config.copilot_cli),
+        AgentType::Ollama => Some(&config.ollama),
+        AgentType::LiteLlm => Some(&config.lite_llm),
+        AgentType::Nvidia => Some(&config.nvidia),
+        AgentType::Custom => None,
+    };
+    let Some(tier_config) = tier_config else {
+        return Vec::new();
+    };
+    [
+        (ModelTier::Economy, tier_config.economy.as_ref()),
+        (ModelTier::Default, tier_config.default.as_ref()),
+        (ModelTier::Reasoning, tier_config.reasoning.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(tier, model)| {
+        model
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| (tier, model.clone()))
+    })
+    .collect()
+}
+
+fn reference_runtime_target(agent_type: &AgentType, connection_id: Option<&str>) -> String {
+    connection_id
+        .map(db::http_runtime_target_id)
+        .unwrap_or_else(|| db::agent_runtime_target_id(agent_type))
+}
+
+/// Attach warnings for persisted references to models that disappeared from
+/// the latest successful catalogue. The warning is recalculated from current
+/// workflow, tier and Quick Prompt state, so fixing the last reference clears
+/// it without mutating catalogue history.
+pub async fn populate_reference_alerts(
+    database: &Database,
+    config: &AppConfig,
+    view: &mut ModelCatalogView,
+) -> anyhow::Result<()> {
+    if !view.models.iter().any(|entry| {
+        entry.availability == ModelAvailability::Unavailable
+            && entry.unavailable_reason == Some(ModelUnavailableReason::Disappeared)
+    }) {
+        view.alerts.clear();
+        return Ok(());
+    }
+    let (workflows, quick_prompts) = database
+        .with_read_conn(|conn| {
+            Ok((
+                crate::db::workflows::list_workflows(conn)?,
+                crate::db::quick_prompts::list_quick_prompts(conn)?,
+            ))
+        })
+        .await?;
+    let tier_models = configured_tier_models(&config.agents.model_tiers, &view.agent_type);
+    let mut alerts = Vec::new();
+
+    for missing in view.models.iter().filter(|entry| {
+        entry.availability == ModelAvailability::Unavailable
+            && entry.unavailable_reason == Some(ModelUnavailableReason::Disappeared)
+    }) {
+        let mut references = Vec::new();
+        for workflow in &workflows {
+            for step in workflow.steps.iter().chain(&workflow.on_failure) {
+                if !matches!(step.step_type, StepType::Agent | StepType::BatchQuickPrompt) {
+                    continue;
+                }
+                let Some(settings) = step.agent_settings.as_ref() else {
+                    continue;
+                };
+                if settings.model.as_deref() != Some(missing.model_id.as_str())
+                    || reference_runtime_target(&step.agent, settings.connection_id.as_deref())
+                        != view.runtime_target_id
+                {
+                    continue;
+                }
+                references.push(ModelCatalogReference {
+                    kind: ModelCatalogReferenceKind::WorkflowStep,
+                    resource_id: Some(workflow.id.clone()),
+                    label: format!("{} · {}", workflow.name, step.name),
+                });
+            }
+        }
+        if view.runtime_target_id == db::agent_runtime_target_id(&view.agent_type) {
+            for (tier, model) in &tier_models {
+                if model == &missing.model_id {
+                    references.push(ModelCatalogReference {
+                        kind: ModelCatalogReferenceKind::ModelTier,
+                        resource_id: None,
+                        label: format!("{:?} · {tier:?}", view.agent_type),
+                    });
+                }
+            }
+        }
+        for prompt in &quick_prompts {
+            let Some(settings) = prompt.agent_settings.as_ref() else {
+                continue;
+            };
+            let connection_id = settings
+                .connection_id
+                .as_deref()
+                .or(prompt.connection_id.as_deref());
+            if settings.model.as_deref() != Some(missing.model_id.as_str())
+                || reference_runtime_target(&prompt.agent, connection_id) != view.runtime_target_id
+            {
+                continue;
+            }
+            references.push(ModelCatalogReference {
+                kind: ModelCatalogReferenceKind::QuickPrompt,
+                resource_id: Some(prompt.id.clone()),
+                label: prompt.name.clone(),
+            });
+        }
+        references.sort_by(|left, right| left.label.cmp(&right.label));
+        if !references.is_empty() {
+            alerts.push(ModelCatalogAlert {
+                model_id: missing.model_id.clone(),
+                replacement: live_replacement_for_entry(&view.models, missing),
+                references,
+            });
+        }
+    }
+    alerts.sort_by(|left, right| left.model_id.cmp(&right.model_id));
+    view.alerts = alerts;
+    Ok(())
 }
 
 /// Serve the current snapshot, refreshing first when it is stale (or when
@@ -582,26 +942,51 @@ fn recommended_action_for(reason: ModelUnavailableReason) -> &'static str {
             "recheck_catalog"
         }
         ModelUnavailableReason::Disappeared => "choose_replacement",
+        // The proxy lists it but refuses to serve it: only the operator can
+        // pick another model (or fix the proxy), Kronn must not substitute one.
+        ModelUnavailableReason::NotFound | ModelUnavailableReason::AccessDenied => {
+            "choose_another_model"
+        }
         ModelUnavailableReason::InvalidCatalog | ModelUnavailableReason::Unsupported => {
             "configure_manual_model"
         }
     }
 }
 
-/// Catalog-driven proactive preflight for one launch target. Returns `None`
-/// when nothing in the catalog contradicts launching (including "we simply
-/// have no record of this identity" — an unknown model is not blocked on
-/// absence alone, only a model the catalog has positively marked
-/// unavailable). HTTP targets read their own durable identity but never trigger
-/// CLI discovery here; reachability remains owned by their transport preflight.
-pub async fn preflight_check(
+/// The catalogue namespace of a legacy HTTP agent run without a connection:
+/// its models are listed under the canonical connection it runs on, never
+/// under the agent's own id, where a 404 would flag nothing.
+pub async fn legacy_runtime_target_id(db: &Database, agent_type: &AgentType) -> Option<String> {
+    let agent = agent_type.clone();
+    match db
+        .with_read_conn(move |conn| {
+            crate::db::external_api_connections::legacy_connection_for_agent(conn, &agent)
+        })
+        .await
+    {
+        Ok(connection) => connection
+            .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id)),
+        Err(error) => {
+            tracing::warn!("Unable to read the legacy connection of {agent_type:?}: {error}");
+            None
+        }
+    }
+}
+
+/// Catalog-driven proactive preflight for one launch target. A disappeared
+/// identity resolves to a same-agent replacement when possible, while every
+/// other positive incompatibility remains a refusal. Unknown identities still
+/// pass through unchanged. HTTP targets read their own durable identity but
+/// never trigger CLI discovery here; reachability remains owned by their
+/// transport preflight.
+pub async fn preflight_resolve(
     db: &Database,
     runtime_target_id: Option<&str>,
     agent_type: AgentType,
     tier: ModelTier,
     model_override: Option<&str>,
     model_tiers: Option<&ModelTiersConfig>,
-) -> Option<CatalogPreflightFailure> {
+) -> Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>> {
     let configured_model = model_override
         .filter(|model| !model.trim().is_empty())
         .map(str::to_string)
@@ -637,9 +1022,16 @@ pub async fn preflight_check(
             })
             .await;
         match result {
-            Ok(model) => model?,
+            Ok(Some(model)) => model,
+            Ok(None) => {
+                return Ok(CatalogPreflightResolution {
+                    requested_model: None,
+                    effective_model: None,
+                    warning: None,
+                })
+            }
             Err(error) => {
-                return Some(CatalogPreflightFailure {
+                return Err(Box::new(CatalogPreflightFailure {
                     runtime_target_id,
                     agent_type,
                     model_id: None,
@@ -647,7 +1039,8 @@ pub async fn preflight_check(
                     detail: format!("catalog assignment lookup failed: {error}"),
                     last_checked_at: Utc::now(),
                     recommended_action: "recheck_catalog".into(),
-                })
+                    replacement: None,
+                }))
             }
         }
     };
@@ -662,7 +1055,7 @@ pub async fn preflight_check(
         match refresh_if_stale(db, agent_type.clone(), false).await {
             Ok(view) => Some(view),
             Err(error) => {
-                return Some(CatalogPreflightFailure {
+                return Err(Box::new(CatalogPreflightFailure {
                     runtime_target_id,
                     agent_type,
                     model_id: Some(model_id.clone()),
@@ -670,7 +1063,8 @@ pub async fn preflight_check(
                     detail: format!("catalog refresh failed: {error}"),
                     last_checked_at: Utc::now(),
                     recommended_action: "recheck_catalog".into(),
-                });
+                    replacement: None,
+                }));
             }
         }
     } else if runtime_target_id.starts_with("http:") {
@@ -700,7 +1094,7 @@ pub async fn preflight_check(
                 });
             !matches!(reason, ModelUnavailableReason::Unsupported) && !retained_claude_model
         }) {
-            return Some(CatalogPreflightFailure {
+            return Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
                 model_id: Some(model_id.clone()),
@@ -710,32 +1104,89 @@ pub async fn preflight_check(
                     .unwrap_or_else(|| "the runtime catalog could not be refreshed".into()),
                 last_checked_at: view.last_attempt_at.unwrap_or_else(Utc::now),
                 recommended_action: recommended_action_for(reason).to_string(),
-            });
+                replacement: None,
+            }));
         }
     }
     let target = runtime_target_id.clone();
     let mid = model_id.clone();
-    let entry = db
-        .with_conn(move |conn| db::get(conn, &target, &mid))
+    let (entry, entries) = db
+        .with_read_conn(move |conn| {
+            let entries = db::list_for_target(conn, &target)?;
+            let entry = entries.iter().find(|entry| entry.model_id == mid).cloned();
+            Ok((entry, entries))
+        })
         .await
-        .ok()
-        .flatten();
+        .unwrap_or((None, Vec::new()));
     match entry {
         Some(entry) if entry.availability == ModelAvailability::Unavailable => {
             let reason = entry
                 .unavailable_reason
                 .unwrap_or(ModelUnavailableReason::Disappeared);
-            Some(CatalogPreflightFailure {
+            let equivalent_tier = entry.tier_assignment.unwrap_or(tier);
+            let replacement = (reason == ModelUnavailableReason::Disappeared)
+                .then(|| live_replacement_for_entry(&entries, &entry))
+                .flatten()
+                .filter(|candidate| available_chat_entry(&entries, candidate).is_some())
+                .map(|model| {
+                    (
+                        model,
+                        CatalogReplacementSource::ResolvedModel,
+                        equivalent_tier,
+                    )
+                })
+                .or_else(|| {
+                    (reason == ModelUnavailableReason::Disappeared)
+                        .then(|| {
+                            tier_replacement_for_entry(
+                                &entries,
+                                &entry,
+                                &agent_type,
+                                tier,
+                                model_tiers,
+                            )
+                        })
+                        .flatten()
+                        .map(|(model, tier)| {
+                            (model, CatalogReplacementSource::EquivalentTier, tier)
+                        })
+                });
+            if let Some((effective_model, replacement_source, equivalent_tier)) = replacement {
+                return Ok(CatalogPreflightResolution {
+                    requested_model: Some(model_id.clone()),
+                    effective_model: Some(effective_model.clone()),
+                    warning: Some(CatalogPreflightWarning {
+                        requested_model: model_id,
+                        effective_model,
+                        reason,
+                        detail: entry.unavailable_detail.unwrap_or_else(|| {
+                            "this model disappeared from the latest live catalogue".into()
+                        }),
+                        replacement_source,
+                        equivalent_tier,
+                    }),
+                });
+            }
+            let detail = if reason == ModelUnavailableReason::Disappeared {
+                format!(
+                    "model `{model_id}` disappeared and no available replacement exists for the {:?} tier on agent {:?}",
+                    equivalent_tier, agent_type
+                )
+            } else {
+                entry
+                    .unavailable_detail
+                    .unwrap_or_else(|| "this model is not currently available".into())
+            };
+            Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
                 model_id: Some(model_id),
                 reason,
-                detail: entry
-                    .unavailable_detail
-                    .unwrap_or_else(|| "this model is not currently available".into()),
+                detail,
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(reason).to_string(),
-            })
+                replacement: None,
+            }))
         }
         // KT-545 DoD #3: a model the catalog positively tags with
         // capabilities that exclude chat (e.g. an image/video-only entry)
@@ -748,7 +1199,7 @@ pub async fn preflight_check(
                 crate::http_transport::CAPABILITY_CHAT,
             ) =>
         {
-            Some(CatalogPreflightFailure {
+            Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
                 model_id: Some(model_id),
@@ -761,10 +1212,39 @@ pub async fn preflight_check(
                 last_checked_at: entry.last_checked_at,
                 recommended_action: recommended_action_for(ModelUnavailableReason::Unsupported)
                     .to_string(),
-            })
+                replacement: None,
+            }))
         }
-        _ => None,
+        _ => Ok(CatalogPreflightResolution {
+            requested_model: Some(model_id.clone()),
+            effective_model: Some(model_id),
+            warning: None,
+        }),
     }
+}
+
+/// Compatibility helper for launch surfaces that only need a blocking
+/// verdict. Callers that dispatch a model must use [`preflight_resolve`] so a
+/// non-blocking replacement reaches the actual runtime.
+pub async fn preflight_check(
+    db: &Database,
+    runtime_target_id: Option<&str>,
+    agent_type: AgentType,
+    tier: ModelTier,
+    model_override: Option<&str>,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Option<CatalogPreflightFailure> {
+    preflight_resolve(
+        db,
+        runtime_target_id,
+        agent_type,
+        tier,
+        model_override,
+        model_tiers,
+    )
+    .await
+    .err()
+    .map(|failure| *failure)
 }
 
 #[cfg(test)]
@@ -781,6 +1261,8 @@ mod tests {
         DiscoveredModel {
             model_id: "claude-fable-5-1[1m]".into(),
             display_name: "Fable".into(),
+            resolved_model: Some("claude-fable-5-1".into()),
+            description: Some("Long-context Fable".into()),
             capabilities: vec!["chat".into()],
             reasoning_modes: vec!["low".into(), "max".into()],
             default_reasoning_mode: None,
@@ -1077,6 +1559,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "some-other-model".into(),
                     display_name: "Some other model".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1147,6 +1631,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "seedance-2.0-mini".into(),
                     display_name: "Seedance 2.0 mini".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["video".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1183,6 +1669,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "llama-3.3-70b".into(),
                     display_name: "Llama 3.3 70B".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1231,6 +1719,8 @@ mod tests {
                 &[DiscoveredModel {
                     model_id: "other-model".into(),
                     display_name: "Other model".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec![],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1254,6 +1744,429 @@ mod tests {
         assert_eq!(failure.model_id.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(failure.reason, ModelUnavailableReason::Disappeared);
         assert_eq!(failure.recommended_action, "choose_replacement");
+    }
+
+    #[tokio::test]
+    async fn a_listed_model_the_proxy_refuses_is_refused_not_swapped_for_another() {
+        // KT-941 — `vertex_ai/claude-sonnet-5` is listed but answers 404 (or is
+        // denied by the proxy's tags). A healthy model sits right next to it, and
+        // the launch must still stop and name the refused one: choosing for the
+        // operator is a silent substitution.
+        for reason in [
+            ModelUnavailableReason::NotFound,
+            ModelUnavailableReason::AccessDenied,
+        ] {
+            let db = test_db();
+            db.with_conn(move |conn| {
+                let listed = |id: &str| DiscoveredModel {
+                    model_id: id.into(),
+                    display_name: id.into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec![],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    "http:connection-a",
+                    &AgentType::LiteLlm,
+                    &[
+                        listed("vertex_ai/claude-sonnet-5"),
+                        listed("claude-sonnet-4-6"),
+                    ],
+                )?;
+                db::mark_unavailable(
+                    conn,
+                    "http:connection-a",
+                    "vertex_ai/claude-sonnet-5",
+                    reason,
+                    Some("Not found or access denied (HTTP 404)"),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+            let failure = preflight_check(
+                &db,
+                Some("http:connection-a"),
+                AgentType::LiteLlm,
+                ModelTier::Default,
+                Some("vertex_ai/claude-sonnet-5"),
+                None,
+            )
+            .await
+            .expect("a model the proxy refuses must fail preflight");
+            assert_eq!(
+                failure.model_id.as_deref(),
+                Some("vertex_ai/claude-sonnet-5")
+            );
+            assert_eq!(failure.reason, reason);
+            assert_eq!(failure.recommended_action, "choose_another_model");
+            assert!(failure.replacement.is_none(), "{failure:?}");
+
+            // The healthy sibling still launches when it is the one asked for.
+            assert!(preflight_check(
+                &db,
+                Some("http:connection-a"),
+                AgentType::LiteLlm,
+                ModelTier::Default,
+                Some("claude-sonnet-4-6"),
+                None,
+            )
+            .await
+            .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn disappeared_claude_alias_names_live_resolved_model_replacement() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let alias = DiscoveredModel {
+                    model_id: "opus[1m]".into(),
+                    display_name: "Opus 1M".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Legacy long-context alias".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let live = DiscoveredModel {
+                    model_id: "opus".into(),
+                    display_name: "Opus".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Current Opus alias".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let default = DiscoveredModel {
+                    model_id: "default".into(),
+                    display_name: "Default".into(),
+                    resolved_model: Some("claude-opus-5-5".into()),
+                    description: Some("Recommended model".into()),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    &[alias, default.clone(), live.clone()],
+                )?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[default, live])
+            })
+            .await
+            .unwrap();
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("opus[1m]"),
+            None,
+        )
+        .await
+        .expect("the disappeared alias has a same-agent live replacement");
+        assert_eq!(resolution.requested_model.as_deref(), Some("opus[1m]"));
+        assert_eq!(resolution.effective_model.as_deref(), Some("opus"));
+        let warning = resolution.warning.expect("the replacement is never silent");
+        assert_eq!(warning.reason, ModelUnavailableReason::Disappeared);
+        assert_eq!(warning.requested_model, "opus[1m]");
+        assert_eq!(warning.effective_model, "opus");
+        assert_eq!(
+            warning.replacement_source,
+            CatalogReplacementSource::ResolvedModel
+        );
+        assert_eq!(warning.equivalent_tier, ModelTier::Reasoning);
+    }
+
+    #[tokio::test]
+    async fn disappeared_model_without_resolved_identity_uses_equivalent_tier_default() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let missing = DiscoveredModel {
+                    model_id: "retired-reasoner".into(),
+                    display_name: "Retired reasoner".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let live = DiscoveredModel {
+                    model_id: "opus".into(),
+                    display_name: "Opus".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    &[missing, live.clone()],
+                )?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[live])
+            })
+            .await
+            .unwrap();
+        let mut tiers = ModelTiersConfig::default();
+        tiers.claude_code.reasoning = Some("opus".into());
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("retired-reasoner"),
+            Some(&tiers),
+        )
+        .await
+        .expect("the live equivalent-tier default replaces the missing model");
+        assert_eq!(resolution.effective_model.as_deref(), Some("opus"));
+        let warning = resolution.warning.unwrap();
+        assert_eq!(
+            warning.replacement_source,
+            CatalogReplacementSource::EquivalentTier
+        );
+        assert_eq!(warning.equivalent_tier, ModelTier::Reasoning);
+    }
+
+    #[tokio::test]
+    async fn disappeared_model_without_tier_config_uses_live_agent_default() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let missing = DiscoveredModel {
+                    model_id: "retired-reasoner".into(),
+                    display_name: "Retired reasoner".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                let live_default = DiscoveredModel {
+                    model_id: "opus".into(),
+                    display_name: "Opus".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    &[missing, live_default.clone()],
+                )?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[live_default])
+            })
+            .await
+            .unwrap();
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("retired-reasoner"),
+            None,
+        )
+        .await
+        .expect("the live built-in tier default replaces the missing model");
+        assert_eq!(resolution.effective_model.as_deref(), Some("opus"));
+        let warning = resolution.warning.unwrap();
+        assert_eq!(
+            warning.replacement_source,
+            CatalogReplacementSource::EquivalentTier
+        );
+        assert_eq!(warning.equivalent_tier, ModelTier::Reasoning);
+    }
+
+    #[tokio::test]
+    async fn disappeared_model_without_same_agent_tier_replacement_is_explicitly_refused() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+                let missing = DiscoveredModel {
+                    model_id: "retired-reasoner".into(),
+                    display_name: "Retired reasoner".into(),
+                    resolved_model: None,
+                    description: None,
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                };
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[missing])?;
+                db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[])
+            })
+            .await
+            .unwrap();
+
+        let failure = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("retired-reasoner"),
+            None,
+        )
+        .await
+        .expect_err("no other agent or unavailable model may be selected");
+        assert_eq!(failure.reason, ModelUnavailableReason::Disappeared);
+        assert!(failure.detail.contains("no available replacement"));
+        assert!(failure.detail.contains("Reasoning"));
+        assert!(failure.detail.contains("ClaudeCode"));
+    }
+
+    #[tokio::test]
+    async fn available_model_passes_preflight_without_rewrite_or_warning() {
+        let database = test_db();
+        database
+            .with_conn(|conn| {
+                db::reconcile_live(
+                    conn,
+                    &db::agent_runtime_target_id(&AgentType::ClaudeCode),
+                    &AgentType::ClaudeCode,
+                    &[DiscoveredModel {
+                        model_id: "opus".into(),
+                        display_name: "Opus".into(),
+                        resolved_model: Some("claude-opus-5-5".into()),
+                        description: None,
+                        capabilities: vec!["chat".into()],
+                        reasoning_modes: vec![],
+                        default_reasoning_mode: None,
+                    }],
+                )
+            })
+            .await
+            .unwrap();
+
+        let resolution = preflight_resolve(
+            &database,
+            None,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            Some("opus"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolution.requested_model, resolution.effective_model);
+        assert!(resolution.warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_alert_names_workflow_tier_and_quick_prompt_references() {
+        let database = test_db();
+        let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+        let alias = DiscoveredModel {
+            model_id: "opus[1m]".into(),
+            display_name: "Opus 1M".into(),
+            resolved_model: Some("claude-opus-5-5".into()),
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        let live = DiscoveredModel {
+            model_id: "opus".into(),
+            display_name: "Opus".into(),
+            resolved_model: Some("claude-opus-5-5".into()),
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        database
+            .with_conn({
+                let target = target.clone();
+                let alias = alias.clone();
+                let live = live.clone();
+                move |conn| {
+                    db::reconcile_live(
+                        conn,
+                        &target,
+                        &AgentType::ClaudeCode,
+                        &[alias, live],
+                    )?;
+                    let now = Utc::now().to_rfc3339();
+                    conn.execute(
+                        "INSERT INTO workflows \
+                         (id, name, trigger_json, steps_json, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                        rusqlite::params![
+                            "workflow-release",
+                            "Release workflow",
+                            r#"{"type":"Manual"}"#,
+                            r#"[{"name":"orchestrator","step_type":{"type":"Agent"},"agent":"ClaudeCode","prompt_template":"Ship","agent_settings":{"model":"opus[1m]"}}]"#,
+                            now,
+                        ],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO quick_prompts \
+                         (id, name, prompt_template, agent, tier, agent_settings_json, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                        rusqlite::params![
+                            "qp-framing",
+                            "Framing analysis",
+                            "Analyse",
+                            "ClaudeCode",
+                            "reasoning",
+                            r#"{"model":"opus[1m]"}"#,
+                            now,
+                        ],
+                    )?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let mut config = crate::core::config::default_config();
+        config.agents.model_tiers.claude_code.reasoning = Some("opus[1m]".into());
+
+        let mut view = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![live]),
+                refresh_if_stale(&database, AgentType::ClaudeCode, true),
+            )
+            .await
+            .unwrap();
+        populate_reference_alerts(&database, &config, &mut view)
+            .await
+            .unwrap();
+
+        assert_eq!(view.alerts.len(), 1);
+        let alert = &view.alerts[0];
+        assert_eq!(alert.model_id, "opus[1m]");
+        assert_eq!(alert.replacement.as_deref(), Some("opus"));
+        assert_eq!(
+            alert
+                .references
+                .iter()
+                .map(|reference| reference.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ClaudeCode · Reasoning",
+                "Framing analysis",
+                "Release workflow · orchestrator",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1449,5 +2362,261 @@ mod tests {
         assert!(view.stale);
         assert!(!view.live_refresh_ok);
         assert!(view.models.is_empty());
+    }
+
+    fn offered(model_id: &str) -> DiscoveredModel {
+        DiscoveredModel {
+            model_id: model_id.into(),
+            display_name: model_id.into(),
+            resolved_model: None,
+            description: None,
+            capabilities: Vec::new(),
+            reasoning_modes: Vec::new(),
+            default_reasoning_mode: None,
+        }
+    }
+
+    fn ids(models: &[DiscoveredModel]) -> Vec<&str> {
+        models.iter().map(|model| model.model_id.as_str()).collect()
+    }
+
+    fn project_at(id: &str, name: &str, path: &std::path::Path) -> crate::models::Project {
+        let now = Utc::now();
+        crate::models::Project {
+            id: id.into(),
+            name: name.into(),
+            path: path.to_string_lossy().into_owned(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: crate::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn only_projects_with_their_own_opencode_config_are_asked() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bench = root.path().join("bench");
+        std::fs::create_dir_all(&bench).unwrap();
+        std::fs::write(bench.join("opencode.json"), "{}").unwrap();
+        let app = root.path().join("app");
+        std::fs::create_dir_all(app.join(".opencode")).unwrap();
+        std::fs::write(app.join(".opencode/opencode.jsonc"), "{}").unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        // A directory that is only named like a config is not a config.
+        let impostor = root.path().join("impostor");
+        std::fs::create_dir_all(impostor.join("opencode.json")).unwrap();
+        let gone = root.path().join("gone");
+
+        let scopes = opencode_project_scopes(&[
+            ("bench".into(), bench.clone()),
+            ("app".into(), app.clone()),
+            ("plain".into(), plain),
+            ("impostor".into(), impostor),
+            ("gone".into(), gone),
+        ]);
+
+        assert_eq!(
+            scopes,
+            vec![("bench".to_string(), bench), ("app".to_string(), app)]
+        );
+    }
+
+    /// A model only a project offers joins the list once, says where it is
+    /// offered, and everything that reaches the list came from a session
+    /// response: nothing is added, and what the user-level config offers is
+    /// left exactly as discovered.
+    #[test]
+    fn a_project_only_model_joins_the_global_list_once_and_nothing_is_invented() {
+        let global = DiscoveryOutcome::Live(vec![
+            offered("opencode/big-pickle"),
+            offered("anthropic/claude-sonnet"),
+        ]);
+        let merged = merge_project_scopes(
+            global,
+            vec![
+                (
+                    "bench".into(),
+                    DiscoveryOutcome::Live(vec![
+                        offered("opencode/big-pickle"),
+                        offered("ollama/qwen3.8:27b"),
+                    ]),
+                ),
+                (
+                    "other".into(),
+                    DiscoveryOutcome::Live(vec![offered("ollama/qwen3.8:27b")]),
+                ),
+            ],
+        );
+
+        let DiscoveryOutcome::Live(models) = merged else {
+            panic!("a live global discovery stays live");
+        };
+        assert_eq!(
+            ids(&models),
+            vec![
+                "opencode/big-pickle",
+                "anthropic/claude-sonnet",
+                "ollama/qwen3.8:27b"
+            ]
+        );
+        assert_eq!(models[0].description, None);
+        assert_eq!(models[1].description, None);
+        let note = models[2].description.as_deref().expect("scope note");
+        assert!(
+            note.contains("bench") && !note.contains("other"),
+            "the first project that offers it is named: {note}"
+        );
+    }
+
+    #[test]
+    fn a_failed_project_scope_leaves_the_rest_of_the_refresh_intact() {
+        let merged = merge_project_scopes(
+            DiscoveryOutcome::Live(vec![offered("opencode/big-pickle")]),
+            vec![
+                ("broken".into(), DiscoveryOutcome::Timeout),
+                (
+                    "denied".into(),
+                    DiscoveryOutcome::AuthRequired("login".into()),
+                ),
+                ("nothing".into(), DiscoveryOutcome::Unsupported),
+                (
+                    "bench".into(),
+                    DiscoveryOutcome::Live(vec![offered("ollama/qwen3.8:27b")]),
+                ),
+            ],
+        );
+
+        let DiscoveryOutcome::Live(models) = merged else {
+            panic!("one project's failure must not fail the refresh");
+        };
+        assert_eq!(
+            ids(&models),
+            vec!["opencode/big-pickle", "ollama/qwen3.8:27b"]
+        );
+    }
+
+    #[test]
+    fn a_failed_user_level_discovery_is_never_masked_by_project_results() {
+        for failure in [
+            DiscoveryOutcome::Timeout,
+            DiscoveryOutcome::CliMissing("opencode".into()),
+            DiscoveryOutcome::Unsupported,
+        ] {
+            let merged = merge_project_scopes(
+                failure.clone(),
+                vec![(
+                    "bench".into(),
+                    DiscoveryOutcome::Live(vec![offered("ollama/qwen3.8:27b")]),
+                )],
+            );
+            assert_eq!(merged, failure);
+        }
+    }
+
+    /// OpenCode is wired to a local Ollama through a project's own config: the
+    /// catalogue must list that model with the rest, and only what OpenCode
+    /// reported. Drives the whole path — project list, scope choice, merge,
+    /// persistence, the view Settings reads.
+    #[tokio::test]
+    async fn every_model_opencode_offers_reaches_the_catalogue_local_providers_included() {
+        let root = tempfile::TempDir::new().unwrap();
+        let bench = root.path().join("bench");
+        std::fs::create_dir_all(&bench).unwrap();
+        std::fs::write(bench.join("opencode.json"), "{}").unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+
+        let database = test_db();
+        let (bench_project, plain_project) = (
+            project_at("p-bench", "bench", &bench),
+            project_at("p-plain", "plain", &plain),
+        );
+        database
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &bench_project)?;
+                crate::db::projects::insert_project(conn, &plain_project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // What each directory's OpenCode session lists. Only `bench` has a config
+        // of its own, so only `bench` may be asked.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let bench_dir = bench.clone();
+        let outcome = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(vec![
+                    offered("opencode/big-pickle"),
+                    offered("anthropic/claude-sonnet"),
+                ]),
+                discover_opencode_with(&database, |dir| {
+                    asked.lock().unwrap().push(dir.clone());
+                    let answer = if dir == bench_dir {
+                        DiscoveryOutcome::Live(vec![
+                            offered("opencode/big-pickle"),
+                            offered("anthropic/claude-sonnet"),
+                            offered("ollama/llama3.3:70b"),
+                            offered("ollama/qwen3.8:27b"),
+                        ])
+                    } else {
+                        DiscoveryOutcome::Unsupported
+                    };
+                    async move { answer }
+                }),
+            )
+            .await;
+        assert_eq!(*asked.lock().unwrap(), vec![bench]);
+
+        let DiscoveryOutcome::Live(models) = outcome else {
+            panic!("a live discovery stays live");
+        };
+        let target = db::agent_runtime_target_id(&AgentType::OpenCode);
+        let reconcile_target = target.clone();
+        database
+            .with_conn(move |conn| {
+                db::reconcile_live(conn, &reconcile_target, &AgentType::OpenCode, &models)
+            })
+            .await
+            .unwrap();
+
+        let view = build_view(&database, target, AgentType::OpenCode)
+            .await
+            .unwrap();
+        let mut listed: Vec<&str> = view.models.iter().map(|m| m.model_id.as_str()).collect();
+        listed.sort_unstable();
+        assert_eq!(
+            listed,
+            vec![
+                "anthropic/claude-sonnet",
+                "ollama/llama3.3:70b",
+                "ollama/qwen3.8:27b",
+                "opencode/big-pickle",
+            ],
+            "every model OpenCode reported, and none it did not"
+        );
+        assert!(view
+            .models
+            .iter()
+            .all(|model| model.availability == ModelAvailability::Available
+                && model.provenance == ModelProvenance::Live));
     }
 }

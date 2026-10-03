@@ -99,13 +99,13 @@ async fn main() -> anyhow::Result<()> {
     //   1. `KRONN_HOST` env — explicit opt-in (e.g. `KRONN_HOST=0.0.0.0` to
     //      expose a NATIVE instance on the LAN for the contacts / P2P feature,
     //      which otherwise binds 127.0.0.1 and is unreachable cross-machine).
-    //   2. Docker (`KRONN_DATA_DIR` set) → 0.0.0.0 so nginx can reach us.
+    //   2. A real container → 0.0.0.0 so nginx can reach us.
     //   3. `config.server.host` (default 127.0.0.1 — localhost only).
-    let host = match std::env::var("KRONN_HOST") {
-        Ok(h) if !h.trim().is_empty() => h.trim().to_string(),
-        _ if std::env::var("KRONN_DATA_DIR").is_ok() => "0.0.0.0".to_string(),
-        _ => app_config.server.host.clone(),
-    };
+    let host = kronn::core::net_expose::resolve_bind_host(
+        std::env::var("KRONN_HOST").ok().as_deref(),
+        kronn::core::env::is_docker(),
+        &app_config.server.host,
+    );
     // Record what we actually bound so the "Allow connections from other
     // devices" toggle can tell the UI whether a restart is still pending.
     kronn::core::net_expose::record_bound_host(&host);
@@ -834,6 +834,13 @@ async fn main() -> anyhow::Result<()> {
     let media_state = state.clone();
     tokio::spawn(async move { kronn::agents::media_runner::run_loop(media_state).await });
 
+    // KT-915 — render the resources of every project ahead of its first
+    // listing, and again after they are edited. Its own task, low priority: it
+    // never delays the boot nor a request, and stops with the server. Mirrored
+    // in desktop/src-tauri/src/main.rs (feature in the lib, spawn per-binary).
+    let prewarm = kronn::api::projects::resource_prewarm::Prewarm::start(state.db.clone());
+    let stop_prewarm = prewarm.shutdown_token();
+
     // Build router
     let deferred_resume_state = state.clone();
     let app = build_router(state);
@@ -877,12 +884,19 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Graceful shutdown: wait for SIGTERM/SIGINT, then let in-flight requests finish
-    axum::serve(
+    let served = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        stop_prewarm.cancel();
+    })
+    .await;
+    // The warm-up leaves between two resources: wait for it to, whether the
+    // server stopped or failed, rather than cut a rendering short.
+    prewarm.stop().await;
+    served?;
 
     tracing::info!("Kronn — Shutdown complete.");
     Ok(())

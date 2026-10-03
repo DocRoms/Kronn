@@ -110,6 +110,35 @@ An echo without an agent message therefore supplies no answer text.
 [src: file: backend/src/acp.rs:940]
 [ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
 
+Native tool banners retain the reported tool name, a bounded redacted input
+excerpt, and the last observed status. ACP updates correlate by `toolCallId`,
+Codex exec items by `id`, and Claude stream snapshots by `tool_use_id`. Repeated
+calls with the same tool name remain separate. Completion is recorded only
+when the runtime reports it; missing metadata remains `unknown` or
+`arguments not reported`. Command output, MCP results and file patch bodies
+are not copied into these records. Input masking covers sensitive JSON keys
+and the shared credential patterns before truncation; it is heuristic, not a
+guarantee that arbitrary user content is secret-free.
+[src: file: backend/src/agents/tool_trace.rs:1]
+[src: file: backend/src/api/discussions/streaming.rs:750]
+
+Native ACP sessions receive Kronn's bridge even when no project is attached.
+The runtime reconstructs the reserved `kronn-internal` entry from its own
+bridge resolver; a project declaration cannot replace or duplicate it. This
+entry bypasses the project registry filter, while other MCP servers remain
+subject to that filter. A permission request for a runtime-registered Kronn
+tool may read or write with `full_access=false`, but must still identify the
+bound protocol session and an authorized server/tool. Missing or ambiguous
+identity remains refused; registration does not grant filesystem access.
+[src: file: backend/src/acp.rs:1227]
+[src: file: backend/src/acp/permission_broker.rs:350]
+
+A native agent's `disc_append` can carry its runtime session id without having
+joined the room as a CLI peer. Such a post does not implicitly queue another
+answer from the discussion's principal. An actual joined CLI may still hand
+the turn back, and explicit recipients keep their existing routing.
+[src: file: backend/src/api/disc_source.rs:622]
+
 Claude's SDK model catalogue is discovered independently of these execution
 toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
 adapter's empty configuration options. See [catalogue discovery and selector
@@ -153,7 +182,16 @@ project path never reuses that identifier.
   A scoped live request must also match the bound ACP protocol session and
   identify either an authorized MCP server/tool or at least one path wholly
   contained by the canonical project root. Missing/malformed locations and
-  symlink escapes are denied, including under `full_access`.
+  symlink escapes are denied, including under `full_access`. A read-like call
+  that names a real secret file (`.env`, `.env.local`, a key) is denied under
+  `full_access` too, while a versioned template (`.env.dist`, `.env.example`,
+  `.env.sample`, `.env.template`) is readable. A refusal is returned as the
+  agent's own reject option, an answer to the tool call. OpenCode asks about a
+  `read` without the path, so Kronn starts it with an inline configuration
+  (`OPENCODE_CONFIG_CONTENT`) that denies the real environment files, allows the
+  templates and keeps a refusal from ending the turn. See
+  [auditing with an ACP agent](../architecture/audit-acp-agents.md).
+  [src: file: backend/src/acp/secret_files.rs]
 - **Filesystem / terminal:** Kronn has not bound a scoped executor for
   `fs/*`/`terminal/*` yet. Every such request — from any agent — gets a
   spec-correct JSON-RPC error (`-32001` "capability not granted"), never a

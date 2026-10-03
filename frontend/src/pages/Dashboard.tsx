@@ -1,10 +1,14 @@
 import './Dashboard.css';
-import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, Suspense } from 'react';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import type { RemoteRepo, RepoSource, DiscoverSourceError, DriftCheckResponse, AuditProgress } from '../types/generated';
+import type { RemoteRepo, RepoSource, DiscoverSourceError, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { lazyPage, preloadPagesWhenIdle } from '../lib/lazyPage';
+import { BootHold, LoadingState } from '../components/LoadingState';
+import { useBackendHealth } from '../hooks/useBackendHealth';
+import { useProjectDrift } from '../hooks/useProjectDrift';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { detectStaleStreams, abortStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -28,14 +32,15 @@ import {
 } from '../lib/dashboard-navigation';
 // Heavy page components lazy-loaded so the initial Dashboard chunk stays
 // under 500 KB. Each one is its own chunk and only fetched when the user
-// switches to that tab. Dropped Dashboard chunk from 949 KB → ~430 KB,
-// at the cost of a one-time ~100 ms fetch on first tab switch.
-const McpPage = lazy(() => import('./McpPage').then(m => ({ default: m.McpPage })));
-const WorkflowsPage = lazy(() => import('./WorkflowsPage').then(m => ({ default: m.WorkflowsPage })));
-const PlanningPage = lazy(() => import('./PlanningPage').then(m => ({ default: m.PlanningPage })));
-const SettingsPage = lazy(() => import('./SettingsPage').then(m => ({ default: m.SettingsPage })));
-const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ default: m.DiscussionsPage })));
-const PagesPage = lazy(() => import('./PagesPage').then(m => ({ default: m.PagesPage })));
+// switches to that tab, or fetched once the browser is idle after start-up so
+// a first tab switch does not wait on the network.
+const McpPage = lazyPage(() => import('./McpPage').then(m => m.McpPage));
+const WorkflowsPage = lazyPage(() => import('./WorkflowsPage').then(m => m.WorkflowsPage));
+const PlanningPage = lazyPage(() => import('./PlanningPage').then(m => m.PlanningPage));
+const SettingsPage = lazyPage(() => import('./SettingsPage').then(m => m.SettingsPage));
+const DiscussionsPage = lazyPage(() => import('./DiscussionsPage').then(m => m.DiscussionsPage));
+const PagesPage = lazyPage(() => import('./PagesPage').then(m => m.PagesPage));
+const PRELOADED_PAGES = [DiscussionsPage, McpPage, WorkflowsPage, PlanningPage, PagesPage, SettingsPage];
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
 import { ProjectList } from '../components/ProjectList';
@@ -56,11 +61,11 @@ interface DashboardProps {
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
 const canAudit = (a: { installed: boolean; runtime_available: boolean; enabled: boolean; agent_type: string }) => isUsable(a) && a.agent_type !== 'Vibe';
 
-// Suspense fallback for the lazy-loaded page chunks. Lightweight on purpose
-// — anything richer (skeleton, spinner) would itself need to be fetched
-// from the page chunk, which defeats the whole point.
+// Suspense fallback for the lazy-loaded page chunks: the shared loading
+// state, which lives in the main chunk.
 function PageFallback() {
-  return <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Chargement…</div>;
+  const { t } = useT();
+  return <LoadingState message={t('common.loading')} />;
 }
 
 // Sort score for project readiness
@@ -116,7 +121,6 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [pendingWorkflowPreset, setPendingWorkflowPreset] = useState<{ presetId: string; projectId: string } | null>(null);
 
   // ─── Drift detection state ──────────
-  const [driftByProject, setDriftByProject] = useState<Record<string, DriftCheckResponse>>({});
 
   // ─── Lifted discussion streaming state (survives page changes) ──────────
   const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
@@ -156,7 +160,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     delete abortControllers.current[discId];
   }, []);
 
-  const { data: projectList, initialLoading: projectsLoading, hasLoaded: projectsLoaded, refetch } = useApi(() => projectsApi.list(), []);
+  const { data: projectList, initialLoading: projectsLoading, hasLoaded: projectsLoaded, error: projectsError, refetch } = useApi(() => projectsApi.list(), []);
 
   // ─── Deep-link: #project-<id> hash → auto-expand + scroll ──────────
   // Used by the CLI: `kronn` opens `http://localhost:3140/#project-<id>`
@@ -204,7 +208,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: registry } = useApi(() => mcpsApi.registry(), []);
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
   const { data: agentList, refetch: refetchAgents } = useApi(() => agentsApi.detect(), []);
-  const { data: discussionList, refetch: refetchDiscussions } = useApi(() => discussionsApi.list(), []);
+  const { data: discussionList, hasLoaded: discussionsLoaded, error: discussionsError, refetch: refetchDiscussions } = useApi(() => discussionsApi.list(), []);
   const { data: configLanguage, refetch: refetchLanguage } = useApi(() => configApi.getLanguage(), []);
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
   const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
@@ -218,6 +222,41 @@ export function Dashboard({ onReset }: DashboardProps) {
   useEffect(() => {
     writeDashboardPage(page);
   }, [page]);
+
+  useEffect(() => {
+    const followDiscussionLink = () => {
+      const discussionId = standaloneDiscussionId(window.location.hash);
+      if (!discussionId) return;
+      setOpenDiscussionId(discussionId);
+      setActiveDiscussionId(discussionId);
+      setPage('discussions');
+    };
+    window.addEventListener('hashchange', followDiscussionLink);
+    return () => window.removeEventListener('hashchange', followDiscussionLink);
+  }, []);
+
+  // A link inside the app (a discussion pointing at a project file) sets the
+  // hash after the first-load consumer above has already run.
+  useEffect(() => {
+    const followProjectLink = () => {
+      const hash = window.location.hash;
+      if (!hash.startsWith('#project-')) return;
+      const projectId = hash.slice('#project-'.length);
+      if (!projectId) return;
+      setPage('projects');
+      setExpandedId(projectId);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          document.getElementById(`project-${projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      });
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    };
+    window.addEventListener('hashchange', followProjectLink);
+    return () => window.removeEventListener('hashchange', followProjectLink);
+  }, []);
 
   useEffect(() => {
     if (pagesCapability && !pagesCapability.activated && page === 'pages') {
@@ -361,12 +400,18 @@ export function Dashboard({ onReset }: DashboardProps) {
     if (msg.status === 'complete') {
       toast(t('audit.finishedToast', projName), 'success');
     } else {
-      // Stream-end interruptions have no warned step — show where it
-      // stopped instead of an unactionable '?'.
+      // Stream-end interruptions have no warned step — show how many steps
+      // succeeded instead of an unactionable '?'.
       const warned = msg.warned_steps.length > 0
         ? msg.warned_steps.join(', ')
         : `${msg.last_completed_step}/${msg.total_steps}`;
-      toast(t('audit.finishedWarnToast', projName, warned), 'warning');
+      // KT-931 — an interrupted run that still carries a validation
+      // discussion had steps succeed: those are being validated, only the
+      // failed ones are left to resume. Without one, validation was skipped.
+      toast(
+        t(msg.discussion_id ? 'audit.finishedPartialToast' : 'audit.finishedWarnToast', projName, warned),
+        'warning',
+      );
     }
     refetch();
     // The completed audit just created a validation discussion (and its
@@ -408,16 +453,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     };
   }, [page, activeAudits.length]);
 
-  // ─── Drift detection fetch ──────────
-  useEffect(() => {
-    for (const proj of projects) {
-      if (proj.audit_status === 'Audited' || proj.audit_status === 'Validated') {
-        projectsApi.checkDrift(proj.id).then(drift => {
-          if (drift) setDriftByProject(prev => ({ ...prev, [proj.id]: drift }));
-        }).catch(() => {});
-      }
-    }
-  }, [projects]);
+  const { driftByProject, refetchDrift: handleRefetchDrift } = useProjectDrift(page === 'projects', projects);
 
   const mcpRegistry = registry ?? [];
   const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
@@ -492,12 +528,6 @@ export function Dashboard({ onReset }: DashboardProps) {
   const handleAutoRunConsumed = useCallback(() => setAutoRunDiscussionId(null), []);
   const handleOpenDiscConsumed = useCallback(() => setOpenDiscussionId(null), []);
 
-  // Drift refetch callback for ProjectCard partial audit
-  const handleRefetchDrift = useCallback((projectId: string) => {
-    projectsApi.checkDrift(projectId).then(d => {
-      if (d) setDriftByProject(prev => ({ ...prev, [projectId]: d }));
-    }).catch(() => {});
-  }, []);
 
   // Bootstrap new project state
   const [showBootstrap, setShowBootstrap] = useState(false);
@@ -714,8 +744,20 @@ export function Dashboard({ onReset }: DashboardProps) {
     }
   };
 
+  // The start-up screen stays until the first projects and discussions are
+  // in (or failed, so the page can say so); then every tab is fetched in the
+  // background so switching never waits on a chunk.
+  // An error settles a load only once the backend is known to answer: while
+  // it restarts, failed loads retry on their own and the screen stays up.
+  const backendHealth = useBackendHealth();
+  const settled = (loaded: boolean, error: string | null) =>
+    loaded || (error !== null && backendHealth === 'up');
+  const firstDataSettled = settled(projectsLoaded, projectsError) && settled(discussionsLoaded, discussionsError);
+  useEffect(() => preloadPagesWhenIdle(PRELOADED_PAGES), []);
+
   return (
     <div className="dash-app">
+      <BootHold active={!firstDataSettled} phase={backendHealth === 'down' ? 'slow' : 'opening'} />
       <ToastContainer />
       <TourProvider setPage={setPage as (p: string) => void}>
       {/* Nav */}
@@ -1414,6 +1456,8 @@ export function Dashboard({ onReset }: DashboardProps) {
               }}
               onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
               onNavigatePage={(pageId) => { setOpenPageId(pageId); setPage('pages'); }}
+              onNavigateMcp={() => setPage('mcps')}
+              onNavigateSettings={() => setPage('settings')}
               onBatchLaunched={(discIds, batchRunId, mode = 'batch') => {
                 // Mark every batch-child disc as sending so the sidebar
                 // spinner lights up for all of them in parallel, not just
@@ -1455,6 +1499,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           <ErrorBoundary mode="zone" label={t('nav.pages')}>
             <Suspense fallback={<PageFallback />}>
               <PagesPage
+                projects={projects}
                 initialSelectedPageId={openPageId}
                 onInitialSelectionConsumed={() => setOpenPageId(null)}
                 onNavigateWorkflow={(workflowId, runId) => {
@@ -1533,7 +1578,10 @@ export function Dashboard({ onReset }: DashboardProps) {
             markAllDiscussionsSeen={markAllDiscussionsSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
             initialActiveDiscussionId={openDiscussionId ?? deepLinkedDiscussionId ?? restorableDiscussionId}
-            initialMessageId={deepLinkedDiscussionId && !openDiscussionId ? standaloneDiscussionMessageId(window.location.hash) : null}
+            initialMessageId={deepLinkedDiscussionId
+              && (!openDiscussionId || openDiscussionId === deepLinkedDiscussionId)
+              ? standaloneDiscussionMessageId(window.location.hash)
+              : null}
             lastSeenMsgCount={lastSeenMsgCount}
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}

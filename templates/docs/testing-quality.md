@@ -3,7 +3,7 @@
 > **TEMPLATE FILE.** Sections marked `{{...}}` must be filled by the AI audit.
 > If the test runner or commands are not filled, say `NOT_FOUND` — **never assume Jest, Mocha, or any specific runner**.
 
-> **Rule: every code change MUST include tests.** See [AGENTS](AGENTS.md) § 4.
+> **Test policy:** see [AGENTS](AGENTS.md) § Project parameters — this file is the checklist, not the source of the policy.
 
 ## Build checks
 
@@ -20,9 +20,13 @@
 <!-- Fill after audit: list each test file/suite with scope and count -->
 {{TEST_SUITES}}
 
-## What to test (by change type)
+## Test selection (when required by the project policy)
 
-| Change type | Required tests | Where |
+Use the project test policy to decide which checks the change requires. Adapt
+the examples below to the project's stack and existing test locations; they
+do not impose additional gates or override an explicit exemption.
+
+| Change type | Suitable checks | Where |
 |-------------|---------------|-------|
 | New API endpoint | Integration test (HTTP request → response) | API test file |
 | New function | Unit test in same file (`#[cfg(test)]` or `__tests__/`) | Same module |
@@ -32,14 +36,16 @@
 
 ## Test quality checklist
 
-Before declaring a task done:
+For the tests required by the project policy, check the applicable items before
+declaring a task done:
+
 - [ ] Tests cover the **happy path**
 - [ ] Tests cover at least one **error path** (invalid input, missing data)
 - [ ] Tests cover **edge cases** (empty, unicode, large input)
 - [ ] Assertions are **meaningful** (not just "renders" or "is defined")
 - [ ] Mocks match **real API shapes** (check generated types)
 - [ ] No **flaky** tests (no sleeps, no timing assumptions)
-- [ ] Full test suite passes
+- [ ] The checks required by the project policy and CI pass
 - [ ] If a test is flaky, **fix the root cause** — do not add retries
 
 ## Coverage

@@ -2638,6 +2638,23 @@
   background: var(--kr-bg-surface);
 }
 
+.set-model-catalog-alert {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--kr-warning) 45%, transparent);
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--kr-warning) 10%, transparent);
+  color: var(--kr-text-primary);
+  font-size: 0.78rem;
+}
+
+.set-model-catalog-alert ul {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
 .set-model-catalog .set-section-header-lg {
   display: flex;
   align-items: flex-start;
@@ -3175,6 +3192,11 @@
 .set-ext-api-media-warning svg {
   flex-shrink: 0;
   margin-top: 1px;
+}
+
+/* A tier whose model answered the test call with a refusal (KT-941). */
+.set-ext-api-tier-check-failed {
+  color: var(--kr-error);
 }
 
 .set-ext-api-tier-panel {
@@ -6276,6 +6298,66 @@
 .set-ollama-tier-cpu   { background: rgba(var(--kr-success-rgb), 0.16); color: var(--kr-success); }
 .set-ollama-tier-mid   { background: rgba(var(--kr-warning-rgb), 0.16); color: var(--kr-warning); }
 .set-ollama-tier-power { background: rgba(var(--kr-purple-soft-rgb), 0.16); color: var(--kr-purple-soft); }
+.set-ollama-tier-mlx   { background: rgba(var(--kr-accent-rgb), 0.16); color: var(--kr-accent); }
+
+/* Downloads in flight sit above the foldable block, so they stay visible when
+ * it is folded. */
+.set-ollama-pulls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-4);
+}
+
+/* The download block folds like the other accordions of the page. */
+.set-ollama-download-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+  color: var(--kr-text-primary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.set-ollama-download-summary::-webkit-details-marker { display: none; }
+.set-ollama-download[open] > .set-ollama-download-summary { margin-bottom: var(--kr-sp-4); }
+
+.set-ollama-download-meta {
+  margin-left: auto;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 400;
+  color: var(--kr-text-muted);
+}
+
+/* What the official library says about an installed model. Same pill as the
+ * hardware tiers; only an available update is loud. */
+.set-ollama-fresh {
+  font-size: var(--kr-fs-2xs);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.set-ollama-fresh-update_available { background: rgba(var(--kr-accent-rgb), 0.16); color: var(--kr-accent); }
+.set-ollama-fresh-up_to_date,
+.set-ollama-fresh-unknown { background: transparent; color: var(--kr-text-muted); font-weight: 400; }
+.set-ollama-fresh-unknown { cursor: help; }
+
+.set-ollama-installed {
+  margin-top: var(--kr-sp-6);
+  padding-top: var(--kr-sp-4);
+  border-top: 1px solid var(--kr-border);
+}
+
+.set-ollama-installed-title {
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-text-secondary);
+  margin-bottom: var(--kr-sp-3);
+}
 
 /* ── Responsive settings shell ─────────────────────────── */
 @media (max-width: 980px) {

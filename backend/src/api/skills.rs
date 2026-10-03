@@ -37,7 +37,8 @@ pub async fn create(
     }
 }
 
-/// PUT /api/skills/:id — update a custom skill
+/// PUT /api/skills/:id — update a custom skill in place. The id never
+/// changes, even when the skill is renamed.
 pub async fn update(
     Path(id): Path<String>,
     _state: State<AppState>,
@@ -47,9 +48,8 @@ pub async fn update(
         return Json(ApiResponse::err("Cannot modify builtin skills"));
     }
 
-    let _ = skills::delete_custom_skill(&id);
-
-    match skills::save_custom_skill(
+    match skills::update_custom_skill(
+        &id,
         &req.name,
         &req.description,
         &req.icon,
@@ -58,7 +58,7 @@ pub async fn update(
         req.license.as_deref(),
         req.allowed_tools.as_deref(),
     ) {
-        Ok(new_id) => match skills::get_skill(&new_id) {
+        Ok(updated_id) => match skills::get_skill(&updated_id) {
             Some(skill) => Json(ApiResponse::ok(skill)),
             None => Json(ApiResponse::err("Skill updated but could not be loaded")),
         },

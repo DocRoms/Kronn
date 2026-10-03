@@ -71,6 +71,9 @@ fn load_detail(
     };
     let active_agent_dispatches =
         crate::db::agent_dispatch::list_active_for_discussion(conn, &id, &discussion.agent)?;
+    let active_workflow_steps =
+        crate::db::workflow_step_rooms::list_active_for_discussion(conn, &id)?;
+    let workflow_step_authors = crate::db::workflow_step_rooms::message_authors(conn, &id)?;
     let partial_response =
         crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
     let message_targets = crate::db::discussions::list_discussion_message_targets(conn, &id)?;
@@ -81,13 +84,10 @@ fn load_detail(
     let default_targets = if crate::db::discussions::disc_is_no_agent(conn, &id)? {
         crate::db::discussion_sessions::list_sessions(conn, &id, false)?
             .iter()
-            .map(|session| {
-                Ok(crate::models::MessageTarget::cli(
-                    crate::db::discussions::parse_agent_type(&session.agent_type)?,
-                    session.id,
-                ))
+            .filter_map(|session| {
+                crate::db::discussions::session_cli_target(&session.agent_type, session.id)
             })
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect()
     } else {
         let mut target = crate::models::MessageTarget::discussion_agent(discussion.agent.clone());
         target.connection_id = discussion.connection_id.clone();
@@ -96,6 +96,8 @@ fn load_detail(
     Ok(Some(crate::models::DiscussionDetail {
         discussion,
         active_agent_dispatches,
+        active_workflow_steps,
+        workflow_step_authors,
         message_targets,
         partial_response,
         default_targets,
@@ -289,6 +291,20 @@ pub async fn create(
             Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
             Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
         };
+        let approval_prompt = qp.clone();
+        if let Err(error) = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                    conn,
+                    &approval_prompt,
+                )
+                .map_err(anyhow::Error::msg)
+            })
+            .await
+        {
+            return Json(ApiResponse::err(format!("preflight_failed:{error}")));
+        }
         let (secret, retention_days) = {
             let config = state.config.read().await;
             let Some(secret) = config.encryption_secret.clone() else {
@@ -1177,6 +1193,43 @@ mod tests {
         }).await.unwrap();
         let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
         AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    #[tokio::test]
+    async fn a_room_with_an_unidentified_peer_still_opens() {
+        // One `Unknown` session used to fail the whole detail with "unknown
+        // persisted agent type", so the room never rendered.
+        let state = state_with_disc("d-unknown").await;
+        let (claude, detail) = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::set_disc_no_agent(conn, "d-unknown", true)?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-unknown",
+                    "Unknown",
+                    Some("sess-unknown"),
+                    "peer",
+                )?;
+                let claude = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-unknown",
+                    "ClaudeCode",
+                    Some("sess-claude"),
+                    "peer",
+                )?;
+                Ok((claude, load_detail(conn, "d-unknown")?))
+            })
+            .await
+            .unwrap();
+        let detail = detail.expect("the room exists");
+        assert_eq!(
+            detail.default_targets,
+            vec![crate::models::MessageTarget::cli(
+                crate::models::AgentType::ClaudeCode,
+                claude
+            )]
+        );
     }
 
     #[tokio::test]

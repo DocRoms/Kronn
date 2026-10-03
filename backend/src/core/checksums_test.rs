@@ -767,3 +767,88 @@ fn failed_checksums_write_preserves_the_previous_manifest() {
     assert!(read_checksums_file(&dir).is_some(), "and still parse");
     let _ = fs::remove_dir_all(&dir);
 }
+
+static DRIFT_COMPUTATIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(super) fn record_drift_computation(project_path: &Path) {
+    *DRIFT_COMPUTATIONS
+        .lock()
+        .unwrap()
+        .entry(project_path.to_path_buf())
+        .or_default() += 1;
+}
+
+fn drift_computations(project_path: &Path) -> usize {
+    DRIFT_COMPUTATIONS
+        .lock()
+        .unwrap()
+        .get(project_path)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn audited_project(name: &str) -> PathBuf {
+    let dir = temp_dir(name);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+    let checksums = compute_step_checksums(&dir, &["src/main.rs"]);
+    write_checksums_file(
+        &dir,
+        &[ChecksumMapping {
+            ai_file: "ai/audit.md".to_string(),
+            audit_step: 1,
+            sources: vec!["src/main.rs".to_string()],
+            checksums,
+        }],
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn cached_drift_is_reused_while_the_audit_manifest_is_unchanged() {
+    // KT-987 — the Projects page asked for drift per audited project on every
+    // refresh, re-hashing every source each time.
+    let dir = audited_project("cached_reuse");
+    assert!(check_drift_cached(&dir).stale_sections.is_empty());
+    fs::write(dir.join("src/main.rs"), "fn main() { changed(); }").unwrap();
+
+    assert!(check_drift_cached(&dir).stale_sections.is_empty());
+    assert_eq!(drift_computations(&dir), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cached_drift_recomputes_as_soon_as_an_audit_rewrites_the_manifest() {
+    let dir = audited_project("cached_manifest_change");
+    assert!(check_drift_cached(&dir).stale_sections.is_empty());
+
+    fs::write(dir.join("src/main.rs"), "fn main() { changed(); }").unwrap();
+    let manifest = crate::core::scanner::detect_docs_dir(&dir).join("checksums.json");
+    let later =
+        fs::metadata(&manifest).unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+    fs::File::options()
+        .write(true)
+        .open(&manifest)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+
+    assert_eq!(check_drift_cached(&dir).stale_sections.len(), 1);
+    assert_eq!(drift_computations(&dir), 2);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concurrent_drift_requests_for_one_project_compute_it_once() {
+    let dir = audited_project("cached_concurrent");
+    std::thread::scope(|scope| {
+        for _ in 0..6 {
+            scope.spawn(|| check_drift_cached(&dir));
+        }
+    });
+    assert_eq!(drift_computations(&dir), 1);
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -260,6 +260,19 @@ pub fn list_live_pages(conn: &Connection) -> Result<Vec<LivePage>> {
     Ok(pages)
 }
 
+pub fn list_live_pages_for_project(conn: &Connection, project_id: &str) -> Result<Vec<LivePage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, title, slug, current_revision_id, data_revision,
+                created_at, updated_at, last_published_at, pinned, archived
+           FROM live_pages WHERE project_id = ?1
+           ORDER BY pinned DESC, updated_at DESC, title COLLATE NOCASE",
+    )?;
+    let pages = stmt
+        .query_map([project_id], map_page)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(pages)
+}
+
 pub fn update_live_page(
     conn: &Connection,
     page_id: &str,
@@ -459,8 +472,10 @@ pub fn update_live_page_html(
     Ok(revision)
 }
 
-pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePageDetail>> {
-    let page = conn
+/// The page row alone, by id or slug: `get_live_page` without the revision,
+/// the datasets and their points, for a caller that needs the page's own facts.
+pub fn get_live_page_summary(conn: &Connection, page_id: &str) -> Result<Option<LivePage>> {
+    Ok(conn
         .query_row(
             "SELECT id, project_id, title, slug, current_revision_id, data_revision,
                     created_at, updated_at, last_published_at, pinned, archived
@@ -468,7 +483,11 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
             [page_id],
             map_page,
         )
-        .optional()?;
+        .optional()?)
+}
+
+pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePageDetail>> {
+    let page = get_live_page_summary(conn, page_id)?;
     let Some(page) = page else {
         return Ok(None);
     };

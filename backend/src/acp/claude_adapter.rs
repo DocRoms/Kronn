@@ -118,9 +118,19 @@ impl AcpTransport for ClaudeAcpAdapter {
         // which may contain that same declaration. Authorization is a set.
         servers.sort_by(|left, right| left.id.cmp(&right.id));
         servers.dedup_by(|left, right| left.id == right.id);
-        let authorized_file =
-            crate::core::mcp_scanner::read_mcp_json(&request.cwd).filter(|file| {
-                file.mcp_servers.len() == servers.len()
+        // Kronn supplies its own bridge below; the synced copy may point at the
+        // host-visible script (Docker) and must not void the project's servers.
+        let project_servers = servers
+            .iter()
+            .filter(|server| server.id != "kronn-internal")
+            .count();
+        let authorized_file = crate::core::mcp_scanner::read_mcp_json(&request.cwd)
+            .map(|mut file| {
+                file.mcp_servers.remove("kronn-internal");
+                file
+            })
+            .filter(|file| {
+                file.mcp_servers.len() == project_servers
                     && file.mcp_servers.iter().all(|(id, entry)| {
                         servers.iter().any(|server| {
                             server.id == *id
@@ -330,14 +340,30 @@ impl AcpTransport for ClaudeAcpAdapter {
         let mut failure: Option<String> = None;
         // Input of the tool call in progress, streamed as partial JSON.
         let mut tool_input: Option<String> = None;
+        let mut text_blocks = crate::agents::runner::TextBlockJoiner::default();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
+                    for trace in crate::agents::tool_trace::from_claude_line(&line) {
+                        if matches!(
+                            trace.status.as_deref(),
+                            Some("completed" | "failed" | "cancelled")
+                        ) {
+                            let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                        }
+                        let _ = events.send(AcpSessionEvent::ToolTrace(trace)).await;
+                    }
                     if let Some(model) = crate::agents::provenance::claude_observed_model(&line) {
                         let _ = events.send(AcpSessionEvent::ModelObserved(model)).await;
                     }
+                    if let Some(session_id) = crate::agents::provenance::claude_session_id(&line) {
+                        let _ = events
+                            .send(AcpSessionEvent::CliSessionObserved(session_id))
+                            .await;
+                    }
                     match parse_claude_stream_line(&line) {
                         StreamJsonEvent::Text(text) => {
+                            let text = text_blocks.join(text);
                             let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
                         }
                         StreamJsonEvent::Usage {
@@ -364,6 +390,7 @@ impl AcpTransport for ClaudeAcpAdapter {
                             }
                         }
                         StreamJsonEvent::ToolEnd => {
+                            text_blocks.block_ended();
                             let target = tool_input.take().and_then(|input| {
                                 crate::agents::activity::tool_input_target(&input)
                             });
@@ -826,6 +853,66 @@ exec sleep 30"#,
             assert_eq!(value, expected, "{case}");
             assert!(!raw.contains("fixture-secret"), "{case}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_synced_bridge_entry_does_not_drop_the_project_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"safe":{"command":"safe-server","env":{"TOKEN":"${KRONN_MCP_A_TOKEN}"}},"kronn-internal":{"command":"python3","args":["/host/visible/disc-introspection-mcp.py"]}}}"#,
+        )
+        .unwrap();
+        let argv_file = dir.path().join("argv");
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &format!(
+            "printf '%s\\n' \"$@\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'", argv_file.display()
+        ));
+        let adapter = ClaudeAcpAdapter {
+            program: fixture.to_string_lossy().into_owned(),
+            ..ClaudeAcpAdapter::new(
+                None,
+                None,
+                false,
+                None,
+                AcpSessionScope::new(Some(dir.path().to_path_buf()), "fixture-discussion"),
+            )
+        };
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(AcpInitialize {
+            protocol_version: 1,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            mcp_servers: vec![crate::acp::AcpMcpServer {
+                id: "safe".into(),
+                command: "safe-server".into(),
+                args: vec![],
+                allowed_tools: vec![],
+            }],
+        })
+        .await
+        .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        host.prompt(&target, "fixture prompt", tx).await.unwrap();
+        drain(rx).await;
+        host.shutdown().await.unwrap();
+        let raw = std::fs::read_to_string(argv_file).unwrap();
+        let args: Vec<_> = raw.lines().collect();
+        let selected = args
+            .windows(2)
+            .find(|p| p[0] == "--mcp-config")
+            .expect("explicit scoped registry")[1];
+        let value: serde_json::Value = serde_json::from_str(selected).unwrap();
+        assert_eq!(
+            value.pointer("/mcpServers/safe/env/TOKEN"),
+            Some(&serde_json::json!("${KRONN_MCP_A_TOKEN}"))
+        );
+        assert_ne!(
+            value.pointer("/mcpServers/kronn-internal/args/0"),
+            Some(&serde_json::json!(
+                "/host/visible/disc-introspection-mcp.py"
+            )),
+            "Kronn's own bridge replaces the synced copy"
+        );
     }
 
     #[tokio::test]

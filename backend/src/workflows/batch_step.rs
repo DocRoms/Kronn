@@ -345,6 +345,24 @@ async fn execute_batch_quick_prompt_step_with_budget(
         Ok(None) => return fail(step, start, format!("Quick prompt '{}' not found", qp_id)),
         Err(e) => return fail(step, start, format!("DB error loading QP: {}", e)),
     };
+    let approval_prompt = qp.clone();
+    if let Err(error) = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn,
+                &approval_prompt,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+    {
+        return fail(
+            step,
+            start,
+            format!("QuickPrompt preflight failed: {error}"),
+        );
+    }
 
     // ── Safety: Isolated mode requires a project_id (git repo to worktree) ──
     // The check is done AFTER loading the QP so we can fall back to the QP's

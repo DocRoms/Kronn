@@ -585,7 +585,9 @@ export function MessageAttachments({
     };
   }, [moveSelection, selectedFile]);
 
-  if (!files.length) return null;
+  // A Markdown link may open a file attached to another message. Its local
+  // thumbnail grid is empty, but the requested asset belongs to carouselScope.
+  if (!files.length && !selectedFile) return null;
   return (
     <>
       <div

@@ -751,6 +751,58 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "195_workflow_run_triggered_by",
         include_str!("sql/195_workflow_run_triggered_by.sql"),
     ),
+    (
+        "196_resource_identities",
+        include_str!("sql/196_resource_identities.sql"),
+    ),
+    (
+        "197_mcp_probe_results",
+        include_str!("sql/197_mcp_probe_results.sql"),
+    ),
+    (
+        "198_workflow_step_room_activity",
+        include_str!("sql/198_workflow_step_room_activity.sql"),
+    ),
+    (
+        "199_model_catalog_resolved_identity",
+        include_str!("sql/199_model_catalog_resolved_identity.sql"),
+    ),
+    (
+        "200_repository_resource_alignment",
+        include_str!("sql/200_repository_resource_alignment.sql"),
+    ),
+    (
+        "201_project_skill_references",
+        include_str!("sql/201_project_skill_references.sql"),
+    ),
+    (
+        "202_provider_quota_reset_at",
+        include_str!("sql/202_provider_quota_reset_at.sql"),
+    ),
+    (
+        "203_message_usage",
+        include_str!("sql/203_message_usage.sql"),
+    ),
+    (
+        "204_task_execution_worker_sessions",
+        include_str!("sql/204_task_execution_worker_sessions.sql"),
+    ),
+    (
+        "205_audit_step_usage",
+        include_str!("sql/205_audit_step_usage.sql"),
+    ),
+    (
+        "206_model_catalog_answered_at",
+        include_str!("sql/206_model_catalog_answered_at.sql"),
+    ),
+    (
+        "207_project_agent_files",
+        include_str!("sql/207_project_agent_files.sql"),
+    ),
+    (
+        "208_workflow_runs_type_index",
+        include_str!("sql/208_workflow_runs_type_index.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

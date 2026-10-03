@@ -1,5 +1,5 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock({
@@ -165,7 +165,7 @@ describe('ProjectCard — repository overview', () => {
     const auditSection = document.querySelector('[data-project-view="audit"]');
     expect(auditSection).toBeInTheDocument();
     expect(auditSection?.querySelector('.dash-collapsible-header')).not.toBeInTheDocument();
-    expect(auditSection?.querySelector('.dash-audit-pad')).toBeInTheDocument();
+    expect(auditSection?.querySelector('[data-testid="audit-timeline"]')).toBeInTheDocument();
 
     fireEvent.click(docsTab);
     expect(docsTab).toHaveAttribute('data-active', 'true');
@@ -175,6 +175,24 @@ describe('ProjectCard — repository overview', () => {
     expect(docsSection?.querySelector('.dash-collapsible-header')).not.toBeInTheDocument();
     expect(docsSection?.querySelector('.aidoc-loading, .aidoc-root, .aidoc-empty'))
       .toBeInTheDocument();
+
+    const resourcesTab = screen.getByRole('button', {
+      name: 'projects.master.tab.resources',
+    });
+    fireEvent.click(resourcesTab);
+    expect(resourcesTab).toHaveAttribute('data-active', 'true');
+    expect(detailBody).toHaveAttribute('data-detail-view', 'resources');
+    expect(await screen.findByText('projects.repositoryResources.share.title')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.overview' }));
+    fireEvent.click(screen.getByRole('button', { name: /projects\.workflows/ }));
+    expect(await screen.findByRole('tab', { name: /projects\.repositoryResources\.tab\.automation/ }))
+      .toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.overview' }));
+    fireEvent.click(screen.getByRole('button', { name: /projects\.skills/ }));
+    expect(await screen.findByRole('tab', { name: /projects\.repositoryResources\.tab\.skills/ }))
+      .toHaveAttribute('aria-selected', 'true');
 
     fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.code' }));
     expect(screen.getByRole('button', { name: 'projects.master.tab.code' }))
@@ -205,6 +223,65 @@ describe('ProjectCard — repository overview', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'projects.master.tab.audit' }))
       .toHaveAttribute('data-active', 'true'));
     expect(sessionStorage.getItem('kronn:projectView:p-deep')).toBeNull();
+  });
+
+  it('keeps linked MCPs, linked repositories, and project deletion in Overview', async () => {
+    const onNavigate = vi.fn();
+    const onRefetch = vi.fn();
+    const project = {
+      ...PROJECT,
+      linked_repos: [{
+        id: 'repo-1',
+        name: 'Backend',
+        kind: 'api' as const,
+        location: '/repos/backend',
+        description: 'API',
+      }],
+    };
+
+    render(
+      <ProjectCard
+        project={project}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[{
+          id: 'mcp-1',
+          server_id: 'github',
+          server_name: 'GitHub',
+          label: 'GitHub',
+          is_global: false,
+          project_ids: [PROJECT.id],
+        } as never]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={onNavigate}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={onRefetch}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    expect(screen.getByTestId('project-overview-linked-repos')).toHaveTextContent('Backend');
+    const mcpShortcut = screen.getByRole('button', { name: /projects\.master\.overview\.linkedMcps/ });
+    expect(mcpShortcut).toHaveTextContent('1');
+    fireEvent.click(mcpShortcut);
+    expect(onNavigate).toHaveBeenCalledWith('mcps');
+
+    const deleteZone = screen.getByTestId('project-overview-delete-zone');
+    fireEvent.click(within(deleteZone).getByRole('button', { name: 'projects.delete' }));
+    fireEvent.click(within(deleteZone).getByRole('button', { name: 'projects.deleteSoft' }));
+    await waitFor(() => expect(projectsApi.delete).toHaveBeenCalledWith(PROJECT.id, false));
+    expect(onRefetch).toHaveBeenCalled();
   });
 
   it('makes a project outside the write perimeter explicit', () => {

@@ -1,12 +1,12 @@
 //! 0.8.7 — Agent CLI usage / cost reporting via `ccusage`.
 //!
-//! Kronn's own `core::pricing` estimates cost from a static table + a guessed
-//! 60/40 input/output split, ignoring prompt caching — which massively
-//! over-estimates cost on cache-heavy sessions. `ccusage`
-//! (https://github.com/ccusage/ccusage) reads the CLIs' OWN local JSONL logs
-//! and reports the REAL token breakdown (input / output / cache-create /
-//! cache-read) with up-to-date per-model pricing, across Claude / Codex /
-//! Gemini and more.
+//! Kronn's own `core::pricing` prices one reply from the counters its runtime
+//! reports, for the few models whose rate is confirmed, and leaves the cost
+//! unknown otherwise (it used to split a total 60/40, ignoring prompt caching —
+//! KT-894). `ccusage` (https://github.com/ccusage/ccusage) reads the CLIs' OWN
+//! local JSONL logs and reports the REAL token breakdown (input / output /
+//! cache-create / cache-read) with up-to-date per-model pricing, across Claude /
+//! Codex / Gemini and more — a much wider model list than Kronn's table.
 //!
 //! This module shells out to the `ccusage` binary (installed globally in the
 //! Docker image, RTK-style) and parses its `--json` output into Kronn types.

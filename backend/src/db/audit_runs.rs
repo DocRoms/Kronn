@@ -248,9 +248,14 @@ pub fn set_validation_discussion(conn: &Connection, run_id: &str, disc_id: &str)
     Ok(())
 }
 
-/// Whether `disc_id` is the durable validation discussion of a completed
-/// audit for `project_id`. The streaming path uses this relation instead of
-/// titles, which users can edit and partial audits localize differently.
+/// Whether `disc_id` is the durable validation discussion of an audit run for
+/// `project_id`. The streaming path uses this relation instead of titles,
+/// which users can edit and partial audits localize differently.
+///
+/// The run is `Completed`, or `Interrupted` (KT-931): a Full run some of whose
+/// steps failed still gets a validation discussion for the steps that
+/// succeeded, linked in the same transaction as its `Interrupted` status. Any
+/// other status carries no link.
 pub fn validation_discussion_belongs_to_project(
     conn: &Connection,
     disc_id: &str,
@@ -261,7 +266,7 @@ pub fn validation_discussion_belongs_to_project(
             SELECT 1 FROM audit_runs
             WHERE validation_discussion_id = ?1
               AND project_id = ?2
-              AND status = 'Completed'
+              AND status IN ('Completed', 'Interrupted')
         )",
         params![disc_id, project_id],
         |row| row.get(0),
@@ -343,8 +348,13 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
 }
 
 /// 0.8.3 (#311) — bump `last_completed_step` on every successful
-/// `step_done` event so the resume mechanism knows where to pick up
-/// if the SSE stream gets interrupted mid-run. `step` is 1-based.
+/// `step_done` event so an interrupted run reports how far it got.
+/// KT-931 — the value is the NUMBER of steps that succeeded in the run
+/// (steps inherited from the resumed predecessor included), not the index
+/// of the last one: a step that failed in the middle of the chain must not
+/// make the progress read as if everything up to the end had succeeded.
+/// Which steps are left is read from `audit_run_steps`, never from this
+/// scalar.
 /// Idempotent: if the new value isn't greater than the current one
 /// (rare race where two updates land out of order), the existing
 /// value wins. No-op on terminal rows.
@@ -511,10 +521,119 @@ pub fn insert_audit_step_start(
     Ok(())
 }
 
+/// KT-931 — a resumed run inherits the steps its predecessor completed
+/// cleanly: one finished row per inherited step (success, zero duration, no
+/// tokens — this run spent nothing on them) and the progress count seeded
+/// from them. Without those rows a second resume — of a run that skipped
+/// them — would find none of them succeeded and replay the whole chain, not
+/// just the step that failed again. Idempotent on `(audit_run_id,
+/// step_index)`, all-or-nothing.
+pub fn carry_over_steps(
+    conn: &Connection,
+    audit_run_id: &str,
+    steps: &[(u32, String)],
+    at: DateTime<Utc>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let at = at.to_rfc3339();
+    for (step_index, file_label) in steps {
+        tx.execute(
+            "INSERT OR IGNORE INTO audit_run_steps
+                (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms, cli_success)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, 1)",
+            params![audit_run_id, *step_index as i64, file_label, at],
+        )?;
+    }
+    update_last_completed_step(&tx, audit_run_id, steps.len() as u32)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// What one audit step consumed, as its agent reported it (KT-927). Every part
+/// is `None` when the runtime did not report it — which is not zero: a step that
+/// reported nothing is of unknown cost, never free. Input is as the agent states
+/// it; whether it already contains the cached share depends on the agent (see
+/// `core::pricing::TokenCounters::from_agent_report`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StepTokens {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+impl StepTokens {
+    /// Sum reported usage across independent attempts. A component absent
+    /// from every attempt remains unknown, as with the run-level counter.
+    pub(crate) fn plus(self, other: Self) -> Self {
+        let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (None, None) => None,
+            _ => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
+        Self {
+            input: sum(self.input, other.input),
+            output: sum(self.output, other.output),
+            cache_read: sum(self.cache_read, other.cache_read),
+            cache_write: sum(self.cache_write, other.cache_write),
+        }
+    }
+    /// Nothing was reported.
+    pub const UNKNOWN: Self = Self {
+        input: None,
+        output: None,
+        cache_read: None,
+        cache_write: None,
+    };
+
+    /// The usage a structured transport (an ACP session, an HTTP provider)
+    /// reported for the run. `None` when it reported nothing.
+    pub fn from_reported(usage: Option<crate::agents::runner::ReportedUsage>) -> Self {
+        let Some(usage) = usage else {
+            return Self::UNKNOWN;
+        };
+        Self {
+            input: Some(usage.input_tokens),
+            output: Some(usage.output_tokens),
+            cache_read: usage.prompt_cache.cached_prompt_tokens,
+            cache_write: usage.prompt_cache.cache_write_prompt_tokens,
+        }
+    }
+
+    /// The step's headline figure: input plus output. `None` — unknown — unless
+    /// the runtime reported at least one of them.
+    pub fn total(&self) -> Option<u64> {
+        match (self.input, self.output) {
+            (None, None) => None,
+            (input, output) => Some(input.unwrap_or(0).saturating_add(output.unwrap_or(0))),
+        }
+    }
+}
+
+/// A later documentary gate can invalidate an earlier successful agent step.
+/// Preserve its timing/usage and original warning; resume must not skip it.
+pub(crate) fn invalidate_documentary_steps(
+    conn: &Connection,
+    run_id: &str,
+    warnings: &[(u32, String)],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (step, warning) in warnings {
+        tx.execute("UPDATE audit_run_steps SET cli_success = 0,
+            step_warning = CASE WHEN step_warning IS NULL THEN ?3 ELSE step_warning || char(10) || ?3 END
+            WHERE audit_run_id = ?1 AND step_index = ?2", params![run_id, step, warning])?;
+    }
+    tx.execute("UPDATE audit_runs SET last_completed_step = (
+        SELECT COUNT(*) FROM audit_run_steps WHERE audit_run_id = ?1 AND cli_success = 1 AND ended_at IS NOT NULL
+    ) WHERE id = ?1", params![run_id])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Finalize a step row at `step_done` (or step_warning). `success`
 /// is `false` when `validate_step_output` (#292) emitted
 /// a warning OR when the CLI exited non-zero. `step_warning` is the
-/// reason string (None on success).
+/// reason string (None on success). `cumulative_tokens` is the run's total so
+/// far, `None` until a step has reported something.
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_audit_step(
     conn: &Connection,
@@ -522,12 +641,13 @@ pub fn finalize_audit_step(
     step_index: u32,
     ended_at: DateTime<Utc>,
     duration_ms: u64,
-    step_tokens: u64,
-    cumulative_tokens: u64,
+    tokens: &StepTokens,
+    cumulative_tokens: Option<u64>,
     cli_success: bool,
     step_warning: Option<&str>,
     repaired: bool,
 ) -> Result<()> {
+    let as_sql = |value: Option<u64>| value.map(|value| value as i64);
     conn.execute(
         "UPDATE audit_run_steps SET
             ended_at = ?3,
@@ -536,18 +656,26 @@ pub fn finalize_audit_step(
             cumulative_tokens = ?6,
             cli_success = ?7,
             step_warning = ?8,
-            step_repaired_from_template = ?9
+            step_repaired_from_template = ?9,
+            input_tokens = ?10,
+            output_tokens = ?11,
+            cache_read_tokens = ?12,
+            cache_write_tokens = ?13
          WHERE audit_run_id = ?1 AND step_index = ?2",
         params![
             audit_run_id,
             step_index as i64,
             ended_at.to_rfc3339(),
             duration_ms as i64,
-            step_tokens as i64,
-            cumulative_tokens as i64,
+            as_sql(tokens.total()),
+            as_sql(cumulative_tokens),
             cli_success as i32,
             step_warning,
             repaired as i32,
+            as_sql(tokens.input),
+            as_sql(tokens.output),
+            as_sql(tokens.cache_read),
+            as_sql(tokens.cache_write),
         ],
     )?;
     Ok(())
@@ -559,7 +687,8 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
     let mut stmt = conn.prepare(
         "SELECT audit_run_id, step_index, file_label, started_at, ended_at,
                 duration_ms, step_tokens, cumulative_tokens, cli_success,
-                step_warning, step_repaired_from_template
+                step_warning, step_repaired_from_template,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
          FROM audit_run_steps
          WHERE audit_run_id = ?1
          ORDER BY step_index ASC",
@@ -582,6 +711,10 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
             duration_ms: row.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
             step_tokens: row.get::<_, Option<i64>>(6)?.map(|v| v.max(0) as u64),
             cumulative_tokens: row.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as u64),
+            input_tokens: row.get::<_, Option<i64>>(11)?.map(|v| v.max(0) as u64),
+            output_tokens: row.get::<_, Option<i64>>(12)?.map(|v| v.max(0) as u64),
+            cache_read_tokens: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u64),
+            cache_write_tokens: row.get::<_, Option<i64>>(14)?.map(|v| v.max(0) as u64),
             cli_success: row.get::<_, i64>(8)? != 0,
             step_warning: row.get(9)?,
             step_repaired_from_template: row.get::<_, i64>(10)? != 0,
@@ -641,6 +774,10 @@ mod tests {
                 cli_success INTEGER NOT NULL DEFAULT 1,
                 step_warning TEXT,
                 step_repaired_from_template INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                cache_write_tokens INTEGER,
                 FOREIGN KEY (audit_run_id) REFERENCES audit_runs(id) ON DELETE CASCADE
             );
             CREATE UNIQUE INDEX idx_audit_run_steps_run
@@ -1162,7 +1299,21 @@ mod tests {
         // Finalize with success.
         let ended = started + chrono::Duration::seconds(42);
         finalize_audit_step(
-            &conn, "run-x", 1, ended, 42_000, 1_234, 1_234, true, None, false,
+            &conn,
+            "run-x",
+            1,
+            ended,
+            42_000,
+            &StepTokens {
+                input: Some(1_000),
+                output: Some(234),
+                cache_read: Some(50),
+                cache_write: None,
+            },
+            Some(1_234),
+            true,
+            None,
+            false,
         )
         .unwrap();
         let steps = list_audit_steps(&conn, "run-x").unwrap();
@@ -1170,9 +1321,74 @@ mod tests {
         assert_eq!(steps[0].duration_ms, Some(42_000));
         assert_eq!(steps[0].step_tokens, Some(1_234));
         assert_eq!(steps[0].cumulative_tokens, Some(1_234));
+        assert_eq!(steps[0].input_tokens, Some(1_000));
+        assert_eq!(steps[0].output_tokens, Some(234));
+        assert_eq!(steps[0].cache_read_tokens, Some(50));
+        assert_eq!(
+            steps[0].cache_write_tokens, None,
+            "a cache figure the runtime did not give stays absent, never 0"
+        );
         assert!(steps[0].cli_success);
         assert!(steps[0].step_warning.is_none());
         assert!(!steps[0].step_repaired_from_template);
+    }
+
+    #[test]
+    fn a_step_whose_agent_reported_no_usage_is_stored_unknown_never_zero() {
+        // KT-927 — every ACP step used to land here as 0 tokens. A runtime that
+        // reports nothing leaves the figures NULL, in the step and in the run.
+        let conn = fresh_conn();
+        let t0 = Utc::now();
+        insert_running(&conn, "run-u", "p1", "Full", "OpenCode", t0).unwrap();
+        insert_audit_step_start(&conn, "run-u", 1, "docs/glossary.md", t0).unwrap();
+        finalize_audit_step(
+            &conn,
+            "run-u",
+            1,
+            t0 + chrono::Duration::seconds(3),
+            3_000,
+            &StepTokens::UNKNOWN,
+            None,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let step = &list_audit_steps(&conn, "run-u").unwrap()[0];
+        assert_eq!(step.step_tokens, None);
+        assert_eq!(step.cumulative_tokens, None);
+        assert_eq!(step.input_tokens, None);
+        assert_eq!(step.output_tokens, None);
+        assert_eq!(step.cache_read_tokens, None);
+        assert_eq!(step.cache_write_tokens, None);
+        assert!(step.cli_success, "an unmeasured step is not a failed one");
+    }
+
+    #[test]
+    fn a_reported_usage_becomes_parts_and_a_headline_total() {
+        use crate::agents::runner::{PromptCacheUsage, ReportedUsage};
+        let tokens = StepTokens::from_reported(Some(ReportedUsage {
+            input_tokens: 6_126,
+            output_tokens: 28,
+            prompt_cache: PromptCacheUsage {
+                cached_prompt_tokens: Some(1_800),
+                cache_write_prompt_tokens: None,
+            },
+        }));
+        assert_eq!(tokens.total(), Some(6_154));
+        assert_eq!(tokens.cache_read, Some(1_800));
+        assert_eq!(tokens.cache_write, None);
+        assert_eq!(StepTokens::from_reported(None).total(), None);
+        // Only the output reported: still a figure, not an unknown.
+        assert_eq!(
+            StepTokens {
+                output: Some(9),
+                ..StepTokens::UNKNOWN
+            }
+            .total(),
+            Some(9)
+        );
     }
 
     #[test]
@@ -1221,8 +1437,12 @@ mod tests {
             5,
             t0 + chrono::Duration::seconds(7),
             7_000,
-            500,
-            12_000,
+            &StepTokens {
+                input: Some(400),
+                output: Some(100),
+                ..StepTokens::UNKNOWN
+            },
+            Some(12_000),
             false,
             Some("target file is empty — repaired from template"),
             true,
@@ -1434,5 +1654,65 @@ mod tests {
         assert_eq!(runs[0].id, "new");
         assert_eq!(runs[1].id, "mid");
         assert_eq!(runs[2].id, "old");
+    }
+
+    #[test]
+    fn documentary_failure_invalidates_prior_success_without_losing_usage() {
+        let conn = fresh_conn();
+        let now = Utc::now();
+        insert_running(&conn, "repair", "p1", "Full", "LiteLlm", now).unwrap();
+        let attempt = StepTokens {
+            input: Some(100),
+            output: Some(10),
+            cache_read: Some(50),
+            cache_write: None,
+        };
+        let combined = attempt.plus(attempt);
+        assert_eq!(combined.total(), Some(220));
+        assert_eq!(combined.cache_write, None);
+        for step in 1..=3 {
+            insert_audit_step_start(&conn, "repair", step, "docs/a.md", now).unwrap();
+            finalize_audit_step(
+                &conn,
+                "repair",
+                step,
+                now,
+                500,
+                &combined,
+                Some(660),
+                true,
+                None,
+                false,
+            )
+            .unwrap();
+        }
+        invalidate_documentary_steps(
+            &conn,
+            "repair",
+            &[
+                (1, "docs/a.md: invalid line".into()),
+                (3, "docs/c.md: invented path".into()),
+            ],
+        )
+        .unwrap();
+        let steps = list_audit_steps(&conn, "repair").unwrap();
+        assert_eq!(
+            crate::api::audit::full::already_succeeded_step_indices(&steps),
+            [2].into_iter().collect()
+        );
+        assert_eq!(steps[0].step_tokens, Some(220));
+        assert_eq!(steps[0].duration_ms, Some(500));
+        assert!(steps[2]
+            .step_warning
+            .as_ref()
+            .unwrap()
+            .contains("invented path"));
+        assert_eq!(
+            get_by_id(&conn, "repair")
+                .unwrap()
+                .unwrap()
+                .last_completed_step,
+            1
+        );
     }
 }

@@ -10,11 +10,13 @@ use std::convert::Infallible;
 use std::pin::Pin;
 
 use axum::response::sse::Event;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 
+mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
+mod document_repair;
 pub mod drift;
 pub mod full;
 pub mod helpers;
@@ -36,16 +38,81 @@ pub use validate::*;
 // `crate::api::audit::Foo`. The remaining `pub(crate)` helpers
 // (`build_validation_prompt`, `build_briefing_prompt`) stay
 // `super::helpers::name`-reachable for sub-modules without leaking.
-pub(crate) use helpers::{check_ai_dir_permissions, detect_project_skills};
+pub(crate) use helpers::{
+    check_ai_dir_permissions, detect_project_skill_markers, detect_project_skills,
+};
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
+/// Poll the producer independently so disconnecting a subscriber cannot stop an audit.
+pub(super) fn detach_sse_stream(mut producer: SseStream) -> SseStream {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
+    tokio::spawn(async move {
+        while let Some(item) = producer.next().await {
+            let _ = tx.send(item);
+        }
+    });
+    Box::pin(futures::stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    }))
+}
+
+#[cfg(test)]
+mod detach_sse_stream_tests {
+    use super::{detach_sse_stream, Event, SseStream};
+    use futures::StreamExt;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn producer_runs_to_completion_after_its_subscriber_is_dropped() {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let producer_progress = progress.clone();
+        let producer: SseStream = Box::pin(async_stream::try_stream! {
+            for i in 1..=5u32 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                producer_progress.fetch_add(1, Ordering::SeqCst);
+                yield Event::default().event("tick").data(i.to_string());
+            }
+        });
+
+        drop(detach_sse_stream(producer));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while progress.load(Ordering::SeqCst) < 5 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("producer must finish after its subscriber is dropped");
+        assert_eq!(progress.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_reach_a_subscriber_that_stays_attached() {
+        let producer: SseStream = Box::pin(async_stream::try_stream! {
+            yield Event::default().event("start").data("{}");
+            yield Event::default().event("done").data("{}");
+        });
+        let mut detached = detach_sse_stream(producer);
+
+        let first: Result<Event, Infallible> = detached.next().await.expect("first event");
+        assert!(first.is_ok());
+        let second: Result<Event, Infallible> = detached.next().await.expect("second event");
+        assert!(second.is_ok());
+        assert!(detached.next().await.is_none());
+    }
+}
+
 pub(crate) const PROMPT_PREAMBLE: &str = "\
-Rules: Write in English. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\
+Rules: Write new content in the documentation language declared by `docs/AGENTS.md` § Project parameters. While Step 1 is still filling that value, preserve the language of existing docs and use English only for a fresh skeleton with no established language. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\
 - Do NOT invent — read `docs/AGENTS.md` § 0 Anti-Hallucination Protocol (STEP 0 of this audit just wrote/refreshed it). The cascade is `read code → existing docs/ → external doc → escalate via TODO marker → never assert without proof`. Every non-trivial fact written into `docs/` MUST carry `[src: file: <path>:<line>]` or `[src: url: …]` ; fabricated citations (path doesn't exist / outside project root) are mechanically checked — `enforce` mode rejects them with a retry, the default `warn` logs them; treat any warning as a defect.\n\
 - Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content. {{PLACEHOLDERS}} are literal text markers — replace by editing file content directly.\n\
 - Keep the existing file structure and section headings — fill in the blanks, do NOT rewrite the file from scratch.\n\
 - If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
+- Any section marked `owner=\"human\"` is owned by a person (legacy `curated=\"human\"` has the same protection): a full OR partial audit must NEVER rewrite, reorder, or delete its body. The pipeline restores attempted changes and records the proposal under `docs/reports/`; do not work around that guard.\n\
+- Never force-translate an existing `docs/` file into another language — a doc already written in a different language stays as-is; the docs/tickets language parameter only governs NEW content.\n\
 - Plain facts in docs/ files — no opinions, debate or trade-off analysis. One exception: `Suggested direction` in TD detail files (and index remediation lines) may carry a one-line, non-binding fix hint.\n\
 - Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
 - Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.\n\
@@ -97,27 +164,9 @@ pub(crate) struct AnalysisStep {
 pub(crate) const ANTI_HALLU_SECTION_BODY: &str = "\
 ## 0. Anti-Hallucination Protocol\n\
 \n\
-You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:\n\
+Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.\n\
 \n\
-1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.\n\
-2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.\n\
-3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.\n\
-4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.\n\
-5. **NEVER ASSERT WITHOUT PROOF** — \"I don't know yet, let me check\" beats a fabrication every time.\n\
-\n\
-### Citation grammar (verified mechanically by Kronn when present)\n\
-\n\
-Attach a structured citation to every non-trivial assertion:\n\
-\n\
-- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`\n\
-- `[src: file: <path>:<start-end>]` — line range\n\
-- `[src: url: <url>]` — external doc\n\
-- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)\n\
-- `[src: commit: <sha>]` — git commit\n\
-\n\
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.\n\
-\n\
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.\n\
+Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).\n\
 ";
 
 /// 0.8.7 — Audit STEP 0 doctrine (used by the `apply_anti_hallu_section`
@@ -143,36 +192,18 @@ This is the FIRST step of the audit. Your job is to ensure `docs/AGENTS.md` carr
 \n\
 1. Read `docs/AGENTS.md`.\n\
 2. Search for the opening marker `<!-- kronn:section name=\"anti-hallu\"`.\n\
-3. **If found** : refresh ONLY the `audit=\"<date>\"` attribute on the opening marker (set it to today's date, ISO YYYY-MM-DD). Do NOT touch the body — `curated=\"ai\"` means Kronn owns the content. Leave the closing `<!-- kronn:section:end -->` marker untouched.\n\
+3. **If found** : refresh ONLY the `audit=\"<date>\"` attribute on the opening marker (set it to today's date, ISO YYYY-MM-DD). Do NOT touch the body — `owner=\"audit\"` means Kronn owns the content. Leave the closing `<!-- kronn:section:end -->` marker untouched.\n\
 4. **If NOT found** : insert the canonical block (exactly as below) immediately after the file's H1 (`# AI agent context — Entry point`) and BEFORE the next `---` separator. Preserve everything else.\n\
 \n\
 ## Canonical block to write (EXACT, no edits)\n\
 \n\
 ```markdown\n\
-<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"<TODAY YYYY-MM-DD>\" -->\n\
+<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" owner=\"audit\" audit=\"<TODAY YYYY-MM-DD>\" -->\n\
 ## 0. Anti-Hallucination Protocol\n\
 \n\
-You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:\n\
+Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.\n\
 \n\
-1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.\n\
-2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.\n\
-3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.\n\
-4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.\n\
-5. **NEVER ASSERT WITHOUT PROOF** — \"I don't know yet, let me check\" beats a fabrication every time.\n\
-\n\
-### Citation grammar (verified mechanically by Kronn when present)\n\
-\n\
-Attach a structured citation to every non-trivial assertion:\n\
-\n\
-- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`\n\
-- `[src: file: <path>:<start-end>]` — line range\n\
-- `[src: url: <url>]` — external doc\n\
-- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)\n\
-- `[src: commit: <sha>]` — git commit\n\
-\n\
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.\n\
-\n\
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.\n\
+Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).\n\
 <!-- kronn:section:end -->\n\
 ```\n\
 \n\
@@ -194,13 +225,17 @@ CI configs (.github/workflows, .gitlab-ci.yml), and main config files.\n\
 Determine: tech stack, project structure, build/dev/test commands, key patterns, third-party services, CI/CD pipeline.\n\n\
 Then fill docs/AGENTS.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
 - {{PROJECT_NAME}} and {{STACK_SUMMARY}}: project name and one-line stack description\n\
-- Common tasks table: replace {{TASK_EXAMPLE_*}} with 5-7 real task→file mappings\n\
-- Prerequisites table: replace {{PREREQ_*}} with Docker, language versions, build commands\n\
-- DO NOT rules: replace {{DO_NOT_*}} with 3+ project-specific rules\n\
-- Source of truth table: replace {{SOURCE_*}} with key config files (models, routes, DB schema, types)\n\
-- Code placement table: replace {{CODE_TYPE_*}} with where to put new endpoints, pages, tests\n\
-- Stack table: replace {{TECH_*}} with all major technologies, versions, and roles\n\
-- Workflow constraints: replace {{WORKFLOW_CONSTRAINT_*}} with project-specific rules\n\
+- {{PROJECT_LANGUAGE}}: language used for code comments, commit messages, and identifiers\n\
+- Common tasks table: replace {{TASK_1}}..{{TASK_4}} with real task→file mappings (add/remove rows to match the project — see the general rule above)\n\
+- Prerequisites: replace the {{PREREQUISITES}} block with a table of Docker, language versions, build commands\n\
+- DO NOT rules: replace {{DO_NOT_1}}, {{DO_NOT_2}} with project-specific rules (add more rows if warranted)\n\
+- Source of truth: replace the {{SOURCES}} block with a table of key config files (models, routes, DB schema, types). Code placement (where new endpoints/pages/tests go) belongs in repo-map.md, NOT here — do not duplicate it\n\
+- Stack: replace the {{STACK}} block with a table of all major technologies, versions, and roles\n\
+- Workflow constraints: replace {{WORKFLOW_CONSTRAINT_1}}, {{WORKFLOW_CONSTRAINT_2}} with project-specific rules\n\
+- {{DOCS_LANGUAGE}}: language for new project documentation. If an existing doc is already written in another language, KEEP it as-is — do not force-translate it\n\
+- {{TICKET_LANGUAGE}}: language used for tickets\n\
+- {{COMMENT_TICKET_POLICY}}: whether code comments may cite a ticket/issue ID\n\
+- {{TEST_POLICY}}: this project's test policy (default: every code change needs a test — see docs/testing-quality.md)\n\
 - {{DATE}}: set to today's date (YYYY-MM-DD)\n\
 \n\
 **CLEANUP ONCE FILLED** — the template ships with scaffolding that MUST NOT survive the fill: \
@@ -232,9 +267,9 @@ Fill docs/glossary.md — replace ALL {{PLACEHOLDERS}}:\n\
 Read docs/AGENTS.md and docs/glossary.md for context. Explore the directory structure (2-3 levels deep).\n\n\
 Fill docs/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
 - {{STACK_OVERVIEW}}: one paragraph summarizing the architecture\n\
-- Key folders tree: replace {{FOLDER_*}} with every major directory (2-3 levels deep), tree format with annotations\n\
-- Entrypoints table: replace {{ENTRYPOINT_*}} with 5-7 key files (config, routes, models, etc.)\n\
-- Auto-generated files: replace {{FILE_PATTERN}} with files NOT to edit manually",
+- Key folders: replace the {{KEY_FOLDERS}} block with every major directory (2-3 levels deep), tree format with annotations\n\
+- Entrypoints: replace the {{ENTRYPOINTS}} block with 5-7 key files (config, routes, models, etc.)\n\
+- Auto-generated files: replace the {{GENERATED_FILES}} block with files NOT to edit manually",
         sources: &["__GIT_SOURCE_TREE__"],
     },
 
@@ -245,14 +280,14 @@ Fill docs/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
 Read docs/AGENTS.md for context. Find ALL linter, formatter, and type-checker configs in the repo \
 (e.g. .eslintrc, eslint.config.js, prettier, rustfmt.toml, tsconfig.json, phpcs.xml, etc.).\n\n\
 Fill docs/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Replace {{LANGUAGE_*}} with one section per language/framework used in the project\n\
-- For each language, fill the Tools table: {{CONFIG}} and {{COMMAND}} for linter, formatter, type checker\n\
-- Replace {{CONVENTION_*}} with coding conventions OBSERVED in existing code (naming, error handling, imports). Write fewer rather than inventing.\n\
-- Replace {{MISTAKE_*}} with common mistakes to avoid (from linter configs, framework gotchas observed in code)\n\
-- If no linter/formatter is configured, write 'Not configured' in the Config column\n\
+- Replace {{LANGUAGE_1}}, {{LANGUAGE_2}} with one section per language/framework used in the project (add more sections if the project uses more than two)\n\
+- For each language, fill its {{TOOLS_1}}/{{TOOLS_2}} block with the linter, formatter, and type checker — config file and run command for each\n\
+- Replace {{CONVENTIONS_1}}, {{CONVENTIONS_2}} with coding conventions OBSERVED in existing code (naming, error handling, imports). Write fewer rather than inventing.\n\
+- Replace {{MISTAKES_1}}, {{MISTAKES_2}} with common mistakes to avoid (from linter configs, framework gotchas observed in code)\n\
+- If no linter/formatter is configured, write 'Not configured' in its place\n\
 - Add or remove language sections as needed to match the actual project stack\n\
 \n\
-**ANTI-HALLU FOR THIS STEP** — {{CONVENTION_*}} and {{MISTAKE_*}} are the #1 vector for training-data leakage into AGENTS.md. Apply this rule strictly:\n\
+**ANTI-HALLU FOR THIS STEP** — {{CONVENTIONS_*}} and {{MISTAKES_*}} are the #1 vector for training-data leakage into AGENTS.md. Apply this rule strictly:\n\
 - Every CONVENTION row MUST cite the rule's source: either a linter config (`[src: file: .eslintrc.json:12]`, `[src: file: rustfmt.toml:3]`) OR at least 3 observed call sites (`[src: file: src/foo.rs:120]`, `[src: file: src/bar.rs:45]`, …).\n\
 - Every MISTAKE row MUST cite either a linter rule that enforces the prohibition OR a real bug found in the repo's git history (`[src: commit: <sha>]`).\n\
 - A rule you 'know from the language ecosystem' but cannot anchor in this repo is NOT a project convention — do NOT add it. Write fewer rules with proof, not more rules from memory.",
@@ -266,12 +301,12 @@ Fill docs/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
 Read docs/AGENTS.md for context. Find test framework configs (jest, vitest, phpunit, pytest, cargo test, bats, etc.) \
 and CI quality gates.\n\n\
 Fill docs/testing-quality.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Build & quality checks table: replace {{CHECK_*}} and {{COMMAND}} with all quality checks (compile, lint, format, test, build)\n\
-- Test infrastructure table: replace {{LANG_*}}, {{RUNNER}}, {{CONFIG}} for each language\n\
-- Test suites table: replace {{SUITE_*}} with test files/suites and approximate counts\n\
-- Coverage: replace {{COVERAGE_STATUS}} and {{COVERAGE_TARGET}} with current status and targets\n\
-- Replace {{UNTESTED_*}} with components that have NO tests\n\
-- Fast smoke checks table: replace {{COMMAND_*}} with 3-5 quick pre-commit commands",
+- Build & quality checks: replace the {{BUILD_CHECKS}} block with a table of all quality checks (compile, lint, format, test, build) and their commands\n\
+- Test infrastructure: replace the {{TEST_INFRASTRUCTURE}} block with the runner, config file, and Node/runtime version for each language\n\
+- Test suites: replace the {{TEST_SUITES}} block with each test file/suite and its approximate count\n\
+- Coverage: replace the {{COVERAGE}} block with the current status and target\n\
+- Replace {{UNTESTED}} with components that have NO tests\n\
+- Smoke checks: replace the {{SMOKE_CHECKS}} block with 3-5 quick pre-commit commands",
         sources: &["package.json", "Cargo.toml", "pyproject.toml"],
     },
 
@@ -281,12 +316,12 @@ Fill docs/testing-quality.md — replace ALL {{PLACEHOLDERS}}:\n\
         prompt: "\
 Read docs/AGENTS.md and docs/repo-map.md for context. Analyze the high-level architecture.\n\n\
 Fill docs/architecture/overview.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Apps/services table: replace {{SERVICE_*}}, {{PORT}}, {{TECH}}, {{ROLE}} for each service\n\
-- Key patterns: replace {{PATTERN_*_NAME}} and {{PATTERN_*_DESCRIPTION}} with 3-5 architectural patterns \
+- Apps/services: replace the {{SERVICES}} block with a table of service, port, tech, and role for each service\n\
+- Key patterns: replace the {{PATTERNS}} block with 3-5 architectural patterns \
   (API pattern, state management, auth, data flow, caching, etc.) — 2-3 sentences each\n\
 - {{SEPARATION_DESCRIPTION}}: how the codebase is organized (by feature, by layer, etc.)\n\
 - {{DATA_FLOW_DESCRIPTION}}: 2-3 sentences on how data moves through the system\n\
-- Legacy table: replace {{AREA}}, {{CURRENT}}, {{TARGET}} for any legacy patterns or planned migrations\n\n\
+- Legacy: replace the {{MIGRATIONS}} block with a table of area, current state, and target for any legacy patterns or planned migrations\n\n\
 **Mermaid diagrams** — mandatory, REPLACES the old ASCII placeholder:\n\
 1. **Architecture overview** — replace `{{ARCHITECTURE_MERMAID}}` with a `flowchart TD` (or `LR` for wide projects) inside a ```mermaid fence. \
 Show every service from the table above, the main data flow direction (HTTP, DB, message bus, etc.), and external systems (APIs, third-party providers). \
@@ -304,8 +339,7 @@ Each file must include a 2-3 sentence intro before the diagram (\"This sequence 
 - **Participant/actor aliases must NOT be Mermaid reserved words** (case-insensitive): `alt`, `else`, `end`, `opt`, `loop`, `par`, `and`, `rect`, `note`, `critical`, `break`, `activate`, `deactivate`, `box`. Declaring `participant Alt as AlternateLocaleSubscriber` then writing `Caddy->>Alt: msg` makes the lexer read `Alt` as the start of an `alt` block → parse error. Pick a non-keyword alias (`AltLoc`, `AltSub`, `Alternate`). Same for `flowchart` node ids — never name a node `end`/`alt`/etc.\n\
 - Test mentally: would `mermaid.parse` accept this verbatim? If unsure, simplify.\n\n\
 **Why Mermaid + file separation**: every viewer (GitHub, GitLab, Obsidian, VS Code) renders Mermaid natively — no external tools. \
-Sequence diagrams live in separate files so `docs/AGENTS.md` Tier 1 stays small; an agent only loads them when working on the related flow.\n\
-- {{DATA_FLOW_DIAGRAM}}: REMOVED — replaced by `{{ARCHITECTURE_MERMAID}}` above.",
+Sequence diagrams live in separate files so `docs/AGENTS.md` T0 stays small; an agent only loads them when working on the related flow.",
         sources: &["docker-compose.yml", "src/main.*", "src/lib.*", "src/index.*"],
     },
 
@@ -316,9 +350,9 @@ Sequence diagrams live in separate files so `docs/AGENTS.md` Tier 1 stays small;
 Read docs/AGENTS.md for context. Find operational commands from Makefile, package.json scripts, \
 docker-compose commands, and any run/build/debug procedures.\n\n\
 Fill docs/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
-- Common commands table: replace {{ACTION_*}} and {{COMMAND_*}} for start, stop, logs, test, build, deploy\n\
-- Docker services table: replace {{SERVICE_*}}, {{PORT}}, {{ROLE}}, {{HEALTH}} for each container\n\
-- Troubleshooting: replace {{ISSUE_*_TITLE}}, {{SYMPTOM}}, {{CAUSE}}, {{FIX}} with 3-5 common issues",
+- Common commands: replace the {{COMMANDS}} block with a table of action → command for start, stop, logs, test, build, deploy\n\
+- Docker services: replace the {{DOCKER_SERVICES}} block with a table of service, port, role, and health check for each container\n\
+- Troubleshooting: replace the {{TROUBLESHOOTING}} block with 3-5 common issues (symptom, cause, fix)",
         sources: &["docker-compose.yml", "Makefile", "Dockerfile"],
     },
 
@@ -340,7 +374,7 @@ Fill docs/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
     AnalysisStep {
         target_file: "docs/inconsistencies-tech-debt.md",
         prompt: "\
-Real issues only, not hypothetical. Read all docs/ files AND scan source code. \
+Real issues only, not hypothetical. Read current docs guidance (exclude dated `docs/reports/` snapshots) AND scan source code. \
 Scan: entry points, config files, Dockerfiles, CI configs, and 5-10 core source files \
 (prioritize auth, data persistence, external input handling).\n\n\
 # A. MANDATORY BASELINE CHECKLIST (never skip, never trim)\n\
@@ -471,6 +505,8 @@ Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and 
    - **Mitigated**: partial fix shipped, residual work tracked.\n\
    - **Confirmed by user**: only set by the validation phase after user confirms.\n\
    - **Rejected**: only set by the validation phase if user rejects — the next audit will NOT recreate this TD.\n\
+   - **Accepted decision**: only set by the validation phase when the user records the TD as an intentional trade-off in `docs/decisions.md`.\n\
+   - **Deferred**: only set by the validation phase when the user postpones the TD decision.\n\
 \n\
 5. **Cap**: target 30 findings maximum. Critical + High findings (including all baseline checklist failures) are NEVER trimmed to fit the cap. Trim Medium and Low if needed. If you cannot stay under 30 even after trimming all Low, note the count of trimmed Medium in the index's `## Coverage gaps` section.\n\
 \n\
@@ -489,7 +525,7 @@ metadata:\n\
   type: tech-debt\n\
   audit_history:\n\
     - date: YYYY-MM-DD\n\
-      status: Verified in source | Inferred | Blocked upstream | Mitigated | Confirmed by user | Rejected\n\
+      status: Verified in source | Inferred | Blocked upstream | Mitigated | Confirmed by user | Rejected | Accepted decision | Deferred\n\
       reviewer: <audit kind, e.g. \"Full audit\" or \"Security audit\">\n\
       note: optional — what changed since previous entry (e.g. \"line numbers shifted\", \"severity bumped to High\")\n\
 ---\n\
@@ -530,7 +566,7 @@ For UPDATES of existing TDs: APPEND a new entry to `audit_history`, do not repla
     // Step 9 has a *real* target_file (`docs/decisions.md`) so the
     // validate_step_output guard catches the case where the
     // agent forgets it. The prompt is a TWO-PHASE pass:
-    //   (1) Final quality review across all docs/ files.
+    //   (1) Final quality review across current routed docs (reports excluded).
     //   (2) Fill docs/decisions.md with intentional architectural
     //       choices observed during steps 1-8 (kept out of the tech-debt
     //       prompt, where it sat 200 lines deep and was systematically
@@ -544,13 +580,13 @@ For UPDATES of existing TDs: APPEND a new entry to `audit_history`, do not repla
         prompt: "\
 This is the FINAL step. Execute the two phases in order:\n\n\
 \
-# PHASE 1 — Final quality review (across all docs/ files)\n\
+# PHASE 1 — Final quality review (reports excluded)\n\
 \n\
-Read ALL docs/ files. Fix issues directly (Write/Edit each file as needed).\n\
+Read current guidance under `docs/`, but EXCLUDE `docs/reports/`: reports are dated snapshots outside routing and must not be rewritten during final review. Fix issues directly in the remaining files (Write/Edit each file as needed).\n\
 \n\
 Check:\n\
 - **No remaining `{{...}}` placeholders** — replace with content or `N/A — not used` for missing features. \
-A surviving `{{PLACEHOLDER}}` is a hard failure: the file looked rendered but isn't.\n\
+Any surviving uppercase double-brace placeholder is a hard failure: the file looked rendered but isn't.\n\
 - **Marker discipline** — there are 3 marker types, each with a strict semantic:\n\
   · `<!-- TODO: ask user -->` — info requires human decision (intent, archi choice). KEEP — Phase 2 validation asks the user.\n\
   · `<!-- TODO: verify -->` — you couldn't verify (sandbox blocked, file out-of-tree). FOR EACH ONE: try a final Glob/Read pass; if still impossible, CONVERT to `<!-- TODO: ask user -->` so Phase 2 escalates. If verification succeeded, write the conclusion WITHOUT any marker.\n\
@@ -628,7 +664,7 @@ If NOT satisfied, emit a TD finding. These do NOT count against any cap.\n\n\
 - No REAL `.env*` file is tracked (`git ls-files -- '*.env*' '.env*'` — pathspec listing, no grep) — `.env.example`/`.env.dist`/`.env.sample` are legitimate templates and NOT findings. Tracking status and file NAMES are the ONLY safe signals you may collect.\n\
 - **Secret VALUES are out of your scope entirely.** You may not open, grep, or otherwise inspect file contents for secret-looking values — any command whose output could echo a matched line would pull the secret into your context, which leaves the machine. For the value-scan sub-dimension, write exactly `Not evaluated safely (requires Kronn's local secret scanner)` — NEVER `verified absent`/`verified clean` on a scan you did not safely run.\n\
 - CI YAML / docker-compose credential hygiene: `Not evaluated safely (requires Kronn's local secret scanner)` — proving the absence of a hardcoded credential means reading the very content that could contain it. You may only note the SAFE structural facts: which workflow/compose files exist, and whether they use `secrets:`/`env_file:` — established EXCLUSIVELY via `grep -lE 'secrets:|env_file:' <files>` (filename-only output, zero lines, zero context; `-l` is the ONLY grep flag allowed near credential material).\n\
-- No private keys or certs in repo (`*.pem`, `*.key`, `*.p12`, `id_rsa*`).\n\
+- No private keys or certs in repo (`*.pem`, `*.key`, `*.p12`, `id_rsa*`). A key often has no extension: list `**/*.pub` — for each `X.pub`, a tracked `X` beside it is the private half — and every file under a `.ssh/` directory. Report their PATHS only, never open them.\n\
 - `git log --all -S 'BEGIN PRIVATE KEY' --name-only --format='%h %ad'` returns nothing recent (last 12 months) — metadata only, NEVER `-p` (a patch dump would pull the key itself into your context).\n\n\
 \
 **EXFILTRATION GUARD (absolute)**: you run with filesystem access and your context leaves the machine. NEVER open, quote, print or write the VALUE of any secret, key or token — in your output, in docs/, in TDs, anywhere. Findings carry file + line + pattern type only.\n\n\
@@ -1117,6 +1153,24 @@ This dimension may not apply to this project. Assess applicability in ≤ 5 tool
 static site with no DB layer). If NOT applicable: write your index file with the single \
 line `Not applicable: <one-sentence reason>` and STOP — no findings, no TD files.\n";
 
+/// The prompt of one audit step, dated: a model cannot know today's date, and
+/// a step that names it in its own words (a TD file name) must still get it.
+pub(crate) fn dated_step_prompt(
+    gate: &str,
+    step_prompt: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let today = now.format("%Y-%m-%d").to_string();
+    let today_compact = now.format("%Y%m%d").to_string();
+    format!(
+        "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}{}",
+        PROMPT_PREAMBLE, gate, step_prompt
+    )
+    .replace("YYYYMMDD=today", &format!("YYYYMMDD={today_compact}"))
+    .replace("today's date (YYYY-MM-DD)", &today)
+    .replace("set to today's date", &format!("set to {today}"))
+}
+
 /// 0.9.0 — the chained audit: a Full run = the 9 foundation steps PLUS
 /// every focused sub-audit appended, so one launch covers everything and
 /// the single validation discussion at the end confirms the WHOLE TD set.
@@ -1184,13 +1238,20 @@ pub(crate) fn partial_selectable(step: &AnalysisStep) -> bool {
 }
 
 /// Agents eligible to RUN an audit: the pipeline's only deliverable is
-/// files written into `docs/`, so an agent without filesystem access can
-/// only produce a silent no-op that the validator then flags step by step.
+/// files written into `docs/`, so an agent that cannot write there can only
+/// produce a silent no-op that the validator then flags step by step.
+///
+/// Two kinds of agent can: a CLI with its own filesystem, and an HTTP agent
+/// whose file tools Kronn executes on its behalf (KT-338), scoped to the
+/// project by `agent_launch` (KT-924). Every HTTP agent is admitted (KT-980):
+/// sending the repository to a hosted provider is the user's choice, warned
+/// about in the UI. A `Custom` agent is only launched with a validated named
+/// connection (`AuditAgentLauncher::for_request`).
+///
 /// ALLOWLIST, not denylist (Codex A4 v2): a new/unknown variant must force
-/// a compiler decision here instead of being audit-capable by default —
-/// `Custom`'s runner is a bare `echo` that exits 0, the exact silent no-op
-/// this gate exists to stop. Mirrored by the UI's `canRunAudit`, enforced
-/// here because MCP/bridge callers bypass the UI entirely.
+/// a compiler decision here instead of being audit-capable by default.
+/// Mirrored by the UI's `canRunAudit`, enforced here because MCP/bridge
+/// callers bypass the UI entirely.
 pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
     use crate::models::AgentType;
     match agent {
@@ -1199,15 +1260,43 @@ pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
         | AgentType::OpenCode
         | AgentType::GeminiCli
         | AgentType::Kiro
-        | AgentType::CopilotCli => true,
-        // LiteLLM joins Ollama here: an audit needs a filesystem and a tool
-        // loop, and the HTTP path has neither.
-        AgentType::Vibe
+        | AgentType::CopilotCli
         | AgentType::Ollama
         | AgentType::LiteLlm
         | AgentType::Nvidia
-        | AgentType::Custom => false,
+        | AgentType::Custom => true,
+        AgentType::Vibe => false,
     }
+}
+
+/// The agents `agent_can_audit` admits, for the refusal message. Kept beside the
+/// predicate and pinned to it by a test, so the message cannot name an agent the
+/// gate refuses or forget one it accepts.
+const AUDIT_AGENTS: [crate::models::AgentType; 10] = [
+    crate::models::AgentType::ClaudeCode,
+    crate::models::AgentType::Codex,
+    crate::models::AgentType::OpenCode,
+    crate::models::AgentType::GeminiCli,
+    crate::models::AgentType::Kiro,
+    crate::models::AgentType::CopilotCli,
+    crate::models::AgentType::Ollama,
+    crate::models::AgentType::LiteLlm,
+    crate::models::AgentType::Nvidia,
+    crate::models::AgentType::Custom,
+];
+
+/// Why `agent` was refused, and who would have been accepted. One wording for the
+/// Full and the partial launch: the two used to disagree, and neither said which
+/// agents to pick instead.
+pub(crate) fn audit_refusal_message(agent: &crate::models::AgentType) -> String {
+    let accepted = AUDIT_AGENTS
+        .iter()
+        .map(crate::api::disc_helpers::agent_display_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{agent:?} cannot run audits: Kronn has no file tools it can scope to the project for it, so the docs/ deliverables would silently never be written. Pick one of: {accepted}."
+    )
 }
 
 pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [AnalysisStep] {
@@ -1802,28 +1891,72 @@ mod prompt_tests {
         }
     }
 
-    #[test]
-    fn audit_capability_excludes_agents_without_filesystem() {
-        // Codex A4 — Ollama is a bare HTTP chat (runner: "NO executable
-        // tools and NO file access") and Vibe is API-only: neither can
-        // write the docs/ deliverables. The predicate gates BOTH launch
-        // endpoints because MCP callers bypass the UI's canAudit.
+    /// Every `AgentType`, with whether an audit may run on it. A new variant is a
+    /// compile error in `agent_can_audit`; this table is what pins the decision.
+    fn audit_capability_table() -> [(crate::models::AgentType, bool); 11] {
         use crate::models::AgentType;
-        // Exhaustive over EVERY variant — a new one added without updating
-        // the allowlist fails compilation, and this pins today's contract.
-        for (agent, expected) in [
+        [
             (AgentType::ClaudeCode, true),
             (AgentType::Codex, true),
+            (AgentType::OpenCode, true),
             (AgentType::GeminiCli, true),
             (AgentType::Kiro, true),
             (AgentType::CopilotCli, true),
+            // KT-924 — HTTP agents whose file tools Kronn executes, scoped to the
+            // project by `agent_launch`: they no longer lack a filesystem.
+            (AgentType::Ollama, true),
+            (AgentType::LiteLlm, true),
+            // KT-980 — any HTTP provider, at the user's choice; Custom with a
+            // named connection. Vibe is API-only with no file tools.
+            (AgentType::Nvidia, true),
+            (AgentType::Custom, true),
             (AgentType::Vibe, false),
-            (AgentType::Ollama, false),
-            // Custom's runner is `echo "Custom agent not configured"` —
-            // exit 0, zero writes: the canonical silent no-op.
-            (AgentType::Custom, false),
-        ] {
+        ]
+    }
+
+    #[test]
+    fn audit_capability_admits_the_agents_that_have_file_tools() {
+        // The predicate gates BOTH launch endpoints because MCP callers bypass
+        // the UI's canAudit.
+        for (agent, expected) in audit_capability_table() {
             assert_eq!(agent_can_audit(&agent), expected, "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate() {
+        // The Full and the partial launch share this one wording (KT-924): it
+        // must list exactly the agents `agent_can_audit` admits — no more (a
+        // refused one named as a fix), no fewer.
+        let accepted: Vec<crate::models::AgentType> = audit_capability_table()
+            .into_iter()
+            .filter_map(|(agent, admitted)| admitted.then_some(agent))
+            .collect();
+        assert_eq!(
+            AUDIT_AGENTS.to_vec(),
+            accepted,
+            "the list behind the message drifted from the gate"
+        );
+        for (agent, admitted) in audit_capability_table() {
+            if admitted {
+                continue;
+            }
+            let message = audit_refusal_message(&agent);
+            assert!(
+                message.starts_with(&format!("{agent:?} cannot run audits")),
+                "{message}"
+            );
+            let (_, picks) = message.split_once("Pick one of: ").expect(&message);
+            let picks: Vec<&str> = picks.trim_end_matches('.').split(", ").collect();
+            let expected: Vec<String> = accepted
+                .iter()
+                .map(crate::api::disc_helpers::agent_display_name)
+                .collect();
+            assert_eq!(picks, expected, "{agent:?}");
+            assert!(picks.contains(&"Ollama") && picks.contains(&"LiteLLM"));
+            // The stale premise, and the stale advice, are gone.
+            assert!(!message.contains("no filesystem access"), "{message}");
+            assert!(!message.contains("Pick a CLI agent"), "{message}");
         }
     }
 
@@ -2099,13 +2232,338 @@ mod prompt_tests {
         // redesign. The anti-hallu doctrine block is now a single
         // bullet pointer, but the MARKER DISCIPLINE section (the
         // 3 TODO marker types + WRONG/RIGHT example) is legitimate
-        // audit task-specific doctrine that stays. Cap kept loose
-        // (< 500) to catch a real re-inline of the cascade while
-        // not flagging the existing marker discipline.
+        // audit task-specific doctrine that stays. KT-843 added two
+        // more bullets (owner="human" preservation + never
+        // force-translate an existing doc) — real doctrine that
+        // applies to every step of a full OR partial audit, so it
+        // belongs here rather than duplicated per-step. Cap raised to
+        // stay loose enough to catch a real re-inline of the cascade
+        // without flagging today's legitimate doctrine.
         let word_count = PROMPT_PREAMBLE.split_whitespace().count();
         assert!(
-            word_count < 500,
+            word_count < 650,
             "PROMPT_PREAMBLE ballooned to {word_count} words — anti-hallu cascade should live in docs/AGENTS.md § Anti-Hallucination (written by STEP 0), not re-inlined here",
+        );
+    }
+
+    #[test]
+    fn preamble_forbids_rewriting_human_owned_sections_on_any_audit() {
+        // KT-843 (Template v2) — the "Never edit docs/AGENTS.md" blanket
+        // ban is gone; ownership is now per-section (`owner="audit"` vs
+        // `owner="human"`). PROMPT_PREAMBLE is injected before EVERY
+        // step of a Full run (full.rs) AND a Drift/partial run
+        // (drift.rs), so this is the one place that guards BOTH: a
+        // human-owned section must never be silently rewritten, and a
+        // re-audit proposes the change as a diff instead.
+        assert!(
+            PROMPT_PREAMBLE.contains("owner=\"human\""),
+            "PROMPT_PREAMBLE must name the owner=\"human\" ownership marker"
+        );
+        assert!(
+            PROMPT_PREAMBLE.to_lowercase().contains("never rewrite"),
+            "PROMPT_PREAMBLE must forbid rewriting a human-owned section"
+        );
+        assert!(
+            PROMPT_PREAMBLE
+                .to_lowercase()
+                .contains("full or partial audit")
+                || PROMPT_PREAMBLE.contains("full OR partial audit"),
+            "the rule must explicitly cover BOTH a full and a partial (drift) audit"
+        );
+        assert!(
+            PROMPT_PREAMBLE.contains("diff"),
+            "a re-audit must propose the change as a diff, not silently overwrite"
+        );
+        // The old blanket ban must actually be gone (KT-843 objective).
+        assert!(
+            !PROMPT_PREAMBLE.contains("Never edit docs/AGENTS.md"),
+            "the blanket \"Never edit docs/AGENTS.md\" ban must be replaced by the per-section ownership rule"
+        );
+    }
+
+    #[test]
+    fn full_and_partial_audits_restore_human_sections_before_retry_decisions() {
+        for (pipeline, source) in [
+            ("full", include_str!("full.rs")),
+            ("partial", include_str!("drift.rs")),
+        ] {
+            let protection = source
+                .find("protect_human_owned_sections")
+                .unwrap_or_else(|| panic!("{pipeline} audit must enforce section ownership"));
+            let retry_gate = source
+                .find("evaluate_enforce_gate")
+                .unwrap_or_else(|| panic!("{pipeline} audit must contain its retry gate"));
+            assert!(
+                protection < retry_gate,
+                "{pipeline} audit must restore owner=\"human\" content before a retry can start"
+            );
+        }
+    }
+
+    #[test]
+    fn docs_agents_md_template_states_project_parameters_and_language_preservation() {
+        // KT-843 DoD #3 — docs/tickets language, the comment→ticket
+        // policy, and the test policy are project parameters (set once
+        // during audit), not fixed doctrine. An existing non-English doc
+        // must be preserved, never force-translated.
+        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("templates/docs/AGENTS.md");
+        let body = std::fs::read_to_string(&tpl_path)
+            .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+        assert!(
+            body.contains("Project parameters"),
+            "template must declare a Project parameters block"
+        );
+        for token in [
+            "{{DOCS_LANGUAGE}}",
+            "{{TICKET_LANGUAGE}}",
+            "{{COMMENT_TICKET_POLICY}}",
+            "{{TEST_POLICY}}",
+        ] {
+            assert!(
+                body.contains(token),
+                "template must expose {token} as a project parameter"
+            );
+        }
+        assert!(
+            body.contains("Ticket IDs in code comments: {{COMMENT_TICKET_POLICY}}"),
+            "the comment→ticket policy must be an explicit project parameter"
+        );
+        assert!(
+            body.to_lowercase().contains("never force-translate")
+                || body.to_lowercase().contains("never translate"),
+            "template must state that an existing non-English doc is kept as-is, not translated"
+        );
+        // The step-1 prompt (docs/AGENTS.md is its target_file) must cite
+        // the exact same tokens it asks the agent to fill — otherwise a
+        // weak model is told to "replace ALL {{PLACEHOLDERS}}" with no
+        // concrete pointer to these two, and may skip them.
+        let step1 = &ANALYSIS_STEPS[0];
+        assert_eq!(step1.target_file, "docs/AGENTS.md");
+        for token in [
+            "{{DOCS_LANGUAGE}}",
+            "{{TICKET_LANGUAGE}}",
+            "{{COMMENT_TICKET_POLICY}}",
+            "{{TEST_POLICY}}",
+        ] {
+            assert!(
+                step1.prompt.contains(token),
+                "step 1 prompt must cite {token} so the agent doesn't skip it"
+            );
+        }
+    }
+
+    #[test]
+    fn docs_agents_md_template_routes_workflow_environments_examples_and_reports() {
+        // KT-843 DoD #2 — the workflow/, environments.md, examples/ and
+        // reports/ cases exist in the template AND are routed from
+        // AGENTS.md. `document_optimization::analyze` flags an unrouted
+        // doc as an orphan (non-blocking, but still a real drift signal),
+        // so this test pins both halves of the contract: the link text
+        // in AGENTS.md, and the linked file actually existing.
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let tpl_path = workspace_root.join("templates/docs/AGENTS.md");
+        let body = std::fs::read_to_string(&tpl_path)
+            .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+
+        for (link_target, must_exist_at) in [
+            ("workflow/README.md", "templates/docs/workflow/README.md"),
+            ("workflow/commits.md", "templates/docs/workflow/commits.md"),
+            (
+                "workflow/pull-requests.md",
+                "templates/docs/workflow/pull-requests.md",
+            ),
+            ("workflow/tickets.md", "templates/docs/workflow/tickets.md"),
+            ("workflow/ci-cd.md", "templates/docs/workflow/ci-cd.md"),
+            ("environments.md", "templates/docs/environments.md"),
+            ("examples/README.md", "templates/docs/examples/README.md"),
+            ("reports/README.md", "templates/docs/reports/README.md"),
+        ] {
+            assert!(
+                body.contains(link_target),
+                "templates/docs/AGENTS.md must route to `{link_target}`"
+            );
+            assert!(
+                workspace_root.join(must_exist_at).is_file(),
+                "`{must_exist_at}` must exist on disk"
+            );
+        }
+        // Reports are explicitly excluded from the tiered routing
+        // strategy (dated snapshots, never "always loaded") even though
+        // they are still linked (so the audit doesn't flag them as an
+        // orphan document).
+        assert!(
+            body.contains("excluded from T0–T2 routing"),
+            "docs/reports/ must be documented as excluded from the tiered routing strategy"
+        );
+        for level in ["T0 — Router", "T1 — Routed context", "T2 — Search"] {
+            assert!(
+                body.contains(level),
+                "the weak-agent routing map must preserve level `{level}`"
+            );
+        }
+        assert!(
+            body.contains("Skills and Kronn resources index:") && body.contains("kronn/INDEX.md"),
+            "the T0 router must expose the skills/resources index"
+        );
+    }
+
+    #[test]
+    fn step1_named_placeholders_all_exist_in_the_agents_md_template() {
+        // KT-843 DoD #4 — every placeholder the step-1 prompt names
+        // explicitly must exist in the template it fills, so a weak
+        // model isn't told to "replace {{X}}" in a file that actually
+        // shows a differently-named token. Mirrors the same contract
+        // `architecture_template_carries_mermaid_placeholder_and_sequences_pointer`
+        // already pins for docs/architecture/overview.md.
+        let step1 = &ANALYSIS_STEPS[0];
+        assert_eq!(step1.target_file, "docs/AGENTS.md");
+        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("templates/docs/AGENTS.md");
+        let body = std::fs::read_to_string(&tpl_path)
+            .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+        for token in [
+            "{{PROJECT_NAME}}",
+            "{{STACK_SUMMARY}}",
+            "{{PROJECT_LANGUAGE}}",
+            "{{TASK_1}}",
+            "{{PREREQUISITES}}",
+            "{{DO_NOT_1}}",
+            "{{DO_NOT_2}}",
+            "{{SOURCES}}",
+            "{{STACK}}",
+            "{{WORKFLOW_CONSTRAINT_1}}",
+            "{{WORKFLOW_CONSTRAINT_2}}",
+            "{{DOCS_LANGUAGE}}",
+            "{{TICKET_LANGUAGE}}",
+            "{{COMMENT_TICKET_POLICY}}",
+            "{{TEST_POLICY}}",
+            "{{DATE}}",
+        ] {
+            assert!(
+                step1.prompt.contains(token),
+                "step 1 prompt should cite {token}"
+            );
+            assert!(
+                body.contains(token),
+                "template must expose {token}, cited by the step 1 prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_security_checklist_finds_keys_without_an_extension() {
+        // A/B s10 on qwen3.6:35b, 3 runs per arm: without this hint 0/3 found
+        // `.ssh/vr-v2njs01-s` and 0/3 `security/devlpt-nodeapi`; with it 3/3 and 2/3.
+        let steps = assemble_chained_steps(crate::models::AuditKind::Full);
+        let security = steps
+            .iter()
+            .find(|step| step.target_file == "docs/inconsistencies-security.md")
+            .unwrap();
+        assert!(security.prompt.contains("list `**/*.pub`"));
+        assert!(security
+            .prompt
+            .contains("every file under a `.ssh/` directory"));
+        assert!(security.prompt.contains("never open them"));
+    }
+
+    #[test]
+    fn every_step_prompt_carries_the_date_and_no_unresolved_today() {
+        // Run O6: step 8 named its TD files 20250113 — "with today's date"
+        // matched none of the substitutions and the date was never given.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-03T01:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (index, step) in assemble_chained_steps(crate::models::AuditKind::Full)
+            .iter()
+            .enumerate()
+        {
+            let prompt = dated_step_prompt("", step.prompt, now);
+            assert!(
+                prompt.starts_with("Today's date is 2026-10-03 (YYYYMMDD: 20261003)."),
+                "step {}",
+                index + 1
+            );
+            assert!(!prompt.contains("YYYYMMDD=today"), "step {}", index + 1);
+        }
+    }
+
+    /// Extract every literal (non-wildcard) `{{UPPER_SNAKE}}` token a prompt
+    /// cites. `{{FOO_*}}` family references are intentionally excluded —
+    /// they name a class of rows the agent may add/remove freely (per
+    /// `PROMPT_PREAMBLE`'s "add or remove table rows" rule), not a single
+    /// token the template must carry verbatim.
+    fn cited_literal_tokens(prompt: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = prompt;
+        while let Some(start) = rest.find("{{") {
+            let after = &rest[start + 2..];
+            let Some(end) = after.find("}}") else {
+                break;
+            };
+            let inside = &after[..end];
+            let is_literal = !inside.is_empty()
+                && !inside.contains('*')
+                && inside
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+            if is_literal {
+                out.push(format!("{{{{{inside}}}}}"));
+            }
+            rest = &after[end + 2..];
+        }
+        out
+    }
+
+    #[test]
+    fn every_step_prompt_placeholder_citation_exists_in_its_template() {
+        // KT-843 DoD #4 — "chaque placeholder cité par un prompt d'audit
+        // existe dans le template". Generalizes
+        // `step1_named_placeholders_all_exist_in_the_agents_md_template` to
+        // every foundation step with a real shipped template: a prompt
+        // that tells the agent to "replace {{X}}" must cite a token the
+        // template it fills actually contains, or a weak model is pointed
+        // at a placeholder that doesn't exist and may skip the real one.
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        // Generic meta-language ("replace ALL {{PLACEHOLDERS}}") — every
+        // step's prompt uses it to mean "every placeholder in the file",
+        // not a literal token any template carries under that exact name.
+        const META_TOKEN: &str = "{{PLACEHOLDERS}}";
+
+        let mut checked_steps = 0;
+        for step in ANALYSIS_STEPS {
+            if step.target_file == "REVIEW" || step.target_file.is_empty() {
+                continue;
+            }
+            let tpl_path = workspace_root.join("templates").join(step.target_file);
+            if !tpl_path.is_file() {
+                continue;
+            }
+            let body = std::fs::read_to_string(&tpl_path)
+                .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+            checked_steps += 1;
+            for token in cited_literal_tokens(step.prompt) {
+                if token == META_TOKEN {
+                    continue;
+                }
+                assert!(
+                    body.contains(&token),
+                    "{}: prompt cites {token} but the template doesn't contain it",
+                    step.target_file
+                );
+            }
+        }
+        assert!(
+            checked_steps >= 7,
+            "expected every foundation step (1,3-9) to have a shipped template to check against, got {checked_steps}"
         );
     }
 
@@ -2296,11 +2754,7 @@ mod prompt_tests {
     }
 
     #[test]
-    fn phase3_template_check_only_with_tracker_mcp() {
-        // The "before pushing tickets, check issue templates" nudge is
-        // gated on `has_issue_tracker_mcp` because it only makes sense
-        // when we're actually going to push tickets. Without a tracker
-        // the nudge is noise.
+    fn phase3_ticket_offer_only_with_tracker_mcp() {
         let info = AuditInfo {
             files: vec![],
             todos: vec![],
@@ -2310,55 +2764,65 @@ mod prompt_tests {
             let with = build_validation_prompt(lang, &info, true, &[]);
             let without = build_validation_prompt(lang, &info, false, &[]);
             assert!(
-                with.contains(".github/ISSUE_TEMPLATE"),
-                "{} prompt with tracker MCP must contain the template check",
+                with.to_lowercase().contains("ticket"),
+                "{} prompt with tracker MCP must contain the ticket offer",
                 lang
             );
             assert!(
-                !without.contains(".github/ISSUE_TEMPLATE"),
-                "{} prompt WITHOUT tracker MCP must NOT contain the template check (noise)",
+                !without.to_lowercase().contains("ticket"),
+                "{} prompt without tracker MCP must not contain a ticket offer",
                 lang
             );
         }
     }
 
     #[test]
-    fn phase2_scans_all_three_marker_types_and_drives_to_resolution() {
-        // 0.8.3 FIX — pre-fix Phase 2 only mentioned `TODO: unknown`
-        // (the value the user could set), never scanned `TODO: verify`
-        // or `TODO: ask user`. Result: 26 verify markers from
-        // DOCROMS_WEB's testing-quality.md stayed in the docs forever,
-        // never converted to user questions. The new Phase 2 explicitly
-        // enumerates all 3 types AND tells the agent to grep + resolve.
+    fn phases2_and3_use_td_cards_with_high_priority_singles_and_batches_of_eight() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo {
                 files: vec![],
                 todos: vec![],
-                tech_debt_items: vec![],
+                tech_debt_items: vec![crate::models::TechDebtItem {
+                    id: "TD-20260928-example".into(),
+                    problem: "Example".into(),
+                    area: "Backend".into(),
+                    severity: "High".into(),
+                }],
             };
             let prompt = build_validation_prompt(lang, &info, false, &[]);
-            for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
+            for contract in [
+                "kronn-question",
+                "audit-td:<TD-ID>",
+                "audit-td-batch",
+                "`items`",
+                "`confirm`",
+                "`reject`",
+                "`accept_decision`",
+                "`defer`",
+            ] {
                 assert!(
-                    prompt.contains(marker),
-                    "{lang} Phase 2 must mention `{marker}` so the agent processes it"
+                    prompt.contains(contract),
+                    "{lang} validation prompt must contain `{contract}`"
                 );
             }
-            // The grep instruction is what makes the scan systematic.
             assert!(
-                prompt.contains("grep") || prompt.contains("MCP"),
-                "{lang} Phase 2 must instruct an enumeration step (grep / MCP)"
+                prompt.contains("8 `items`"),
+                "{lang} remaining TD batches must be capped at eight items"
+            );
+            let expected_summary = match lang {
+                "en" => "across Phases 2 and 3",
+                "es" => "entre las Fases 2 y 3",
+                _ => "entre les Phases 2 et 3",
+            };
+            assert!(
+                prompt.contains(expected_summary),
+                "{lang} TD summary must cover both card phases"
             );
         }
     }
 
     #[test]
-    fn phase3_is_bulk_first_not_one_by_one() {
-        // 0.8.3 — Phase 3 was rewritten to surface a compact table of
-        // ALL findings + a single bulk question (all-confirm / all-
-        // reject / discuss-selected). The "1-by-1" anti-pattern bored
-        // users into bailing out before reaching Critical items.
-        // Pin the rewrite so a future "drive-by simplification" can't
-        // silently revert it.
+    fn validation_prompt_has_no_legacy_bulk_first_contradiction() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo {
                 files: vec![],
@@ -2366,32 +2830,14 @@ mod prompt_tests {
                 tech_debt_items: vec![],
             };
             let prompt = build_validation_prompt(lang, &info, false, &[]);
-            // The new flow advertises itself with "BULK-FIRST" — a
-            // marker an unfamiliar editor will see + understand.
-            assert!(
-                prompt.contains("BULK-FIRST"),
-                "{} Phase 3 must use BULK-FIRST protocol (marker missing)",
-                lang
-            );
-            // Compact table header must be in the prompt so the
-            // agent renders the same shape across languages.
-            assert!(
-                prompt.contains("| ID | Severity"),
-                "{} Phase 3 must instruct the compact markdown table",
-                lang
-            );
-            // Three bulk options (a) / (b) / (c) are the contract.
             let lower = prompt.to_lowercase();
             assert!(
-                lower.contains("(a)") && lower.contains("(b)") && lower.contains("(c)"),
-                "{} Phase 3 must offer 3 bulk options (a)/(b)/(c)",
-                lang
-            );
-            // Default for non-selected TDs is `Confirmed by user`
-            // (per user UX decision in 0.8.3 session).
-            assert!(
-                prompt.contains("Confirmed by user"),
-                "{} Phase 3 must default non-selected TDs to `Confirmed by user`",
+                !lower.contains("bulk-first")
+                    && !lower.contains("tout valider")
+                    && !lower.contains("do not batch-confirm")
+                    && !lower.contains("no confirmar en lote")
+                    && !lower.contains("pas de confirmation en lot"),
+                "{} validation prompt must not retain the contradictory legacy protocol",
                 lang
             );
         }
@@ -2408,10 +2854,10 @@ mod prompt_tests {
             let prompt = build_validation_prompt(lang, &info, false, &[]);
             let lower = prompt.to_lowercase();
             assert!(
-                lower.contains("never modify")
-                    || lower.contains("ne modifie jamais")
-                    || lower.contains("nunca modifiques"),
-                "Validation prompt ({}) must forbid code modification",
+                lower.contains("modify only `docs/`")
+                    || lower.contains("modifica solo `docs/`")
+                    || lower.contains("modifie uniquement `docs/`"),
+                "Validation prompt ({}) must restrict changes to docs",
                 lang
             );
         }

@@ -297,6 +297,7 @@ describe('DiscussionPlanPanel', () => {
       recovery: null,
       usage: {
         duration_ms: 1000, in_app_tokens: 0, in_app_messages: 0,
+        in_app_breakdown: null, in_app_cost_unknown_reasons: [],
         in_app_cost_usd: null, in_app_cost_is_partial: false,
         cli_traffic_tokens: null, cli_billable_tokens: null,
         cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0,
@@ -373,7 +374,7 @@ describe('DiscussionPlanPanel', () => {
     mocks.execution.mockResolvedValue({
       lineage: { execution: { id: 'exec-1', status: 'Working', attempt_no: 1, worker_agent_type: 'Codex', worker_model: 'saved-override' }, task_reference: 'KT-1', task_title: 'Build the panel', parent_discussion_id: 'disc-1', sub_discussion_id: null, workspace_canonical_path: null },
       target_branch: 'main', definition_of_done: [], attempts: [], validation_runs: [], recovery: null,
-      usage: { duration_ms: 0, in_app_tokens: 0, in_app_messages: 0, in_app_cost_usd: null, in_app_cost_is_partial: false, cli_traffic_tokens: null, cli_billable_tokens: null, cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0 },
+      usage: { duration_ms: 0, in_app_tokens: 0, in_app_messages: 0, in_app_breakdown: null, in_app_cost_unknown_reasons: [], in_app_cost_usd: null, in_app_cost_is_partial: false, cli_traffic_tokens: null, cli_billable_tokens: null, cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0 },
     });
     mocks.catalog.mockResolvedValue({ targets: [] });
     render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
@@ -405,7 +406,7 @@ describe('DiscussionPlanPanel', () => {
     mocks.execution.mockResolvedValue({
       lineage: { execution: { id: 'exec-1', status: 'Working', attempt_no: 1, worker_agent_type: 'Codex', worker_model: 'saved-override' }, task_reference: 'KT-1', task_title: 'Build the panel', parent_discussion_id: 'disc-1', sub_discussion_id: null, workspace_canonical_path: null },
       target_branch: 'main', definition_of_done: [], attempts: [], validation_runs: [], recovery: null,
-      usage: { duration_ms: 0, in_app_tokens: 0, in_app_messages: 0, in_app_cost_usd: null, in_app_cost_is_partial: false, cli_traffic_tokens: null, cli_billable_tokens: null, cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0 },
+      usage: { duration_ms: 0, in_app_tokens: 0, in_app_messages: 0, in_app_breakdown: null, in_app_cost_unknown_reasons: [], in_app_cost_usd: null, in_app_cost_is_partial: false, cli_traffic_tokens: null, cli_billable_tokens: null, cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0 },
     });
     render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
 

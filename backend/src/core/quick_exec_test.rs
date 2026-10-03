@@ -611,3 +611,88 @@ fn filetime_set(path: &Path, when: std::time::SystemTime) {
     let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
     file.set_modified(when).unwrap();
 }
+
+// ── a persisted command line is checked when it is written ──────────
+
+#[test]
+fn a_command_line_written_for_a_shell_is_refused_with_the_form_that_runs() {
+    // KT-830/KT-828/KT-847: these were accepted at launch and refused only at
+    // integration, after the worker had delivered and the principal approved.
+    for (line, culprit) in [
+        ("cd frontend && npx tsc -b --pretty false", "`cd`"),
+        ("cd backend && CARGO_TARGET_DIR=/tmp/t cargo test", "`cd`"),
+        (
+            "CARGO_TARGET_DIR=/tmp/t cargo test",
+            "environment assignment",
+        ),
+        ("cargo test && cargo clippy", "`&&`"),
+        ("cargo test || true", "`||`"),
+        ("cargo test | tee out.txt", "pipe"),
+        ("cargo test; cargo clippy", "separator"),
+        ("cargo test > out.txt", "redirection"),
+        ("cargo test 2>&1", "redirection"),
+        ("cargo test &", "background"),
+        ("git log $(git rev-parse HEAD)", "substitution"),
+        ("npx tsc -b", "`npx`"),
+        ("bash -c true", "`bash`"),
+        ("./node_modules/.bin/tsc", "path"),
+    ] {
+        let rejection = check_command_line(line)
+            .expect_err(&format!("`{line}` was accepted but can never run"));
+        assert!(
+            rejection.0.contains(culprit),
+            "`{line}` was refused for the wrong reason (wanted {culprit}): {}",
+            rejection.0
+        );
+        assert!(
+            rejection.0.contains("pnpm --dir frontend exec")
+                && rejection.0.contains("cargo test --manifest-path"),
+            "`{line}`: the refusal must give the form that runs: {}",
+            rejection.0
+        );
+    }
+}
+
+#[test]
+fn a_command_line_the_runner_can_spawn_is_accepted() {
+    for line in [
+        "cargo test --manifest-path backend/Cargo.toml --target-dir /tmp/kronn-target",
+        "pnpm --dir frontend exec tsc -b --pretty false",
+        "rtk cargo clippy --all-targets",
+        "git diff --check",
+        "python3 scripts/check.py --flag=a<b",
+        "  true  ",
+    ] {
+        check_command_line(line)
+            .unwrap_or_else(|rejection| panic!("`{line}` was refused: {rejection}"));
+    }
+}
+
+#[test]
+fn an_empty_command_line_is_refused() {
+    assert!(check_command_line("").is_err());
+    assert!(check_command_line("   ").is_err());
+}
+
+#[test]
+fn what_check_command_line_accepts_is_what_validate_accepts() {
+    // The two must never drift: `check_command_line` is a promise about the run.
+    let root = tempfile::tempdir().unwrap();
+    let roots = vec![root.path().to_path_buf()];
+    for line in [
+        "cargo test --manifest-path backend/Cargo.toml",
+        "pnpm --dir frontend exec vitest run",
+        "curl https://example.com",
+        "sh -c true",
+        "/bin/true",
+    ] {
+        let mut words = line.split_whitespace();
+        let binary = words.next().unwrap();
+        let argv: Vec<&str> = words.collect();
+        assert_eq!(
+            check_command_line(line).is_ok(),
+            validate(&spec(binary, &argv, root.path()), &roots).is_ok(),
+            "`{line}`"
+        );
+    }
+}

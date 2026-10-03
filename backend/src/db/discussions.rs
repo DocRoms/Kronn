@@ -1847,6 +1847,7 @@ pub fn insert_native_agent_message_with_checkpoint(
             )?;
             let joined: Vec<crate::db::discussion_sessions::JoinedCliSession> = views
                 .iter()
+                .filter(|view| view.workflow_step.is_none())
                 .map(|v| crate::db::discussion_sessions::JoinedCliSession {
                     agent_type: v.agent_type.clone(),
                     ordinal: v.cli_ordinal,
@@ -1860,9 +1861,12 @@ pub fn insert_native_agent_message_with_checkpoint(
                         .iter()
                         .find(|view| view.id == pk)
                         .ok_or(rusqlite::Error::InvalidQuery)?;
-                    parse_agent_type(&view.agent_type).map(|agent| MessageTarget::cli(agent, pk))
+                    Ok(session_cli_target(&view.agent_type, pk))
                 })
                 .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect()
         } else {
             Vec::new()
         };
@@ -2308,7 +2312,11 @@ fn list_all_messages(
                             AND e.id <= s.id)
                    FROM message_cli_authors mca
                    JOIN discussion_sessions s ON s.id = mca.cli_session_id
-                  WHERE mca.message_id = messages.id) AS author_cli_ordinal
+                  WHERE mca.message_id = messages.id
+                    AND NOT EXISTS (
+                        SELECT 1 FROM workflow_step_room_sessions step_session
+                         WHERE step_session.session_pk = mca.cli_session_id
+                    )) AS author_cli_ordinal
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -2389,7 +2397,11 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                             AND e.id <= s.id)
                    FROM message_cli_authors mca
                    JOIN discussion_sessions s ON s.id = mca.cli_session_id
-                  WHERE mca.message_id = messages.id) AS author_cli_ordinal
+                  WHERE mca.message_id = messages.id
+                    AND NOT EXISTS (
+                        SELECT 1 FROM workflow_step_room_sessions step_session
+                         WHERE step_session.session_pk = mca.cli_session_id
+                    )) AS author_cli_ordinal
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -2896,14 +2908,10 @@ pub fn message_cli_author_target(
          WHERE mca.message_id = ?1
            AND m.discussion_id = ?2",
         params![message_id, discussion_id],
-        |row| {
-            Ok(MessageTarget::cli(
-                parse_agent_type(&row.get::<_, String>(0)?)?,
-                row.get(1)?,
-            ))
-        },
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
     )
     .optional()
+    .map(|author| author.and_then(|(agent, pk)| session_cli_target(&agent, pk)))
     .map_err(anyhow::Error::from)
 }
 
@@ -3777,6 +3785,23 @@ pub fn update_message_tokens(
     Ok(())
 }
 
+/// A joined session as a typed CLI target, or `None` when the bridge could not
+/// identify its provider (it joins as `Unknown`): such a peer cannot be addressed
+/// by type, and it must not make the whole room unreadable.
+pub(crate) fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<MessageTarget> {
+    match parse_agent_type(agent_type) {
+        Ok(agent) => Some(MessageTarget::cli(agent, session_pk)),
+        Err(_) => {
+            tracing::warn!(
+                session_pk,
+                agent_type,
+                "joined session has an unrecognised agent type; it is not addressable as a CLI target"
+            );
+            None
+        }
+    }
+}
+
 pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
@@ -4140,6 +4165,27 @@ pub fn get_context_files_for_prompt(
         })?
         .filter_map(|r| r.ok())
         .collect();
+    Ok(rows)
+}
+
+/// A discussion's attachments that were stored on disk, as `(filename,
+/// disk_path)` — the closed list an agent's file tools may read from, read-only
+/// (KT-946). Only this discussion's rows: another discussion's attachment is not
+/// reachable by guessing its path.
+pub fn list_attachment_files(
+    conn: &Connection,
+    discussion_id: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT filename, disk_path FROM context_files
+         WHERE discussion_id = ?1 AND disk_path IS NOT NULL AND disk_path != ''
+         ORDER BY created_at",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![discussion_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 

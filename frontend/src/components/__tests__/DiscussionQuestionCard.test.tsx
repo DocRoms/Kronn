@@ -59,6 +59,27 @@ const renderCard = (fenceIndex: number | undefined = 0, messageId = 'm-1') => re
 );
 
 describe('DiscussionQuestionCard', () => {
+  it('warns when the workflow step that asked has already finished', async () => {
+    questionsMock.mockResolvedValue({
+      questions: [question({
+        requester_workflow_step: {
+          run_id: 'run-1',
+          workflow_id: 'workflow-1',
+          workflow_name: 'Implementation',
+          step_key: 'orchestrate',
+          step_name: 'Orchestrate',
+          active: false,
+        },
+      })],
+      pending_count: 1,
+    });
+
+    renderCard();
+    expect(await screen.findByTestId('disc-question-finished-step-warning')).toHaveTextContent(
+      'disc.question.finishedStepWarning Implementation Orchestrate',
+    );
+  });
+
   it('refreshes an initially empty room when its first question message arrives', async () => {
     questionsMock.mockResolvedValueOnce({ questions: [], pending_count: 0 });
     const view = render(<DiscussionQuestionBanner discussionId="d-1" messageRevision="m-0" />);
@@ -157,6 +178,58 @@ describe('DiscussionQuestionCard', () => {
     expect(await screen.findByTestId('disc-question-answer')).toHaveTextContent('Romu - mac');
     // Answered, the form is gone: there is nothing left to decide here.
     expect(screen.queryByTestId('disc-question-send')).toBeNull();
+  });
+
+  it('requires one outcome per item in an audit batch card', async () => {
+    const items = [
+      { id: 'TD-1', label: 'First TD', description: null },
+      { id: 'TD-2', label: 'Second TD', description: null },
+    ];
+    const options = [
+      { id: 'confirm', label: 'Confirm', description: null },
+      { id: 'reject', label: 'Reject', description: null },
+      { id: 'accept_decision', label: 'Accepted decision', description: null },
+      { id: 'defer', label: 'Defer', description: null },
+    ];
+    questionsMock.mockResolvedValue({
+      questions: [question({ items, options, task_ref: 'audit-td-batch' })],
+      pending_count: 1,
+    });
+    answerMock.mockResolvedValue(question({
+      items,
+      options,
+      task_ref: 'audit-td-batch',
+      state: 'answered',
+      answer: {
+        selected_option_ids: [],
+        item_answers: [
+          { item_id: 'TD-1', selected_option_id: 'confirm' },
+          { item_id: 'TD-2', selected_option_id: 'defer' },
+        ],
+        text: null,
+        author_pseudo: 'Romu - mac',
+        answered_at: '2026-09-06T09:00:00Z',
+        message_id: 'm-2',
+      },
+    }));
+
+    renderCard();
+    await screen.findByTestId('disc-question-items');
+    fireEvent.click(screen.getByTestId('disc-question-item-TD-1-confirm'));
+    expect(screen.getByTestId('disc-question-send')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('disc-question-item-TD-2-defer'));
+    expect(screen.getByTestId('disc-question-send')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('disc-question-send'));
+
+    await waitFor(() => expect(answerMock).toHaveBeenCalledWith('d-1', 'q-1', expect.objectContaining({
+      selected_option_ids: [],
+      item_answers: [
+        { item_id: 'TD-1', selected_option_id: 'confirm' },
+        { item_id: 'TD-2', selected_option_id: 'defer' },
+      ],
+    })));
+    expect(await screen.findByTestId('disc-question-answer')).toHaveTextContent('First TD: Confirm');
+    expect(screen.getByTestId('disc-question-answer')).toHaveTextContent('Second TD: Defer');
   });
 
   /// Free text is always offered, options or not — the right answer is

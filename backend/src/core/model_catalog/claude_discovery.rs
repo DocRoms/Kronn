@@ -21,6 +21,10 @@ struct ModelInfo {
     value: String,
     display_name: String,
     #[serde(default)]
+    resolved_model: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
     supported_effort_levels: Vec<String>,
 }
 
@@ -47,6 +51,14 @@ fn parse_models(value: Value) -> DiscoveryOutcome {
         || models.iter().any(|model| {
             !printable(&model.value, 256)
                 || !printable(&model.display_name, 256)
+                || model
+                    .resolved_model
+                    .as_deref()
+                    .is_some_and(|value| !printable(value, 256))
+                || model
+                    .description
+                    .as_deref()
+                    .is_some_and(|value| !printable(value, 4096))
                 || !identities.insert(model.value.as_str())
                 || model.supported_effort_levels.len() > 16
                 || model
@@ -63,6 +75,8 @@ fn parse_models(value: Value) -> DiscoveryOutcome {
             .map(|model| DiscoveredModel {
                 model_id: model.value,
                 display_name: model.display_name,
+                resolved_model: model.resolved_model,
+                description: model.description,
                 capabilities: vec!["chat".into()],
                 reasoning_modes: model.supported_effort_levels,
                 default_reasoning_mode: None,
@@ -257,22 +271,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn claude_catalog_keeps_exact_fable_identifier_and_reported_efforts() {
+    fn claude_2_1_283_catalog_keeps_resolved_identity_description_and_efforts() {
         let DiscoveryOutcome::Live(models) = parse_models(json!({"models":[
+            {"value":"default","displayName":"Default","description":"Recommended model","resolvedModel":"claude-opus-5-5","supportedEffortLevels":["low","medium","high","xhigh","max"]},
+            {"value":"opus","displayName":"Opus","description":"Most capable for complex work","resolvedModel":"claude-opus-5-5","supportedEffortLevels":["low","medium","high","xhigh","max"]},
             {"value":"claude-fable-5-1[1m]","resolvedModel":"claude-fable-5-1","displayName":"Fable","supportedEffortLevels":["low","medium","high","xhigh","max"]},
+            {"value":"sonnet","displayName":"Sonnet"},
             {"value":"haiku","displayName":"Haiku"}
         ]})) else {
-            panic!("the official initialization models must be discovered");
+            panic!("the Claude Code 2.1.283 initialization models must be discovered");
         };
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].model_id, "claude-fable-5-1[1m]");
-        assert_eq!(models[0].display_name, "Fable");
+        assert_eq!(models.len(), 5);
+        assert_eq!(models[0].model_id, "default");
+        assert_eq!(models[0].resolved_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(models[0].description.as_deref(), Some("Recommended model"));
+        assert_eq!(models[1].model_id, "opus");
+        assert_eq!(models[1].resolved_model, models[0].resolved_model);
+        assert_eq!(models[2].model_id, "claude-fable-5-1[1m]");
+        assert_eq!(models[2].display_name, "Fable");
         assert_eq!(
-            models[0].reasoning_modes,
+            models[2].reasoning_modes,
             ["low", "medium", "high", "xhigh", "max"]
         );
-        assert_eq!(models[0].default_reasoning_mode, None);
-        assert!(models[1].reasoning_modes.is_empty());
+        assert_eq!(models[2].default_reasoning_mode, None);
+        assert!(models[4].reasoning_modes.is_empty());
     }
 
     #[test]
@@ -296,6 +318,8 @@ mod tests {
             json!({"models":[{"value":"x\u{0}","displayName":"bad"}]}),
             json!({"models":[{"value":"sonnet","displayName":"Sonnet"},{"value":"sonnet","displayName":"duplicate"}]}),
             json!({"models":[{"value":"sonnet","displayName":"Sonnet","supportedEffortLevels":[1]}]}),
+            json!({"models":[{"value":"sonnet","displayName":"Sonnet","resolvedModel":""}]}),
+            json!({"models":[{"value":"sonnet","displayName":"Sonnet","description":"bad\u{0}"}]}),
         ] {
             assert!(matches!(
                 parse_models(value),

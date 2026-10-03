@@ -1,4 +1,5 @@
 import { Fragment, useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import type { ReactNode } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { DiscussionWeightBadge } from './DiscussionWeightBadge';
@@ -6,8 +7,10 @@ import { boundedWeightIds, useDiscussionWeights } from '../lib/useDiscussionWeig
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
 import { CollectionFavoritesHeader } from './CollectionFavoritesHeader';
+import { CollectionSidebarFooter } from './CollectionSidebarFooter';
 import { CopyIdPill } from './CopyIdPill';
 import { CollectionShell, CollectionSidebarCollapseButton } from './CollectionShell';
+import { CollectionProjectTree } from './CollectionProjectTree';
 import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussionLink, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
@@ -219,38 +222,13 @@ export function DiscussionSidebar({
   // matches because the user is explicitly hunting.
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [expandedSmartSections, setExpandedSmartSections] = useState<Set<string>>(() => new Set());
-  const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
-  const [bulkActionBusy, setBulkActionBusy] = useState(false);
-  const bulkActionInFlightRef = useRef(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const importInFlightRef = useRef(false);
   const [importing, setImporting] = useState(false);
-  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
-  const headerMenuRef = useRef<HTMLDivElement>(null);
-  const headerMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const [openBatchMenuRunId, setOpenBatchMenuRunId] = useState<string | null>(null);
   const batchMenuRef = useRef<HTMLDivElement>(null);
   const batchMenuTriggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
-
-  useEffect(() => {
-    if (!headerMenuOpen) return;
-    headerMenuRef.current?.querySelector<HTMLButtonElement>('.disc-sidebar-header-menu > button')?.focus();
-    const closeFromOutside = (event: PointerEvent) => {
-      if (!headerMenuRef.current?.contains(event.target as Node)) setHeaderMenuOpen(false);
-    };
-    const closeFromKeyboard = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setHeaderMenuOpen(false);
-      requestAnimationFrame(() => headerMenuTriggerRef.current?.focus());
-    };
-    window.addEventListener('pointerdown', closeFromOutside);
-    window.addEventListener('keydown', closeFromKeyboard);
-    return () => {
-      window.removeEventListener('pointerdown', closeFromOutside);
-      window.removeEventListener('keydown', closeFromKeyboard);
-    };
-  }, [headerMenuOpen]);
 
   useEffect(() => {
     if (!openBatchMenuRunId) return;
@@ -271,56 +249,6 @@ export function DiscussionSidebar({
       window.removeEventListener('keydown', closeFromKeyboard);
     };
   }, [openBatchMenuRunId]);
-
-  const toggleSelection = useCallback((discId: string) => {
-    setSelectedIds(previous => {
-      const next = new Set(previous);
-      if (next.has(discId)) next.delete(discId);
-      else next.add(discId);
-      return next;
-    });
-  }, [setSelectedIds]);
-
-  const leaveSelectionMode = useCallback(() => {
-    setSelectionMode(false);
-    setSelectedIds(new Set());
-  }, [setSelectedIds, setSelectionMode]);
-
-  const runBulkAction = async (kind: 'archive' | 'delete') => {
-    const action = kind === 'archive' ? onBulkArchive : onBulkDelete;
-    if (!action || selectedIds.size === 0 || bulkActionInFlightRef.current) return;
-    const confirmKey = kind === 'archive'
-      ? 'disc.bulk.confirmArchive'
-      : 'disc.bulk.confirmDelete';
-    if (!confirm(t(confirmKey, selectedIds.size))) return;
-
-    bulkActionInFlightRef.current = true;
-    setBulkActionBusy(true);
-    try {
-      await action([...selectedIds]);
-      leaveSelectionMode();
-    } catch {
-      toast(t('disc.bulk.error'), 'error');
-    } finally {
-      bulkActionInFlightRef.current = false;
-      setBulkActionBusy(false);
-    }
-  };
-
-  const compareSelected = async () => {
-    if (!onCompareSelected || selectedIds.size < 2 || bulkActionInFlightRef.current) return;
-    bulkActionInFlightRef.current = true;
-    setBulkActionBusy(true);
-    try {
-      await onCompareSelected([...selectedIds]);
-      leaveSelectionMode();
-    } catch {
-      toast(t('disc.compare.selectionError'), 'error');
-    } finally {
-      bulkActionInFlightRef.current = false;
-      setBulkActionBusy(false);
-    }
-  };
 
   // 0.8.4 (#294) — cross-agent source bindings. Fetched once at mount
   // + on each disc list change so newly-imported discs get the badge
@@ -441,21 +369,7 @@ export function DiscussionSidebar({
   };
 
   // ─── Derived data ─────────────────────────────────────────────────────
-  const { activeDiscByProject, archivedDiscussions } = useMemo(() => {
-    const activeMap = new Map<string | null, Discussion[]>();
-    const archived: Discussion[] = [];
-    for (const d of discussions) {
-      if (d.archived) {
-        archived.push(d);
-      } else {
-        const key = d.project_id ?? null;
-        const list = activeMap.get(key) ?? [];
-        list.push(d);
-        activeMap.set(key, list);
-      }
-    }
-    return { activeDiscByProject: activeMap, archivedDiscussions: archived };
-  }, [discussions]);
+  const archivedDiscussions = useMemo(() => discussions.filter(d => d.archived), [discussions]);
 
   // 0.8.3 (#277) — total unseen count across ALL discussions
   // (including archived + batch children) so we know whether to
@@ -568,10 +482,20 @@ export function DiscussionSidebar({
   const { enabled: weightEnabled, weights, stateFor: weightStateFor } = useDiscussionWeights(weightIds);
   // Per-row state: a discussion outside the bounded batch reports
   // `unmeasured`, so it never renders a zero it was never measured for.
-  const weightBadgeFor = (id: string) =>
-    weightEnabled
-      ? <DiscussionWeightBadge weight={weights[id]} state={weightStateFor(id)} t={t} />
-      : undefined;
+  // Same element per row until the weights change: a fresh element on every
+  // render would defeat the card memo and re-render the whole list per click.
+  const weightBadgeFor = useMemo(() => {
+    const badges = new Map<string, ReactNode>();
+    return (id: string) => {
+      if (!weightEnabled) return undefined;
+      let badge = badges.get(id);
+      if (!badge) {
+        badge = <DiscussionWeightBadge weight={weights[id]} state={weightStateFor(id)} t={t} />;
+        badges.set(id, badge);
+      }
+      return badge;
+    };
+  }, [weightEnabled, weights, weightStateFor, t]);
   const executionChildrenByParent = new Map<string, ExecutionDiscussionLink[]>();
   const nestedExecutionChildIds = new Set<string>();
   for (const link of executionLinks) {
@@ -606,43 +530,16 @@ export function DiscussionSidebar({
     if (disc.id === activeId) return sum;
     return sum + Math.max(0, unseenBasis(disc) - (lastSeenMsgCount[disc.id] ?? 0));
   }, 0);
-  // Smart shortcuts earn their duplication only when the canonical tree is
-  // genuinely large. On a small workspace, Projects/General already fits on
-  // screen; rendering the same rows twice adds noise and duplicate keyboard
-  // targets. Selection mode also stays canonical so one discussion maps to one
-  // checkbox.
-  const smartSectionsEnabled =
-    !selectionMode && discussions.filter(disc => !disc.archived).length >= 20;
-  const followUpDiscussions = (smartSectionsEnabled ? smartCandidates : [])
-    .filter((disc) => {
-      if (isRunningDisc(disc) || isQueuedDisc(disc)) return true;
-      // A favorite has its own stable shortcut section. Keep it out of the
-      // unread catch-all so Favoris does not disappear on a fresh workspace
-      // where every old discussion is technically unseen.
-      if (disc.pinned) return false;
-      if (disc.id === activeId) return false;
-      return unseenBasis(disc) > (lastSeenMsgCount[disc.id] ?? 0);
-    })
-    .sort(byLiveThenRecent);
-  const followUpIds = new Set(followUpDiscussions.map(disc => disc.id));
-  // Favoris is a shortcut, not the tree. `smartCandidates` drops execution
-  // children so the canonical tree does not render them twice — correct there,
-  // but it also made a pinned sub-discussion impossible to reach from Favoris.
-  // Pinning one is an explicit request for a direct route to it, so the
-  // shortcut reads from a base that keeps them.
-  const favoriteCandidates = selectionMode
-    ? []
-    : discussions.filter(disc => !disc.archived && matchesFilters(disc));
-  const favoriteDiscussions = favoriteCandidates
-    .filter(disc => disc.pinned && !followUpIds.has(disc.id))
-    .sort(byLiveThenRecent);
-  const favoriteIds = new Set(favoriteDiscussions.map(disc => disc.id));
-  const recentDiscussions = (smartSectionsEnabled ? smartCandidates : [])
-    .filter(disc => !followUpIds.has(disc.id) && !favoriteIds.has(disc.id))
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-    .slice(0, 10);
+  // A single small context threaded through every row-rendering helper below
+  // instead of reading component-body state directly: the shell now owns
+  // "is bulk selection active" internally, exposed only inside `renderList`.
+  interface DiscSelectionCtx {
+    canMultiSelect: boolean;
+    isMultiSelected: (disc: Discussion) => boolean;
+    toggleMultiSelection: (id: string) => void;
+  }
 
-  const renderSmartRows = (rows: Discussion[], keyPrefix: string) => rows.map(disc => (
+  const renderSmartRows = (rows: Discussion[], keyPrefix: string, sel: DiscSelectionCtx) => rows.map(disc => (
     <SwipeableDiscItem
       key={`${keyPrefix}-${disc.id}`}
       disc={disc}
@@ -652,9 +549,9 @@ export function DiscussionSidebar({
       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
       isSending={isRunningDisc(disc)}
       isQueued={isQueuedDisc(disc)}
-      selectionMode={selectionMode}
-      isSelected={selectedIds.has(disc.id)}
-      onToggleSelection={toggleSelection}
+      selectionMode={sel.canMultiSelect}
+      isSelected={sel.isMultiSelected(disc)}
+      onToggleSelection={sel.toggleMultiSelection}
       onSelect={onSelect}
       onArchive={onArchive}
       onDelete={onDelete}
@@ -668,7 +565,7 @@ export function DiscussionSidebar({
     />
   ));
 
-  const renderCanonicalRow = (disc: Discussion) => {
+  const renderCanonicalRow = (disc: Discussion, sel: DiscSelectionCtx) => {
     const children = (executionChildrenByParent.get(disc.id) ?? [])
       .filter(link => {
         const child = discussionById.get(link.sub_discussion_id);
@@ -695,9 +592,9 @@ export function DiscussionSidebar({
           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
           isSending={isRunningDisc(disc)}
           isQueued={isQueuedDisc(disc)}
-          selectionMode={selectionMode}
-          isSelected={selectedIds.has(disc.id)}
-          onToggleSelection={toggleSelection}
+          selectionMode={sel.canMultiSelect}
+          isSelected={sel.isMultiSelected(disc)}
+          onToggleSelection={sel.toggleMultiSelection}
           onSelect={onSelect}
           onArchive={onArchive}
           onDelete={onDelete}
@@ -739,9 +636,9 @@ export function DiscussionSidebar({
                     lastSeenCount={lastSeenMsgCount[child.id] ?? 0}
                     isSending={isRunningDisc(child)}
                     isQueued={isQueuedDisc(child)}
-                    selectionMode={selectionMode}
-                    isSelected={selectedIds.has(child.id)}
-                    onToggleSelection={toggleSelection}
+                    selectionMode={sel.canMultiSelect}
+                    isSelected={sel.isMultiSelected(child)}
+                    onToggleSelection={sel.toggleMultiSelection}
                     onSelect={onSelect}
                     onArchive={onArchive}
                     onDelete={onDelete}
@@ -760,13 +657,13 @@ export function DiscussionSidebar({
       </Fragment>
     );
   };
-  const renderSmartSectionRows = (rows: Discussion[], keyPrefix: string) => {
+  const renderSmartSectionRows = (rows: Discussion[], keyPrefix: string, sel: DiscSelectionCtx) => {
     const expanded = expandedSmartSections.has(keyPrefix);
     const visible = expanded ? rows : rows.slice(0, SMART_SECTION_LIMIT);
     const hiddenCount = rows.length - visible.length;
     return (
       <>
-        {renderSmartRows(visible, keyPrefix)}
+        {renderSmartRows(visible, keyPrefix, sel)}
         {hiddenCount > 0 && (
           <button
             type="button"
@@ -784,683 +681,12 @@ export function DiscussionSidebar({
     );
   };
 
-  return (
-    <CollectionShell<Discussion>
-      ariaLabel="Discussions"
-      items={discussions}
-      getId={disc => disc.id}
-      getLabel={disc => disc.title}
-      filterQuery={false}
-      persistence={{
-        query: discSearchFilter,
-        onQueryChange: setDiscSearchFilter,
-        favoritesOnly: false,
-        onFavoritesOnlyChange: () => {},
-      }}
-      selectedId={activeId}
-      onSelect={id => onSelect(id, 0)}
-      selectedIds={selectedIds}
-      onSelectedIdsChange={setSelectedIds}
-      sidebarOnly
-      sidebarClassName="disc-sidebar"
-      isMobile={isMobile}
-      globalSearchShortcut
-      shortcutsEnabled={!globalSearchOpen}
-      showControls={false}
-      onSearchSubmit={onOpenGlobalSearch}
-      labels={{
-        search: t('disc.globalSearch.placeholder'),
-        favorites: t('disc.favorites'),
-        clearFilters: t('disc.searchClear'),
-        moreActions: t('disc.sidebar.moreActions'),
-        openCollection: t('disc.openSidebar'),
-        closeCollection: t('disc.closeSidebar'),
-        selectItem: t('disc.select'),
-      }}
-      slots={{
-        renderDetail: () => null,
-        beforeSidebarHeader: <>
-      <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
-        <span className="disc-sidebar-header-title">
-          {selectionMode ? (
-            t('disc.bulk.selected', selectedIds.size)
-          ) : (
-            <>
-              Discussions
-              <span className="disc-sidebar-header-count">
-                {' · '}{discussions.length}
-              </span>
-            </>
-          )}
-        </span>
-        <div className="disc-sidebar-header-actions">
-          {selectionMode ? (
-            <>
-              {selectedIds.size >= 2 && selectedIds.size <= MAX_MOSAIC_DISCUSSIONS && !bulkActionBusy ? (
-                <a className="disc-icon-btn" href={discussionMosaicUrl([...selectedIds])}
-                  target="_blank" rel="noopener noreferrer"
-                  aria-label={t('disc.mosaic.open')} title={t('disc.mosaic.open')}>
-                  <LayoutGrid size={14} />
-                </a>
-              ) : (
-                <button type="button" className="disc-icon-btn" disabled
-                  aria-label={t('disc.mosaic.open')}
-                  title={t('disc.mosaic.selection', MAX_MOSAIC_DISCUSSIONS)}>
-                  <LayoutGrid size={14} />
-                </button>
-              )}
-              <button
-                type="button"
-                className="disc-icon-btn"
-                onClick={() => void compareSelected()}
-                disabled={selectedIds.size < 2 || bulkActionBusy || !onCompareSelected}
-                aria-label={t('disc.bulk.compare')}
-                title={selectedIds.size < 2 ? t('disc.compare.selectAtLeastTwo') : t('disc.bulk.compare')}
-              >
-                <Columns3 size={14} />
-              </button>
-              <button
-                type="button"
-                className="disc-icon-btn"
-                onClick={() => void runBulkAction('archive')}
-                disabled={selectedIds.size === 0 || bulkActionBusy || !onBulkArchive}
-                aria-label={t('disc.bulk.archive')}
-                title={t('disc.bulk.archive')}
-              >
-                {bulkActionBusy ? <Loader2 size={14} className="spin" /> : <Archive size={14} />}
-              </button>
-              <button
-                type="button"
-                className="disc-icon-btn disc-bulk-delete-btn"
-                onClick={() => void runBulkAction('delete')}
-                disabled={selectedIds.size === 0 || bulkActionBusy || !onBulkDelete}
-                aria-label={t('disc.bulk.delete')}
-                title={t('disc.bulk.delete')}
-              >
-                <Trash2 size={14} />
-              </button>
-              <button
-                type="button"
-                className="disc-icon-btn"
-                onClick={leaveSelectionMode}
-                disabled={bulkActionBusy}
-                aria-label={t('disc.bulk.cancel')}
-                title={t('disc.bulk.cancel')}
-              >
-                <X size={14} />
-              </button>
-            </>
-          ) : (
-            <>
-              {onImportDiscussion && (
-                <input
-                  ref={importInputRef}
-                  type="file"
-                  accept=".json,.kronn-discussion.json,application/json"
-                  className="disc-sidebar-visually-hidden"
-                  tabIndex={-1}
-                  aria-hidden="true"
-                  onChange={async event => {
-                    const file = event.target.files?.[0];
-                    event.target.value = '';
-                    if (!file || importInFlightRef.current) return;
-                    importInFlightRef.current = true;
-                    setImporting(true);
-                    try {
-                      await onImportDiscussion(file);
-                    } catch (error) {
-                      toast(t('disc.portability.importError', String(error)), 'error');
-                    } finally {
-                      importInFlightRef.current = false;
-                      setImporting(false);
-                    }
-                  }}
-                />
-              )}
-              <button
-                type="button"
-                className="disc-icon-btn disc-sidebar-new-btn"
-                data-tour-id="new-disc-btn"
-                onClick={onNewDiscussion}
-                aria-label={t('disc.new')}
-                title={t('disc.new')}
-              >
-                <Plus size={16} />
-                <span className="disc-sidebar-visually-hidden">{t('disc.new')}</span>
-              </button>
-              <div className="disc-sidebar-header-menu-wrap" ref={headerMenuRef}>
-                <button
-                  type="button"
-                  className="disc-icon-btn"
-                  ref={headerMenuTriggerRef}
-                  onClick={() => setHeaderMenuOpen(open => !open)}
-                  aria-label={t('disc.sidebar.moreActions')}
-                  aria-expanded={headerMenuOpen}
-                  aria-controls="disc-sidebar-header-actions"
-                  title={t('disc.sidebar.moreActions')}
-                >
-                  <MoreHorizontal size={16} />
-                </button>
-                {headerMenuOpen && (
-                  <div
-                    id="disc-sidebar-header-actions"
-                    className="disc-sidebar-header-menu"
-                    role="group"
-                    aria-label={t('disc.sidebar.moreActions')}
-                  >
-                    {onMarkAllRead && totalUnseenAll > 0 && (
-                      <button
-                        type="button"
-                        aria-label={t('disc.markAllRead')}
-                        title={t('disc.markAllReadTooltip', totalUnseenAll)}
-                        onClick={() => {
-                          onMarkAllRead();
-                          setHeaderMenuOpen(false);
-                        }}
-                      >
-                        <CheckCheck size={13} />
-                        <span>{t('disc.markAllRead')}</span>
-                        <strong>{totalUnseenAll}</strong>
-                      </button>
-                    )}
-                    {(onBulkArchive || onBulkDelete) && discussions.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSelectionMode(true);
-                          setHeaderMenuOpen(false);
-                        }}
-                      >
-                        <ListChecks size={13} />
-                        <span>{t('disc.bulk.start')}</span>
-                      </button>
-                    )}
-                    {onImportDiscussion && (
-                      <button
-                        type="button"
-                        disabled={importing}
-                        onClick={() => {
-                          importInputRef.current?.click();
-                          setHeaderMenuOpen(false);
-                        }}
-                      >
-                        {importing ? <Loader2 size={13} className="spin" /> : <Upload size={13} />}
-                        <span>{t('disc.portability.import')}</span>
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-              {isMobile && (
-                <CollectionSidebarCollapseButton
-                  isMobile
-                  label={t('disc.closeSidebar')}
-                  onCollapse={onClose}
-                />
-              )}
-              {!isMobile && onCollapse && (
-                <CollectionSidebarCollapseButton
-                  label={t('disc.closeSidebar')}
-                  onCollapse={onCollapse}
-                />
-              )}
-            </>
-          )}
-        </div>
-      </div>
-        </>,
+  const renderNoProjectRows = (groupItems: Discussion[], sel: DiscSelectionCtx) => groupItems
+    .filter(disc => !nestedExecutionChildIds.has(disc.id))
+    .sort(byLiveThenRecent)
+    .map(disc => renderCanonicalRow(disc, sel));
 
-        renderSearch: ({ value, inputId, onChange, onSubmit, clear }) => <>
-      {globalSearchOpen && onCloseGlobalSearch && onOpenGlobalSearchResult && (
-        <GlobalSearchPanel
-          projects={projects}
-          authors={globalSearchAuthors}
-          initialQuery={discSearchFilter}
-          onQueryChange={setDiscSearchFilter}
-          onOpenResult={onOpenGlobalSearchResult}
-          onClose={() => {
-            setDiscSearchFilter('');
-            onCloseGlobalSearch();
-          }}
-          t={t}
-          lang={lang}
-        />
-      )}
-
-      {/* KT-70 / KT-90 — one search entry point. Enter runs the backend query
-          over titles, ids and every message; Filtres opens the same result
-          panel with its advanced controls. The local tree never remounts on
-          each keystroke. */}
-      <div className="disc-search-wrap" hidden={globalSearchOpen}>
-        <div className="disc-search-controls">
-          <div className="disc-search-box">
-            <Search size={13} className="disc-search-icon" />
-            <input
-              id={inputId}
-              type="text"
-              className="disc-search-input"
-              value={value}
-              onChange={e => onChange(e.target.value)}
-              placeholder={t('disc.globalSearch.placeholder')}
-              aria-label={t('disc.globalSearch.placeholder')}
-              aria-keyshortcuts="/"
-              onKeyDown={event => {
-                if (event.key === 'Enter' && onSubmit) {
-                  event.preventDefault();
-                  onSubmit();
-                }
-              }}
-            />
-            {discSearchFilter && (
-              <button
-                type="button"
-                onClick={clear}
-                className="disc-search-clear"
-                aria-label={t('disc.searchClear')}
-                title={t('disc.searchClear')}
-              >
-                <X size={10} />
-              </button>
-            )}
-          </div>
-          {onOpenGlobalSearch && (
-            <button
-              type="button"
-              className="disc-search-filter-btn"
-              onClick={onOpenGlobalSearch}
-              aria-label={t('disc.globalSearch.open')}
-              title={t('disc.globalSearch.open')}
-              data-testid="disc-open-global-search"
-              data-tour-id="global-search-open"
-              data-active={sourceFilter ? 'true' : undefined}
-            >
-              <Filter size={14} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        {/* 0.8.4 (#294) — cross-agent source filter. Hidden when no
-           imported discs exist (the dropdown would be pointless).
-           Filters the disc list to discs whose source_agent matches. */}
-        {sourceAgentsAvailable.length > 0 && (
-          <select
-            data-testid="disc-source-filter"
-            className="disc-source-filter-select"
-            value={sourceFilter}
-            onChange={e => setSourceFilter(e.target.value)}
-            // A title alone is not an accessible name (axe `label-title-only`).
-            aria-label={t('disc.source.filterTooltip')}
-            title={t('disc.source.filterTooltip')}
-            style={{
-              marginTop: 4, fontSize: 11, padding: '2px 4px',
-              background: 'var(--kr-bg-elevated, transparent)',
-              border: '1px solid var(--kr-border-subtle, rgba(255,255,255,0.1))',
-              borderRadius: 4, color: 'inherit',
-            }}
-          >
-            <option value="">{t('disc.source.filterAll')}</option>
-            {sourceAgentsAvailable.map(agent => (
-              <option key={agent} value={agent}>{t('disc.source.filterFrom', agent)}</option>
-            ))}
-          </select>
-        )}
-      </div>
-        </>,
-
-        renderList: () => <div className="disc-sidebar-list" hidden={globalSearchOpen}>
-        {followUpDiscussions.length > 0 && (() => {
-          const isCollapsed = collapsedGroups.has('__follow_up__');
-          return (
-            <div
-              className="disc-sidebar-section disc-sidebar-follow-up"
-              data-expanded={!isCollapsed}
-            >
-              <button
-                type="button"
-                className="disc-group-btn"
-                data-no-border="true"
-                onClick={() => onToggleGroup('__follow_up__')}
-                aria-expanded={!isCollapsed}
-              >
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
-                <CircleDot size={10} />
-                <span>{t('disc.followUp')}</span>
-                <span className="disc-group-unseen">{followUpDiscussions.length}</span>
-              </button>
-              {!isCollapsed && renderSmartSectionRows(followUpDiscussions, 'follow')}
-            </div>
-          );
-        })()}
-
-        {recentDiscussions.length > 0 && (() => {
-          const isCollapsed = collapsedGroups.has('__recent__');
-          return (
-            <div
-              className="disc-sidebar-section disc-sidebar-recent"
-              data-expanded={!isCollapsed}
-            >
-              <button
-                type="button"
-                className="disc-group-btn"
-                data-no-border="true"
-                onClick={() => onToggleGroup('__recent__')}
-                aria-expanded={!isCollapsed}
-              >
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
-                <Clock3 size={10} />
-                <span>{t('disc.recent')}</span>
-                <span className="disc-group-count">{recentDiscussions.length}</span>
-              </button>
-              {!isCollapsed && renderSmartSectionRows(recentDiscussions, 'recent')}
-            </div>
-          );
-        })()}
-
-        {/* Contacts remain immediately reachable but no longer consume the
-            first screen permanently on large workspaces. The same persisted
-            group-state mechanism as projects/favorites keeps the interaction
-            predictable across reloads. Add/join actions are siblings of the
-            toggle (never nested interactive controls). */}
-        <div
-          className="disc-sidebar-section disc-sidebar-contacts"
-          data-expanded={!contactsCollapsed}
-        >
-          <div className="disc-contacts-header">
-            <button
-              type="button"
-              className="disc-group-btn disc-contacts-toggle"
-              data-no-border="true"
-              onClick={() => onToggleGroup(contactsGroupKey)}
-              aria-expanded={!contactsCollapsed}
-            >
-              <ChevronRight size={10} className="disc-chevron" data-expanded={!contactsCollapsed} />
-              <Users2 size={10} />
-              <span>{t('contacts.title')}</span>
-              {contacts.length > 0 && (
-                <span className="disc-group-count">
-                  {onlineContactCount}/{contacts.length}
-                </span>
-              )}
-            </button>
-            <span className="disc-contacts-meta">
-              {contacts.length > 0 && (
-                <span
-                  className="disc-ws-dot"
-                  role="status"
-                  data-connected={wsConnected}
-                  title={wsConnected ? t('contacts.wsConnected') : t('contacts.wsDisconnected')}
-                  aria-label={wsConnected ? t('contacts.wsConnected') : t('contacts.wsDisconnected')}
-                />
-              )}
-              {onJoinByCode && (
-                <button
-                  type="button"
-                  onClick={() => { setShowJoin(p => !p); setShowAddContact(false); }}
-                  className="disc-contact-add-btn"
-                  title={t('contacts.joinByCode')}
-                  aria-label={t('contacts.joinByCode')}
-                >
-                  <LogIn size={12} />
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => { setShowAddContact(p => !p); setShowJoin(false); }}
-                className="disc-contact-add-btn"
-                title={t('contacts.add')}
-                aria-label={t('contacts.add')}
-              >
-                <Plus size={12} />
-              </button>
-            </span>
-          </div>
-          {!contactsCollapsed && (
-            <>
-          {/* Join a discussion by code — unified local/cross-instance join */}
-          {showJoin && (
-            <div className="disc-contact-add-form">
-              <input
-                type="text"
-                className="disc-contact-add-input"
-                value={joinCode}
-                onChange={e => setJoinCode(e.target.value)}
-                placeholder={t('contacts.joinPlaceholder')}
-                disabled={joining}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && joinCode.trim()) {
-                    handleJoin();
-                  }
-                }}
-              />
-              <button
-                className="disc-contact-add-submit"
-                onClick={handleJoin}
-                disabled={joining || !joinCode.trim()}
-              >
-                {joining
-                  ? <span className="disc-join-resolving"><Loader2 size={11} className="disc-join-spin" /> {t('contacts.joinResolving')}</span>
-                  : t('contacts.joinByCode')}
-              </button>
-            </div>
-          )}
-          {/* Add contact inline form */}
-          {showAddContact && (
-            <div className="disc-contact-add-form">
-              <input
-                type="text"
-                className="disc-contact-add-input"
-                value={addContactCode}
-                onChange={e => setAddContactCode(e.target.value)}
-                placeholder={t('contacts.addPlaceholder')}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && addContactCode.trim()) {
-                    handleContactAdd();
-                  }
-                }}
-              />
-              <button
-                className="disc-contact-add-submit"
-                onClick={handleContactAdd}
-              >
-                {t('contacts.add')}
-              </button>
-            </div>
-          )}
-          {/* Contact list — click a row to open a 1:1 chat with that contact.
-              The identity is its own <button> rather than a clickable row: the
-              delete button must not sit inside an interactive ancestor (axe
-              `nested-interactive`), and a real button gives keyboard activation
-              that the previous `div role="button"` only pretended to offer. */}
-          {contacts.map(c => {
-            const identity = (
-              <>
-                <span className="disc-contact-dot" data-online={contactsOnline[c.id] ?? false} />
-                {c.avatar_email ? (
-                  <img src={gravatarUrl(c.avatar_email, 20)} alt="" className="disc-contact-avatar" />
-                ) : (
-                  <span className="disc-contact-initials">
-                    {c.pseudo.slice(0, 2).toUpperCase()}
-                  </span>
-                )}
-                <span className="disc-contact-name">{c.pseudo}</span>
-                {c.status === 'pending' && !contactsOnline[c.id] && (
-                  <span className="disc-contact-pending" title="Contact injoignable — vérifiez que les deux machines sont sur le même réseau">{t('contacts.pending')}</span>
-                )}
-                {c.status === 'accepted' && !contactsOnline[c.id] && (
-                  <span className="disc-contact-offline">offline</span>
-                )}
-              </>
-            );
-            return (
-              <div key={c.id} className="disc-contact-row">
-                {onStartChat ? (
-                  <button
-                    type="button"
-                    className="disc-contact-open"
-                    title={t('contacts.startChat', c.pseudo)}
-                    onClick={() => onStartChat(c)}
-                  >
-                    {identity}
-                  </button>
-                ) : (
-                  <span className="disc-contact-open">{identity}</span>
-                )}
-                <button
-                  onClick={() => onContactDelete(c.id)}
-                  className="disc-contact-del-btn"
-                  title={t('contacts.delete')}
-                >
-                  <X size={10} />
-                </button>
-              </div>
-            );
-          })}
-            </>
-          )}
-        </div>
-
-        {/* Pinned / Favorites — cross-project and collapsible. The optional
-            source filter applies locally; the primary query renders in the
-            dedicated global-results panel above. */}
-        {(() => {
-          const pinned = favoriteDiscussions;
-          if (pinned.length === 0) return null;
-          const isCollapsed = collapsedGroups.has('__favorites__');
-          return (
-            <div
-              className="disc-sidebar-section disc-sidebar-favorites"
-              data-expanded={!isCollapsed}
-            >
-              <CollectionFavoritesHeader
-                label={t('disc.favorites')}
-                count={pinned.length}
-                expanded={!isCollapsed}
-                onToggle={() => onToggleGroup('__favorites__')}
-              />
-              {!isCollapsed && renderSmartSectionRows(pinned.sort(byLiveThenRecent), 'pin')}
-            </div>
-          );
-        })()}
-
-        {/* Canonical discussion tree. Smart sections above are shortcuts only;
-            Projects remains the complete, non-duplicated source of truth. */}
-        {canonicalCandidates.length > 0 && (
-          <div
-            className="disc-sidebar-section disc-sidebar-projects"
-            data-expanded={!projectsCollapsed}
-          >
-            <button
-              type="button"
-              className="disc-group-btn"
-              data-no-border="true"
-              onClick={() => onToggleGroup(projectsGroupKey)}
-              aria-expanded={!projectsCollapsed}
-            >
-              <ChevronRight size={10} className="disc-chevron" data-expanded={!projectsCollapsed} />
-              <Folder size={10} />
-              <span>{t('projects.title')}</span>
-              <span className="disc-group-count">{canonicalCandidates.length}</span>
-              {canonicalUnseen > 0 && (
-                <span className="disc-group-unseen">{canonicalUnseen}</span>
-              )}
-            </button>
-            {!projectsCollapsed && (
-              <div className="disc-project-tree">
-        {/* Global discussions (no project) */}
-        {(() => {
-          // Filter up front so header/count visibility follows the optional
-          // source filter.
-          const globalDiscs = (activeDiscByProject.get(null) ?? [])
-            .filter(matchesFilters)
-            .filter(disc => !nestedExecutionChildIds.has(disc.id));
-          if (globalDiscs.length === 0) return null;
-          const isCollapsed = collapsedGroups.has('__global__');
-          return (
-            <div>
-              <button
-                className="disc-group-btn"
-                data-no-border="true"
-                onClick={() => onToggleGroup('__global__')}
-                aria-expanded={!isCollapsed}
-              >
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
-                <MessageSquare size={10} /> {t('disc.noProject')}
-                <span className="disc-group-count">{globalDiscs.length}</span>
-                {(unseenByGroup.get('__global__') ?? 0) > 0 && (
-                  <span className="disc-group-unseen">{unseenByGroup.get('__global__')}</span>
-                )}
-              </button>
-              {!isCollapsed && globalDiscs.sort(byLiveThenRecent).map(renderCanonicalRow)}
-            </div>
-          );
-        })()}
-
-        {/* Project discussions — grouped by org */}
-        {(() => {
-          // `.filter(matchesFilters)` is a no-op when no source filter is
-          // active; otherwise it hides folders with no matching discussion.
-          const visibleProjects = projects.filter(p => !isHiddenPath(p.path) && (activeDiscByProject.get(p.id) ?? []).filter(matchesFilters).length > 0);
-          // Build org groups
-          const orgMap = new Map<string, typeof visibleProjects>();
-          for (const p of visibleProjects) {
-            const org = getProjectGroup(p, t('disc.local'), t('disc.local'));
-            const list = orgMap.get(org) ?? [];
-            list.push(p);
-            orgMap.set(org, list);
-          }
-          // Sort orgs alphabetically, "Local" last
-          const localLabel = t('disc.local');
-          const sortedOrgs = [...orgMap.entries()].sort(([a], [b]) => {
-            if (a === localLabel) return 1;
-            if (b === localLabel) return -1;
-            return a.localeCompare(b);
-          });
-
-          return sortedOrgs.map(([orgName, orgProjects]) => {
-            const orgKey = `org::${orgName}`;
-            const isOrgCollapsed = collapsedGroups.has(orgKey);
-            const orgDiscCount = orgProjects.reduce((sum, p) => sum + (activeDiscByProject.get(p.id) ?? []).filter(matchesFilters).length, 0);
-            // Color from org name hash (same as Dashboard)
-            const orgColor = orgName === localLabel ? 'var(--kr-text-dim)'
-              : `hsl(${[...orgName].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0)}, 50%, 60%)`;
-
-            return (
-              <div key={orgKey}>
-                {sortedOrgs.length > 1 && (
-                  <button
-                    className="disc-org-header"
-                    style={{ color: orgColor }}
-                    onClick={() => onToggleGroup(orgKey)}
-                    aria-expanded={!isOrgCollapsed}
-                  >
-                    <ChevronRight size={9} className="disc-chevron" data-expanded={!isOrgCollapsed} />
-                    {orgName}
-                    <span className="disc-group-count">{orgDiscCount}</span>
-                    {(unseenByGroup.get(orgKey) ?? 0) > 0 && (
-                      <span className="disc-group-unseen">{unseenByGroup.get(orgKey)}</span>
-                    )}
-                  </button>
-                )}
-                {!isOrgCollapsed && orgProjects.map(proj => {
-                  const projDiscs = activeDiscByProject.get(proj.id) ?? [];
-                  // Auto-expand a project folder when its active disc is in
-                  // it — same reasoning as the batch auto-expand below.
-                  const projContainsActive = projDiscs.some(d => d.id === activeId);
-                  const isCollapsed = collapsedGroups.has(proj.id) && !projContainsActive;
-                  return (
-                    <div key={proj.id}>
-                      <button
-                        className="disc-group-btn"
-                        onClick={() => onToggleGroup(proj.id)}
-                        aria-expanded={!isCollapsed}
-                      >
-                        <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
-                        <Folder size={10} /> {proj.name}
-                        <span className="disc-group-count">{projDiscs.filter(matchesFilters).length}</span>
-                        {(unseenByGroup.get(proj.id) ?? 0) > 0 && (
-                          <span className="disc-group-unseen">{unseenByGroup.get(proj.id)}</span>
-                        )}
-                      </button>
-                      {!isCollapsed && (() => {
+  const renderProjectGroupContent = (proj: Project, projDiscs: Discussion[], sel: DiscSelectionCtx) => {
                         // Filter + sort, then split into batch groups vs loose discs.
                         const filtered = projDiscs
                           .filter(matchesFilters)
@@ -1767,9 +993,9 @@ export function DiscussionSidebar({
                                           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                                           isSending={!!sendingMap[disc.id]}
                                           isQueued={isQueuedDisc(disc)}
-                                          selectionMode={selectionMode}
-                                          isSelected={selectedIds.has(disc.id)}
-                                          onToggleSelection={toggleSelection}
+                                          selectionMode={sel.canMultiSelect}
+                                          isSelected={sel.isMultiSelected(disc)}
+                                          onToggleSelection={sel.toggleMultiSelection}
                                           onSelect={onSelect}
                                           onArchive={onArchive}
                                           onDelete={onDelete}
@@ -1867,7 +1093,7 @@ export function DiscussionSidebar({
                               const hiddenCount = orderedLoose.length - visibleLoose.length;
                               return (
                                 <>
-                                  {visibleLoose.map(renderCanonicalRow)}
+                                  {visibleLoose.map(disc => renderCanonicalRow(disc, sel))}
                                   {hiddenCount > 0 && (
                                     <button
                                       className="disc-show-more-btn"
@@ -1891,14 +1117,584 @@ export function DiscussionSidebar({
                             })()}
                           </>
                         );
-                      })()}
-                    </div>
-                  );
-                })}
+  };
+
+  return (
+    <CollectionShell<Discussion>
+      ariaLabel="Discussions"
+      items={discussions}
+      getId={disc => disc.id}
+      getLabel={disc => disc.title}
+      filterQuery={false}
+      persistence={{
+        query: discSearchFilter,
+        onQueryChange: setDiscSearchFilter,
+        favoritesOnly: false,
+        onFavoritesOnlyChange: () => {},
+      }}
+      selectedId={activeId}
+      onSelect={id => onSelect(id, 0)}
+      selectedIds={selectedIds}
+      onSelectedIdsChange={setSelectedIds}
+      sidebarOnly
+      sidebarClassName="disc-sidebar"
+      isMobile={isMobile}
+      globalSearchShortcut
+      shortcutsEnabled={!globalSearchOpen}
+      showControls={false}
+      onSearchSubmit={onOpenGlobalSearch}
+      title="Discussions"
+      titleCount={discussions.length}
+      headerActions={<>
+        {onImportDiscussion && (
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".json,.kronn-discussion.json,application/json"
+            className="disc-sidebar-visually-hidden"
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={async event => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (!file || importInFlightRef.current) return;
+              importInFlightRef.current = true;
+              setImporting(true);
+              try {
+                await onImportDiscussion(file);
+              } catch (error) {
+                toast(t('disc.portability.importError', String(error)), 'error');
+              } finally {
+                importInFlightRef.current = false;
+                setImporting(false);
+              }
+            }}
+          />
+        )}
+        <button
+          type="button"
+          className="disc-icon-btn disc-sidebar-new-btn"
+          data-tour-id="new-disc-btn"
+          onClick={onNewDiscussion}
+          aria-label={t('disc.new')}
+          title={t('disc.new')}
+        >
+          <Plus size={16} />
+          <span className="disc-sidebar-visually-hidden">{t('disc.new')}</span>
+        </button>
+        {isMobile && (
+          <CollectionSidebarCollapseButton
+            isMobile
+            label={t('disc.closeSidebar')}
+            onCollapse={onClose}
+          />
+        )}
+        {!isMobile && onCollapse && (
+          <CollectionSidebarCollapseButton
+            label={t('disc.closeSidebar')}
+            onCollapse={onCollapse}
+          />
+        )}
+      </>}
+      actions={[
+        {
+          id: 'mosaic',
+          label: t('disc.mosaic.open'),
+          icon: <LayoutGrid size={14} />,
+          disabled: items => items.length < 2 || items.length > MAX_MOSAIC_DISCUSSIONS,
+          disabledTitle: () => t('disc.mosaic.selection', MAX_MOSAIC_DISCUSSIONS),
+          href: items => discussionMosaicUrl(items.map(disc => disc.id)),
+        },
+        {
+          id: 'compare',
+          label: t('disc.bulk.compare'),
+          icon: <Columns3 size={14} />,
+          disabled: items => items.length < 2 || !onCompareSelected,
+          disabledTitle: items => items.length < 2 ? t('disc.compare.selectAtLeastTwo') : t('disc.bulk.compare'),
+          onSelect: async items => {
+            try {
+              await onCompareSelected?.(items.map(disc => disc.id));
+            } catch {
+              toast(t('disc.compare.selectionError'), 'error');
+              throw new Error('compare failed');
+            }
+          },
+        },
+        {
+          id: 'archive',
+          label: t('disc.bulk.archive'),
+          icon: <Archive size={14} />,
+          disabled: items => items.length === 0 || !onBulkArchive,
+          onSelect: async items => {
+            if (!confirm(t('disc.bulk.confirmArchive', items.length))) throw new Error('cancelled');
+            try {
+              await onBulkArchive?.(items.map(disc => disc.id));
+            } catch {
+              toast(t('disc.bulk.error'), 'error');
+              throw new Error('archive failed');
+            }
+          },
+        },
+        {
+          id: 'delete',
+          label: t('disc.bulk.delete'),
+          icon: <Trash2 size={14} />,
+          danger: true,
+          disabled: items => items.length === 0 || !onBulkDelete,
+          onSelect: async items => {
+            if (!confirm(t('disc.bulk.confirmDelete', items.length))) throw new Error('cancelled');
+            try {
+              await onBulkDelete?.(items.map(disc => disc.id));
+            } catch {
+              toast(t('disc.bulk.error'), 'error');
+              throw new Error('delete failed');
+            }
+          },
+        },
+      ]}
+      labels={{
+        search: t('disc.globalSearch.placeholder'),
+        favorites: t('disc.favorites'),
+        clearFilters: t('disc.searchClear'),
+        moreActions: t('disc.sidebar.moreActions'),
+        openCollection: t('disc.openSidebar'),
+        closeCollection: t('disc.closeSidebar'),
+        selectItem: t('disc.select'),
+        selectMultiple: t('disc.bulk.start'),
+        cancelSelection: t('disc.bulk.cancel'),
+        selectedCount: count => t('disc.bulk.selected', count),
+      }}
+      slots={{
+        renderDetail: () => null,
+        moreActionsMenuExtra: () => <>
+          {onMarkAllRead && totalUnseenAll > 0 && (
+            <button
+              type="button"
+              role="menuitem"
+              aria-label={t('disc.markAllRead')}
+              title={t('disc.markAllReadTooltip', totalUnseenAll)}
+              onClick={onMarkAllRead}
+            >
+              <CheckCheck size={13} />
+              <span>{t('disc.markAllRead')}</span>
+              <strong>{totalUnseenAll}</strong>
+            </button>
+          )}
+          {onImportDiscussion && (
+            <button type="button" role="menuitem" disabled={importing} onClick={() => importInputRef.current?.click()}>
+              {importing ? <Loader2 size={13} className="spin" /> : <Upload size={13} />}
+              <span>{t('disc.portability.import')}</span>
+            </button>
+          )}
+        </>,
+
+        renderSearch: ({ value, inputId, onChange, onSubmit, clear }) => <>
+      {globalSearchOpen && onCloseGlobalSearch && onOpenGlobalSearchResult && (
+        <GlobalSearchPanel
+          projects={projects}
+          authors={globalSearchAuthors}
+          initialQuery={discSearchFilter}
+          onQueryChange={setDiscSearchFilter}
+          onOpenResult={onOpenGlobalSearchResult}
+          onClose={() => {
+            setDiscSearchFilter('');
+            onCloseGlobalSearch();
+          }}
+          t={t}
+          lang={lang}
+        />
+      )}
+
+      {/* KT-70 / KT-90 — one search entry point. Enter runs the backend query
+          over titles, ids and every message; Filtres opens the same result
+          panel with its advanced controls. The local tree never remounts on
+          each keystroke. */}
+      <div className="disc-search-wrap" hidden={globalSearchOpen}>
+        <div className="disc-search-controls">
+          <div className="disc-search-box">
+            <Search size={13} className="disc-search-icon" />
+            <input
+              id={inputId}
+              type="text"
+              className="disc-search-input"
+              value={value}
+              onChange={e => onChange(e.target.value)}
+              placeholder={t('disc.globalSearch.placeholder')}
+              aria-label={t('disc.globalSearch.placeholder')}
+              aria-keyshortcuts="/"
+              onKeyDown={event => {
+                if (event.key === 'Enter' && onSubmit) {
+                  event.preventDefault();
+                  onSubmit();
+                }
+              }}
+            />
+            {discSearchFilter && (
+              <button
+                type="button"
+                onClick={clear}
+                className="disc-search-clear"
+                aria-label={t('disc.searchClear')}
+                title={t('disc.searchClear')}
+              >
+                <X size={10} />
+              </button>
+            )}
+          </div>
+          {onOpenGlobalSearch && (
+            <button
+              type="button"
+              className="disc-search-filter-btn"
+              onClick={onOpenGlobalSearch}
+              aria-label={t('disc.globalSearch.open')}
+              title={t('disc.globalSearch.open')}
+              data-testid="disc-open-global-search"
+              data-tour-id="global-search-open"
+              data-active={sourceFilter ? 'true' : undefined}
+            >
+              <Filter size={14} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+        {/* 0.8.4 (#294) — cross-agent source filter. Hidden when no
+           imported discs exist (the dropdown would be pointless).
+           Filters the disc list to discs whose source_agent matches. */}
+        {sourceAgentsAvailable.length > 0 && (
+          <select
+            data-testid="disc-source-filter"
+            className="disc-source-filter-select"
+            value={sourceFilter}
+            onChange={e => setSourceFilter(e.target.value)}
+            // A title alone is not an accessible name (axe `label-title-only`).
+            aria-label={t('disc.source.filterTooltip')}
+            title={t('disc.source.filterTooltip')}
+            style={{
+              marginTop: 4, fontSize: 11, padding: '2px 4px',
+              background: 'var(--kr-bg-elevated, transparent)',
+              border: '1px solid var(--kr-border-subtle, rgba(255,255,255,0.1))',
+              borderRadius: 4, color: 'inherit',
+            }}
+          >
+            <option value="">{t('disc.source.filterAll')}</option>
+            {sourceAgentsAvailable.map(agent => (
+              <option key={agent} value={agent}>{t('disc.source.filterFrom', agent)}</option>
+            ))}
+          </select>
+        )}
+      </div>
+        </>,
+
+        renderList: ({ canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
+          const sel: DiscSelectionCtx = { canMultiSelect, isMultiSelected, toggleMultiSelection };
+          // Smart shortcuts earn their duplication only when the canonical tree
+          // is genuinely large. On a small workspace, Projects/General already
+          // fits on screen; rendering the same rows twice adds noise and
+          // duplicate keyboard targets. Selection mode also stays canonical so
+          // one discussion maps to one checkbox.
+          const smartSectionsEnabled =
+            !canMultiSelect && discussions.filter(disc => !disc.archived).length >= 20;
+          const followUpDiscussions = (smartSectionsEnabled ? smartCandidates : [])
+            .filter((disc) => {
+              if (isRunningDisc(disc) || isQueuedDisc(disc)) return true;
+              // A favorite has its own stable shortcut section. Keep it out of
+              // the unread catch-all so Favoris does not disappear on a fresh
+              // workspace where every old discussion is technically unseen.
+              if (disc.pinned) return false;
+              if (disc.id === activeId) return false;
+              return unseenBasis(disc) > (lastSeenMsgCount[disc.id] ?? 0);
+            })
+            .sort(byLiveThenRecent);
+          const followUpIds = new Set(followUpDiscussions.map(disc => disc.id));
+          // Favoris is a shortcut, not the tree. `smartCandidates` drops
+          // execution children so the canonical tree does not render them
+          // twice — correct there, but it also made a pinned sub-discussion
+          // impossible to reach from Favoris. Pinning one is an explicit
+          // request for a direct route to it, so the shortcut reads from a
+          // base that keeps them.
+          const favoriteCandidates = canMultiSelect
+            ? []
+            : discussions.filter(disc => !disc.archived && matchesFilters(disc));
+          const favoriteDiscussions = favoriteCandidates
+            .filter(disc => disc.pinned && !followUpIds.has(disc.id))
+            .sort(byLiveThenRecent);
+          const favoriteIds = new Set(favoriteDiscussions.map(disc => disc.id));
+          const recentDiscussions = (smartSectionsEnabled ? smartCandidates : [])
+            .filter(disc => !followUpIds.has(disc.id) && !favoriteIds.has(disc.id))
+            .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+            .slice(0, 10);
+          return <div className="disc-sidebar-list" hidden={globalSearchOpen}>
+        {followUpDiscussions.length > 0 && (() => {
+          const isCollapsed = collapsedGroups.has('__follow_up__');
+          return (
+            <div
+              className="disc-sidebar-section disc-sidebar-follow-up"
+              data-expanded={!isCollapsed}
+            >
+              <button
+                type="button"
+                className="disc-group-btn"
+                data-no-border="true"
+                onClick={() => onToggleGroup('__follow_up__')}
+                aria-expanded={!isCollapsed}
+              >
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
+                <CircleDot size={10} />
+                <span>{t('disc.followUp')}</span>
+                <span className="disc-group-unseen">{followUpDiscussions.length}</span>
+              </button>
+              {!isCollapsed && renderSmartSectionRows(followUpDiscussions, 'follow', sel)}
+            </div>
+          );
+        })()}
+
+        {recentDiscussions.length > 0 && (() => {
+          const isCollapsed = collapsedGroups.has('__recent__');
+          return (
+            <div
+              className="disc-sidebar-section disc-sidebar-recent"
+              data-expanded={!isCollapsed}
+            >
+              <button
+                type="button"
+                className="disc-group-btn"
+                data-no-border="true"
+                onClick={() => onToggleGroup('__recent__')}
+                aria-expanded={!isCollapsed}
+              >
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
+                <Clock3 size={10} />
+                <span>{t('disc.recent')}</span>
+                <span className="disc-group-count">{recentDiscussions.length}</span>
+              </button>
+              {!isCollapsed && renderSmartSectionRows(recentDiscussions, 'recent', sel)}
+            </div>
+          );
+        })()}
+
+        {/* Contacts remain immediately reachable but no longer consume the
+            first screen permanently on large workspaces. The same persisted
+            group-state mechanism as projects/favorites keeps the interaction
+            predictable across reloads. Add/join actions are siblings of the
+            toggle (never nested interactive controls). */}
+        <div
+          className="disc-sidebar-section disc-sidebar-contacts"
+          data-expanded={!contactsCollapsed}
+        >
+          <div className="disc-contacts-header">
+            <button
+              type="button"
+              className="disc-group-btn disc-contacts-toggle"
+              data-no-border="true"
+              onClick={() => onToggleGroup(contactsGroupKey)}
+              aria-expanded={!contactsCollapsed}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!contactsCollapsed} />
+              <Users2 size={10} />
+              <span>{t('contacts.title')}</span>
+              {contacts.length > 0 && (
+                <span className="disc-group-count">
+                  {onlineContactCount}/{contacts.length}
+                </span>
+              )}
+            </button>
+            <span className="disc-contacts-meta">
+              {contacts.length > 0 && (
+                <span
+                  className="disc-ws-dot"
+                  role="status"
+                  data-connected={wsConnected}
+                  title={wsConnected ? t('contacts.wsConnected') : t('contacts.wsDisconnected')}
+                  aria-label={wsConnected ? t('contacts.wsConnected') : t('contacts.wsDisconnected')}
+                />
+              )}
+              {onJoinByCode && (
+                <button
+                  type="button"
+                  onClick={() => { setShowJoin(p => !p); setShowAddContact(false); }}
+                  className="disc-contact-add-btn"
+                  title={t('contacts.joinByCode')}
+                  aria-label={t('contacts.joinByCode')}
+                >
+                  <LogIn size={12} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => { setShowAddContact(p => !p); setShowJoin(false); }}
+                className="disc-contact-add-btn"
+                title={t('contacts.add')}
+                aria-label={t('contacts.add')}
+              >
+                <Plus size={12} />
+              </button>
+            </span>
+          </div>
+          {!contactsCollapsed && (
+            <>
+          {/* Join a discussion by code — unified local/cross-instance join */}
+          {showJoin && (
+            <div className="disc-contact-add-form">
+              <input
+                type="text"
+                className="disc-contact-add-input"
+                value={joinCode}
+                onChange={e => setJoinCode(e.target.value)}
+                placeholder={t('contacts.joinPlaceholder')}
+                disabled={joining}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && joinCode.trim()) {
+                    handleJoin();
+                  }
+                }}
+              />
+              <button
+                className="disc-contact-add-submit"
+                onClick={handleJoin}
+                disabled={joining || !joinCode.trim()}
+              >
+                {joining
+                  ? <span className="disc-join-resolving"><Loader2 size={11} className="disc-join-spin" /> {t('contacts.joinResolving')}</span>
+                  : t('contacts.joinByCode')}
+              </button>
+            </div>
+          )}
+          {/* Add contact inline form */}
+          {showAddContact && (
+            <div className="disc-contact-add-form">
+              <input
+                type="text"
+                className="disc-contact-add-input"
+                value={addContactCode}
+                onChange={e => setAddContactCode(e.target.value)}
+                placeholder={t('contacts.addPlaceholder')}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && addContactCode.trim()) {
+                    handleContactAdd();
+                  }
+                }}
+              />
+              <button
+                className="disc-contact-add-submit"
+                onClick={handleContactAdd}
+              >
+                {t('contacts.add')}
+              </button>
+            </div>
+          )}
+          {/* Contact list — click a row to open a 1:1 chat with that contact.
+              The identity is its own <button> rather than a clickable row: the
+              delete button must not sit inside an interactive ancestor (axe
+              `nested-interactive`), and a real button gives keyboard activation
+              that the previous `div role="button"` only pretended to offer. */}
+          {contacts.map(c => {
+            const identity = (
+              <>
+                <span className="disc-contact-dot" data-online={contactsOnline[c.id] ?? false} />
+                {c.avatar_email ? (
+                  <img src={gravatarUrl(c.avatar_email, 20)} alt="" className="disc-contact-avatar" />
+                ) : (
+                  <span className="disc-contact-initials">
+                    {c.pseudo.slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+                <span className="disc-contact-name">{c.pseudo}</span>
+                {c.status === 'pending' && !contactsOnline[c.id] && (
+                  <span className="disc-contact-pending" title="Contact injoignable — vérifiez que les deux machines sont sur le même réseau">{t('contacts.pending')}</span>
+                )}
+                {c.status === 'accepted' && !contactsOnline[c.id] && (
+                  <span className="disc-contact-offline">offline</span>
+                )}
+              </>
+            );
+            return (
+              <div key={c.id} className="disc-contact-row">
+                {onStartChat ? (
+                  <button
+                    type="button"
+                    className="disc-contact-open"
+                    title={t('contacts.startChat', c.pseudo)}
+                    onClick={() => onStartChat(c)}
+                  >
+                    {identity}
+                  </button>
+                ) : (
+                  <span className="disc-contact-open">{identity}</span>
+                )}
+                <button
+                  onClick={() => onContactDelete(c.id)}
+                  className="disc-contact-del-btn"
+                  title={t('contacts.delete')}
+                >
+                  <X size={10} />
+                </button>
               </div>
             );
-          });
+          })}
+            </>
+          )}
+        </div>
+
+        {/* Pinned / Favorites — cross-project and collapsible. The optional
+            source filter applies locally; the primary query renders in the
+            dedicated global-results panel above. */}
+        {(() => {
+          const pinned = favoriteDiscussions;
+          if (pinned.length === 0) return null;
+          const isCollapsed = collapsedGroups.has('__favorites__');
+          return (
+            <div
+              className="disc-sidebar-section disc-sidebar-favorites"
+              data-expanded={!isCollapsed}
+            >
+              <CollectionFavoritesHeader
+                label={t('disc.favorites')}
+                count={pinned.length}
+                expanded={!isCollapsed}
+                onToggle={() => onToggleGroup('__favorites__')}
+              />
+              {!isCollapsed && renderSmartSectionRows(pinned.sort(byLiveThenRecent), 'pin', sel)}
+            </div>
+          );
         })()}
+
+        {/* Canonical discussion tree. Smart sections above are shortcuts only;
+            Projects remains the complete, non-duplicated source of truth. */}
+        {canonicalCandidates.length > 0 && (
+          <div
+            className="disc-sidebar-section disc-sidebar-projects"
+            data-expanded={!projectsCollapsed}
+          >
+            <button
+              type="button"
+              className="disc-group-btn"
+              data-no-border="true"
+              onClick={() => onToggleGroup(projectsGroupKey)}
+              aria-expanded={!projectsCollapsed}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!projectsCollapsed} />
+              <Folder size={10} />
+              <span>{t('projects.title')}</span>
+              <span className="disc-group-count">{canonicalCandidates.length}</span>
+              {canonicalUnseen > 0 && (
+                <span className="disc-group-unseen">{canonicalUnseen}</span>
+              )}
+            </button>
+            {!projectsCollapsed && (
+              <div className="disc-project-tree">
+                <CollectionProjectTree<Discussion>
+                  projects={projects.filter(p => !isHiddenPath(p.path))}
+                  items={canonicalCandidates}
+                  getProjectId={disc => disc.project_id ?? null}
+                  isItemActive={disc => disc.id === activeId}
+                  collapsedGroups={collapsedGroups}
+                  onToggleGroup={onToggleGroup}
+                  unseenByGroup={unseenByGroup}
+                  labels={{ noProject: t('disc.noProject'), local: t('disc.local') }}
+                  noProjectIcon={<MessageSquare size={10} />}
+                  renderGroup={({ project, items: groupItems }) => project === null
+                    ? renderNoProjectRows(groupItems, sel)
+                    : renderProjectGroupContent(project, groupItems, sel)}
+                />
               </div>
             )}
           </div>
@@ -1942,9 +1738,9 @@ export function DiscussionSidebar({
                       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                       isSending={!!sendingMap[disc.id]}
                       isQueued={isQueuedDisc(disc)}
-                      selectionMode={selectionMode}
-                      isSelected={selectedIds.has(disc.id)}
-                      onToggleSelection={toggleSelection}
+                      selectionMode={sel.canMultiSelect}
+                      isSelected={sel.isMultiSelected(disc)}
+                      onToggleSelection={sel.toggleMultiSelection}
                       onSelect={onSelect}
                       onArchive={onUnarchive}
                       onDelete={onDelete}
@@ -1970,15 +1766,13 @@ export function DiscussionSidebar({
             })()}
           </div>
         )}
-      </div>,
-        sidebarFooter: !globalSearchOpen ? <div className="disc-sidebar-footer">
-          <span>{t('disc.sidebar.compact')}</span>
-          <span>
-            <kbd>↑↓</kbd> {t('disc.sidebar.navigate')}
-            <span aria-hidden="true"> · </span>
-            <kbd>/</kbd> {t('disc.sidebar.searchShortcut')}
-          </span>
-        </div> : null,
+      </div>;
+        },
+        sidebarFooter: !globalSearchOpen ? <CollectionSidebarFooter
+          label={t('disc.sidebar.compact')}
+          navigateLabel={t('disc.sidebar.navigate')}
+          searchLabel={t('disc.sidebar.searchShortcut')}
+        /> : null,
       }}
     />
   );

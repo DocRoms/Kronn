@@ -139,6 +139,8 @@ mod tests {
             agent_type: AgentType::Custom,
             model_id: "m".into(),
             display_name: "M".into(),
+            resolved_model: None,
+            description: None,
             display_alias: None,
             provenance: ModelProvenance::Live,
             availability: ModelAvailability::Available,
@@ -158,6 +160,7 @@ mod tests {
             last_checked_at: now,
             created_at: now,
             updated_at: now,
+            last_answered_at: None,
         }
     }
 

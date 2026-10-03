@@ -636,6 +636,30 @@ describe('MessageBubble — agent label + copy buttons', () => {
     );
   });
 
+  it('renders a workflow-step response as a discussion agent and never as a CLI ordinal', () => {
+    const { container } = renderBubble(
+      makeMessage({
+        role: 'Agent',
+        agent_type: 'Codex',
+        source_msg_id: 'workflow-cli-message',
+        author_cli_ordinal: 3,
+      }),
+      {
+        workflowStep: {
+          run_id: 'run-1',
+          workflow_id: 'workflow-1',
+          workflow_name: 'Implementation',
+          step_key: 'orchestrate',
+          step_name: 'Orchestrate',
+        },
+      },
+    );
+    const label = container.querySelector('.disc-msg-agent-label');
+    expect(label).toHaveTextContent('@codex · disc.targetDiscussionAgent');
+    expect(label).toHaveTextContent('Implementation › Orchestrate');
+    expect(label).not.toHaveTextContent('CLI 3');
+  });
+
   it('labels the agentless guided-tour document as preloaded Kronn content', () => {
     const { container } = renderBubble(
       makeMessage({
@@ -1051,6 +1075,26 @@ describe('MessageBubble — inline CTAs', () => {
     expect(JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? '{}')).toEqual({
       agentType: 'LiteLlm', tier: 'default',
     });
+  });
+
+  it('shows a sentence, not the proxy JSON, for a persisted error in the runner\'s real format (KT-941)', () => {
+    // The colon right after the status is what the runner writes; the nested,
+    // escaped body is LiteLLM's own.
+    const raw = 'LiteLLM error 404: Provider response: {"error":{"message":"litellm.NotFoundError: Vertex_aiException - {\\n \\"error\\": {\\"code\\": 404}}"}}';
+    renderBubble(makeMessage({
+      role: 'System',
+      content: raw,
+      agent_type: 'LiteLlm',
+      model: 'vertex_ai/claude-sonnet-5',
+      model_tier: 'default',
+    }));
+
+    const block = screen.getByTestId('disc-model-error-content');
+    // Collapsed: only the summary key is on screen as visible prose …
+    expect(block.querySelector('p')).toHaveTextContent('disc.modelErrorSummary');
+    expect(block.querySelector('p')).not.toHaveTextContent('litellm.NotFoundError');
+    // … the raw body stays reachable under the technical details.
+    expect(block.querySelector('details pre')).toHaveTextContent('litellm.NotFoundError');
   });
 });
 

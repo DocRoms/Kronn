@@ -1,7 +1,7 @@
 import { test, expect } from '../fixtures/kronn-fixture';
 
 test.describe('Plugins sidebar viewport containment', () => {
-  for (const width of [767, 900]) {
+  for (const width of [400, 767, 900]) {
     test(`keeps its header inside the page frame at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 800 });
       await page.addInitScript(() => {
@@ -18,6 +18,12 @@ test.describe('Plugins sidebar viewport containment', () => {
       const geometry = await page.evaluate(() => {
         const nav = document.querySelector('.dash-nav')?.getBoundingClientRect();
         const titlebar = document.querySelector('.mcp-page .collection-shell-titlebar')?.getBoundingClientRect();
+        const actionBoxes = [...document.querySelectorAll<HTMLElement>(
+          '.mcp-page .collection-shell-titlebar button, .mcp-page .mcp-collection-toolbar button',
+        )].map(element => {
+          const box = element.getBoundingClientRect();
+          return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+        });
         return {
           viewportWidth: window.innerWidth,
           bodyWidth: document.body.scrollWidth,
@@ -25,6 +31,7 @@ test.describe('Plugins sidebar viewport containment', () => {
           titlebarX: titlebar?.x ?? -1,
           titlebarY: titlebar?.y ?? -1,
           titlebarRight: titlebar?.right ?? Number.POSITIVE_INFINITY,
+          actionBoxes,
         };
       });
 
@@ -32,6 +39,13 @@ test.describe('Plugins sidebar viewport containment', () => {
       expect(geometry.titlebarX).toBeGreaterThanOrEqual(0);
       expect(geometry.titlebarRight).toBeLessThanOrEqual(geometry.viewportWidth);
       expect(geometry.titlebarY).toBeGreaterThanOrEqual(geometry.navBottom);
+      expect(geometry.actionBoxes.length).toBeGreaterThan(0);
+      expect(geometry.actionBoxes.every(box => (
+        box.left >= 0
+        && box.right <= geometry.viewportWidth
+        && box.top >= 0
+        && box.bottom <= 800
+      ))).toBe(true);
     });
   }
 });

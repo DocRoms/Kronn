@@ -207,7 +207,7 @@ describe('TaskLaunchDialog', () => {
     renderDialog();
     const model = screen.getByRole('combobox', { name: 'wiz.model' });
     fireEvent.focus(model);
-    expect(await screen.findByRole('option', { name: 'Offline model — modelCatalog.unavailable' })).toBeDisabled();
+    expect(await screen.findByRole('option', { name: '❌ Offline model — modelCatalog.unavailable' })).toBeDisabled();
   });
 
   it('keeps and submits a historical model override when the saved catalogue is unavailable', async () => {

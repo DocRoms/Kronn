@@ -1,9 +1,9 @@
 <!-- kronn:doc-version="1.0" -->
 <!-- kronn:spec="https://github.com/DocRoms/Kronn/blob/main/docs/conventions/agents-md-format-v1.md" local="docs/conventions/agents-md-format-v1.md" -->
 <!-- This file follows the Kronn AGENTS.md convention v1. Sections marked
-     curated="ai" carry [src: …] provenance per assertion. Any agent — with
-     or without Kronn — can read the spec at the URL above to understand the
-     markers and the [src:] citation grammar. -->
+     curated="ai" carry [src: …] provenance per assertion. Template v2 adds
+     owner="audit" / owner="human"; human-owned sections are never rewritten
+     by an audit. Legacy curated="human" sections receive the same protection. -->
 # AI agent context — Entry point
 
 > **TEMPLATE FILE.** Every `{{...}}` MUST be filled by the AI audit before use.
@@ -11,46 +11,37 @@
 
 **Project:** {{PROJECT_NAME}} — {{STACK_SUMMARY}}.
 
-**Working language:** {{PROJECT_LANGUAGE}} [ex: "French", "English" — language of code comments, commit messages, variable names; distinct from docs/ file language (always English) and agent response language (config.toml)]
+## Project parameters
 
-> **Rules:** All `docs/` files in English. Never hallucinate — check docs, then ask user. Update `docs/` after learning something new.
+Set once during audit; apply to every `docs/` file.
+
+- Working language: {{PROJECT_LANGUAGE}}.
+- Documentation language: {{DOCS_LANGUAGE}}. This governs new documentation only; preserve every existing document in its current language.
+- Ticket language: {{TICKET_LANGUAGE}}.
+- Ticket IDs in code comments: {{COMMENT_TICKET_POLICY}}.
+- Test policy: {{TEST_POLICY}}.
+
+> **Rules:** Use the project parameters above; never force-translate an existing document. Never hallucinate — check docs, then ask the user. Update `docs/` after learning something new.
 > **MCP:** Before calling any MCP tool, read [operations/mcp-servers/<name>.md](operations/mcp-servers/) if it exists.
+> **Skills and Kronn resources index:** `kronn/INDEX.md` (no-op if the project has none published yet).
 
 ---
 
-<!-- kronn:section name="anti-hallu" curated="ai" audit="{{DATE}}" -->
+<!-- kronn:section name="anti-hallu" curated="ai" owner="audit" audit="{{DATE}}" -->
 ## 0. Anti-Hallucination Protocol
 
-You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:
+Never state a non-trivial technical fact (paths, APIs, config, versions, behaviour) without proof — read the code, then `docs/`, then official docs, then ask; never guess. Cite every assertion as `[src: file: <path>:<line>]` or `[src: url: <url>]`; a citation that doesn't resolve is rejected as fabricated.
 
-1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.
-2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.
-3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.
-4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.
-5. **NEVER ASSERT WITHOUT PROOF** — "I don't know yet, let me check" beats a fabrication every time.
-
-### Citation grammar (verified mechanically by Kronn when present)
-
-Attach a structured citation to every non-trivial assertion:
-
-- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`
-- `[src: file: <path>:<start-end>]` — line range
-- `[src: url: <url>]` — external doc
-- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)
-- `[src: commit: <sha>]` — git commit
-
-A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.
-
-Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.
+Full grammar and cascade: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md).
 <!-- kronn:section:end -->
 
 ---
 
 ## 1. Context loading (mandatory)
 
-**Tier 1 — Always:** [docs/AGENTS.md](AGENTS.md) (this file). Sufficient for trivial tasks.
+**T0 — Router (always loaded):** [docs/AGENTS.md](AGENTS.md) (this file). Sufficient for trivial tasks.
 
-**Common tasks — load exactly:**
+**T1 — Routed context:** for a matching common task, load exactly the listed files.
 
 | Task | Files |
 |------|-------|
@@ -59,7 +50,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | [ex: "New feature"] {{TASK_3}} | [architecture/overview](architecture/overview.md), [repo-map](repo-map.md) |
 | [ex: "Debug / deploy"] {{TASK_4}} | [operations/debug-operations](operations/debug-operations.md) |
 
-**Tier 2 — Max 3 files if above doesn't cover:**
+**T2 — Search:** if T1 does not cover the task, search `docs/` first and load at most 3 relevant files.
 
 | Need | File |
 |------|------|
@@ -69,8 +60,17 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | Known issues | [inconsistencies-tech-debt](inconsistencies-tech-debt.md) |
 | Architecture decisions | [decisions](decisions.md) |
 | Glossary | [glossary](glossary.md) |
+| Workflow overview | [workflow/](workflow/README.md) |
+| Commit conventions | [workflow/commits](workflow/commits.md) |
+| Pull request conventions | [workflow/pull-requests](workflow/pull-requests.md) |
+| Ticket/tracker conventions | [workflow/tickets](workflow/tickets.md) |
+| CI/CD pipeline | [workflow/ci-cd](workflow/ci-cd.md) |
+| Environments (staging, prod, …) | [environments](environments.md) |
+| Worked examples | [examples/](examples/README.md) |
 
-**Tier 3:** Only if Tier 1+2 insufficient. State which file and why. Never load all files.
+If T0–T2 are insufficient, state which additional file you need and why. Never load every file.
+
+`docs/reports/` — [dated snapshots](reports/README.md), excluded from T0–T2 routing; read one only when a task names it.
 
 ---
 
@@ -83,9 +83,9 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 - **Guess tool versions** — if prerequisites are not filled below, ask. Do not assume "Node 18" or "Python 3.10".
 - **Guess languages or frameworks** — check § 6 Stack. Do not assume Express, Django, or Next.js.
 - **Edit auto-generated files** — if a file is marked as generated (e.g., types exported from another language), never edit it by hand.
-- **Load all Tier 2 files at once** — max 3, pick what you need.
+- **Load all T2 files at once** — max 3, pick what you need.
 - **Modify business code** when the task is only about project documentation — edit `docs/` only.
-- **Skip tests** — every code change requires tests. See § 4.
+- **Skip the test policy** — see § Project parameters above and § 4.
 
 ---
 
@@ -102,9 +102,9 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 - {{WORKFLOW_CONSTRAINT_1}}
 - {{WORKFLOW_CONSTRAINT_2}}
 
-### Testing rule (mandatory)
+### Test policy
 
-**Every code change MUST include tests.** No exceptions. Details and checklist: [testing-quality](testing-quality.md).
+See the Test policy parameter above (§ Project parameters). Checklist: [testing-quality](testing-quality.md).
 
 ---
 
@@ -138,8 +138,9 @@ New code placement: see [repo-map](repo-map.md).
 - Use [repo-map](repo-map.md) for file placement.
 - Missing/ambiguous info → say `NOT_FOUND`, ask. Never guess.
 - Large refactor needed → add entry to [inconsistencies-tech-debt](inconsistencies-tech-debt.md).
-- **Write tests for every change** — see § 4. No exceptions.
-- After task: update `docs/` if you learned something non-obvious. Prefer the agent-writable subfolders: `docs/conventions/`, `docs/gotchas/`, `docs/architecture/`, `docs/operations/`. Never edit `docs/AGENTS.md` (curated by audit) directly.
+- **Follow the test policy** — see § 4.
+- After task: update `docs/` if you learned something non-obvious. Prefer the agent-writable subfolders: `docs/conventions/`, `docs/gotchas/`, `docs/architecture/`, `docs/operations/`.
+- `docs/AGENTS.md` sections use `owner="audit"` or `owner="human"` (legacy `curated="human"` remains protected). Never rewrite a human-owned section in a full or partial audit; re-audits put the proposed change in a dated diff under `docs/reports/`.
 
 ---
 

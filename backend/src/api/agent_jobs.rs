@@ -152,7 +152,16 @@ pub(crate) async fn start_background_job(
     let lookup_id = quick_exec_id.clone();
     let quick = state
         .db
-        .with_conn(move |conn| crate::db::quick_execs::get_quick_exec(conn, &lookup_id))
+        .with_read_conn(move |conn| {
+            let quick = crate::db::quick_execs::get_quick_exec(conn, &lookup_id)?;
+            if let Some(quick) = &quick {
+                crate::core::repository_resources::ensure_quick_exec_execution_approved(
+                    conn, quick,
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
+            Ok(quick)
+        })
         .await?
         .context("Quick Exec not found")?;
     crate::api::quick_execs::validate_variables(&quick.variables, &request.variables)

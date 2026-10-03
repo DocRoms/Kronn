@@ -25,6 +25,7 @@
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { DashboardPage } from '../pages/DashboardPage';
+import { WorkflowsPage } from '../pages/WorkflowsPage';
 
 const QP_TITLE = `PW compare-multi ${Date.now()}`;
 const QP_PROMPT = 'Réponds simplement par "ok".';
@@ -173,7 +174,7 @@ test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)'
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
     await dashboard.openWorkflows();
-    await page.locator('[data-tour-id="automation-kind-quick-prompt"]').click();
+    await new WorkflowsPage(page).selectKind('quickPrompts');
 
     // Find our QP card. The 🤝 button stays disabled until /api/agents
     // resolves — wait for it to enable before clicking.

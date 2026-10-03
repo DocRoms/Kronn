@@ -84,6 +84,10 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
     () => snapshot?.targets.flatMap(target => target.models) ?? [],
     [snapshot],
   );
+  const alerts = useMemo(
+    () => snapshot?.targets.flatMap(target => target.alerts ?? []) ?? [],
+    [snapshot],
+  );
 
   // One row per model, carrying the target it belongs to: the table sorts and
   // filters on that, and the reader needs to see it on the row.
@@ -239,6 +243,26 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
         {t('modelCatalog.loadError')}{' '}
         <button type="button" className="set-icon-btn" onClick={catalog.refetch}>{t('modelCatalog.reload')}</button>
       </p>}
+      {alerts.map(alert => (
+        <div
+          className="set-model-catalog-alert"
+          role="alert"
+          key={alert.model_id}
+          data-testid={`model-catalog-alert-${alert.model_id}`}
+        >
+          <strong>{t('modelCatalog.disappearedAlert', alert.model_id)}</strong>
+          {alert.replacement && (
+            <span>{t('modelCatalog.replacement', alert.replacement)}</span>
+          )}
+          <ul>
+            {alert.references.map(reference => (
+              <li key={`${reference.kind}:${reference.resource_id ?? reference.label}:${reference.label}`}>
+                {t(`modelCatalog.reference.${reference.kind}`)}: {reference.label}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
 
       {form && (
         <div className="set-ext-api-form set-model-catalog-form">
@@ -300,7 +324,7 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
             </label>
           </div>
           <div className="set-ext-api-test-actions">
-            {(['chat', 'image', 'video'] as const).map(capability => (
+            {(['chat', 'vision', 'image', 'video'] as const).map(capability => (
               <label key={capability} className="set-model-catalog-capability">
                 <input type="checkbox" checked={form.capabilities.includes(capability)} onChange={event => setForm(current => current && ({
                   ...current,
@@ -308,7 +332,7 @@ export function ModelCatalogSection({ onCatalogChanged, sharedCatalog }: {
                     ? [...current.capabilities, capability]
                     : current.capabilities.filter(value => value !== capability),
                 }))} />
-                {capability}
+                {capability === 'vision' ? t('modelCatalog.visionCapability') : capability}
               </label>
             ))}
             <button type="button" className="set-btn-primary" disabled={busy} onClick={() => void save()}>{t('common.save')}</button>

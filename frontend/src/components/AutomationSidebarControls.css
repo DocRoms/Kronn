@@ -1,0 +1,234 @@
+/* Automation sidebar controls (KT-916, "Group by" layout): the segmented
+   control and the filter chips under the search. Everything shrinks and wraps
+   inside the drawer, so nothing scrolls sideways at 400 px: the chips wrap onto
+   new lines, the segmented control takes the full width, and a menu spans the
+   width of the block it opens from instead of hanging off its chip. */
+.automation-controls {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--kr-sp-2);
+  min-width: 0;
+  padding: var(--kr-sp-2) var(--kr-sp-3) var(--kr-sp-3);
+  border-bottom: 1px solid var(--kr-border-ghost);
+  background: var(--kr-bg-surface);
+}
+
+.automation-groupby {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+.automation-groupby-label {
+  flex: 0 0 auto;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+.automation-segmented {
+  display: grid;
+  flex: 1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-input);
+}
+.automation-segmented-option {
+  min-width: 0;
+  padding: 4px var(--kr-sp-2);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.automation-segmented-option:hover,
+.automation-segmented-option:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+.automation-segmented-option:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+.automation-segmented-option[data-active='true'] {
+  background: var(--kr-accent-bg-strong);
+  color: var(--kr-text-primary);
+}
+
+.automation-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-1) var(--kr-sp-2);
+  min-width: 0;
+}
+.automation-chip,
+.automation-chip-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  max-width: 100%;
+  min-height: 26px;
+  padding: 2px 9px;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+.automation-chip:hover,
+.automation-chip:focus-visible,
+.automation-chip-clear:hover,
+.automation-chip-clear:focus-visible {
+  border-color: var(--kr-accent-border);
+  color: var(--kr-text-primary);
+}
+.automation-chip:focus-visible,
+.automation-chip-clear:focus-visible,
+.automation-chip-project button:focus-visible,
+.automation-chip-option:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+.automation-chip[data-active='true'] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg-strong);
+  color: var(--kr-text-primary);
+}
+.automation-chip-add {
+  border-style: dashed;
+  color: var(--kr-text-muted);
+}
+.automation-chip-clear {
+  border-color: transparent;
+  background: transparent;
+  color: var(--kr-text-muted);
+}
+.disc-empty .automation-chip-clear {
+  display: flex;
+  margin: var(--kr-sp-3) auto 0;
+}
+
+/* A chosen project: the name reopens the list, the cross removes the filter.
+   A long name is cut, never allowed to widen the row. */
+.automation-chip-project {
+  cursor: default;
+  padding-right: 4px;
+}
+.automation-chip-project button {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.automation-chip-project-name {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.automation-chip-project-remove {
+  flex: 0 0 auto;
+  padding: 2px;
+  border-radius: 999px;
+}
+.automation-chip-project-remove:hover,
+.automation-chip-project-remove:focus-visible {
+  background: var(--kr-bg-hover);
+}
+
+.automation-chip-menu {
+  position: absolute;
+  top: 100%;
+  left: var(--kr-sp-3);
+  right: var(--kr-sp-3);
+  z-index: 20;
+  display: grid;
+  max-height: min(50vh, 320px);
+  padding: var(--kr-sp-1);
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+}
+.automation-chip-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2);
+  min-height: 32px;
+  padding: 0 var(--kr-sp-2);
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.automation-chip-option > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.automation-chip-option:hover,
+.automation-chip-option:focus-visible {
+  background: var(--kr-bg-hover);
+}
+.automation-chip-option[aria-selected='true'] {
+  background: var(--kr-accent-bg-strong);
+}
+.automation-chip-option-count {
+  flex: 0 0 auto;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+.automation-chip-menu-empty {
+  margin: 0;
+  padding: var(--kr-sp-2);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+/* Sort choices, inside the sidebar's ⋯ menu. */
+.automation-sort-menu {
+  display: grid;
+  margin-bottom: var(--kr-sp-1);
+  padding-bottom: var(--kr-sp-1);
+  border-bottom: 1px solid var(--kr-border-ghost);
+}
+.automation-sort-menu-title {
+  padding: var(--kr-sp-1) var(--kr-sp-2);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+.automation-sort-menu button {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+.automation-sort-menu-check {
+  display: inline-grid;
+  flex: 0 0 14px;
+  width: 14px;
+  place-items: center;
+}

@@ -90,6 +90,73 @@ pub struct StepValidationWarning {
     pub repaired: bool,
 }
 
+const COVERAGE_WARNING_PREFIX: &str = "dimension coverage incomplete";
+
+/// Recompute the coverage failure from the current index, including on resume.
+/// This is feedback for the agent, never a relaxation or an in-place repair.
+pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
+    if target_file != "docs/inconsistencies-tech-debt.md" {
+        return None;
+    }
+    let (_, warning) = validate_step_output(true, project_path, target_file);
+    let reason = warning?.reason;
+    // Missing/truncated output or an unfilled template still needs the full
+    // step prompt; a matrix-only instruction would leave its index unfinished.
+    if !reason.starts_with(COVERAGE_WARNING_PREFIX) {
+        return None;
+    }
+    Some(format!(
+        "## Coverage matrix — targeted correction required\n\n\
+         Read `{target_file}` and correct this current failure: {reason}.\n\n\
+         Keep all ten dimension rows and THREE cells per row: Dimension | Outcome | Evidence / reason. \
+         An N/A outcome must also have a nonempty evidence/reason cell supported by the actual repository. \
+         Preserve the existing TD detail files, index entries and human-owned sections. \
+         Correct this matrix only; do not repeat the entire audit or invent supporting evidence.\n"
+    ))
+}
+
+/// Retain safe provider and tool-budget causes alongside the artifact failure.
+/// A recovered ceiling or negotiated provider fallback does not fail a good step.
+pub(crate) fn with_http_diagnostics(
+    success: bool,
+    warning: Option<StepValidationWarning>,
+    stderr: &[String],
+) -> Option<StepValidationWarning> {
+    if success {
+        return warning;
+    }
+    let mut causes = Vec::new();
+    if let Some(summary) = crate::agents::http_diagnostics::failure_summary(stderr) {
+        causes.push(summary);
+    }
+    if let Some(report) = crate::agents::runner::parse_ceiling_report(stderr) {
+        let mut limits: Vec<_> = report
+            .tools
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{}: {} calls ({} refused)",
+                    hit.tool, hit.limit, hit.refused
+                )
+            })
+            .collect();
+        if let Some(rounds) = report.rounds {
+            limits.push(format!("{rounds} tool rounds"));
+        }
+        causes.push(format!("HTTP tool budget reached: {}", limits.join(", ")));
+    }
+    if causes.is_empty() {
+        return warning;
+    }
+    let reason = warning
+        .map(|w| w.reason)
+        .unwrap_or_else(|| "Agent did not complete the audit step".into());
+    Some(StepValidationWarning {
+        reason: format!("{reason}. {}. Partial files are preserved; resume this step to finish the missing output.", causes.join(". ")),
+        repaired: false,
+    })
+}
+
 /// Check that a step's target file is plausibly filled. If it's
 /// missing or suspiciously small, the step FAILS with a warning —
 /// the file itself is never modified. Returns `(success,
@@ -197,15 +264,37 @@ pub fn validate_step_output(
     // we keep the detection binary — partial progress is recovered by
     // the resume layer, not by relaxing the leak check here.
     if let Ok(content) = std::fs::read_to_string(&dst_path) {
-        let leaked = count_raw_placeholders(&content);
+        let leaked_names = raw_placeholder_names(&content);
+        let leaked = leaked_names.len();
         if leaked > 0 {
+            // Name what is left: one forgotten field in a written document is
+            // not an untouched template, and the two need different fixes.
+            let template_count = template_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|t| count_raw_placeholders(&t))
+                .unwrap_or(0);
+            let untouched = template_count > 0 && leaked >= template_count;
+            let shown = leaked_names
+                .iter()
+                .take(5)
+                .map(|n| format!("{{{{{n}}}}}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             return (
                 false,
                 Some(StepValidationWarning {
-                    reason: format!(
-                        "step did not fill `{}`: {} raw `{{{{...}}}}` placeholders remain (the file is still the template — agent likely crashed / rate-limited before writing)",
-                        target_file, leaked
-                    ),
+                    reason: if untouched {
+                        format!(
+                            "step did not fill `{}`: {} raw `{{{{...}}}}` placeholders remain (the file is still the template — agent likely crashed / rate-limited before writing)",
+                            target_file, leaked
+                        )
+                    } else {
+                        format!(
+                            "step left {} placeholder(s) unfilled in `{}`: {} (the rest of the file was written)",
+                            leaked, target_file, shown
+                        )
+                    },
                     repaired: false, // file IS the template; nothing to restore
                 }),
             );
@@ -223,7 +312,7 @@ pub fn validate_step_output(
                     false,
                     Some(StepValidationWarning {
                         reason: format!(
-                            "dimension coverage incomplete in `{}`: {} (Step 8 will be re-run)",
+                            "{COVERAGE_WARNING_PREFIX} in `{}`: {} (Step 8 will be re-run)",
                             target_file, reason
                         ),
                         repaired: false,
@@ -324,6 +413,11 @@ pub fn check_detector_disposition(
 /// lexical, and an UNCLOSED fence restores everything it withheld,
 /// opening line included.
 pub(crate) fn count_raw_placeholders(content: &str) -> usize {
+    raw_placeholder_names(content).len()
+}
+
+/// The `{{TOKEN}}` placeholders still in `content`, in order, outside code.
+pub(crate) fn raw_placeholder_names(content: &str) -> Vec<String> {
     let stripped = crate::core::anti_halluc::strip_inline_code(
         &crate::core::anti_halluc::strip_fenced_code(content),
     );
@@ -331,7 +425,7 @@ pub(crate) fn count_raw_placeholders(content: &str) -> usize {
     // UPPERCASE_SNAKE (with optional digits + _). The trailing
     // boundary is a literal `}}`, not just `}`, to avoid hits on
     // Twig double-brace blocks that contain spaces / parens.
-    let mut count = 0usize;
+    let mut names = Vec::new();
     let mut rest = stripped.as_str();
     while let Some(start) = rest.find("{{") {
         let after_open = &rest[start + 2..];
@@ -348,11 +442,43 @@ pub(crate) fn count_raw_placeholders(content: &str) -> usize {
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
             && inside.chars().any(|c| c.is_ascii_uppercase());
         if is_placeholder {
-            count += 1;
+            names.push(inside.to_string());
         }
         rest = &after_open[end + 2..];
     }
-    count
+    names
+}
+
+/// Placeholders whose value Kronn knows for certain, not the model: filled
+/// by the pipeline so a step never fails on a date it could not see.
+pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> String {
+    content
+        .replace("{{DATE}}", today)
+        .replace("{{ DATE }}", today)
+}
+
+/// Apply [`fill_kronn_owned_placeholders`] to this step's own target file.
+pub(crate) fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
+    if !target_file.starts_with("docs/") {
+        return;
+    }
+    let path = project_path.join(target_file);
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        // Only a document the agent otherwise finished: filling the date of an
+        // untouched template would pass it off as rewritten.
+        if raw_placeholder_names(&content)
+            .iter()
+            .any(|name| name != "DATE")
+        {
+            return;
+        }
+        let filled = fill_kronn_owned_placeholders(&content, today);
+        if filled != content {
+            if let Err(error) = std::fs::write(&path, filled) {
+                tracing::warn!(target_file, %error, "could not fill Kronn-owned placeholders");
+            }
+        }
+    }
 }
 
 /// The 10 dimensions Step 8 § B must account for in the coverage matrix.
@@ -744,6 +870,56 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn coverage_feedback_rechecks_the_index_without_modifying_it() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        let project = project.as_path();
+        assert!(coverage_repair_feedback(project, target).is_none());
+        let malformed = valid_coverage_matrix().replace(
+            "| Accessibility | N/A: no web surface | CLI binary only |",
+            "| Accessibility | N/A: no web surface |",
+        );
+        std::fs::write(project.join(target), &malformed).unwrap();
+        let feedback = coverage_repair_feedback(project, target).unwrap();
+        assert!(
+            feedback.contains("Accessibility")
+                && feedback.contains("evidence/reason cell is empty")
+        );
+        assert!(feedback.contains("THREE cells") && feedback.contains("human-owned"));
+        assert_eq!(
+            std::fs::read_to_string(project.join(target)).unwrap(),
+            malformed
+        );
+        assert!(coverage_repair_feedback(project, "docs/AGENTS.md").is_none());
+        std::fs::write(
+            project.join(target),
+            format!("{malformed}\n{{{{PROJECT_NAME}}}}\n"),
+        )
+        .unwrap();
+        assert!(
+            coverage_repair_feedback(project, target).is_none(),
+            "an unfilled template needs the whole step, not only its matrix"
+        );
+        std::fs::write(project.join(target), valid_coverage_matrix()).unwrap();
+        assert!(
+            coverage_repair_feedback(project, target).is_none(),
+            "a corrected index must not carry stale feedback"
+        );
+    }
+
+    #[test]
     fn coverage_matrix_embellished_dimension_label_passes() {
         // Regression (2026-06-03 self-inflicted Step-8-red on DOCROMS_WEB):
         // the agent wrote `Accessibility (a11y)` as the row label. An exact
@@ -914,6 +1090,73 @@ mod tests {
     }
 
     #[test]
+    fn kronn_fills_the_dates_it_owns_and_nothing_else() {
+        // KT-967 — run O6: qwen3.6:35b wrote 1,321 words of AGENTS.md and
+        // left only `{{DATE}}`; the step failed on a value Kronn knows.
+        let filled = fill_kronn_owned_placeholders(
+            "audit=\"{{DATE}}\" reviewed {{ DATE }} keep {{TASK_1}}",
+            "2026-10-03",
+        );
+        assert_eq!(
+            filled,
+            "audit=\"2026-10-03\" reviewed 2026-10-03 keep {{TASK_1}}"
+        );
+    }
+
+    #[test]
+    fn the_date_is_filled_only_in_a_document_the_agent_finished() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "done, reviewed {{DATE}}").unwrap();
+        std::fs::write(docs.join("b.md"), "{{TASK_1}} reviewed {{DATE}}").unwrap();
+        fill_step_owned_placeholders(tmp.path(), "docs/a.md", "2026-10-03");
+        fill_step_owned_placeholders(tmp.path(), "docs/b.md", "2026-10-03");
+        assert_eq!(
+            std::fs::read_to_string(docs.join("a.md")).unwrap(),
+            "done, reviewed 2026-10-03"
+        );
+        assert_eq!(
+            std::fs::read_to_string(docs.join("b.md")).unwrap(),
+            "{{TASK_1}} reviewed {{DATE}}"
+        );
+    }
+
+    #[test]
+    #[serial(kronn_templates_env)]
+    fn a_written_doc_with_a_forgotten_field_is_named_not_called_a_template() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let target = "docs/AGENTS.md";
+        let (_tmp, project) = fixture(target, 0, 0);
+        let template = format!("# Doc\n{{{{ONE}}}}\n{{{{TWO}}}}\n{}", "padding ".repeat(40));
+        let templates = std::env::var_os("KRONN_TEMPLATES_DIR").unwrap();
+        std::fs::write(std::path::Path::new(&templates).join(target), &template).unwrap();
+
+        std::fs::write(project.join(target), template.replace("{{ONE}}", "written")).unwrap();
+        let (success, warning) = validate_step_output(true, &project, target);
+        assert!(!success);
+        let reason = warning.unwrap().reason;
+        assert!(
+            reason.contains("{{TWO}}") && !reason.contains("still the template"),
+            "{reason}"
+        );
+
+        // The untouched template keeps its own diagnosis.
+        std::fs::write(project.join(target), &template).unwrap();
+        let (_, warning) = validate_step_output(true, &project, target);
+        assert!(warning.unwrap().reason.contains("still the template"));
+    }
+
+    #[test]
     fn count_raw_placeholders_recognizes_uppercase_snake_tokens() {
         // Pin the placeholder shape so a refactor doesn't widen / narrow
         // the regex unintentionally. Examples below cover (a) the
@@ -1069,5 +1312,30 @@ mod tests {
                 .exists(),
             "no sidecar noise either"
         );
+    }
+
+    #[test]
+    fn failed_artifact_retains_http_budget_cause_but_recovered_search_does_not_fail() {
+        let trace = vec![format!(
+            "{}{}",
+            crate::agents::runner::CEILING_TRACE_PREFIX,
+            serde_json::json!({"version":1,"tools":[{"tool":"write_file","limit":64,
+                "refused":1,"refused_calls":["sensitive output must not be copied"]}]})
+        )];
+        let warning = with_http_diagnostics(
+            false,
+            Some(StepValidationWarning {
+                reason: "docs/index.md is missing or empty".into(),
+                repaired: false,
+            }),
+            &trace,
+        )
+        .unwrap();
+        assert!(warning.reason.contains("docs/index.md is missing"));
+        assert!(warning.reason.contains("write_file: 64 calls"));
+        assert!(warning.reason.contains("resume this step"));
+        assert!(!warning.reason.contains("sensitive output"));
+        assert!(with_http_diagnostics(true, None, &trace).is_none());
+        assert!(with_http_diagnostics(false, None, &[]).is_none());
     }
 }

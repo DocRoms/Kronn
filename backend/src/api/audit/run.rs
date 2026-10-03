@@ -50,6 +50,20 @@ pub async fn audit_status_all(
     Json(ApiResponse::ok(snapshot))
 }
 
+/// GET /api/audit/steps — the Full audit's steps in run order, from the same
+/// chain the pipeline executes, so the UI never keeps its own copy.
+pub async fn audit_steps() -> Json<ApiResponse<Vec<AuditStepInfo>>> {
+    let steps = super::assemble_chained_steps(crate::models::AuditKind::Full)
+        .into_iter()
+        .enumerate()
+        .map(|(i, step)| AuditStepInfo {
+            index: i as u32 + 1,
+            target_file: step.target_file.to_string(),
+        })
+        .collect();
+    Json(ApiResponse::ok(steps))
+}
+
 /// 0.8.4 (#298) — fetch the most-recent **completed** audit run for a
 /// project, or `None`. Sister of `audit_latest_resumable` (which only
 /// returns Interrupted rows); this one returns Completed rows so the
@@ -61,7 +75,7 @@ pub async fn audit_latest(
 ) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
     let result = state
         .db
-        .with_conn(move |conn| crate::db::audit_runs::latest_completed(conn, &id))
+        .with_read_conn(move |conn| crate::db::audit_runs::latest_completed(conn, &id))
         .await;
     match result {
         Ok(row) => Json(ApiResponse::ok(row)),
@@ -138,13 +152,114 @@ pub async fn audit_run_steps(
 pub async fn audit_latest_resumable(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
+) -> Json<ApiResponse<Option<ResumableAudit>>> {
     let result = state
         .db
-        .with_conn(move |conn| crate::db::audit_runs::latest_resumable(conn, &id))
+        .with_conn(move |conn| {
+            let Some(run) = crate::db::audit_runs::latest_resumable(conn, &id)? else {
+                return Ok(None);
+            };
+            let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+            Ok(Some(ResumableAudit::new(run, &steps)))
+        })
         .await;
     match result {
         Ok(row) => Json(ApiResponse::ok(row)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
+}
+
+/// An interrupted run and what a resume would run (KT-931). `last_completed_step`
+/// is a count of successful steps, not a position: the button names the steps
+/// that are left, which a resume re-runs and nothing else.
+#[derive(serde::Serialize)]
+pub struct ResumableAudit {
+    #[serde(flatten)]
+    run: crate::models::AuditRun,
+    /// 1-based steps a resume runs: the ones that failed and the ones that
+    /// never ran. Empty when the run's kind is unknown.
+    steps_to_redo: Vec<u32>,
+}
+
+impl ResumableAudit {
+    fn new(run: crate::models::AuditRun, steps: &[crate::models::AuditRunStep]) -> Self {
+        let steps_to_redo = match crate::models::AuditKind::from_label(&run.kind) {
+            Some(kind) => {
+                let done = super::full::already_succeeded_step_indices(steps);
+                let total = super::assemble_chained_steps(kind).len() as u32;
+                (1..=total).filter(|step| !done.contains(step)).collect()
+            }
+            None => Vec::new(),
+        };
+        Self { run, steps_to_redo }
+    }
+}
+
+#[cfg(test)]
+mod resumable_tests {
+    use super::ResumableAudit;
+
+    fn step(index: u32, ok: bool) -> crate::models::AuditRunStep {
+        serde_json::from_value(serde_json::json!({
+            "audit_run_id": "r", "step_index": index, "file_label": "x",
+            "started_at": "2026-10-01T00:00:00Z", "ended_at": "2026-10-01T00:00:01Z",
+            "cli_success": ok,
+        }))
+        .unwrap()
+    }
+
+    fn run(kind: &str) -> crate::models::AuditRun {
+        serde_json::from_value(serde_json::json!({
+            "id": "r", "project_id": "p", "kind": kind, "agent_type": "ClaudeCode",
+            "started_at": "2026-10-01T00:00:00Z", "status": "Interrupted",
+            "last_completed_step": 15,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_resume_names_the_failed_step_and_the_steps_that_never_ran() {
+        let total =
+            crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+        // Step 5 failed; the stream then ended after step 14: 15 and 16 never ran.
+        let steps: Vec<_> = (1..=14).map(|i| step(i, i != 5)).collect();
+        let resumable = ResumableAudit::new(run("Full"), &steps);
+        assert_eq!(total, 16);
+        assert_eq!(resumable.steps_to_redo, vec![5, 15, 16]);
+        // Flattened: the client keeps reading the run's own fields.
+        let json = serde_json::to_value(&resumable).unwrap();
+        assert_eq!(json["id"], "r");
+        assert_eq!(json["last_completed_step"], 15);
+        assert_eq!(json["steps_to_redo"], serde_json::json!([5, 15, 16]));
+    }
+
+    #[test]
+    fn a_run_of_an_unknown_kind_names_nothing() {
+        assert!(ResumableAudit::new(run("Nonsense"), &[])
+            .steps_to_redo
+            .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod audit_steps_tests {
+    #[tokio::test]
+    async fn lists_the_full_chain_in_run_order() {
+        let steps = super::audit_steps().await.0.data.expect("steps");
+        assert_eq!(steps.len(), 16);
+        assert!(steps
+            .iter()
+            .enumerate()
+            .all(|(i, s)| s.index as usize == i + 1));
+        assert_eq!(steps[0].target_file, "docs/AGENTS.md");
+        // The consolidation's position may move between versions; the UI
+        // groups steps by target file, so only its presence is pinned.
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|s| s.target_file == "docs/decisions.md")
+                .count(),
+            1
+        );
     }
 }

@@ -103,6 +103,7 @@ async fn validate_manual_request(
 /// One snapshot consumed by every selector. Reads never pretend to be live:
 /// freshness/provenance is returned with each target.
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<ModelCatalogSnapshot>> {
+    let config = state.config.read().await.clone();
     let connections = match state
         .db
         .with_read_conn(external_api_connections::list)
@@ -122,6 +123,13 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<ModelCatalo
         match model_catalog::build_view(&state.db, runtime_target_id, agent_type).await {
             Ok(mut view) => {
                 view.target_label = Some(target_label);
+                if let Err(error) =
+                    model_catalog::populate_reference_alerts(&state.db, &config, &mut view).await
+                {
+                    return Json(ApiResponse::err(format!(
+                        "Failed to inspect model catalog references: {error}"
+                    )));
+                }
                 targets.push(view);
             }
             Err(error) => {
@@ -138,6 +146,13 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<ModelCatalo
         {
             Ok(mut view) => {
                 view.target_label = Some(connection.display_name.clone());
+                if let Err(error) =
+                    model_catalog::populate_reference_alerts(&state.db, &config, &mut view).await
+                {
+                    return Json(ApiResponse::err(format!(
+                        "Failed to inspect model catalog references: {error}"
+                    )));
+                }
                 targets.push(view);
             }
             Err(error) => {
@@ -173,7 +188,17 @@ pub async fn refresh(
         model_catalog::refresh_if_stale(&state.db, req.agent_type, req.force).await
     };
     match refresh {
-        Ok(view) => Json(ApiResponse::ok(view)),
+        Ok(mut view) => {
+            let config = state.config.read().await.clone();
+            if let Err(error) =
+                model_catalog::populate_reference_alerts(&state.db, &config, &mut view).await
+            {
+                return Json(ApiResponse::err(format!(
+                    "Failed to inspect model catalog references: {error}"
+                )));
+            }
+            Json(ApiResponse::ok(view))
+        }
         Err(error) => Json(ApiResponse::err(format!(
             "Failed to refresh model catalog: {error}"
         ))),

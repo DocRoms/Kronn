@@ -112,6 +112,8 @@ Kronn/
 │       │   ├── model_catalog/  # ACP/Codex discovery, HTTP reconciliation, preflight and one-time seed migration
 │       │   ├── host_mcp_discovery.rs # 0.6.0: read-only scan of ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml, ~/.copilot/mcp-config.json. Returns DiscoveredHostMcp with HostScope (ClaudeUser, ClaudeLocal{path}, Gemini, Codex, Copilot) + KronnOwnership (NotManaged | ManagedByMarker(uuid) | ManagedByHash(uuid)). Phase 1 of inbound/outbound feature. Never writes disk.
 │       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
+│       │   ├── agent_skill.rs # Agent Skills file format (agentskills.io): parse, validate (name/description bounds) and render a SKILL.md; Kronn's own fields go under `metadata`
+│       │   ├── skill_migration.rs # "Migrate everything to .agents/skills": read-only plan (moves, conflicts, blocked) then apply; nothing overwritten without a chosen version, symlinks refused, never commits
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
 │       │   ├── docs_sidecar.rs # Kronn Docs sidecar manager (0.5.1) — prefers the desktop-bundled executable, falls back to the Docker/dev Python venv, reads "KRONN_DOCS_READY <port>", and exposes handle() → base_url for the proxy.
 │       │   ├── tailscale.rs   # Network & VPN auto-detection (Tailscale, VPN, LAN IPs). KRONN_HOST_IPS env for Docker. Used for multi-user invite codes.
@@ -122,7 +124,7 @@ Kronn/
 │       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
 │       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows + (0.6.0) resolve bare program names (npx, npm, git…) via which::which on Windows so .cmd/.bat wrappers are spawnable. ALL Command::new() calls MUST use these helpers
 │       │   ├── sse_limits.rs # Global + per-client SSE concurrency caps (0.3.5)
-│       │   └── pricing.rs    # Static token pricing table (per-provider $/1M tokens). estimate_cost() fallback when real cost unavailable
+│       │   └── pricing.rs    # Per-model $/1M-token rates. message_cost()/price_reply() price the detailed counters (input, cache read/write, output) of the serving model; unknown, never guessed, when a counter or a rate is missing
 │       ├── profiles/          # Builtin profile Markdown files (16 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor, entrepreneur, ux-designer, game-developer, data-analyst, data-engineer, seo-growth, sre, staff-engineer)
 │       ├── directives/        # Builtin directive Markdown files
 │       ├── skills/             # Builtin skill Markdown files (embedded at compile time)

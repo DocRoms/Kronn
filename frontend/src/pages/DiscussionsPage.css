@@ -3993,6 +3993,25 @@ button.disc-contact-open {
   gap: var(--kr-sp-3);
 }
 
+.disc-workflow-step-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.35rem 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-workflow-step-run {
+  opacity: 0.7;
+}
+
+.disc-msg-workflow-step {
+  opacity: 0.75;
+  font-weight: 600;
+}
+
 .disc-pending-agent-status {
   display: flex;
   align-items: center;
@@ -5509,6 +5528,48 @@ button.disc-contact-open {
   color: var(--kr-accent);
   border-color: var(--kr-accent-border);
   background: var(--kr-accent-bg);
+}
+
+/* KT-954 — a file an agent linked by its path: openable when it is attached,
+ * shown as inert text otherwise, never a link to a page that does not exist. */
+.disc-md-file-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 0 5px;
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+  line-height: 1.35;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.disc-md-file-link--unavailable {
+  border-color: var(--kr-border);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-muted);
+  cursor: help;
+}
+
+.disc-md-file-link--project {
+  border-color: var(--kr-border);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  cursor: default;
+}
+
+.disc-md-file-link-open {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--kr-accent);
+  cursor: pointer;
 }
 
 /* The human gets its own identity rather than borrowing an agent colour. */

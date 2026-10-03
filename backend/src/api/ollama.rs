@@ -8,7 +8,7 @@
 use crate::models::*;
 use crate::AppState;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     response::sse::{Event, Sse},
     Json,
 };
@@ -57,13 +57,88 @@ fn detect_context() -> &'static str {
     }
 }
 
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// The running server's own version string, from `/api/version`. Asked fresh
+/// on every health probe, unlike the per-endpoint cache the runner keeps: the
+/// natural answer to "no MLX models offered" is to update Ollama, and the
+/// Refresh button must see the new version without restarting Kronn.
+///
+/// Bounded tighter than the probe that precedes it: the server has just
+/// answered `/api/tags`, and callers that wrap `health` in their own deadline
+/// (the worker reachability check allows four seconds) must never lose a
+/// reachable server to an optional extra.
+async fn fetch_server_version(client: &reqwest::Client, base: &str) -> Option<String> {
+    let body = client
+        .get(format!("{}/api/version", base.trim_end_matches('/')))
+        .timeout(VERSION_PROBE_TIMEOUT)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    version_from_body(&body)
+}
+
+/// `{"version": "0.34.2"}` → `"0.34.2"`; anything else is no answer.
+fn version_from_body(body: &serde_json::Value) -> Option<String> {
+    body["version"]
+        .as_str()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned)
+}
+
+/// KT-930 — whether `-mlx` models are worth offering on this host: a Mac on
+/// Apple Silicon running an Ollama whose MLX engine Kronn has measured
+/// behaving. The version floor is the one the runner already scopes its MLX
+/// worker mitigations to (`mlx_prefix_cache_reused`, measured on 0.34.2):
+/// below it the MLX engine lacks prompt-prefix reuse (ollama/ollama#17829),
+/// which is not what a suggestion should steer a user towards. An unknown
+/// version is not capable.
+pub(crate) fn mlx_capable(apple_silicon: bool, version: Option<&str>) -> bool {
+    apple_silicon
+        && crate::agents::runner::mlx_prefix_cache_reused(
+            version.and_then(crate::agents::runner::parse_ollama_version),
+        )
+}
+
+/// The health answer for a reachable server, from facts already gathered.
+fn online_health(
+    endpoint: String,
+    models_count: u32,
+    version: Option<String>,
+    apple_silicon: bool,
+) -> OllamaHealthResponse {
+    let hint = if models_count == 0 {
+        Some(
+            "Ollama est en ligne mais aucun modèle n'est installé. Exécutez : ollama pull qwen3:8b"
+                .into(),
+        )
+    } else {
+        None
+    };
+    OllamaHealthResponse {
+        status: "online".into(),
+        mlx_capable: mlx_capable(apple_silicon, version.as_deref()),
+        version,
+        endpoint,
+        models_count,
+        hint,
+    }
+}
+
 /// GET /api/ollama/health
 ///
 /// Probe Ollama availability with contextual error messages.
 /// The `hint` field provides a user-friendly explanation adapted to the
 /// detected environment (native, Docker on WSL, Docker on macOS, etc.).
-pub async fn health(State(_state): State<AppState>) -> Json<ApiResponse<OllamaHealthResponse>> {
-    let base = ollama_base_url();
+/// An online answer also carries the server's version and `mlx_capable`.
+pub async fn health(State(state): State<AppState>) -> Json<ApiResponse<OllamaHealthResponse>> {
+    let base = resolve_base_url_pub(state.ollama_base_url_override.as_deref());
     let context = detect_context();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -78,20 +153,14 @@ pub async fn health(State(_state): State<AppState>) -> Json<ApiResponse<OllamaHe
                 .as_array()
                 .map(|a| a.len() as u32)
                 .unwrap_or(0);
+            let version = fetch_server_version(&client, &base).await;
 
-            let hint = if models_count == 0 {
-                Some("Ollama est en ligne mais aucun modèle n'est installé. Exécutez : ollama pull qwen3:8b".into())
-            } else {
-                None
-            };
-
-            Json(ApiResponse::ok(OllamaHealthResponse {
-                status: "online".into(),
-                version: None,
-                endpoint: base,
+            Json(ApiResponse::ok(online_health(
+                base,
                 models_count,
-                hint,
-            }))
+                version,
+                crate::core::env::host_is_apple_silicon(),
+            )))
         }
         _ => {
             // HTTP failed — build contextual hint
@@ -136,6 +205,7 @@ pub async fn health(State(_state): State<AppState>) -> Json<ApiResponse<OllamaHe
                 endpoint: base,
                 models_count: 0,
                 hint: Some(hint.into()),
+                mlx_capable: false,
             }))
         }
     }
@@ -155,9 +225,7 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
                 .map(|tag| (tag.name, tag.size, tag.modified_at))
                 .collect();
             let env_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
-            let ram_ceiling = crate::agents::runner::ram_derived_ceiling(
-                crate::agents::runner::total_system_memory_bytes(),
-            );
+            let machine = crate::agents::ollama_memory::MachineFacts::read();
             let overrides = state
                 .config
                 .read()
@@ -172,27 +240,47 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
             // opening Settings into a burst of a dozen simultaneous local
             // requests, cold-load stalls included.
             const MAX_CONCURRENT_PROBES: usize = 4;
-            let names_to_probe: Vec<String> =
-                listed.iter().map(|(name, _, _)| name.clone()).collect();
-            let contexts = futures::stream::iter(names_to_probe)
-                .map(|name| {
+            // KT-943 — the ceiling is per model: its weights are what the
+            // listing already says it takes, its cache cost comes from its own
+            // metadata, so the one probe also decides the ceiling.
+            let probes: Vec<(String, u64)> = listed
+                .iter()
+                .map(|(name, size, _)| (name.clone(), *size))
+                .collect();
+            let decided = futures::stream::iter(probes)
+                .map(|(name, size)| {
                     let base = base.clone();
-                    async move { crate::agents::runner::ollama_model_ctx_limit(&base, &name).await }
+                    async move {
+                        let profile =
+                            crate::agents::runner::ollama_model_profile(&base, &name).await;
+                        let ceiling = crate::agents::runner::ollama_machine_ceiling(
+                            &machine,
+                            &base,
+                            &name,
+                            profile.as_ref(),
+                            Some(size),
+                        )
+                        .await;
+                        (
+                            profile.and_then(|profile| profile.context_length()),
+                            ceiling,
+                        )
+                    }
                 })
                 .buffered(MAX_CONCURRENT_PROBES)
                 .collect::<Vec<_>>()
                 .await;
             let models = listed
                 .into_iter()
-                .zip(contexts)
-                .map(|((name, size, modified), advertised_context)| {
+                .zip(decided)
+                .map(|((name, size, modified), (advertised_context, ceiling))| {
                     let context_override = overrides.get(&name).copied();
                     let cap = crate::agents::runner::resolve_ctx_cap_for_model(
                         env_cap.clone(),
                         &name,
                         &overrides,
                         advertised_context,
-                        ram_ceiling,
+                        ceiling,
                     );
                     OllamaModel {
                         name,
@@ -214,6 +302,67 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct OllamaRegistryQuery {
+    /// The tags the card suggests, comma-separated: their sizes are wanted.
+    suggested: Option<String>,
+    /// `true` asks the registry again even where an answer is cached: after an
+    /// update, and on an explicit Refresh.
+    fresh: Option<bool>,
+}
+
+/// `"a:1, b:2,,"` → `["a:1", "b:2"]`, at most as many as one answer may look
+/// up. Validity of each name is the registry module's call, not this one's.
+fn suggested_from_query(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .take(crate::core::ollama_registry::MAX_LOOKUPS)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// GET /api/ollama/registry?suggested=<tag>,<tag>
+///
+/// KT-930 — what the official Ollama library says about the installed models
+/// (is there an update?) and the suggested tags (how big are they?), without
+/// downloading anything. A separate call from `/models` on purpose: that one
+/// is local and fast and Settings waits for it, this one asks the internet
+/// and must never hold the page up. See `core::ollama_registry` for what is
+/// bounded and cached, and for why anything unconfirmed is `unknown`.
+pub async fn registry(
+    State(state): State<AppState>,
+    Query(query): Query<OllamaRegistryQuery>,
+) -> Json<ApiResponse<OllamaRegistryResponse>> {
+    let base = resolve_base_url_pub(state.ollama_base_url_override.as_deref());
+    // No local server to read digests from is no installed model to judge;
+    // the suggestions' sizes do not depend on it.
+    let installed: Vec<(String, String)> =
+        match crate::core::model_catalog::ollama_discovery::discover(&base).await {
+            Ok(tags) => tags.into_iter().map(|tag| (tag.name, tag.digest)).collect(),
+            Err(_) => Vec::new(),
+        };
+    let suggested = suggested_from_query(query.suggested.as_deref());
+    let library = match state.ollama_registry_override.as_deref() {
+        Some(library) => library,
+        None => crate::core::ollama_registry::shared(),
+    };
+    Json(ApiResponse::ok(
+        crate::core::ollama_registry::report(
+            library,
+            &installed,
+            &suggested,
+            if query.fresh == Some(true) {
+                crate::core::ollama_registry::Look::RECHECK
+            } else {
+                crate::core::ollama_registry::Look::CACHED
+            },
+        )
+        .await,
+    ))
+}
+
 /// Stable string form of `CtxCapOrigin` for the API — the internal enum's
 /// variant names are Rust naming, not a contract; this is.
 fn context_origin_label(origin: &crate::agents::runner::CtxCapOrigin) -> String {
@@ -222,13 +371,14 @@ fn context_origin_label(origin: &crate::agents::runner::CtxCapOrigin) -> String 
         crate::agents::runner::CtxCapOrigin::ModelOverride => "model_override",
         crate::agents::runner::CtxCapOrigin::ModelWindow => "model_window",
         crate::agents::runner::CtxCapOrigin::MachineCeiling { .. } => "machine_ceiling",
+        crate::agents::runner::CtxCapOrigin::ModelEstimate { .. } => "model_estimate",
         crate::agents::runner::CtxCapOrigin::PortableFallback => "portable_fallback",
     }
     .to_string()
 }
 
 /// Format bytes into human-readable size (e.g. "4.1 GB").
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
     } else if bytes >= 1_000_000 {
@@ -367,7 +517,20 @@ async fn bounded_response_text(response: reqwest::Response) -> String {
 /// Proxies Ollama's NDJSON `POST /api/pull` response as SSE. The request body
 /// owns the upstream response, so when the browser aborts the SSE request the
 /// response body is dropped and the in-flight Ollama request is cancelled too.
-pub async fn pull(Json(request): Json<PullOllamaModelRequest>) -> Sse<OllamaSseStream> {
+///
+/// This is also how an installed model is UPDATED (KT-930): asking Ollama to
+/// pull a tag it already holds fetches whatever that tag points to now, and the
+/// same progress, cancellation and error contract applies. There is no separate
+/// "update" endpoint to drift from the download one.
+pub async fn pull(
+    State(state): State<AppState>,
+    Json(request): Json<PullOllamaModelRequest>,
+) -> Sse<OllamaSseStream> {
+    let base = resolve_base_url_pub(state.ollama_base_url_override.as_deref());
+    pull_from(&base, request).await
+}
+
+async fn pull_from(base: &str, request: PullOllamaModelRequest) -> Sse<OllamaSseStream> {
     let model = request.model.trim().to_string();
     if model.is_empty() {
         return pull_sse_error("Choose a model before starting the download.");
@@ -388,7 +551,7 @@ pub async fn pull(Json(request): Json<PullOllamaModelRequest>) -> Sse<OllamaSseS
         }
     };
     let upstream = client
-        .post(format!("{}/api/pull", ollama_base_url()))
+        .post(format!("{}/api/pull", base.trim_end_matches('/')))
         .json(&serde_json::json!({ "model": model, "stream": true }))
         .send();
     let response = match tokio::time::timeout(PULL_HEADER_TIMEOUT, upstream).await {
@@ -409,8 +572,21 @@ pub async fn pull(Json(request): Json<PullOllamaModelRequest>) -> Sse<OllamaSseS
         },
     };
 
-    let stream: OllamaSseStream = Box::pin(async_stream::stream! {
-        let mut lines = response.bytes_stream();
+    Sse::new(crate::core::sse_limits::bounded(pull_events(
+        response.bytes_stream(),
+    )))
+}
+
+/// Turns Ollama's NDJSON pull records into the SSE events the browser reads:
+/// `progress` for each record, then exactly one terminal `success` or `error`.
+/// Generic over the byte source so the contract (a download and an update of an
+/// installed tag share it) is testable without a socket.
+fn pull_events<S, E>(mut lines: S) -> OllamaSseStream
+where
+    S: Stream<Item = Result<axum::body::Bytes, E>> + Send + Unpin + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    Box::pin(async_stream::stream! {
         let mut pending = String::new();
         while let Some(chunk) = lines.next().await {
             let chunk = match chunk {
@@ -465,8 +641,7 @@ pub async fn pull(Json(request): Json<PullOllamaModelRequest>) -> Sse<OllamaSseS
         } else {
             yield Ok(Event::default().event("error").data(serde_json::json!({ "message": "Ollama ended the download without confirming success. You can safely try again." }).to_string()));
         }
-    });
-    Sse::new(crate::core::sse_limits::bounded(stream))
+    })
 }
 
 pub async fn set_context_override(
@@ -504,11 +679,19 @@ pub async fn set_context_override(
     let warnings = match request.num_ctx {
         Some(value) => {
             let base = ollama_base_url();
-            let advertised = crate::agents::runner::ollama_model_ctx_limit(&base, &model).await;
-            let ram_ceiling = crate::agents::runner::ram_derived_ceiling(
-                crate::agents::runner::total_system_memory_bytes(),
-            );
-            override_warnings(&model, value, advertised, ram_ceiling)
+            let profile = crate::agents::runner::ollama_model_profile(&base, &model).await;
+            let advertised = profile
+                .as_ref()
+                .and_then(|profile| profile.context_length());
+            let ceiling = crate::agents::runner::ollama_machine_ceiling(
+                &crate::agents::ollama_memory::MachineFacts::read(),
+                &base,
+                &model,
+                profile.as_ref(),
+                crate::agents::runner::ollama_model_size_bytes(&base, &model).await,
+            )
+            .await;
+            override_warnings(&model, value, advertised, ceiling.tokens)
         }
         None => Vec::new(),
     };
@@ -548,6 +731,297 @@ mod tests {
     fn explicit_runner_endpoint_is_used_verbatim() {
         let mock_endpoint = "http://127.0.0.1:43123";
         assert_eq!(resolve_base_url_pub(Some(mock_endpoint)), mock_endpoint);
+    }
+
+    /// KT-930 — `-mlx` models are offered only to a Mac on Apple Silicon whose
+    /// Ollama is at or above the version Kronn has measured MLX on. Every
+    /// other combination, an unreadable version included, offers nothing.
+    #[test]
+    fn mlx_is_offered_only_on_apple_silicon_with_a_recent_enough_ollama() {
+        assert!(mlx_capable(true, Some("0.34.2")));
+        assert!(mlx_capable(true, Some("v0.34.0")));
+        assert!(mlx_capable(true, Some("0.40.1")));
+        assert!(mlx_capable(true, Some("1.0.0")));
+        // Apple Silicon, but a server older than the measured floor.
+        assert!(!mlx_capable(true, Some("0.33.9")));
+        assert!(!mlx_capable(true, Some("0.19.0")));
+        // Recent server on any other host (Intel Mac, Linux, WSL, Windows).
+        assert!(!mlx_capable(false, Some("0.34.2")));
+        assert!(!mlx_capable(false, Some("1.0.0")));
+        // The version is the one fact Kronn does not guess.
+        assert!(!mlx_capable(true, None));
+        assert!(!mlx_capable(true, Some("nightly")));
+        assert!(!mlx_capable(true, Some("")));
+        assert!(!mlx_capable(false, None));
+    }
+
+    #[test]
+    fn the_version_body_is_read_as_written_or_not_at_all() {
+        use serde_json::json;
+        assert_eq!(
+            version_from_body(&json!({ "version": "0.34.2" })).as_deref(),
+            Some("0.34.2")
+        );
+        assert_eq!(
+            version_from_body(&json!({ "version": " 0.34.2\n" })).as_deref(),
+            Some("0.34.2")
+        );
+        assert_eq!(version_from_body(&json!({ "version": "  " })), None);
+        assert_eq!(version_from_body(&json!({ "version": 34 })), None);
+        assert_eq!(version_from_body(&json!({})), None);
+        assert_eq!(version_from_body(&json!(null)), None);
+    }
+
+    #[test]
+    fn the_suggested_tags_of_a_query_are_split_trimmed_and_bounded() {
+        assert!(suggested_from_query(None).is_empty());
+        assert!(suggested_from_query(Some("")).is_empty());
+        assert!(suggested_from_query(Some(" , ,")).is_empty());
+        assert_eq!(
+            suggested_from_query(Some("qwen3:8b, gemma4:12b-mlx,,qwen3.5:4b ")),
+            vec!["qwen3:8b", "gemma4:12b-mlx", "qwen3.5:4b"]
+        );
+        let many = (0..500)
+            .map(|i| format!("m{i}:1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            suggested_from_query(Some(&many)).len(),
+            crate::core::ollama_registry::MAX_LOOKUPS
+        );
+    }
+
+    #[test]
+    fn an_online_answer_carries_the_server_version_and_the_mlx_verdict() {
+        let mac = online_health(
+            "http://localhost:11434".into(),
+            3,
+            Some("0.34.2".into()),
+            true,
+        );
+        assert_eq!(mac.status, "online");
+        assert_eq!(mac.version.as_deref(), Some("0.34.2"));
+        assert!(mac.mlx_capable);
+        assert!(mac.hint.is_none());
+
+        let linux = online_health(
+            "http://localhost:11434".into(),
+            3,
+            Some("0.34.2".into()),
+            false,
+        );
+        assert_eq!(linux.version.as_deref(), Some("0.34.2"));
+        assert!(!linux.mlx_capable, "the same server on a non-Mac host");
+
+        let old_mac = online_health(
+            "http://localhost:11434".into(),
+            0,
+            Some("0.32.14".into()),
+            true,
+        );
+        assert!(!old_mac.mlx_capable);
+        assert!(old_mac.hint.is_some(), "an empty install keeps its hint");
+
+        let silent = online_health("http://localhost:11434".into(), 1, None, true);
+        assert!(silent.version.is_none());
+        assert!(!silent.mlx_capable);
+    }
+
+    /// A mock Ollama bound to an ephemeral port: `/api/version` answers what the
+    /// test gives it, `/api/pull` records the body it received and streams the
+    /// NDJSON records it is given.
+    async fn mock_ollama(
+        version_body: &'static str,
+        pull_lines: &'static str,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::routing::{get, post};
+        let pulls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = pulls.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/version",
+                get(move || async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        version_body,
+                    )
+                }),
+            )
+            .route(
+                "/api/pull",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let recorded = recorded.clone();
+                    async move {
+                        recorded.lock().unwrap().push(body);
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+                            pull_lines,
+                        )
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), pulls, server)
+    }
+
+    #[tokio::test]
+    async fn the_version_probe_reads_the_server_and_never_guesses() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let (base, _, server) = mock_ollama(r#"{"version":"0.34.2"}"#, "").await;
+        assert_eq!(
+            fetch_server_version(&client, &base).await.as_deref(),
+            Some("0.34.2")
+        );
+        server.abort();
+
+        let (base, _, server) = mock_ollama(r#"{"version":"  "}"#, "").await;
+        assert_eq!(fetch_server_version(&client, &base).await, None);
+        server.abort();
+
+        let (base, _, server) = mock_ollama("not json", "").await;
+        assert_eq!(fetch_server_version(&client, &base).await, None);
+        server.abort();
+
+        // Nothing listening: the probe fails closed instead of inventing one.
+        let (base, _, server) = mock_ollama("{}", "").await;
+        server.abort();
+        let _ = server.await;
+        assert_eq!(fetch_server_version(&client, &base).await, None);
+    }
+
+    async fn sse_body(sse: Sse<OllamaSseStream>) -> String {
+        use axum::response::IntoResponse;
+        use http_body_util::BodyExt;
+        let bytes = sse
+            .into_response()
+            .into_body()
+            .collect()
+            .await
+            .expect("the SSE body ends")
+            .to_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// KT-930 — updating an installed model is the download flow pointed at a
+    /// tag the server already holds: the same upstream call, with the exact tag
+    /// (trimmed), streamed back as the same progress and terminal events. Needs
+    /// a local socket for the mock server, which a sandbox may refuse.
+    #[tokio::test]
+    async fn updating_an_installed_tag_streams_the_same_pull_as_a_download() {
+        let (base, pulls, server) = mock_ollama(
+            "{}",
+            "{\"status\":\"pulling manifest\"}\n\
+             {\"status\":\"downloading\",\"digest\":\"sha256:abc\",\"completed\":1048576,\"total\":4194304}\n\
+             {\"status\":\"success\"}\n",
+        )
+        .await;
+
+        let body = sse_body(
+            pull_from(
+                &base,
+                PullOllamaModelRequest {
+                    model: "  qwen3.8:27b-mlx ".into(),
+                },
+            )
+            .await,
+        )
+        .await;
+
+        let sent = pulls.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "one upstream pull");
+        assert_eq!(
+            sent[0]["model"], "qwen3.8:27b-mlx",
+            "the exact tag, trimmed"
+        );
+        assert_eq!(sent[0]["stream"], true);
+        assert!(body.contains("event: progress"), "{body}");
+        assert!(body.contains("\"completed\":1048576"), "{body}");
+        assert!(body.contains("\"total\":4194304"), "{body}");
+        assert!(body.contains("event: success"), "{body}");
+        assert!(!body.contains("event: error"), "{body}");
+        server.abort();
+    }
+
+    /// The browser-facing events for a stream of NDJSON chunks, with no socket:
+    /// what `pull_events` does to whatever Ollama sends back, a download of a
+    /// new tag and an update of an installed one alike.
+    async fn pull_events_for(chunks: &[&'static str]) -> String {
+        let source = futures::stream::iter(
+            chunks
+                .iter()
+                .map(|chunk| Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(*chunk)))
+                .collect::<Vec<_>>(),
+        );
+        sse_body(Sse::new(pull_events(source))).await
+    }
+
+    #[tokio::test]
+    async fn an_update_stream_reports_progress_then_exactly_one_success() {
+        let body = pull_events_for(&[
+            "{\"status\":\"pulling manifest\"}\n",
+            "{\"status\":\"downloading\",\"digest\":\"sha256:abc\",\"completed\":1048576,\"total\":4194304}\n",
+            "{\"status\":\"success\"}\n",
+        ])
+        .await;
+        assert_eq!(body.matches("event: progress").count(), 2, "{body}");
+        assert!(body.contains("\"completed\":1048576"), "{body}");
+        assert!(body.contains("\"total\":4194304"), "{body}");
+        assert_eq!(body.matches("event: success").count(), 1, "{body}");
+        assert!(!body.contains("event: error"), "{body}");
+    }
+
+    /// A stream that never carries a byte counter (nothing to fetch, or a
+    /// server that does not report one) is still a finished pull.
+    #[tokio::test]
+    async fn a_stream_without_byte_counters_still_ends_in_success() {
+        let body =
+            pull_events_for(&["{\"status\":\"pulling manifest\"}\n{\"status\":\"success\"}\n"])
+                .await;
+        assert!(body.contains("event: success"), "{body}");
+        assert!(!body.contains("event: error"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn records_split_across_chunks_are_reassembled() {
+        let body = pull_events_for(&[
+            "{\"status\":\"downloading\",\"completed\":10,",
+            "\"total\":20}\n{\"status\":\"succ",
+            "ess\"}\n",
+        ])
+        .await;
+        assert!(body.contains("\"completed\":10"), "{body}");
+        assert!(body.contains("event: success"), "{body}");
+        assert!(!body.contains("event: error"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_update_surfaces_an_error_and_never_a_success() {
+        let body = pull_events_for(&[
+            "{\"status\":\"pulling manifest\"}\n",
+            "{\"error\":\"pull model manifest: file does not exist\"}\n",
+        ])
+        .await;
+        assert!(body.contains("event: error"), "{body}");
+        assert!(body.contains("pull model manifest"), "{body}");
+        assert!(!body.contains("event: success"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_stops_before_success_is_an_error_not_a_silent_success() {
+        let body =
+            pull_events_for(&["{\"status\":\"downloading\",\"completed\":5,\"total\":9}\n"]).await;
+        assert!(body.contains("event: error"), "{body}");
+        assert!(body.contains("without confirming success"), "{body}");
+        assert!(!body.contains("event: success"), "{body}");
     }
 
     /// KT-405 — an operator's request is never refused for being LARGER than
@@ -671,6 +1145,12 @@ mod tests {
                 model_limit: 262_144
             }),
             "machine_ceiling"
+        );
+        assert_eq!(
+            context_origin_label(&CtxCapOrigin::ModelEstimate {
+                model_limit: 262_144
+            }),
+            "model_estimate"
         );
         assert_eq!(
             context_origin_label(&CtxCapOrigin::PortableFallback),

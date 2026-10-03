@@ -49,6 +49,39 @@ pub struct VersionCheck {
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubAsset {
+    name: String,
+}
+
+/// Set by the desktop app before it starts the embedded backend: it updates by
+/// installer, so a release without one must not be offered (KT-970: 0.12.0 to
+/// 0.14.1 shipped none, and the banner led to empty release pages). Docker and
+/// source installs update from the tag and need no installer.
+pub const DESKTOP_APP_ENV: &str = "KRONN_DESKTOP_APP";
+
+fn updates_by_installer() -> bool {
+    std::env::var(DESKTOP_APP_ENV).as_deref() == Ok("1")
+}
+
+/// Whether one of a release's assets installs on `os`/`arch`, by Tauri's file
+/// names (`Kronn_0.14.2_aarch64.dmg`, `…_x64-setup.exe`, `…_amd64.AppImage`).
+fn has_installer_for(asset_names: &[&str], os: &str, arch: &str) -> bool {
+    let endings: &[&str] = match (os, arch) {
+        ("macos", "aarch64") => &["_aarch64.dmg"],
+        ("macos", _) => &["_x64.dmg"],
+        ("windows", _) => &[".exe", ".msi"],
+        ("linux", _) => &[".appimage", ".deb"],
+        _ => &[],
+    };
+    asset_names.iter().any(|name| {
+        let name = name.to_ascii_lowercase();
+        endings.iter().any(|ending| name.ends_with(ending))
+    })
 }
 
 struct Cache {
@@ -95,6 +128,25 @@ fn is_up_to_date(current: &str, latest: &str) -> bool {
 }
 
 async fn fetch_latest() -> Option<(String, String)> {
+    let release = fetch_latest_release().await?;
+    if updates_by_installer() {
+        let names: Vec<&str> = release
+            .assets
+            .iter()
+            .map(|asset| asset.name.as_str())
+            .collect();
+        if !has_installer_for(&names, std::env::consts::OS, std::env::consts::ARCH) {
+            tracing::info!(
+                "Release {} has no installer for this platform yet: not offered",
+                release.tag_name
+            );
+            return None;
+        }
+    }
+    Some((release.tag_name, release.html_url))
+}
+
+async fn fetch_latest_release() -> Option<GitHubRelease> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -105,8 +157,7 @@ async fn fetch_latest() -> Option<(String, String)> {
     if !resp.status().is_success() {
         return None;
     }
-    let release: GitHubRelease = resp.json().await.ok()?;
-    Some((release.tag_name, release.html_url))
+    resp.json().await.ok()
 }
 
 /// `GET /api/version/check` — returns the current+latest version pair,
@@ -161,6 +212,62 @@ pub async fn check(State(_state): State<AppState>) -> Json<ApiResponse<VersionCh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RELEASE: [&str; 6] = [
+        "Kronn_0.14.2_aarch64.dmg",
+        "Kronn_0.14.2_x64.dmg",
+        "Kronn_0.14.2_x64-setup.exe",
+        "Kronn_0.14.2_x64_en-US.msi",
+        "Kronn_0.14.2_amd64.deb",
+        "Kronn_0.14.2_amd64.AppImage",
+    ];
+
+    #[test]
+    fn every_platform_finds_its_installer_in_a_complete_release() {
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+            ("windows", "x86_64"),
+            ("linux", "x86_64"),
+        ] {
+            assert!(has_installer_for(&RELEASE, os, arch), "{os}/{arch}");
+        }
+    }
+
+    #[test]
+    fn a_release_without_installers_is_not_offered_to_the_desktop_app() {
+        // KT-970 — 0.12.0 to 0.14.1 had no asset at all.
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("windows", "x86_64"),
+            ("linux", "x86_64"),
+        ] {
+            assert!(!has_installer_for(&[], os, arch), "{os}/{arch}");
+        }
+        // An Intel Mac cannot install the Apple Silicon image, nor the reverse.
+        assert!(!has_installer_for(
+            &["Kronn_0.14.2_aarch64.dmg"],
+            "macos",
+            "x86_64"
+        ));
+        assert!(!has_installer_for(
+            &["Kronn_0.14.2_x64.dmg"],
+            "macos",
+            "aarch64"
+        ));
+    }
+
+    #[test]
+    fn release_assets_are_read_from_the_github_payload() {
+        let release: GitHubRelease = serde_json::from_str(
+            r#"{"tag_name":"0.14.2","html_url":"https://x","assets":[{"name":"Kronn_0.14.2_amd64.deb","size":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(release.assets[0].name, "Kronn_0.14.2_amd64.deb");
+        let bare: GitHubRelease =
+            serde_json::from_str(r#"{"tag_name":"0.14.1","html_url":"https://x"}"#).unwrap();
+        assert!(bare.assets.is_empty());
+    }
 
     #[test]
     fn normalize_strips_v_prefix() {

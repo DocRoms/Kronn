@@ -186,7 +186,34 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
 
-fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
+/// `metadata` keys a skill written by Kronn carries for Kronn's own use: the
+/// Agent Skills format keeps `name` for the folder slug, so the display name,
+/// icon, category and attribution live here.
+pub(crate) const KRONN_NAME_KEY: &str = "kronn-name";
+pub(crate) const KRONN_ICON_KEY: &str = "kronn-icon";
+pub(crate) const KRONN_CATEGORY_KEY: &str = "kronn-category";
+pub(crate) const KRONN_EXTERNAL_KEY: &str = "kronn-external";
+pub(crate) const KRONN_SOURCE_URL_KEY: &str = "kronn-source-url";
+
+/// The lowercase word a category is written as in a skill file.
+pub(crate) fn category_str(category: &SkillCategory) -> &'static str {
+    match category {
+        SkillCategory::Language => "language",
+        SkillCategory::Domain => "domain",
+        SkillCategory::Business => "business",
+    }
+}
+
+fn category_from_str(value: &str) -> Option<SkillCategory> {
+    match value.trim().to_lowercase().as_str() {
+        "language" => Some(SkillCategory::Language),
+        "domain" => Some(SkillCategory::Domain),
+        "business" => Some(SkillCategory::Business),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
     let trimmed = raw.trim_start();
     if !trimmed.starts_with("---") {
         tracing::warn!("Skill '{}' missing YAML frontmatter", id);
@@ -217,7 +244,7 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
         }
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
-            name = val.trim().to_string();
+            name = crate::core::agent_skill::decode_scalar(val);
         } else if let Some(val) = line.strip_prefix("description:") {
             description = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("icon:") {
@@ -246,6 +273,36 @@ fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> 
             if !v.is_empty() {
                 source_url = Some(v);
             }
+        }
+    }
+
+    // A skill in the Agent Skills format keeps what is Kronn's own under
+    // `metadata` and may quote or fold its values: read those, they win over
+    // the bare line reading above.
+    if let Ok(standard) = crate::core::agent_skill::parse(raw) {
+        let kronn = |key: &str| standard.metadata.get(key).filter(|value| !value.is_empty());
+        if let Some(value) = kronn(KRONN_NAME_KEY) {
+            name = value.clone();
+        }
+        if !standard.description.is_empty() {
+            description = standard.description.clone();
+        }
+        if let Some(value) = kronn(KRONN_ICON_KEY) {
+            icon = value.clone();
+        }
+        if let Some(value) = kronn(KRONN_CATEGORY_KEY) {
+            category = category_from_str(value).unwrap_or(category);
+        }
+        if let Some(value) = kronn(KRONN_EXTERNAL_KEY) {
+            external = matches!(value.as_str(), "true" | "yes" | "1");
+        }
+        if let Some(value) = kronn(KRONN_SOURCE_URL_KEY) {
+            source_url = Some(value.clone());
+        }
+        license = standard.license.or(license);
+        allowed_tools = standard.allowed_tools.or(allowed_tools);
+        if name.is_empty() {
+            name = standard.name;
         }
     }
 
@@ -366,6 +423,18 @@ fn custom_skills_dir() -> Option<PathBuf> {
     Some(config_dir.join("skills"))
 }
 
+/// When a custom skill's file last changed: the Kronn-side date of a skill,
+/// which carries no `updated_at` of its own. `None` for builtin skills.
+pub fn custom_skill_modified_at(id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let slug = id.strip_prefix("custom-")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return None;
+    }
+    let path = custom_skills_dir()?.join(format!("{slug}.md"));
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.into())
+}
+
 /// List all available skills (builtin + custom).
 pub fn list_all_skills() -> Vec<Skill> {
     let mut skills = Vec::new();
@@ -413,31 +482,60 @@ pub fn get_skills_by_ids(ids: &[String]) -> Vec<Skill> {
         .collect()
 }
 
-/// Build the combined skill prompt text for injection.
-/// Returns empty string if no skills are selected.
-pub fn build_skills_prompt(skill_ids: &[String]) -> String {
-    let skills = get_skills_by_ids(skill_ids);
+// ─── Run snapshot (ADR-005 slice 1) ─────────────────────────────────────────
+
+static SKILL_SNAPSHOTS: crate::core::resource_snapshot::RunSnapshotCache<Skill> =
+    crate::core::resource_snapshot::RunSnapshotCache::new();
+
+/// Resolve `ids` like `get_skills_by_ids`, but pin each skill's content to
+/// `run_id`: an edit or deletion made to a skill while this run is still
+/// executing doesn't change what this run already loaded.
+pub fn get_skills_snapshot(run_id: &str, ids: &[String]) -> Vec<Skill> {
+    ids.iter()
+        .filter_map(|id| SKILL_SNAPSHOTS.get_or_resolve(run_id, id, || get_skill(id)))
+        .collect()
+}
+
+/// Drop every skill snapshot pinned to `run_id`. Call once that run has
+/// finished so its resources don't stay pinned in memory.
+pub fn release_skills_snapshot(run_id: &str) {
+    SKILL_SNAPSHOTS.release(run_id);
+}
+
+fn render_skills_block(header: &str, skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    let mut prompt = String::from("=== Active Skills ===\n\n");
-    for skill in &skills {
+    let mut prompt = format!("=== {header} ===\n\n");
+    for skill in skills {
         prompt.push_str(&format!("--- {} ---\n{}\n\n", skill.name, skill.content));
     }
     prompt
 }
 
-/// Build a compact skills prompt for agents with small context windows.
-/// Uses the first 2-3 meaningful lines instead of just 1 (~40% token savings).
-pub fn build_skills_prompt_compact(skill_ids: &[String]) -> String {
-    let skills = get_skills_by_ids(skill_ids);
+fn render_skills_prompt(skills: &[Skill]) -> String {
+    render_skills_block("Active Skills", skills)
+}
+
+/// Build the combined skill prompt text for injection.
+/// Returns empty string if no skills are selected.
+pub fn build_skills_prompt(skill_ids: &[String]) -> String {
+    render_skills_prompt(&get_skills_by_ids(skill_ids))
+}
+
+/// Same as `build_skills_prompt`, resolved through the run snapshot cache.
+pub fn build_skills_prompt_for_run(run_id: &str, skill_ids: &[String]) -> String {
+    render_skills_prompt(&get_skills_snapshot(run_id, skill_ids))
+}
+
+fn render_skills_block_compact(header: &str, skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    let mut prompt = String::from("=== Skills ===\n");
-    for skill in &skills {
+    let mut prompt = format!("=== {header} ===\n");
+    for skill in skills {
         // Take first 2-3 meaningful lines (up to ~200 chars) for better context
         let mut summary = String::new();
         for line in skill.content.lines() {
@@ -461,8 +559,60 @@ pub fn build_skills_prompt_compact(skill_ids: &[String]) -> String {
     prompt
 }
 
-/// Save a custom skill to disk. Returns the generated ID.
-pub fn save_custom_skill(
+fn render_skills_prompt_compact(skills: &[Skill]) -> String {
+    render_skills_block_compact("Skills", skills)
+}
+
+/// `prompt` (the catalog skills' text, possibly empty or a native-files hint)
+/// followed by the skills a project's repository holds (KT-923), laid out like
+/// the catalog's — full for an agent that takes them, compact for one with a
+/// small context window. They get a block of their own: the native-files hint
+/// says nothing about a `SKILL.md` Kronn did not write, so this text is what
+/// makes sure the agent reads it.
+pub fn append_repository_skills_prompt(prompt: String, skills: &[Skill], compact: bool) -> String {
+    if skills.is_empty() {
+        return prompt;
+    }
+    let block = if compact {
+        render_skills_block_compact("Repository Skills", skills)
+    } else {
+        render_skills_block("Repository Skills", skills)
+    };
+    if prompt.is_empty() {
+        block
+    } else {
+        format!("{prompt}\n{block}")
+    }
+}
+
+/// Build a compact skills prompt for agents with small context windows.
+/// Uses the first 2-3 meaningful lines instead of just 1 (~40% token savings).
+pub fn build_skills_prompt_compact(skill_ids: &[String]) -> String {
+    render_skills_prompt_compact(&get_skills_by_ids(skill_ids))
+}
+
+/// Same as `build_skills_prompt_compact`, resolved through the run snapshot cache.
+pub fn build_skills_prompt_compact_for_run(run_id: &str, skill_ids: &[String]) -> String {
+    render_skills_prompt_compact(&get_skills_snapshot(run_id, skill_ids))
+}
+
+/// Validate a skill's editable fields per agentskills.io spec. Shared by
+/// create and update so both paths reject the same inputs.
+fn validate_skill_fields(name: &str, description: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Skill name is required".into());
+    }
+    if description.len() > 1024 {
+        return Err("Description must be at most 1024 characters".into());
+    }
+    Ok(())
+}
+
+/// Render a custom skill's Markdown+frontmatter file content. Shared by
+/// create and update: renaming only changes the `name:` line, never the
+/// file this is written to.
+#[allow(clippy::too_many_arguments)]
+fn render_skill_markdown(
     name: &str,
     description: &str,
     icon: &str,
@@ -470,24 +620,7 @@ pub fn save_custom_skill(
     content: &str,
     license: Option<&str>,
     allowed_tools: Option<&str>,
-) -> Result<String, String> {
-    // Validate per agentskills.io spec
-    if name.is_empty() {
-        return Err("Skill name is required".into());
-    }
-    if description.len() > 1024 {
-        return Err("Description must be at most 1024 characters".into());
-    }
-
-    let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
-
-    let slug = super::native_files::slug(name);
-    if slug.is_empty() {
-        return Err("Skill name must contain at least one alphanumeric character".into());
-    }
-
-    let id = format!("custom-{}", slug);
+) -> String {
     let cat_str = match category {
         SkillCategory::Language => "language",
         SkillCategory::Domain => "domain",
@@ -507,15 +640,109 @@ pub fn save_custom_skill(
         .filter(|s| !s.is_empty())
         .map(|s| format!("allowed-tools: {}\n", s))
         .unwrap_or_default();
-    let file_content = format!(
+    format!(
         "---\nname: {}\n{}category: {}\nicon: {}\n{}{}builtin: false\n---\n{}",
         name, desc_line, cat_str, icon, license_line, tools_line, content
+    )
+}
+
+/// Find a filename stem for `name` that no existing custom skill file
+/// already uses. Two names that produce the same slug (e.g. "Rust!" and
+/// "rust?") get distinct files instead of one silently overwriting the
+/// other.
+fn unique_skill_slug(dir: &std::path::Path, name: &str) -> Result<String, String> {
+    let base = super::native_files::slug(name);
+    if base.is_empty() {
+        return Err("Skill name must contain at least one alphanumeric character".into());
+    }
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+    while dir.join(format!("{}.md", candidate)).exists() {
+        candidate = format!("{}-{}", base, suffix);
+        suffix += 1;
+    }
+    Ok(candidate)
+}
+
+/// Save a new custom skill to disk. Returns the generated, stable ID.
+pub fn save_custom_skill(
+    name: &str,
+    description: &str,
+    icon: &str,
+    category: &SkillCategory,
+    content: &str,
+    license: Option<&str>,
+    allowed_tools: Option<&str>,
+) -> Result<String, String> {
+    validate_skill_fields(name, description)?;
+
+    let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
+
+    let slug = unique_skill_slug(&dir, name)?;
+    let id = format!("custom-{}", slug);
+    let file_content = render_skill_markdown(
+        name,
+        description,
+        icon,
+        category,
+        content,
+        license,
+        allowed_tools,
     );
 
     let path = dir.join(format!("{}.md", slug));
-    std::fs::write(&path, file_content).map_err(|e| format!("Cannot write skill: {}", e))?;
+    crate::core::mcp_scanner::atomic_write(&path, &file_content)
+        .map_err(|e| format!("Cannot write skill: {}", e))?;
 
     Ok(id)
+}
+
+/// Update a custom skill IN PLACE and atomically: same file, same id, even
+/// when `name` changes. Unlike `save_custom_skill`, the file is located
+/// from the EXISTING id — the slug is never recomputed from the new name,
+/// so renaming a skill never changes what `skill_ids` must reference.
+#[allow(clippy::too_many_arguments)]
+pub fn update_custom_skill(
+    id: &str,
+    name: &str,
+    description: &str,
+    icon: &str,
+    category: &SkillCategory,
+    content: &str,
+    license: Option<&str>,
+    allowed_tools: Option<&str>,
+) -> Result<String, String> {
+    validate_skill_fields(name, description)?;
+
+    let slug = id
+        .strip_prefix("custom-")
+        .ok_or("Cannot modify builtin skills")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid skill id '{}'", id));
+    }
+    let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
+    let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid skill id '{}'", id));
+    }
+    if !path.exists() {
+        return Err(format!("Skill '{}' not found", id));
+    }
+
+    let file_content = render_skill_markdown(
+        name,
+        description,
+        icon,
+        category,
+        content,
+        license,
+        allowed_tools,
+    );
+    crate::core::mcp_scanner::atomic_write(&path, &file_content)
+        .map_err(|e| format!("Cannot write skill: {}", e))?;
+
+    Ok(id.to_string())
 }
 
 /// Delete a custom skill from disk.
@@ -524,8 +751,14 @@ pub fn delete_custom_skill(id: &str) -> Result<bool, String> {
         return Err("Cannot delete builtin skills".into());
     }
     let slug = id.strip_prefix("custom-").unwrap();
+    if !super::native_files::is_valid_slug(slug) {
+        return Err(format!("Invalid skill id '{}'", id));
+    }
     let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
     let path = dir.join(format!("{}.md", slug));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(format!("Invalid skill id '{}'", id));
+    }
 
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Cannot delete skill: {}", e))?;
@@ -538,6 +771,242 @@ pub fn delete_custom_skill(id: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// `KRONN_DATA_DIR` is a process-wide env var (see `core::config`).
+    /// Tests that write custom skills to disk run serialized against a
+    /// unique tempdir so parallel tests never share or race a directory.
+    fn scratch_config_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "kronn-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    #[serial]
+    fn update_preserves_the_original_id_and_is_atomic() {
+        let dir = scratch_config_dir("skills-update");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let id = save_custom_skill(
+            "Original Name",
+            "desc",
+            "🔧",
+            &SkillCategory::Domain,
+            "content v1",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let updated_id = update_custom_skill(
+            &id,
+            "Renamed",
+            "desc v2",
+            "🔧",
+            &SkillCategory::Domain,
+            "content v2",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(updated_id, id, "renaming must keep the same id");
+
+        let skill = get_skill(&id).expect("skill must still resolve under the original id");
+        assert_eq!(skill.name, "Renamed");
+        assert_eq!(skill.content, "content v2");
+
+        // Atomic in-place: exactly one file for this skill, no leftover tmp.
+        let files: Vec<_> = std::fs::read_dir(dir.join("skills"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files.len(), 1, "expected exactly one file, got {:?}", files);
+        assert!(
+            !files[0].contains(".tmp"),
+            "no leftover temp file: {:?}",
+            files
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_of_unknown_id_is_rejected() {
+        let dir = scratch_config_dir("skills-update-missing");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let result = update_custom_skill(
+            "custom-does-not-exist",
+            "Name",
+            "desc",
+            "🔧",
+            &SkillCategory::Domain,
+            "content",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn colliding_slugs_do_not_overwrite_each_other() {
+        let dir = scratch_config_dir("skills-collision");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let first = save_custom_skill(
+            "Foo Bar",
+            "first",
+            "🅰️",
+            &SkillCategory::Domain,
+            "content A",
+            None,
+            None,
+        )
+        .unwrap();
+        let second = save_custom_skill(
+            "foo-bar",
+            "second",
+            "🅱️",
+            &SkillCategory::Domain,
+            "content B",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_ne!(first, second, "colliding names must get distinct ids");
+        assert_eq!(get_skill(&first).unwrap().content, "content A");
+        assert_eq!(get_skill(&second).unwrap().content, "content B");
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn update_and_delete_reject_a_path_traversal_id() {
+        let dir = scratch_config_dir("skills-traversal");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        // Lives one level above the skills/ dir the traversal id targets.
+        let sentinel = dir.join("sentinel.md");
+        std::fs::write(&sentinel, "untouched").unwrap();
+        let traversal_id = "custom-../sentinel";
+
+        assert!(
+            update_custom_skill(
+                traversal_id,
+                "Name",
+                "desc",
+                "🔧",
+                &SkillCategory::Domain,
+                "content",
+                None,
+                None,
+            )
+            .is_err(),
+            "a path traversal id must be rejected on update"
+        );
+        assert!(
+            delete_custom_skill(traversal_id).is_err(),
+            "a path traversal id must be rejected on delete"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "untouched",
+            "a file outside the skills dir must never be touched"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn run_snapshot_keeps_the_loaded_version_even_after_a_change_or_deletion() {
+        let dir = scratch_config_dir("skills-snapshot");
+        let previous = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let id = save_custom_skill(
+            "Snapshot Skill",
+            "desc",
+            "📌",
+            &SkillCategory::Domain,
+            "content v1",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let run_id = format!("run-kt847-{}", std::process::id());
+        let loaded = get_skills_snapshot(&run_id, std::slice::from_ref(&id));
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "content v1");
+
+        // The skill changes mid-run...
+        update_custom_skill(
+            &id,
+            "Snapshot Skill",
+            "desc",
+            "📌",
+            &SkillCategory::Domain,
+            "content v2",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // ...the run still sees what it first loaded.
+        let still_loaded = get_skills_snapshot(&run_id, std::slice::from_ref(&id));
+        assert_eq!(still_loaded.len(), 1);
+        assert_eq!(still_loaded[0].content, "content v1");
+
+        // Even after outright deletion.
+        delete_custom_skill(&id).unwrap();
+        let after_delete = get_skills_snapshot(&run_id, std::slice::from_ref(&id));
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(after_delete[0].content, "content v1");
+
+        // A different run resolves fresh — already deleted, so not found.
+        let other_run = get_skills_snapshot("run-other-kt847", std::slice::from_ref(&id));
+        assert!(other_run.is_empty());
+
+        release_skills_snapshot(&run_id);
+
+        match previous {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
 
     #[test]
     fn parse_builtin_skills() {
@@ -725,6 +1194,76 @@ mod tests {
         assert!(prompt.contains("=== Active Skills ==="));
     }
 
+    fn repository_skill(name: &str, content: &str) -> Skill {
+        Skill {
+            id: format!("repository:p1:{name}"),
+            name: name.into(),
+            description: String::new(),
+            icon: "📂".into(),
+            category: SkillCategory::Domain,
+            content: content.into(),
+            is_builtin: false,
+            token_estimate: 0,
+            license: None,
+            allowed_tools: None,
+            auto_triggers: None,
+            external: false,
+            source_url: None,
+        }
+    }
+
+    #[test]
+    fn repository_skills_leave_the_catalog_prompt_alone_when_there_are_none() {
+        assert_eq!(
+            append_repository_skills_prompt("catalog".into(), &[], false),
+            "catalog"
+        );
+        assert_eq!(
+            append_repository_skills_prompt(String::new(), &[], true),
+            ""
+        );
+    }
+
+    #[test]
+    fn repository_skills_follow_the_catalog_ones_in_a_block_of_their_own() {
+        let skills = [repository_skill("block-migration", "Move the block.")];
+        let alone = append_repository_skills_prompt(String::new(), &skills, false);
+        assert_eq!(
+            alone,
+            "=== Repository Skills ===\n\n--- block-migration ---\nMove the block.\n\n"
+        );
+
+        let catalog = build_skills_prompt(&["rust".into()]);
+        let both = append_repository_skills_prompt(catalog.clone(), &skills, false);
+        assert!(both.starts_with(&catalog));
+        assert!(
+            both.contains("=== Active Skills ===") && both.contains("=== Repository Skills ===")
+        );
+        assert!(both.ends_with(&alone));
+
+        // Even when the catalog's part is only the native-files hint: a
+        // SKILL.md Kronn did not write is not what that hint points at.
+        let hinted = append_repository_skills_prompt(
+            "For this task, prioritize your rust skills.".into(),
+            &skills,
+            false,
+        );
+        assert!(hinted.contains("Move the block."));
+    }
+
+    #[test]
+    fn repository_skills_are_summarised_for_a_small_context_agent() {
+        let skills = [repository_skill(
+            "block-migration",
+            "Move the block.\nThen check it.",
+        )];
+        let prompt = append_repository_skills_prompt(String::new(), &skills, true);
+        assert_eq!(
+            prompt,
+            "=== Repository Skills ===\n[block-migration: Move the block. Then check it.]\n"
+        );
+    }
+
     #[test]
     fn new_language_skills_exist() {
         for id in ["java", "kotlin", "swift", "csharp"] {
@@ -741,6 +1280,32 @@ mod tests {
             assert!(skill.is_some(), "Domain skill '{}' must exist", id);
             assert_eq!(skill.unwrap().category, SkillCategory::Domain);
         }
+    }
+
+    #[test]
+    fn a_standard_agent_skill_keeps_kronns_fields_under_metadata() {
+        let raw = "---\nname: review\ndescription: \"Review \\\"carefully\\\".\"\nlicense: \"MIT\"\nallowed-tools: \"Bash Read\"\nmetadata:\n  kronn-name: \"Review Diffs\"\n  kronn-icon: \"🔍\"\n  kronn-category: \"language\"\n  kronn-external: \"true\"\n  kronn-source-url: \"https://example.test/skill\"\n---\n\nRead the diff.\n";
+        let skill = parse_skill_markdown("review", raw, false).unwrap();
+        assert_eq!(skill.name, "Review Diffs");
+        assert_eq!(skill.description, "Review \"carefully\".");
+        assert_eq!(skill.icon, "🔍");
+        assert_eq!(skill.category, SkillCategory::Language);
+        assert_eq!(skill.license.as_deref(), Some("MIT"));
+        assert_eq!(skill.allowed_tools.as_deref(), Some("Bash Read"));
+        assert!(skill.external);
+        assert_eq!(
+            skill.source_url.as_deref(),
+            Some("https://example.test/skill")
+        );
+        assert_eq!(skill.content, "Read the diff.");
+    }
+
+    #[test]
+    fn a_plain_standard_skill_is_named_after_its_header() {
+        let raw = "---\nname: \"3d-models\"\ndescription: >\n  Model in\n  three dimensions.\n---\nBody.\n";
+        let skill = parse_skill_markdown("3d-models", raw, false).unwrap();
+        assert_eq!(skill.name, "3d-models");
+        assert_eq!(skill.description, "Model in three dimensions.");
     }
 
     #[test]
@@ -1070,16 +1635,16 @@ body"#;
         );
 
         // 0.8.3 cross-repo evidence — the skill must teach the
-        // runner-side companion-repo injection (see runner.rs:124
-        // and triage::TRIAGE_PROMPT_ADDENDUM). Without this section
-        // an architect designing a migration workflow won't realize
-        // the runtime injects linked_repos AND that the agent is
+        // linked-repo evidence pattern (see triage::TRIAGE_PROMPT_ADDENDUM).
+        // Without this section an architect designing a migration
+        // workflow won't realize the project's linked_repos are the
+        // source AND that the agent is
         // expected to cite `evidence: <repo>/<path>:<line>` in
         // `decided`/`mocked` entries — the killer differentiator
         // versus a flat "agent improvises in isolation" pipeline.
         assert!(
             c.contains("Cross-repo evidence"),
-            "skill must teach the cross-repo evidence section (linked_repos auto-injection)"
+            "skill must teach the cross-repo evidence section (the project's linked repos)"
         );
         assert!(
             c.contains("linked_repos") || c.contains("Linked repositories"),

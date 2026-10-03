@@ -202,17 +202,12 @@ describe('ProjectCard — full audit step_error visibility', () => {
       agents: [AGENT, CODEX_AGENT],
     });
     const trackerPrerequisite = screen.getByTestId('audit-tracker-prerequisite');
-    const briefingButton = screen.getByTestId('briefing-open-form-btn');
+    const briefingButton = screen.getByTestId('audit-timeline-briefing-open');
     expect(trackerPrerequisite.compareDocumentPosition(briefingButton))
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(container.querySelector('select')).toBeNull();
-    const agentPicker = container.querySelector<HTMLButtonElement>('.kr-agent-switch-btn');
-    expect(agentPicker).not.toBeNull();
-    await act(async () => { fireEvent.click(agentPicker!); });
-    await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
-    });
-
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Codex/ })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /disc\.tier\.economy/ })); });
     const btn = await screen.findByText(/audit.startFullAudit/);
     await act(async () => { fireEvent.click(btn); await Promise.resolve(); });
     expect(captured).not.toBeNull();

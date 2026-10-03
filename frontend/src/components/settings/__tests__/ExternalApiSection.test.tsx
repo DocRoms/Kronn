@@ -11,13 +11,14 @@ import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-li
 import { buildApiMock } from '../../../test/apiMock';
 import type { ExternalApiConnectionView } from '../../../lib/api';
 
-const { listMock, createMock, updateMock, revealMock, removeMock, testMock } = vi.hoisted(() => ({
+const { listMock, createMock, updateMock, revealMock, removeMock, testMock, testProgressMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
   updateMock: vi.fn(),
   revealMock: vi.fn(),
   removeMock: vi.fn(),
   testMock: vi.fn(),
+  testProgressMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () =>
@@ -29,6 +30,7 @@ vi.mock('../../../lib/api', () =>
       reveal: revealMock as never,
       remove: removeMock as never,
       test: testMock as never,
+      testProgress: testProgressMock as never,
     },
   }),
 );
@@ -70,11 +72,14 @@ function renderSection(onModelTiersChanged?: () => void) {
   return { toast };
 }
 
+/** An option's name, whether or not a call verdict (✅ / ❌) marks it. */
+const optionNamed = (model: string) => (name: string) => name.replace(/^(✅|❌) /, '') === model;
+
 function chooseTier(testId: string, model: string) {
   const input = screen.getByTestId(testId);
   fireEvent.focus(input);
   fireEvent.change(input, { target: { value: model } });
-  fireEvent.click(screen.getByRole('option', { name: model }));
+  fireEvent.click(screen.getByRole('option', { name: optionNamed(model) }));
 }
 
 function expectTierOption(testId: string, model: string) {
@@ -90,6 +95,7 @@ beforeEach(() => {
   updateMock.mockResolvedValue(conn({}));
   revealMock.mockResolvedValue('sk-stored-secret');
   removeMock.mockResolvedValue(null);
+  testProgressMock.mockResolvedValue({ done: 0, total: 0 });
   testMock.mockResolvedValue({
     ok: true,
     status: 'success',
@@ -110,6 +116,46 @@ afterEach(() => {
 });
 
 describe('ExternalApiSection', () => {
+  it.each(['draft', 'saved'] as const)('shows a localized billing error for a %s connection and allows a new test', async mode => {
+    listMock.mockResolvedValue(mode === 'saved'
+      ? [conn({ id: 'mimo', endpoint: 'https://api.xiaomimimo.com', has_credential: true })]
+      : []);
+    testMock.mockResolvedValueOnce({
+      ok: false,
+      status: 'billing_error',
+      models: [],
+      catalog: [],
+      hint: 'The provider requires payment (HTTP 402).',
+    });
+    renderSection();
+    if (mode === 'draft') {
+      fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+      fireEvent.click(screen.getByTestId('ext-api-preset-other'));
+      fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://api.xiaomimimo.com/v1' } });
+      fireEvent.change(screen.getByTestId('ext-api-key'), { target: { value: 'sk-test-key' } });
+    }
+    const testId = mode === 'draft' ? 'ext-api-test' : 'ext-api-test-saved-mimo';
+    const resultId = mode === 'draft' ? 'ext-api-test-result' : 'ext-api-saved-test-result-mimo';
+    fireEvent.click(await screen.findByTestId(testId));
+    await waitFor(() => expect(screen.getByTestId(resultId)).toHaveAttribute('data-status', 'billing_error'));
+    expect(screen.getByTestId(resultId)).toHaveTextContent('config.extApi.billingError');
+    expect(screen.getByTestId(resultId)).not.toHaveTextContent('config.extApi.noModels');
+    expect(screen.getByTestId(resultId)).not.toHaveTextContent('The provider requires payment');
+    if (mode === 'draft') {
+      expect(screen.getByTestId('ext-api-tier-default')).toBeDisabled();
+    } else {
+      expect(screen.queryByTestId('ext-api-saved-models-mimo')).not.toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByTestId(testId));
+    await waitFor(() => expect(screen.getByTestId(resultId)).toHaveAttribute('data-status', 'success'));
+    expect(screen.getByTestId(resultId)).not.toHaveTextContent('config.extApi.billingError');
+    if (mode === 'draft') {
+      expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled();
+    } else {
+      expect(screen.getByTestId('ext-api-saved-models-mimo')).toHaveTextContent('model-a');
+    }
+  });
+
   it('keeps an absent saved text tier visible but unavailable after a successful test', async () => {
     listMock.mockResolvedValue([conn({ endpoint: 'https://saved.example.test', default_model: 'retired/model' })]);
     renderSection();
@@ -466,6 +512,7 @@ describe('ExternalApiSection', () => {
       endpoint: 'http://localhost:4000',
       api_key: null,
       origin_preset: 'lite_llm',
+      progress_id: expect.any(String),
     }));
     expect(createMock).not.toHaveBeenCalled();
     expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(false);
@@ -611,6 +658,7 @@ describe('ExternalApiSection', () => {
       endpoint: 'https://changed.example.test',
       api_key: null,
       origin_preset: 'lite_llm',
+      progress_id: expect.any(String),
     }));
     await waitFor(() => expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled());
     fireEvent.click(screen.getByTestId('ext-api-save'));
@@ -894,4 +942,256 @@ describe('ExternalApiSection', () => {
     expect(screen.queryByTestId('ext-api-conn-media-video-c-img')).toBeNull();
   });
 
+  // ── KT-941 — "Test" verifies the models chosen for each tier ──────────
+  describe('LiteLLM tier verification', () => {
+    const verified = {
+      ok: true,
+      status: 'model_error',
+      models: ['gemini-3.6-flash', 'vertex_ai/claude-sonnet-5', 'vertex_ai/claude-fable-5'],
+      catalog: ['gemini-3.6-flash', 'vertex_ai/claude-sonnet-5', 'vertex_ai/claude-fable-5']
+        .map(id => ({ id, display_name: id, capabilities: ['chat'] })),
+      hint: 'The default model vertex_ai/claude-sonnet-5 does not answer.',
+      tier_checks: [
+        { tier: 'economy', model: 'gemini-3.6-flash', ok: true, status: 'ok', http_status: null },
+        { tier: 'default', model: 'vertex_ai/claude-sonnet-5', ok: false, status: 'not_found', http_status: 404 },
+        { tier: 'reasoning', model: 'vertex_ai/claude-fable-5', ok: false, status: 'access_denied', http_status: 401 },
+      ],
+    };
+    const saved = conn({
+      id: 'euronews',
+      display_name: 'Euronews proxy',
+      endpoint: 'http://litellm.stg.euronews.internal',
+      origin_preset: 'lite_llm',
+      has_credential: true,
+      economy_model: 'gemini-3.6-flash',
+      default_model: 'vertex_ai/claude-sonnet-5',
+      reasoning_model: 'vertex_ai/claude-fable-5',
+    });
+
+    it('sends the model of each tier and shows, per tier, whether it answers', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+
+      // First test: the catalogue only — the saved choices must not be called
+      // against a connection that has not been validated yet.
+      testMock.mockResolvedValueOnce({ ...verified, status: 'success', tier_checks: [], hint: null });
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled());
+      expect(testMock.mock.calls[0][0]).not.toHaveProperty('tier_models');
+
+      // Second test: each tier's model is verified.
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(testMock).toHaveBeenCalledTimes(2));
+      expect(testMock).toHaveBeenLastCalledWith(expect.objectContaining({
+        origin_preset: 'lite_llm',
+        connection_id: 'euronews',
+        tier_models: [
+          { tier: 'economy', model: 'gemini-3.6-flash' },
+          { tier: 'default', model: 'vertex_ai/claude-sonnet-5' },
+          { tier: 'reasoning', model: 'vertex_ai/claude-fable-5' },
+        ],
+      }));
+
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveAttribute('data-tier-check', 'not_found'));
+      expect(screen.getByTestId('ext-api-tier-status-economy')).toHaveAttribute('data-tier-check', 'ok');
+      expect(screen.getByTestId('ext-api-tier-status-economy')).toHaveTextContent('config.extApi.tierCheck.ok');
+      expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.tierCheck.not_found:404');
+      expect(screen.getByTestId('ext-api-tier-status-reasoning')).toHaveTextContent('config.extApi.tierCheck.access_denied:401');
+      expect(screen.getByTestId('ext-api-tier-status-default')).toHaveClass('set-ext-api-tier-check-failed');
+      expect(screen.getByTestId('ext-api-tier-status-economy')).not.toHaveClass('set-ext-api-tier-check-failed');
+      // The connection itself works: the pickers stay open so another model
+      // can be chosen — a failed tier must not lock the operator out.
+      expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled();
+    });
+
+    it('drops a tier verdict as soon as that tier is given another model', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveAttribute('data-tier-check', 'not_found'));
+
+      chooseTier('ext-api-tier-default', 'gemini-3.6-flash');
+      // The verdict belonged to the previous model; the new one is unverified.
+      expect(screen.getByTestId('ext-api-tier-status-default')).not.toHaveAttribute('data-tier-check');
+      expect(screen.getByTestId('ext-api-tier-status-default')).toHaveTextContent('config.extApi.testedCatalog');
+      expect(screen.getByTestId('ext-api-tier-status-reasoning')).toHaveAttribute('data-tier-check', 'access_denied');
+    });
+
+    it('shows the same per-tier verdicts on the saved connection card', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+
+      fireEvent.click(await screen.findByTestId('ext-api-test-saved-euronews'));
+      await waitFor(() => expect(testMock).toHaveBeenCalledWith(expect.objectContaining({
+        connection_id: 'euronews',
+        tier_models: [
+          { tier: 'economy', model: 'gemini-3.6-flash' },
+          { tier: 'default', model: 'vertex_ai/claude-sonnet-5' },
+          { tier: 'reasoning', model: 'vertex_ai/claude-fable-5' },
+        ],
+      })));
+      expect(await screen.findByTestId('ext-api-saved-tier-status-default-euronews')).toHaveAttribute('data-tier-check', 'not_found');
+      expect(screen.getByTestId('ext-api-saved-tier-status-economy-euronews')).toHaveAttribute('data-tier-check', 'ok');
+      expect(screen.getByTestId('ext-api-saved-tier-status-reasoning-euronews')).toHaveTextContent('config.extApi.tierCheck.access_denied:401');
+      expect(screen.getByTestId('ext-api-saved-test-result-euronews')).toHaveAttribute('data-status', 'model_error');
+    });
+
+    it('keeps the earlier payload for every other preset', async () => {
+      listMock.mockResolvedValue([conn({
+        id: 'nv', endpoint: 'https://integrate.api.nvidia.com', origin_preset: 'nvidia',
+        has_credential: true, default_model: 'nvidia/model',
+      })]);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-test-saved-nv'));
+      await waitFor(() => expect(testMock).toHaveBeenCalledWith({
+        endpoint: 'https://integrate.api.nvidia.com',
+        api_key: null,
+        connection_id: 'nv',
+        origin_preset: 'nvidia',
+        models: ['nvidia/model'],
+      }));
+    });
+
+    // ── KT-957 — a model the proxy refuses is marked, and kept only on confirmation ──
+    it('marks in the tier list which models answered a call and which were refused', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue(verified);
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-tier-status-default')).toHaveAttribute('data-tier-check', 'not_found'));
+
+      const input = screen.getByTestId('ext-api-tier-default');
+      fireEvent.focus(input);
+      expect(screen.getByRole('option', { name: /✅ gemini-3\.6-flash/ })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/claude-sonnet-5/ })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/claude-fable-5/ })).toBeInTheDocument();
+      fireEvent.keyDown(input, { key: 'Escape' });
+    });
+
+    it('marks every model the test called, not only the tier ones, and refuses to pick a refused one', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue({
+        ...verified,
+        models: [...verified.models, 'vertex_ai/claude-opus-5', 'claude-sonnet-4-6'],
+        catalog: [...verified.catalog,
+          { id: 'vertex_ai/claude-opus-5', display_name: 'vertex_ai/claude-opus-5', capabilities: ['chat'] },
+          { id: 'claude-sonnet-4-6', display_name: 'claude-sonnet-4-6', capabilities: ['chat'] }],
+        model_checks: [
+          { model: 'gemini-3.6-flash', ok: true, status: 'ok', http_status: null },
+          { model: 'vertex_ai/claude-sonnet-5', ok: false, status: 'not_found', http_status: 404 },
+          { model: 'vertex_ai/claude-fable-5', ok: false, status: 'access_denied', http_status: 401 },
+          { model: 'vertex_ai/claude-opus-5', ok: false, status: 'not_found', http_status: 404 },
+          { model: 'claude-sonnet-4-6', ok: true, status: 'ok', http_status: null },
+        ],
+      });
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+
+      await waitFor(() => expect(screen.getByTestId('ext-api-model-sweep')).toHaveAttribute('data-refused', '3'));
+      expect(screen.getByTestId('ext-api-model-sweep')).toHaveTextContent('config.extApi.modelSweep:5,2,3');
+      const input = screen.getByTestId('ext-api-tier-economy');
+      fireEvent.focus(input);
+      // Never put on a tier, yet called by the test: marked and not selectable.
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/claude-opus-5/ })).toHaveAttribute('aria-disabled', 'true');
+      expect(screen.getByRole('option', { name: /✅ claude-sonnet-4-6/ })).not.toHaveAttribute('aria-disabled', 'true');
+      fireEvent.keyDown(input, { key: 'Escape' });
+    });
+
+    it('shows how far the call to every model has got while the test runs', async () => {
+      listMock.mockResolvedValue([saved]);
+      let finish: (value: unknown) => void = () => {};
+      testMock.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+      testProgressMock.mockResolvedValue({ done: 3, total: 96 });
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+
+      expect(screen.getByTestId('ext-api-testing-all-models')).toHaveTextContent('config.extApi.testingAllModels');
+      await waitFor(
+        () => expect(screen.getByTestId('ext-api-testing-all-models')).toHaveTextContent('config.extApi.testingProgress:3,96'),
+        { timeout: 3000 },
+      );
+      const progressId = testMock.mock.calls[0][0].progress_id;
+      expect(progressId).toEqual(expect.any(String));
+      expect(testProgressMock).toHaveBeenCalledWith(progressId);
+
+      finish(verified);
+      await waitFor(() => expect(screen.queryByTestId('ext-api-testing-all-models')).toBeNull());
+    });
+
+    it('marks a refused media model in the image list and keeps it from being picked', async () => {
+      listMock.mockResolvedValue([saved]);
+      testMock.mockResolvedValue({
+        ...verified,
+        catalog: [...verified.catalog,
+          { id: 'vertex_ai/imagen-ok', display_name: 'vertex_ai/imagen-ok', capabilities: ['image'] },
+          { id: 'vertex_ai/imagen-refused', display_name: 'vertex_ai/imagen-refused', capabilities: ['image'] }],
+        image_capability_known: true,
+        model_checks: [
+          { model: 'vertex_ai/imagen-ok', ok: true, status: 'ok', http_status: null },
+          { model: 'vertex_ai/imagen-refused', ok: false, status: 'access_denied', http_status: 401 },
+        ],
+      });
+      renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-test'));
+      await waitFor(() => expect(screen.getByTestId('ext-api-media-image')).not.toBeDisabled());
+
+      fireEvent.focus(screen.getByTestId('ext-api-media-image'));
+      expect(screen.getByRole('option', { name: /✅ vertex_ai\/imagen-ok/ })).not.toHaveAttribute('aria-disabled', 'true');
+      expect(screen.getByRole('option', { name: /❌ vertex_ai\/imagen-refused/ })).toHaveAttribute('aria-disabled', 'true');
+    });
+
+    it.each([
+      [true, 2],
+      [false, 1],
+    ] as const)('asks before keeping a refused tier model (confirmed: %s)', async (confirmed, calls) => {
+      const { ApiRequestError } = await import('../../../lib/apiRequestError');
+      listMock.mockResolvedValue([saved]);
+      updateMock.mockRejectedValueOnce(new ApiRequestError(
+        'The proxy lists but refuses to serve vertex_ai/claude-sonnet-5 (default tier, HTTP 404)',
+        'unreachable_model',
+      ));
+      const confirmSpy = vi.fn(() => confirmed);
+      vi.stubGlobal('confirm', confirmSpy);
+      const { toast } = renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-save'));
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
+      expect(String(confirmSpy.mock.calls[0])).toContain('config.extApi.unreachableConfirm');
+      expect(String(confirmSpy.mock.calls[0])).toContain('vertex_ai/claude-sonnet-5');
+      await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(calls));
+      expect(updateMock.mock.calls[0][1]).not.toHaveProperty('confirm_unreachable_models');
+      if (confirmed) {
+        expect(updateMock.mock.calls[1][1]).toEqual(expect.objectContaining({ confirm_unreachable_models: true }));
+        await waitFor(() => expect(toast).toHaveBeenCalledWith('config.saved', 'success'));
+      } else {
+        // Declined: nothing saved, the form stays open for another choice.
+        expect(toast).not.toHaveBeenCalledWith('config.saved', 'success');
+        expect(screen.getByTestId('ext-api-save')).toBeInTheDocument();
+      }
+      vi.unstubAllGlobals();
+    });
+
+    it('turns any other save failure into an error toast without asking', async () => {
+      listMock.mockResolvedValue([saved]);
+      updateMock.mockRejectedValueOnce(new Error('Alias already used'));
+      const confirmSpy = vi.fn(() => true);
+      vi.stubGlobal('confirm', confirmSpy);
+      const { toast } = renderSection();
+      fireEvent.click(await screen.findByTestId('ext-api-edit-euronews'));
+      fireEvent.click(screen.getByTestId('ext-api-save'));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('common.actionFailed'), 'error'));
+      expect(confirmSpy).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    });
+  });
 });

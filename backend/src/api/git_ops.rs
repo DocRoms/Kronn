@@ -370,7 +370,7 @@ fn run_git_status_impl(
 
     // Check if there's an open PR/MR for this branch
     let pr_url = if !branch.is_empty() && !is_default_branch {
-        check_pr_url(repo_path, &branch)
+        cached_pr_url(repo_path, &branch)
     } else {
         None
     };
@@ -1090,23 +1090,11 @@ pub fn run_git_commit(
     run_git_commit_with_child_lock(repo_path, files, message, amend, sign, None)
 }
 
-/// Stage and commit explicit paths, optionally retaining the backend's
-/// data-directory lock in Git and any hook descendants across backend death.
-pub fn run_git_commit_with_child_lock(
-    repo_path: &Path,
-    files: &[String],
-    message: &str,
-    amend: bool,
-    sign: bool,
-    data_dir_lock: Option<&std::fs::File>,
-) -> Result<GitCommitResponse, String> {
-    // git add each file individually, skip missing files gracefully
+/// Stage each explicit path (`git add`, or `git rm --cached` for a path that no
+/// longer exists) and return how many were staged. A path git refuses is skipped.
+fn stage_explicit_paths(repo_path: &Path, clean_files: &[&str]) -> Result<usize, String> {
     let mut added = 0;
-    let clean_files = files
-        .iter()
-        .map(|file| file.trim_matches('"'))
-        .collect::<Vec<_>>();
-    for &clean_file in &clean_files {
+    for &clean_file in clean_files {
         let file_abs = repo_path.join(clean_file);
 
         if file_abs.exists() {
@@ -1134,11 +1122,11 @@ pub fn run_git_commit_with_child_lock(
             }
         }
     }
-    if added == 0 {
-        return Err("No files could be staged".to_string());
-    }
+    Ok(added)
+}
 
-    // Ensure git identity is set
+/// Give the repository a fallback git identity when none is configured.
+fn ensure_git_identity(repo_path: &Path) {
     let has_user = sync_cmd("git")
         .args(["config", "user.name"])
         .current_dir(repo_path)
@@ -1155,27 +1143,16 @@ pub fn run_git_commit_with_child_lock(
             .current_dir(repo_path)
             .status();
     }
+}
 
-    let mut commit_args = vec!["commit"];
-    if amend {
-        commit_args.push("--amend");
-    }
-    commit_args.push("-s"); // signoff by default
-    if sign {
-        commit_args.push("-S");
-    } else {
-        commit_args.push("--no-gpg-sign");
-    }
-    commit_args.push("-m");
-    commit_args.push(message);
-    // The index may contain unrelated entries staged earlier by a CLI worker.
-    // `--only -- <paths>` makes the explicit inventory authoritative: Git
-    // commits those working-tree paths and cannot smuggle another staged file
-    // into the mediated commit.
-    commit_args.push("--only");
-    commit_args.push("--");
-    commit_args.extend(clean_files);
-
+/// Run `git commit <commit_args>` and return the new short HEAD, optionally
+/// retaining the backend's data-directory lock in Git and any hook descendants
+/// across backend death.
+fn run_commit_command(
+    repo_path: &Path,
+    commit_args: &[&str],
+    data_dir_lock: Option<&std::fs::File>,
+) -> Result<String, String> {
     // Only `git commit` executes hooks. Keep the inherited descriptor alive
     // through this spawn; descendants retain it until the whole hook tree exits.
     let child_lock = data_dir_lock
@@ -1185,7 +1162,7 @@ pub fn run_git_commit_with_child_lock(
             format!("Failed to inherit data-directory lock for git commit: {error}")
         })?;
     let mut commit_command = sync_cmd("git");
-    commit_command.args(&commit_args).current_dir(repo_path);
+    commit_command.args(commit_args).current_dir(repo_path);
     #[cfg(unix)]
     if let Some(child_lock) = child_lock.as_ref() {
         crate::core::config::inherit_data_dir_lock_on_command(&mut commit_command, child_lock);
@@ -1213,9 +1190,217 @@ pub fn run_git_commit_with_child_lock(
         .output()
         .map_err(|e| format!("Failed to get commit hash: {}", e))?;
 
-    let hash = String::from_utf8_lossy(&hash_output.stdout)
+    Ok(String::from_utf8_lossy(&hash_output.stdout)
         .trim()
-        .to_string();
+        .to_string())
+}
+
+/// Stage and commit explicit paths, optionally retaining the backend's
+/// data-directory lock in Git and any hook descendants across backend death.
+pub fn run_git_commit_with_child_lock(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    amend: bool,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+) -> Result<GitCommitResponse, String> {
+    // git add each file individually, skip missing files gracefully
+    let clean_files = files
+        .iter()
+        .map(|file| file.trim_matches('"'))
+        .collect::<Vec<_>>();
+    if stage_explicit_paths(repo_path, &clean_files)? == 0 {
+        return Err("No files could be staged".to_string());
+    }
+
+    ensure_git_identity(repo_path);
+
+    let mut commit_args = vec!["commit"];
+    if amend {
+        commit_args.push("--amend");
+    }
+    commit_args.push("-s"); // signoff by default
+    if sign {
+        commit_args.push("-S");
+    } else {
+        commit_args.push("--no-gpg-sign");
+    }
+    commit_args.push("-m");
+    commit_args.push(message);
+    // The index may contain unrelated entries staged earlier by a CLI worker.
+    // `--only -- <paths>` makes the explicit inventory authoritative: Git
+    // commits those working-tree paths and cannot smuggle another staged file
+    // into the mediated commit.
+    commit_args.push("--only");
+    commit_args.push("--");
+    commit_args.extend(clean_files);
+
+    let hash = run_commit_command(repo_path, &commit_args, data_dir_lock)?;
+
+    Ok(GitCommitResponse {
+        hash,
+        message: message.to_string(),
+    })
+}
+
+/// Whether `repo_path` is in the middle of a merge: git keeps `MERGE_HEAD` in
+/// the worktree's own git dir, so this holds per linked worktree.
+pub fn merge_in_progress(repo_path: &Path) -> bool {
+    sync_cmd("git")
+        .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run a `git diff`-style command and split its NUL-separated path list.
+fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let output = sync_cmd("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git {}: {}", args.join(" "), e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Paths the side being merged in (`MERGE_HEAD`) changed relative to each merge
+/// base. Several bases (a criss-cross history) widen the set, never narrow it;
+/// with none (unrelated histories) every path where the two sides differ counts.
+fn paths_changed_by_merged_side(repo_path: &Path) -> Result<Vec<String>, String> {
+    let output = sync_cmd("git")
+        .args(["merge-base", "--all", "HEAD", "MERGE_HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git merge-base: {}", e))?;
+    let mut bases = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if bases.is_empty() {
+        bases.push("HEAD".to_string());
+    }
+    let mut changed = Vec::new();
+    for base in &bases {
+        changed.extend(git_path_list(
+            repo_path,
+            &[
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                base.as_str(),
+                "MERGE_HEAD",
+            ],
+        )?);
+    }
+    Ok(changed)
+}
+
+/// Finish the merge in progress with its own parents.
+///
+/// `git commit --only -- <paths>` is refused during a merge, and the way out a
+/// worker finds on its own — erasing `MERGE_HEAD` — yields a single-parent commit
+/// whose tree is right but whose history makes the target's files look added on
+/// both sides at integration. So the merge is committed here, whole, with
+/// `MERGE_HEAD` as its second parent.
+///
+/// A merge commit cannot be limited to paths, so the explicit inventory guards
+/// it differently: every conflict must be resolved (or named, and thereby
+/// staged by Kronn), and no staged path may fall outside what the merge brings
+/// in plus the named files. Refusals leave the merge state untouched.
+pub fn run_git_merge_commit_with_child_lock(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+) -> Result<GitCommitResponse, String> {
+    let clean_files = files
+        .iter()
+        .map(|file| file.trim_matches('"'))
+        .collect::<Vec<_>>();
+    if !merge_in_progress(repo_path) {
+        return Err("no merge in progress in this worktree".to_string());
+    }
+
+    let unresolved = git_path_list(repo_path, &["diff", "--name-only", "-z", "--diff-filter=U"])?
+        .into_iter()
+        .filter(|path| !clean_files.contains(&path.as_str()))
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+        return Err(format!(
+            "refused: the merge in progress still has unresolved conflicts in: {}. Resolve them in the \
+             files, then name each resolved file in `files` so Kronn stages it and finishes the merge \
+             with both parents. Do not delete MERGE_HEAD or commit by hand: a single-parent commit \
+             makes the target's files look added on both sides at integration.",
+            unresolved.join(", ")
+        ));
+    }
+
+    if stage_explicit_paths(repo_path, &clean_files)? == 0 {
+        return Err("No files could be staged".to_string());
+    }
+
+    // What the merge legitimately changes in the index: the paths the merged-in
+    // side changed since the histories diverged (a three-way merge leaves a path
+    // at our version whenever the other side did not touch it). Anything else
+    // staged was put there by hand and is not part of what the worker named.
+    let brought_by_merge = paths_changed_by_merged_side(repo_path)?;
+    let foreign = git_path_list(
+        repo_path,
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "HEAD",
+        ],
+    )?
+    .into_iter()
+    .filter(|path| !brought_by_merge.contains(path) && !clean_files.contains(&path.as_str()))
+    .collect::<Vec<_>>();
+    if !foreign.is_empty() {
+        return Err(format!(
+            "refused: these staged paths belong neither to the merge nor to `files`: {}. Unstage them \
+             (`git restore --staged -- <path>`) or name them in `files`; the merge state was left as it was.",
+            foreign.join(", ")
+        ));
+    }
+
+    ensure_git_identity(repo_path);
+
+    let mut commit_args = vec!["commit", "-s"];
+    commit_args.push(if sign { "-S" } else { "--no-gpg-sign" });
+    commit_args.extend(["-m", message]);
+    let hash = run_commit_command(repo_path, &commit_args, data_dir_lock)?;
+
+    let has_second_parent = sync_cmd("git")
+        .args(["rev-parse", "-q", "--verify", "HEAD^2"])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_second_parent {
+        return Err(format!(
+            "the merge was committed as {hash} but without its second parent; do not deliver it"
+        ));
+    }
 
     Ok(GitCommitResponse {
         hash,
@@ -1514,26 +1699,94 @@ pub fn run_create_pr(
     }
 
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    forget_pr_urls(repo_path);
     Ok(url)
+}
+
+/// How long a branch's PR lookup is reused. `gh pr view` is a network call and
+/// git-status runs each time a discussion opens (KT-983): uncached, it added
+/// ~0.7 s to every open, and far more on a slow network.
+const PR_URL_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+/// A lookup that takes longer than this gives up: a missing PR link is better
+/// than a discussion that does not open.
+const PR_URL_LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+type PrUrlCache =
+    std::collections::HashMap<(std::path::PathBuf, String), (Option<String>, std::time::Instant)>;
+static PR_URLS: std::sync::LazyLock<std::sync::Mutex<PrUrlCache>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// [`check_pr_url`], reused for [`PR_URL_TTL`] per repository and branch,
+/// "no PR" included.
+pub fn cached_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
+    let key = (repo_path.to_path_buf(), branch.to_string());
+    if let Ok(cache) = PR_URLS.lock() {
+        if let Some((url, at)) = cache.get(&key) {
+            if at.elapsed() < PR_URL_TTL {
+                return url.clone();
+            }
+        }
+    }
+    let url = check_pr_url(repo_path, branch);
+    if let Ok(mut cache) = PR_URLS.lock() {
+        cache.retain(|_, (_, at)| at.elapsed() < PR_URL_TTL);
+        cache.insert(key, (url.clone(), std::time::Instant::now()));
+    }
+    url
+}
+
+/// Drop what is known about this repository's PRs: Kronn just created one.
+pub fn forget_pr_urls(repo_path: &Path) {
+    if let Ok(mut cache) = PR_URLS.lock() {
+        cache.retain(|(repo, _), _| repo != repo_path);
+    }
+}
+
+/// Run `command`, giving up after `limit`.
+fn output_within(
+    mut command: std::process::Command,
+    limit: std::time::Duration,
+) -> Option<std::process::Output> {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if started.elapsed() < limit => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// Check if an open PR/MR exists for a branch.
 pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
     let provider = detect_provider(repo_path);
-    let output = match provider {
-        "gitlab" => sync_cmd("glab")
-            .args([
+    let mut command = match provider {
+        "gitlab" => {
+            let mut command = sync_cmd("glab");
+            command.args([
                 "mr", "view", branch, "--json", "web_url", "--jq", ".web_url",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .ok()?,
-        _ => sync_cmd("gh")
-            .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
-            .current_dir(repo_path)
-            .output()
-            .ok()?,
+            ]);
+            command
+        }
+        _ => {
+            let mut command = sync_cmd("gh");
+            command.args(["pr", "view", branch, "--json", "url", "--jq", ".url"]);
+            command
+        }
     };
+    command.current_dir(repo_path);
+    let output = output_within(command, PR_URL_LOOKUP_LIMIT)?;
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if url.is_empty() {
@@ -1592,6 +1845,31 @@ pub fn default_pr_template(branch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_pr_lookup_that_hangs_is_given_up_instead_of_blocking_the_discussion() {
+        // KT-983 — `gh pr view` runs on every git-status; a slow network must
+        // cost at most the limit, never the whole page.
+        let mut command = std::process::Command::new("sleep");
+        command.arg("5");
+        let started = std::time::Instant::now();
+        let output = super::output_within(command, std::time::Duration::from_millis(200));
+        assert!(output.is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let mut quick = std::process::Command::new("echo");
+        quick.arg("https://example.test/pr/1");
+        let output = super::output_within(quick, std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "https://example.test/pr/1"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -2077,11 +2355,27 @@ filename src/main.rs
             .unwrap();
         for index in 0..305 {
             let output = std::process::Command::new("git")
-                .args(["commit", "--allow-empty", "-m", &format!("history {index}")])
+                // Background auto-gc repacks refs mid-loop and the next commit
+                // can fail with "could not parse HEAD" on a loaded machine.
+                .args([
+                    "-c",
+                    "gc.auto=0",
+                    "-c",
+                    "maintenance.auto=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    &format!("history {index}"),
+                ])
                 .current_dir(repo.path())
                 .output()
                 .unwrap();
-            assert!(output.status.success());
+            assert!(
+                output.status.success(),
+                "empty history commit {index} failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let first = run_git_status_page(repo.path(), 0, 40).unwrap();

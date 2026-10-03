@@ -193,9 +193,13 @@ fn adr_legal(from: TaskExecutionStatus, to: TaskExecutionStatus) -> bool {
             | (Provisioning, Working)
             | (Provisioning, Blocked)
             | (Provisioning, Failed)
+            // KT-862: the principal takes back an integration send-back whose failure
+            // did not come from the delivery. Guarded in the transition primitive.
+            | (Provisioning, Approved)
             | (Blocked, Provisioning)
             | (Blocked, Applying)
             | (Working, AwaitingReview)
+            | (Working, Approved)
             | (AwaitingReview, Approved)
             | (AwaitingReview, ChangesRequested)
             | (Approved, Integrating)
@@ -1712,7 +1716,7 @@ fn hard_quota_creates_an_immediate_human_wait_checkpoint() {
     )
     .unwrap();
 
-    let escalated = escalate_execution_for_dispatch_quota(&conn, "quota-dispatch", "Codex")
+    let escalated = escalate_execution_for_dispatch_quota(&conn, "quota-dispatch", "Codex", None)
         .unwrap()
         .expect("the dispatch belongs to an execution");
     assert_eq!(escalated.0, execution.id);
@@ -1988,8 +1992,114 @@ fn human_rearm_is_idempotent_isolated_and_a_new_quota_failure_blocks_again() {
     );
 
     let dispatch_id = attach_quota_dispatch(&conn, &codex, AgentType::Codex);
-    escalate_execution_for_dispatch_quota(&conn, &dispatch_id, "Codex").unwrap();
+    escalate_execution_for_dispatch_quota(&conn, &dispatch_id, "Codex", None).unwrap();
     assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn one_outage_escalating_two_executions_is_lifted_for_both_by_a_single_rearm() {
+    // KT-838: each real escalation takes the next generation, so the two
+    // executions of one outage carry different ones. Acknowledging the latest
+    // generation must lift both, in whichever order they were escalated.
+    let conn = setup();
+    let first = launch_working_execution_for(&conn, "t-outage-1", 1240, "ClaudeCode");
+    let second = launch_working_execution_for(&conn, "t-outage-2", 1241, "ClaudeCode");
+    let first_dispatch = attach_quota_dispatch(&conn, &first, AgentType::ClaudeCode);
+    let second_dispatch = attach_quota_dispatch(&conn, &second, AgentType::ClaudeCode);
+    escalate_execution_for_dispatch_quota(&conn, &first_dispatch, "ClaudeCode", None).unwrap();
+    escalate_execution_for_dispatch_quota(&conn, &second_dispatch, "ClaudeCode", None).unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    // Excluding one of the two is not enough — the other still blocks.
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", Some(&first)).unwrap());
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", Some(&second)).unwrap());
+
+    assert!(rearm_provider_quota(&conn, "ClaudeCode", "outage-over", "human", None).unwrap());
+    assert!(!provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    assert_eq!(
+        get_task_execution(&conn, &second).unwrap().unwrap().status,
+        TaskExecutionStatus::Escalated
+    );
+
+    // The next real failure is a newer generation than the acknowledgement.
+    escalate_execution_for_dispatch_quota(&conn, &first_dispatch, "ClaudeCode", None).unwrap();
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+}
+
+#[test]
+fn only_the_provider_that_stopped_an_escalated_execution_counts_as_a_quota_retry() {
+    let conn = setup();
+    let quota = launch_working_execution_for(&conn, "t-retry-quota", 1242, "Codex");
+    let timeout = launch_working_execution_for(&conn, "t-retry-timeout", 1243, "Codex");
+    let working = launch_working_execution_for(&conn, "t-retry-working", 1244, "Codex");
+    escalate_with_reason(&conn, &quota, "quota_exhausted:Codex");
+    escalate_with_reason(&conn, &timeout, "activity_timeout");
+
+    assert!(is_quota_retry_on_same_provider(&conn, &quota, "Codex").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, &quota, "ClaudeCode").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, &timeout, "Codex").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, &working, "Codex").unwrap());
+    assert!(!is_quota_retry_on_same_provider(&conn, "unknown-exec", "Codex").unwrap());
+}
+
+#[test]
+fn a_rearm_inside_a_rolled_back_transaction_leaves_the_provider_blocked() {
+    // The reassignment re-arms inside its own transaction: if the handoff
+    // fails, the provider must be exactly as blocked as before.
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-rearm-rollback", 1245, "Codex");
+    escalate_with_reason(&conn, &exec_id, "quota_exhausted:Codex");
+
+    let transaction = conn.unchecked_transaction().unwrap();
+    assert!(rearm_provider_quota(&transaction, "Codex", "in-flight", "human", None).unwrap());
+    assert!(!provider_has_open_quota_exhaustion(&transaction, "Codex", None).unwrap());
+    drop(transaction);
+
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM provider_quota_rearm_events",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn an_announced_reset_is_kept_for_the_outage_and_dropped_once_it_has_passed() {
+    let conn = setup();
+    let stamp = |at: chrono::DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let dispatches = ["t-reset-1", "t-reset-2", "t-reset-3", "t-reset-4"]
+        .iter()
+        .enumerate()
+        .map(|(offset, task)| {
+            let exec =
+                launch_working_execution_for(&conn, task, 1250 + offset as i64, "ClaudeCode");
+            attach_quota_dispatch(&conn, &exec, AgentType::ClaudeCode)
+        })
+        .collect::<Vec<_>>();
+    let escalate = |dispatch: &str, reset: Option<chrono::DateTime<Utc>>| {
+        escalate_execution_for_dispatch_quota(&conn, dispatch, "ClaudeCode", reset).unwrap();
+        provider_quota_reset_at(&conn, "ClaudeCode").unwrap()
+    };
+    assert_eq!(provider_quota_reset_at(&conn, "ClaudeCode").unwrap(), None);
+
+    let soon = Utc::now() + chrono::Duration::hours(2);
+    assert_eq!(escalate(&dispatches[0], Some(soon)), Some(stamp(soon)));
+    // The same outage escalating a second execution whose refusal named no
+    // time keeps the announcement that is still ahead of us.
+    assert_eq!(escalate(&dispatches[1], None), Some(stamp(soon)));
+    // A refusal that names a time replaces it.
+    let later = Utc::now() + chrono::Duration::hours(5);
+    assert_eq!(escalate(&dispatches[2], Some(later)), Some(stamp(later)));
+    // Once the announced instant has passed, the outage it described is over.
+    conn.execute(
+        "UPDATE provider_quota_generations SET reset_at = ?1 WHERE provider = 'ClaudeCode'",
+        [stamp(Utc::now() - chrono::Duration::hours(1))],
+    )
+    .unwrap();
+    assert_eq!(escalate(&dispatches[3], None), None);
 }
 
 #[test]
@@ -5313,4 +5423,414 @@ fn principal_notices_address_the_pinned_parent_room_cli() {
         MessageTarget::discussion_agent(room_agent),
         "a principal that left the room no longer captures notices"
     );
+}
+
+// ─── KT-839 — the principal corrects an execution's validations ─────────────
+
+fn principal_actor() -> OrchestrationActor {
+    OrchestrationActor {
+        kind: PlanningActorKind::Agent,
+        id: Some("Claude Code".into()),
+        session_id: Some("adhoc-principal".into()),
+        source_message_id: None,
+    }
+}
+
+fn gate(command: &str) -> ValidationSpec {
+    ValidationSpec {
+        command: command.into(),
+        quick_exec_id: None,
+        timeout_secs: None,
+    }
+}
+
+/// An execution launched with `validations`, driven through `path`.
+fn launch_gated(
+    conn: &Connection,
+    task_id: &str,
+    number: i64,
+    validations: Vec<ValidationSpec>,
+    path: &[TaskExecutionStatus],
+) -> (String, String) {
+    seed_task(conn, task_id, number);
+    let mut input = LaunchSingleTaskInput::new(task_id, DISC);
+    input.validations = validations;
+    let outcome = launch_single_task(conn, &input, &backend_actor()).unwrap();
+    let id = outcome.execution.id;
+    for &to in path {
+        assert!(
+            transition_execution(conn, &id, to, &backend_actor(), serde_json::json!({})).unwrap(),
+            "expected transition to {to:?} to be accepted"
+        );
+    }
+    (id, outcome.run.id)
+}
+
+fn run_gates(conn: &Connection, run_id: &str) -> Vec<String> {
+    get_orchestration_run(conn, run_id)
+        .unwrap()
+        .unwrap()
+        .validations
+        .into_iter()
+        .map(|spec| spec.command)
+        .collect()
+}
+
+fn replaced_events(conn: &Connection, exec_id: &str) -> Vec<TaskExecutionEvent> {
+    list_execution_events(conn, exec_id)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.action == "validations_replaced")
+        .collect()
+}
+
+#[test]
+fn replacing_validations_corrects_the_gates_in_place_and_keeps_the_trace() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    // KT-830's shape: approved work sent back because its gate could not run.
+    let broken = "cd frontend && npx tsc -b --pretty false";
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-kt830",
+        830,
+        vec![gate(broken), gate("cargo fmt --check")],
+        &[Provisioning, Working, AwaitingReview, ChangesRequested],
+    );
+    record_validation_run(
+        &conn,
+        &id,
+        Some("candidate-1"),
+        &gate(broken),
+        None,
+        Some(0),
+        Some("refused: `cd` is not in the Quick Exec allowlist"),
+    )
+    .unwrap();
+    let before = get_task_execution(&conn, &id).unwrap().unwrap();
+
+    let fixed = vec![
+        gate("pnpm --dir frontend exec tsc -b --pretty false"),
+        gate("cargo fmt --check"),
+    ];
+    let replacement =
+        replace_execution_validations(&conn, &id, &fixed, &principal_actor(), "cd has no shell")
+            .unwrap();
+
+    assert!(replacement.changed);
+    assert_eq!(
+        replacement
+            .previous
+            .iter()
+            .map(|spec| spec.command.as_str())
+            .collect::<Vec<_>>(),
+        [broken, "cargo fmt --check"]
+    );
+    assert_eq!(
+        run_gates(&conn, &run_id),
+        [
+            "pnpm --dir frontend exec tsc -b --pretty false",
+            "cargo fmt --check"
+        ]
+    );
+
+    // No relaunch: the same execution, in the same status, on the same attempt,
+    // still attached to the same run and worktree lineage.
+    let after = get_task_execution(&conn, &id).unwrap().unwrap();
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.status, ChangesRequested);
+    assert_eq!(after.attempt_no, before.attempt_no);
+    assert_eq!(after.orchestration_run_id, run_id);
+    assert_eq!(after.review_rounds, before.review_rounds);
+
+    // No loss of trace: the failed run is still on record...
+    let runs = list_validation_runs(&conn, &id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].command, broken);
+    assert!(!runs[0].passed());
+    // ...and the swap itself is journaled, attributed, with both sides and why.
+    let events = replaced_events(&conn, &id);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].actor_kind, PlanningActorKind::Agent);
+    assert_eq!(events[0].actor_id.as_deref(), Some("Claude Code"));
+    assert_eq!(
+        events[0].actor_session_id.as_deref(),
+        Some("adhoc-principal")
+    );
+    assert_eq!(events[0].changes["reason"], "cd has no shell");
+    assert_eq!(events[0].changes["previous"][0]["command"], broken);
+    assert_eq!(
+        events[0].changes["validations"][0]["command"],
+        "pnpm --dir frontend exec tsc -b --pretty false"
+    );
+    assert_eq!(
+        (events[0].from_status, events[0].to_status),
+        (None, None),
+        "a swap is not a status transition"
+    );
+
+    // The corrected gate has no result for a candidate yet, so integration will
+    // run it; the broken one no longer stands in the way of finishing.
+    assert!(!has_passing_validation_run(&conn, &id, "candidate-1", &fixed[0]).unwrap());
+}
+
+#[test]
+fn replacing_with_the_current_set_writes_and_journals_nothing() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-noop",
+        1,
+        vec![gate("cargo test")],
+        &[Provisioning, Working],
+    );
+    let updated_at = get_orchestration_run(&conn, &run_id)
+        .unwrap()
+        .unwrap()
+        .updated_at;
+
+    let replacement = replace_execution_validations(
+        &conn,
+        &id,
+        &[gate("cargo test")],
+        &principal_actor(),
+        "same",
+    )
+    .unwrap();
+
+    assert!(!replacement.changed);
+    assert!(replaced_events(&conn, &id).is_empty());
+    assert_eq!(
+        get_orchestration_run(&conn, &run_id)
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        updated_at
+    );
+}
+
+#[test]
+fn replacing_with_an_empty_set_removes_every_gate_and_says_so_in_the_journal() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-empty",
+        1,
+        vec![gate("cargo test")],
+        &[Provisioning, Working],
+    );
+    let replacement =
+        replace_execution_validations(&conn, &id, &[], &principal_actor(), "no gate wanted")
+            .unwrap();
+    assert!(replacement.changed);
+    assert!(run_gates(&conn, &run_id).is_empty());
+    let events = replaced_events(&conn, &id);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].changes["validations"], serde_json::json!([]));
+    assert_eq!(events[0].changes["previous"][0]["command"], "cargo test");
+}
+
+#[test]
+fn replacing_validations_is_refused_when_it_would_not_be_the_set_that_runs() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let mut number = 100;
+    let mut refused = |label: &str, path: &[TaskExecutionStatus], wanted: &str| {
+        number += 1;
+        let (id, run_id) = launch_gated(
+            &conn,
+            &format!("t-refused-{number}"),
+            number,
+            vec![gate("cargo test")],
+            path,
+        );
+        let error = replace_execution_validations(
+            &conn,
+            &id,
+            &[gate("cargo fmt")],
+            &principal_actor(),
+            "r",
+        )
+        .expect_err(label)
+        .to_string();
+        assert!(error.contains(wanted), "{label}: {error}");
+        assert_eq!(
+            run_gates(&conn, &run_id),
+            ["cargo test"],
+            "{label}: a refused swap must change nothing"
+        );
+        assert!(replaced_events(&conn, &id).is_empty(), "{label}");
+    };
+
+    // The running integration read its gates when it started.
+    for (label, last) in [
+        ("integrating", Integrating),
+        ("validating", Validating),
+        ("applying", Applying),
+    ] {
+        let mut path = vec![Provisioning, Working, AwaitingReview, Approved, Integrating];
+        match last {
+            Validating => path.push(Validating),
+            Applying => path.extend([Validating, Applying]),
+            _ => {}
+        }
+        refused(label, &path, "integration is running");
+    }
+    // A closed history is not rewritten.
+    refused(
+        "cancelled",
+        &[Provisioning, Working, Cancelled],
+        "can no longer change",
+    );
+}
+
+#[test]
+fn replacing_validations_is_refused_for_an_execution_of_a_campaign_run() {
+    use TaskExecutionStatus::*;
+    let conn = setup();
+    let (id, run_id) = launch_gated(
+        &conn,
+        "t-campaign",
+        1,
+        vec![gate("cargo test")],
+        &[Provisioning, Working],
+    );
+    // The campaign's gates are shared policy, not this execution's to rewrite.
+    conn.execute(
+        "UPDATE orchestration_runs SET kind = 'campaign' WHERE id = ?1",
+        params![run_id],
+    )
+    .unwrap();
+
+    let error =
+        replace_execution_validations(&conn, &id, &[gate("cargo fmt")], &principal_actor(), "r")
+            .expect_err("a campaign's shared gates")
+            .to_string();
+    assert!(error.contains("campaign"), "{error}");
+    assert_eq!(run_gates(&conn, &run_id), ["cargo test"]);
+}
+
+#[test]
+fn replacing_validations_of_an_unknown_execution_is_refused() {
+    let conn = setup();
+    let error = replace_execution_validations(&conn, "missing", &[], &principal_actor(), "r")
+        .expect_err("unknown execution")
+        .to_string();
+    assert!(error.contains("not found"), "{error}");
+}
+
+/// KT-911 — a worker's CLI sessions are listed per attempt and per process, a
+/// stale dispatch cannot add one, and pricing a session never erases or
+/// duplicates it whichever of the two lands first.
+#[test]
+fn worker_cli_sessions_are_kept_per_attempt_and_only_the_current_dispatch_writes() {
+    let conn = setup();
+    let exec_id = launch_and_drive(
+        &conn,
+        "t-sessions",
+        1191,
+        &[
+            TaskExecutionStatus::Provisioning,
+            TaskExecutionStatus::Working,
+        ],
+    );
+    let record = |dispatch: &str, session: &str, cost: Option<&WorkerSessionCost>| {
+        record_worker_cli_session(&conn, &exec_id, dispatch, "ClaudeCode", session, cost).unwrap()
+    };
+    // `task_executions.dispatch_job_id` references a real dispatch job.
+    for (n, dispatch) in ["dispatch-a", "dispatch-b"].into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+             VALUES (?1, ?2, 'User', 'go', '2026-01-01T00:00:00Z', ?3)",
+            params![format!("m-{dispatch}"), DISC, 100 + n as i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                 trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, available_at, \
+                 created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?1, '[]', ?5, '2026-01-01T00:00:00Z', \
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            // One running dispatch per room: the earlier launch is over.
+            params![
+                dispatch,
+                DISC,
+                format!("m-{dispatch}"),
+                100 + n as i64,
+                if n == 0 { "Completed" } else { "Running" }
+            ],
+        )
+        .unwrap();
+    }
+    let unknown = WorkerSessionCost {
+        usd: None,
+        unknown_reason: Some("cache reads were not reported".into()),
+    };
+    let known = WorkerSessionCost {
+        usd: Some(1.5),
+        unknown_reason: None,
+    };
+
+    attach_execution_dispatch(&conn, &exec_id, "dispatch-a").unwrap();
+    // The price may land before the poll that names the session.
+    assert!(record("dispatch-a", "sess-1", Some(&unknown)));
+    assert!(
+        record("dispatch-a", "sess-1", None),
+        "naming it again is a no-op"
+    );
+    assert!(
+        !record("dispatch-old", "sess-stale", None),
+        "a dispatch the execution left cannot add a session"
+    );
+    let sessions = list_worker_cli_sessions(&conn, &exec_id).unwrap();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0].session_id, "sess-1");
+    assert_eq!(sessions[0].attempt_no, 0);
+    assert_eq!(sessions[0].cost_usd, None);
+    assert_eq!(
+        sessions[0].cost_unknown_reason.as_deref(),
+        Some("cache reads were not reported"),
+        "unknown is a reason, not a zero"
+    );
+
+    // The same dispatch relaunched its process: a second session, same attempt.
+    assert!(record("dispatch-a", "sess-2", Some(&known)));
+    // Pricing the first session again replaces its unknown reason with the figure.
+    assert!(record("dispatch-a", "sess-1", Some(&known)));
+    assert_eq!(list_worker_cli_sessions(&conn, &exec_id).unwrap().len(), 2);
+    // A rework: new dispatch, next attempt. Earlier sessions stay.
+    conn.execute(
+        "UPDATE task_executions SET attempt_no = 1 WHERE id = ?1",
+        [&exec_id],
+    )
+    .unwrap();
+    attach_execution_dispatch(&conn, &exec_id, "dispatch-b").unwrap();
+    assert!(record("dispatch-b", "sess-3", None));
+    assert!(
+        !record("dispatch-a", "sess-late", None),
+        "the replaced dispatch is stale now"
+    );
+
+    let sessions = list_worker_cli_sessions(&conn, &exec_id).unwrap();
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|s| (
+                s.attempt_no,
+                s.dispatch_job_id.as_str(),
+                s.session_id.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, "dispatch-a", "sess-1"),
+            (0, "dispatch-a", "sess-2"),
+            (1, "dispatch-b", "sess-3"),
+        ]
+    );
+    assert_eq!(sessions[0].cost_usd, Some(1.5));
+    assert_eq!(sessions[0].cost_unknown_reason, None);
+    assert_eq!(sessions[1].cost_usd, Some(1.5));
+    assert_eq!(sessions[2].cost_usd, None);
 }

@@ -280,7 +280,7 @@ async fn read_git_branch(path: &Path) -> Result<String> {
 
 /// Convert a container mount path back to the original host path.
 /// e.g. /host-home/Repositories/foo -> /home/priol/Repositories/foo
-fn restore_host_path(path: &Path) -> String {
+pub(crate) fn restore_host_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     if let Some(relative) = s.strip_prefix("/host-home") {
         if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
@@ -538,6 +538,17 @@ pub fn needs_docs_migration(project_path: &Path) -> bool {
     project_path.join("ai/index.md").is_file()
 }
 
+/// True when `content` still has an unfilled template placeholder like
+/// `{{PROJECT_NAME}}` — anchored to all-caps + underscore so it doesn't
+/// false-positive on Twig (`{{ user.name }}`), GitHub Actions (`${{ secrets.FOO }}`),
+/// or instructional text that mentions `{{...}}` as an example.
+pub(crate) fn has_unfilled_placeholder(content: &str) -> bool {
+    regex_lite::Regex::new(r"\{\{[A-Z_]+\}\}")
+        .ok()
+        .map(|re| re.is_match(content))
+        .unwrap_or(false)
+}
+
 /// Detect the AI audit status for a project based on filesystem state.
 pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     use crate::models::AiAuditStatus;
@@ -578,13 +589,7 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     if content.contains("KRONN:BOOTSTRAP:START") || content.contains("KRONN:BOOTSTRAP:END") {
         return AiAuditStatus::TemplateInstalled;
     }
-    // Check for unfilled placeholders like {{PROJECT_NAME}}, but ignore instructional
-    // text that mentions {{...}} as an example (e.g., "If you see an unfilled {{...}}")
-    if regex_lite::Regex::new(r"\{\{[A-Z_]+\}\}")
-        .ok()
-        .map(|re| re.is_match(&content))
-        .unwrap_or(false)
-    {
+    if has_unfilled_placeholder(&content) {
         return AiAuditStatus::TemplateInstalled;
     }
 

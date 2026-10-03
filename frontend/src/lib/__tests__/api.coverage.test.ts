@@ -296,6 +296,14 @@ describe('api.ollama', () => {
   if ('models' in ollama) {
     it('models', async () => { await exec((ollama as { models: () => Promise<unknown> }).models(), 'GET', '/ollama/models'); });
   }
+  if ('registry' in ollama) {
+    it('registry', async () => {
+      await exec((ollama as { registry: (suggested: string[]) => Promise<unknown> }).registry(['qwen3:8b', 'gemma4:12b-mlx']), 'GET', '/ollama/registry?suggested=qwen3%3A8b%2Cgemma4%3A12b-mlx');
+    });
+    it('registry, asked fresh', async () => {
+      await exec((ollama as { registry: (suggested: string[], fresh: boolean) => Promise<unknown> }).registry(['qwen3:8b'], true), 'GET', '/ollama/registry?suggested=qwen3%3A8b&fresh=true');
+    });
+  }
 });
 describe('api.apiCallLogs', () => {
   if ('list' in apiCallLogs) {
@@ -393,6 +401,50 @@ describe('api.projects', () => {
 // Core api() wrapper — error paths (the actual ApiResponse envelope handling)
 // ════════════════════════════════════════════════════════════════════════════
 describe('api() wrapper', () => {
+  it('retains allowlisted startup GETs for the two-second boot window', async () => {
+    const first = config.getServerConfig();
+    const second = config.getServerConfig();
+    await Promise.all([first, second]);
+    await config.getServerConfig();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/config/server', expect.objectContaining({ method: 'GET' }));
+  });
+
+  it('refetches a dynamic resource after the previous request resolves', async () => {
+    await discussions.list();
+    await discussions.list();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares simultaneous requests for a dynamic resource', async () => {
+    let resolveFetch!: (response: unknown) => void;
+    fetchMock.mockReturnValueOnce(new Promise(resolve => { resolveFetch = resolve; }));
+
+    const first = discussions.list();
+    const second = discussions.list();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch({
+      ok: true,
+      status: 200,
+      headers: { get: (name: string) => (name === 'content-type' ? 'application/json' : null) },
+      json: async () => ({ success: true, data: [] }),
+      text: async () => '',
+    });
+    await Promise.all([first, second]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates shared startup reads after a mutation', async () => {
+    await config.getLanguage();
+    await config.saveLanguage('fr');
+    await config.getLanguage();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('attaches Authorization header when authToken is set', async () => {
     setAuthToken('my-secret-token');
     await config.getLanguage();

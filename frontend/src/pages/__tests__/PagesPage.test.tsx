@@ -75,7 +75,7 @@ import { PagesPage } from '../PagesPage';
 import { triggerDownload } from '../../lib/downloadBlob';
 
 function getCanonicalPageRow(title: string): HTMLElement {
-  const section = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
+  const section = document.querySelector('.disc-sidebar-projects') as HTMLElement;
   return within(section).getByLabelText(new RegExp(`pages\\.(?:open|select):${title}`));
 }
 
@@ -765,7 +765,7 @@ describe('PagesPage', () => {
     const favoriteSection = screen.getByText('pages.filter.favorites').closest('.disc-sidebar-section') as HTMLElement;
     expect(within(favoriteSection).getByRole('button', { name: 'pages.filter.favorites 1' })).toHaveClass('collection-favorites-header');
     const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
-    const canonicalSection = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
+    const canonicalSection = document.querySelector('.disc-sidebar-projects') as HTMLElement;
     expect([...recentSection.querySelectorAll('.disc-item-title-text')].map(node => node.textContent))
       .toEqual(recentPages.slice(0, 10).map(item => item.title));
     expect(within(recentSection).queryByText(favorite.title)).toBeNull();
@@ -851,11 +851,45 @@ describe('PagesPage', () => {
     expect(screen.getByText('pages.noSearchResults')).toBeInTheDocument();
   });
 
+  it('groups the canonical Page list under no-project and organization project folders', async () => {
+    const projectPage = {
+      ...page,
+      id: 'page-project',
+      project_id: 'project-alpha',
+      title: 'Project health',
+      slug: 'project-health',
+    };
+    const secondProjectPage = {
+      ...page,
+      id: 'page-project-beta',
+      project_id: 'project-beta',
+      title: 'Beta health',
+      slug: 'beta-health',
+    };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, projectPage, secondProjectPage]);
+
+    render(<PagesPage projects={[
+      { id: 'project-alpha', name: 'Alpha', repo_url: 'https://github.com/acme/alpha' } as never,
+      { id: 'project-beta', name: 'Beta', repo_url: 'https://github.com/beta-inc/beta' } as never,
+    ]} />);
+    await screen.findByTestId('live-page-frame');
+
+    const projectsSection = document.querySelector('.disc-sidebar-projects') as HTMLElement;
+    const noProjectButton = within(projectsSection).getByRole('button', { name: /disc\.noProject/ });
+    const projectButton = within(projectsSection).getByRole('button', { name: /Alpha/ });
+    expect(noProjectButton).toHaveAttribute('aria-expanded', 'true');
+    expect(projectButton).toHaveAttribute('aria-expanded', 'true');
+    expect(within(projectsSection).getByLabelText('pages.open:Adobe Signals')).toBeInTheDocument();
+    expect(within(projectsSection).getByLabelText('pages.open:Project health')).toBeInTheDocument();
+    expect(within(projectsSection).getByText('acme')).toBeInTheDocument();
+    expect(within(projectsSection).getByText('beta-inc')).toBeInTheDocument();
+  });
+
   it('restores the selected Page and collapsed sidebar sections', async () => {
     const other = { ...page, id: 'page-2', title: 'Jira Delivery', slug: 'jira-delivery' };
     const otherDetail = { ...detail, ...other };
     localStorage.setItem('kronn:pageNavigation', JSON.stringify({ resourceId: other.id }));
-    localStorage.setItem('kronn:pageCollapsedSections', JSON.stringify(['pages', 'archives']));
+    localStorage.setItem('kronn:pageCollapsedSections', JSON.stringify(['projects', 'archives']));
     vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
     vi.mocked(pagesApi.get).mockImplementation(async id => id === other.id ? otherDetail : detail);
 
@@ -863,21 +897,21 @@ describe('PagesPage', () => {
 
     await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(other.id));
     expect(screen.getByRole('heading', { name: other.title })).toBeInTheDocument();
-    expect(screen.getByText('pages.filter.active').closest('button')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByText('projects.title').closest('button')).toHaveAttribute('aria-expanded', 'false');
     expect(JSON.parse(localStorage.getItem('kronn:pageNavigation') ?? '{}')).toEqual({ resourceId: other.id });
   });
 
   it('temporarily expands matching sections without losing their saved state', async () => {
-    localStorage.setItem('kronn:pageCollapsedSections', JSON.stringify(['pages', 'archives']));
+    localStorage.setItem('kronn:pageCollapsedSections', JSON.stringify(['projects', 'archives']));
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
 
-    const activeSection = screen.getByText('pages.filter.active').closest('button');
+    const activeSection = screen.getByText('projects.title').closest('button');
     expect(activeSection).toHaveAttribute('aria-expanded', 'false');
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'Adobe' } });
     expect(activeSection).toHaveAttribute('aria-expanded', 'true');
     expect(getCanonicalPageRow('Adobe Signals')).toBeInTheDocument();
-    expect(JSON.parse(localStorage.getItem('kronn:pageCollapsedSections') ?? '[]')).toEqual(['pages', 'archives']);
+    expect(JSON.parse(localStorage.getItem('kronn:pageCollapsedSections') ?? '[]')).toEqual(['projects', 'archives']);
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: '' } });
     expect(activeSection).toHaveAttribute('aria-expanded', 'false');
   });

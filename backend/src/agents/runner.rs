@@ -5,9 +5,14 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+use super::idle_watchdog::{self, IdleWatchdog};
+use super::ollama_memory::{
+    ceiling_for_model, kv_shape_from_show, kv_shape_from_store, CeilingBasis, CeilingInputs,
+    KvShape, MachineFacts, ModelCeiling,
+};
 use super::provenance::{self, AgentProvenanceCapture};
 use crate::core::cmd::{async_cmd, sync_cmd};
-use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
+use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
 // Repository search is not an API probe. A real KT-404 worker needed thirteen
@@ -16,6 +21,10 @@ const MAX_CALLS_PER_TOOL: usize = 12;
 // Keep the larger allowance worker-only so a general/API agent still gets the
 // stricter anti-loop policy.
 const MAX_WORKER_SEARCH_TEXT_CALLS: usize = 24;
+// A dimension audit writes many findings, then its index. These remain
+// per-attempt backstops; round, duration, repeat and error guards still apply.
+const MAX_AUDIT_WRITE_CALLS: usize = 64;
+const MAX_AUDIT_SEARCH_CALLS: usize = 48;
 // 48, raised from 24 after a real delegation died of it: a task that crosses
 // an 11 000-line file needed ~30 honest 120-line slices, spent the budget
 // mid-exploration, and the run ended with no edit. The cap is a backstop now,
@@ -34,6 +43,8 @@ const MAX_WEB_FETCH_CALLS: usize = 120;
 const MAX_API_ENUMERATION_CALLS: usize = 60;
 const MAX_ERRORS_PER_TOOL: usize = 3;
 const MAX_ERROR_ONLY_TOOL_ROUNDS: usize = 6;
+// Rounds an audit keeps, before its ceiling, to write its deliverable.
+const AUDIT_WRITE_RESERVE_ROUNDS: usize = 8;
 const ACP_DIAGNOSTIC_MAX_CHARS: usize = 1_024;
 const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
 // The window a worker gets to gather evidence before it must turn it into a
@@ -274,7 +285,7 @@ const CATALOGUE_BYTES_PER_TOKEN: u64 = 7;
 const CATALOGUE_BYTES_PER_TOKEN_SCALE: u64 = 2;
 
 fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
-    let wire_bytes = body["messages"].to_string().len() as u64;
+    let wire_bytes = super::vision::messages_wire_len(body) as u64;
     let mut estimate = (wire_bytes / 3) + 2048;
     for field in ["tools", "format"] {
         if let Some(value) = body.get(field) {
@@ -665,13 +676,52 @@ fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -
     // Reading several small files is legitimate repository analysis. Keep the
     // stricter anti-loop cap for API/MCP calls, where varying arguments caused
     // the observed 47-call paid loop. Exact duplicate reads are still stopped
-    // separately after one replay, and the global 50-round cap remains.
+    // separately after one replay, and the context-sized round cap remains.
     match (run_mode, name) {
+        (crate::agents::tools::ToolRunMode::Audit, name) if is_audit_deliverable_tool(name) => {
+            MAX_AUDIT_WRITE_CALLS
+        }
+        (crate::agents::tools::ToolRunMode::Audit, "search_text") => MAX_AUDIT_SEARCH_CALLS,
         (_, "read_file") => MAX_READ_FILE_CALLS,
         (_, "web_fetch") => MAX_WEB_FETCH_CALLS,
         (_, "api_call" | "qa_run") => MAX_API_ENUMERATION_CALLS,
         (crate::agents::tools::ToolRunMode::Worker, "search_text") => MAX_WORKER_SEARCH_TEXT_CALLS,
         _ => MAX_CALLS_PER_TOOL,
+    }
+}
+
+/// An audit step's deliverable is a file: these are the only tools that can
+/// produce it, so convergence must never take them away.
+fn is_audit_deliverable_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit_file" | "edit_lines" | "insert_after_line"
+    )
+}
+
+/// Ends tool exploration. Outside audits the catalogue goes away so prose is
+/// the only move left; an audit keeps its writers, minus any already refused.
+fn withdraw_tools_for_convergence(
+    body: &mut serde_json::Value,
+    audit_writers: &[serde_json::Value],
+    withdrawn: &std::collections::HashSet<String>,
+) {
+    let writers = audit_writers
+        .iter()
+        .filter(|tool| {
+            tool.pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| !withdrawn.contains(name))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+    if writers.is_empty() {
+        map.remove("tools");
+    } else {
+        map.insert("tools".into(), serde_json::Value::Array(writers));
     }
 }
 
@@ -728,9 +778,27 @@ pub(crate) fn progress_readers_to_restore(
     run_mode: crate::agents::tools::ToolRunMode,
     allowance: &crate::agents::tools::CeilingAllowance,
 ) -> Vec<String> {
+    observation_readers_to_restore(
+        withdrawn,
+        open_circuits,
+        calls_per_tool,
+        run_mode,
+        allowance,
+        is_progress_observation_tool,
+    )
+}
+
+fn observation_readers_to_restore(
+    withdrawn: &std::collections::HashSet<String>,
+    open_circuits: &std::collections::HashSet<String>,
+    calls_per_tool: &std::collections::HashMap<String, usize>,
+    run_mode: crate::agents::tools::ToolRunMode,
+    allowance: &crate::agents::tools::CeilingAllowance,
+    is_observation: fn(&str) -> bool,
+) -> Vec<String> {
     withdrawn
         .iter()
-        .filter(|name| is_progress_observation_tool(name))
+        .filter(|name| is_observation(name))
         .filter(|name| !open_circuits.contains(*name))
         .filter(|name| {
             // Include human grants when checking the enforced call ceiling.
@@ -841,6 +909,27 @@ fn annotate_worker_exploration(
              edit it now; if you cannot proceed, state the concrete blocker instead of circling."
         )),
     );
+}
+
+/// What the duplicate guard compares: the canonical arguments and the
+/// `name|arguments` signature built from them.
+///
+/// Canonical: serde_json preserves insertion order, so the same call re-emitted
+/// with its keys in another order would otherwise look new. Sorting the pairs
+/// makes the signature about content. Every argument counts, so an `api_call`
+/// that only adds an `extract` or changes a query parameter asks a different
+/// question and is run, not answered as a repeat of the call it follows.
+fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, String) {
+    let canonical_args = match arguments.as_object() {
+        Some(map) => {
+            let mut pairs: Vec<_> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            pairs.sort();
+            pairs.join(",")
+        }
+        None => arguments.to_string(),
+    };
+    let signature = format!("{name}|{canonical_args}");
+    (canonical_args, signature)
 }
 
 /// A successful tool call that teaches the model nothing is invisible to every
@@ -1520,6 +1609,46 @@ pub enum StreamJsonEvent {
     Skip,
 }
 
+/// Joins the text of Claude's content blocks. `content_block_stop` ends every
+/// block (it reaches consumers as `ToolEnd`); the next block's text, from the
+/// same message, a message after a tool call or a turn a Stop hook relaunched,
+/// must not continue the previous block's last line: a `kronn-question` fence
+/// closed there would never close (#223).
+#[derive(Debug, Default)]
+pub struct TextBlockJoiner {
+    block_ended: bool,
+    emitted: bool,
+    trailing_newlines: usize,
+}
+
+impl TextBlockJoiner {
+    /// The current content block is over.
+    pub fn block_ended(&mut self) {
+        self.block_ended = true;
+    }
+
+    /// `text` as it must be appended: preceded by a blank line when it opens a
+    /// new block after earlier text.
+    pub fn join(&mut self, text: String) -> String {
+        let mut out = text;
+        if std::mem::take(&mut self.block_ended) && self.emitted {
+            let leading = out.chars().take_while(|c| *c == '\n').count();
+            let have = (self.trailing_newlines + leading).min(2);
+            out.insert_str(0, &"\n".repeat(2 - have));
+        }
+        if !out.is_empty() {
+            let trailing = out.chars().rev().take_while(|c| *c == '\n').count();
+            self.trailing_newlines = if trailing == out.chars().count() {
+                self.trailing_newlines + trailing
+            } else {
+                trailing
+            };
+            self.emitted = true;
+        }
+        out
+    }
+}
+
 /// Structured fields retained from a failed Claude Code `result` event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamJsonFailure {
@@ -1595,11 +1724,43 @@ pub struct AgentProcess {
     token_fragments: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Reads an HTTP agent's tool activity from outside its run.
+#[derive(Clone)]
+pub struct ToolActivityProbe(Arc<Mutex<AgentUsage>>);
+
+impl ToolActivityProbe {
+    /// The last tool called and the running count, `None` before the first call.
+    pub fn read(&self) -> Option<(String, u32)> {
+        let usage = self.0.lock().ok()?;
+        usage.last_tool.clone().map(|tool| (tool, usage.tool_calls))
+    }
+}
+
+/// `read_file · src/main.rs`: the tool, and the path it works on when it has one.
+fn tool_activity_label(call: &crate::agents::tools::ToolCall) -> String {
+    match ["path", "pattern", "query"]
+        .iter()
+        .find_map(|key| call.arguments.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(target) => {
+            let target: String = target.chars().take(80).collect();
+            format!("{} · {target}", call.name)
+        }
+        None => call.name.clone(),
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct AgentUsage {
     input_tokens: u64,
     output_tokens: u64,
     prompt_cache: PromptCacheUsage,
+    /// The last native tool an HTTP agent called (with its path when it has
+    /// one) and how many it has called: what a CLI's stream-json shows.
+    last_tool: Option<String>,
+    tool_calls: u32,
 }
 
 /// Prompt-cache tokens a runtime reported beside its input and output.
@@ -1608,6 +1769,16 @@ struct AgentUsage {
 pub struct PromptCacheUsage {
     pub cached_prompt_tokens: Option<u64>,
     pub cache_write_prompt_tokens: Option<u64>,
+}
+
+/// One run's reported usage, parts kept apart. `input_tokens` is as the agent
+/// reports it, so whether it already contains the cached share depends on the
+/// agent (see `core::pricing::TokenCounters::from_agent_report`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportedUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub prompt_cache: PromptCacheUsage,
 }
 
 impl PromptCacheUsage {
@@ -1668,13 +1839,32 @@ impl AgentProcess {
     }
 
     pub fn reported_token_usage(&self) -> Option<u64> {
-        let usage = *self.usage.lock().unwrap();
+        let usage = self.usage.lock().unwrap().clone();
         let total = usage.input_tokens.saturating_add(usage.output_tokens);
         (total > 0).then_some(total)
     }
 
     pub fn reported_prompt_cache(&self) -> PromptCacheUsage {
         self.usage.lock().unwrap().prompt_cache
+    }
+
+    /// The structured transport's usage with its parts kept apart — what a
+    /// cost is computed from. `None` when nothing was reported. Each agent
+    /// states its input differently (Codex includes the cached share, Claude
+    /// excludes it), so the caller resolves that with the agent type.
+    /// A handle that reads this run's tool activity while the run goes on:
+    /// an HTTP agent can call tools for minutes without a line of text.
+    pub fn tool_activity_probe(&self) -> ToolActivityProbe {
+        ToolActivityProbe(self.usage.clone())
+    }
+
+    pub fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        let usage = self.usage.lock().unwrap().clone();
+        (usage.input_tokens.saturating_add(usage.output_tokens) > 0).then_some(ReportedUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            prompt_cache: usage.prompt_cache,
+        })
     }
 
     /// Fix file ownership after agent execution.
@@ -1791,6 +1981,11 @@ pub trait AgentIo: Send {
     fn reported_prompt_cache(&self) -> PromptCacheUsage {
         PromptCacheUsage::default()
     }
+    /// The structured transport's usage with its parts kept apart — what a
+    /// cost is computed from (KT-894). `None` when nothing was reported.
+    fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        None
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -1823,6 +2018,9 @@ impl AgentIo for AgentProcess {
     }
     fn reported_prompt_cache(&self) -> PromptCacheUsage {
         AgentProcess::reported_prompt_cache(self)
+    }
+    fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        AgentProcess::reported_usage_counters(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -2293,6 +2491,38 @@ pub(crate) fn codex_kronn_internal_env_override() -> String {
     )
 }
 
+/// Kronn's own server for a Codex discussion run, complete and approved, so the
+/// run does not depend on the global config sync (KT-953). Dotted keys merge
+/// with the user's config instead of replacing their other servers.
+pub(crate) fn codex_discussion_mcp_overrides() -> Vec<String> {
+    render_codex_discussion_mcp_overrides(disc_introspection_mcp_command())
+}
+
+fn render_codex_discussion_mcp_overrides(launch: Option<InternalMcpCommand>) -> Vec<String> {
+    const KEY: &str = "mcp_servers.kronn-internal";
+    // Without its command a key alone is an entry with no transport, and Codex
+    // then rejects the whole configuration.
+    let Some(launch) = launch else {
+        return Vec::new();
+    };
+    let (Ok(command), Ok(args)) = (
+        serde_json::to_string(&launch.command),
+        serde_json::to_string(&launch.args),
+    ) else {
+        return Vec::new();
+    };
+    let values = vec![
+        codex_kronn_internal_env_override(),
+        format!("{KEY}.command={command}"),
+        format!("{KEY}.args={args}"),
+        format!("{KEY}.default_tools_approval_mode=\"approve\""),
+    ];
+    values
+        .into_iter()
+        .flat_map(|value| ["-c".to_string(), value])
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct AcpSessionStore {
     db: Arc<crate::db::Database>,
@@ -2544,6 +2774,11 @@ pub struct AgentStartConfig<'a> {
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
     pub skill_ids: &'a [String],
+    /// Skills only a project's repository holds (KT-923), already resolved and
+    /// masked by the caller at send time from `repository:<project>:<slug>` ids
+    /// in `skill_ids`. Injected in a block of their own, whatever the agent
+    /// discovers natively.
+    pub repository_skills: &'a [Skill],
     pub directive_ids: &'a [String],
     pub profile_ids: &'a [String],
     /// Override MCP context instead of reading from project filesystem.
@@ -2570,6 +2805,11 @@ pub struct AgentStartConfig<'a> {
     pub external_http: Option<&'a ExternalHttpRuntime>,
     /// Pre-built context files prompt (uploaded file contents for this discussion).
     pub context_files_prompt: &'a str,
+    /// The discussion's attached images, for an HTTP agent (KT-946). A CLI agent
+    /// is handed the path in `context_files_prompt` and opens the file itself; an
+    /// HTTP agent has no hands, so these either ride the request as real image
+    /// parts or are announced as unseen — never delivered as a bare path.
+    pub context_images: Option<&'a super::vision::ContextImages>,
     /// Discussion id this run targets, when known. Forwarded to the
     /// agent process as `KRONN_DISCUSSION_ID` so the in-process
     /// `kronn-internal` MCP bridge knows which discussion to introspect.
@@ -2637,6 +2877,13 @@ pub struct AgentStartConfig<'a> {
     /// request that happens before an `AgentProcess` exists. Discussion paths
     /// pass the exact visible hosted/local wall-clock budget here.
     pub http_request_timeout: Option<std::time::Duration>,
+    /// KT-932 — how long the model may stay silent before the run is failed and
+    /// its generation cancelled: no byte on the HTTP stream, no frame from the
+    /// ACP agent. Progress restarts it, so a slow model that keeps talking is
+    /// never cut. Discussions and workflow steps pass the operator's inactivity
+    /// setting; `None` is [`idle_watchdog::DEFAULT_IDLE_TIMEOUT`], sized for the
+    /// first token of a large local model loaded cold.
+    pub idle_timeout: Option<std::time::Duration>,
     /// Optional lifecycle owned by the caller (discussion/workflow). HTTP
     /// agents derive a child token from it so cancellation also interrupts the
     /// initial request, before an `AgentProcess`/lifeline exists.
@@ -2645,6 +2892,14 @@ pub struct AgentStartConfig<'a> {
     /// vendor-native JSON-RPC transport in `start_native_acp`.
     #[cfg(test)]
     pub test_acp_transport: Option<std::sync::Arc<dyn crate::acp::AcpTransport>>,
+    /// ADR-005 slice 1 (KT-847) — when `Some`, skills/directives/profiles
+    /// are resolved through the run snapshot cache keyed by this id instead
+    /// of read fresh from disk: a resource edited or deleted while the run
+    /// is still executing doesn't change what this run already loaded.
+    /// Workflow runs pass their `WorkflowRun.id` here. `None` (the default)
+    /// preserves the previous always-fresh resolution — used by normal
+    /// discussions, benches and one-off spawns.
+    pub run_snapshot_id: Option<&'a str>,
 }
 
 impl<'a> AgentStartConfig<'a> {
@@ -2683,6 +2938,7 @@ impl<'a> AgentStartConfig<'a> {
             work_dir: None,
             full_access: false,
             skill_ids: &[],
+            repository_skills: &[],
             directive_ids: &[],
             profile_ids: &[],
             mcp_context_override: None,
@@ -2692,6 +2948,7 @@ impl<'a> AgentStartConfig<'a> {
             http_endpoints: None,
             external_http: None,
             context_files_prompt: "",
+            context_images: None,
             discussion_id: None,
             acp_session_store: None,
             native_acp_full_prompt: None,
@@ -2705,9 +2962,11 @@ impl<'a> AgentStartConfig<'a> {
             max_tokens_override: None,
             ollama_context_overrides: None,
             http_request_timeout: None,
+            idle_timeout: None,
             cancel_token: None,
             #[cfg(test)]
             test_acp_transport: None,
+            run_snapshot_id: None,
         }
     }
 }
@@ -3216,14 +3475,34 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let skills_prompt = if force_full_skill {
         // Compare judges cannot discover a skill through a tool, and compact
         // injection would omit the normative anchors after the first lines.
-        crate::core::skills::build_skills_prompt(config.skill_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids)
+            }
+            None => crate::core::skills::build_skills_prompt(config.skill_ids),
+        }
     } else if native_skills {
         crate::core::native_files::build_skills_reference_prompt(config.skill_ids)
     } else if compact {
-        crate::core::skills::build_skills_prompt_compact(config.skill_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_compact_for_run(run_id, config.skill_ids)
+            }
+            None => crate::core::skills::build_skills_prompt_compact(config.skill_ids),
+        }
     } else {
-        crate::core::skills::build_skills_prompt(config.skill_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids)
+            }
+            None => crate::core::skills::build_skills_prompt(config.skill_ids),
+        }
     };
+    let skills_prompt = crate::core::skills::append_repository_skills_prompt(
+        skills_prompt,
+        config.repository_skills,
+        compact,
+    );
 
     // 0.8.8 PR-B — enforce mode auto-attaches the `kronn-doc-author` cheat-sheet
     // when the agent's project carries a `docs/AGENTS.md`, so an agent that
@@ -3248,7 +3527,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     };
 
     // Build directives prompt (always injected — no native format)
-    let directives_prompt = crate::core::directives::build_directives_prompt(config.directive_ids);
+    let directives_prompt = match config.run_snapshot_id {
+        Some(run_id) => {
+            crate::core::directives::build_directives_prompt_for_run(run_id, config.directive_ids)
+        }
+        None => crate::core::directives::build_directives_prompt(config.directive_ids),
+    };
 
     // Build profiles prompt.
     //
@@ -3269,9 +3553,20 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         // `.claude/agents/<id>.md` on disk; the compact injection here is
         // a token-saving fallback in case the agent's one-shot mode
         // doesn't auto-pick the file up (which was the EW-7189 failure).
-        crate::core::profiles::build_profiles_prompt_compact(config.profile_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => crate::core::profiles::build_profiles_prompt_compact_for_run(
+                run_id,
+                config.profile_ids,
+            ),
+            None => crate::core::profiles::build_profiles_prompt_compact(config.profile_ids),
+        }
     } else {
-        crate::core::profiles::build_profiles_prompt(config.profile_ids)
+        match config.run_snapshot_id {
+            Some(run_id) => {
+                crate::core::profiles::build_profiles_prompt_for_run(run_id, config.profile_ids)
+            }
+            None => crate::core::profiles::build_profiles_prompt(config.profile_ids),
+        }
     };
 
     // A prelocalized HTTP worker is not a smaller general-purpose agent. Its
@@ -3529,7 +3824,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 }
             },
         );
-        return start_ollama_http(
+        return start_ollama_http_with_idle(
             config.agent_type,
             config.prompt,
             &http_system_context,
@@ -3544,6 +3839,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.reasoning_effort_override,
             config.max_tokens_override,
             config.provenance.clone(),
+            config.idle_timeout,
+            config.context_images,
         )
         .await;
     }
@@ -3615,6 +3912,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 fallback_prompt: config.native_acp_full_prompt,
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
+                idle_timeout: config.idle_timeout,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
@@ -3643,6 +3941,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 fallback_prompt: config.native_acp_full_prompt,
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
+                idle_timeout: config.idle_timeout,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
@@ -3723,7 +4022,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             let worker_mcp = claude_task_worker_mcp_config(&project_root)?;
             insert_claude_mcp_config(&mut args, worker_mcp, true);
         } else {
-            let mcp_json = work_dir.join(".mcp.json");
+            // A project whose agent files live outside its repository (KT-971)
+            // keeps Claude's MCP config in Kronn's stand-in directory.
+            let mcp_json = crate::core::mcp_scanner::outside_agent_files_dir(config.project_path)
+                .map(|dir| dir.join(".mcp.json"))
+                .filter(|path| path.is_file())
+                .unwrap_or_else(|| work_dir.join(".mcp.json"));
             if mcp_json.exists() {
                 // Strict, so the agent gets exactly the servers Kronn declares
                 // — the ones its own UI lists — and nothing else. Without it
@@ -3843,6 +4147,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                         if observe_claude {
                             if let Some(model) = provenance::claude_observed_model(&line) {
                                 provenance::observe_model(provenance.as_ref(), &model);
+                            }
+                            if let Some(session_id) = provenance::claude_session_id(&line) {
+                                provenance::observe_session(provenance.as_ref(), &session_id);
                             }
                         }
                         if tx_out.send(line).await.is_err() {
@@ -4006,6 +4313,8 @@ struct AcpSessionRequest<'a> {
     fallback_prompt: Option<&'a str>,
     provenance: Option<AgentProvenanceCapture>,
     activity: Option<super::activity::AgentActivitySink>,
+    /// KT-932 — silence after which the turn is cancelled; `None` is the default.
+    idle_timeout: Option<Duration>,
 }
 
 async fn start_native_acp(
@@ -4133,6 +4442,10 @@ pub(crate) mod test_acp_routes {
         RouteGuard(work_dir.to_path_buf())
     }
 
+    pub(crate) fn is_routed(work_dir: &Path) -> bool {
+        ROUTES.lock().unwrap().contains_key(work_dir)
+    }
+
     pub(super) fn transport_for(
         config: &AgentStartConfig<'_>,
         work_dir: &Path,
@@ -4154,6 +4467,10 @@ pub(crate) mod test_acp_routes {
 /// is text; this is the third channel both other transports already use.
 pub const ACP_TOOL_MARKER: &str = "[acp-tool] ";
 
+/// How long a stop waits for `session/cancel` to be written before the agent's
+/// process is shut down regardless.
+const ACP_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn run_acp_session(
     request: AcpSessionRequest<'_>,
     transport: Arc<dyn crate::acp::AcpTransport>,
@@ -4173,6 +4490,7 @@ async fn run_acp_session(
         fallback_prompt,
         provenance,
         activity,
+        idle_timeout,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4272,9 +4590,14 @@ async fn run_acp_session(
     }
     // Apply the resolved tier/model against the options the session actually
     // returned (ACP session-config-options). The host applies it via
-    // `session/set_config_option` only when a matching option value exists;
-    // otherwise the choice is a deliberate no-op so a catalogue-less agent keeps
-    // its own default instead of receiving a bad flag.
+    // `session/set_config_option` only when a matching option value exists.
+    // A session that lists no models at all is a catalogue-less agent: the
+    // choice is a deliberate no-op and it keeps its own default instead of
+    // receiving a bad flag. A session that lists models without the chosen one
+    // is different: keeping its default would run another model than the one
+    // the user picked, while every screen says otherwise — OpenCode lists the
+    // models of the directory it runs in, so a model seen from elsewhere can be
+    // absent here. That launch is refused, before any prompt is sent.
     if let Some(model) = model_flag {
         match host.select_model(&session, model).await {
             Ok(true) => {
@@ -4283,10 +4606,22 @@ async fn run_acp_session(
             }
             Ok(false) => {
                 provenance::resolve_model(provenance.as_ref(), Some(model), Some(false));
+                if host.offers_model_catalogue().await {
+                    return Err(acp_start_failure(
+                        &host,
+                        format!(
+                            "{agent_type:?} does not offer the model '{model}' for this \
+                             working directory, so it would run another one. Pick a model \
+                             it lists here, or declare '{model}' in a config {agent_type:?} \
+                             reads from this directory."
+                        ),
+                    )
+                    .await);
+                }
                 tracing::debug!(
-                agent = ?agent_type,
-                model,
-                "ACP session exposes no matching model option; keeping its default"
+                    agent = ?agent_type,
+                    model,
+                    "ACP session exposes no model catalogue; keeping its default"
                 );
             }
             Err(error) => {
@@ -4322,6 +4657,18 @@ async fn run_acp_session(
     let event_agent_label = format!("{agent_type:?}");
     let event_agent_type = agent_type.clone();
     let event_work_dir = work_dir.to_path_buf();
+    // KT-932 — the turn's progress clock. Every event the agent produces beats
+    // it, so what ends a turn is a silence, not a long run: an agent that keeps
+    // streaming is never cut however long it takes.
+    let model_idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
+    let idle = IdleWatchdog::new(model_idle_limit);
+    let forwarder_idle = idle.clone();
+    // KT-932 follow-up — while a tool call is open, OpenCode (or any ACP
+    // agent) emits no frame at all: a `cargo test` or a build legitimately
+    // runs well past the model's own delay. Spend this much wider bound on
+    // the tool itself instead, so a long but healthy tool call is never
+    // mistaken for a dead model.
+    let tool_execution_limit = idle_watchdog::tool_execution_timeout(model_idle_limit);
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
@@ -4355,6 +4702,7 @@ async fn run_acp_session(
         let event_store = session_store.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                forwarder_idle.beat();
                 match event {
                     AcpSessionEvent::TextDelta(text) => {
                         if tx.send(text).await.is_err() {
@@ -4363,6 +4711,9 @@ async fn run_acp_session(
                     }
                     AcpSessionEvent::ModelObserved(model) => {
                         provenance::observe_model(provenance.as_ref(), &model);
+                    }
+                    AcpSessionEvent::CliSessionObserved(session_id) => {
+                        provenance::observe_session(provenance.as_ref(), &session_id);
                     }
                     AcpSessionEvent::ToolCall { name } => {
                         // A tool call is not text. Forwarding it on `tx` — the
@@ -4381,9 +4732,22 @@ async fn run_acp_session(
                             capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
                         super::activity::tool_started(activity.as_ref(), &name);
+                        // KT-932 follow-up — a tool call is open: measure
+                        // silence against ITS OWN wider bound, not the
+                        // model's, until a terminal update closes it.
+                        forwarder_idle.begin_tool(&name, tool_execution_limit);
+                    }
+                    AcpSessionEvent::ToolCallEnded => {
+                        // Back to watching the model itself.
+                        forwarder_idle.end_tool();
                     }
                     AcpSessionEvent::ToolTarget(target) => {
                         super::activity::tool_target(activity.as_ref(), target);
+                    }
+                    AcpSessionEvent::ToolTrace(trace) => {
+                        if let Ok(mut capture) = forwarder_stderr.lock() {
+                            capture.push(trace.marker());
+                        }
                     }
                     AcpSessionEvent::Usage {
                         input_tokens,
@@ -4394,6 +4758,7 @@ async fn run_acp_session(
                             input_tokens,
                             output_tokens,
                             prompt_cache,
+                            ..AgentUsage::default()
                         };
                     }
                     AcpSessionEvent::NativeSessionId(conversation_id) => {
@@ -4410,16 +4775,60 @@ async fn run_acp_session(
                             }
                         }
                     }
-                    AcpSessionEvent::Completed => {}
+                    // Proof of life that has nothing to show: it only beat the clock.
+                    AcpSessionEvent::Activity | AcpSessionEvent::Completed => {}
                 }
             }
         });
 
         // On cancellation the prompt future is dropped, which drops its event
         // sender and lets the forwarder finish draining before we report.
-        let (result, cancelled) = tokio::select! {
-            _ = task_cancel.cancelled() => (host.cancel(&session).await, true),
-            result = host.prompt(&session, &full_prompt, event_tx) => (result, false),
+        //
+        // A stall ends the turn the same way a stop does — cancel the session,
+        // then the shutdown below takes the agent's whole process group, which
+        // closes its connection to the model server. That close is what tells
+        // Ollama to abandon the generation instead of finishing it for nobody
+        // while the next request queues behind it.
+        let (result, cancelled, stalled) = tokio::select! {
+            _ = task_cancel.cancelled() => {
+                // The cancel is a write to the agent's stdin: a wedged agent must
+                // not hold the stop hostage, and the shutdown below kills it
+                // whether or not it heard.
+                let sent = tokio::time::timeout(ACP_CANCEL_GRACE, host.cancel(&session))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(crate::acp::AcpError::Timeout("session/cancel".to_owned()))
+                    });
+                (sent, true, false)
+            }
+            _ = idle.expired() => {
+                // KT-932 follow-up — a tool call still open when this fires
+                // means the TOOL's own bound expired, not the model's: name
+                // it instead of accusing the model of a silence it never had.
+                let reason = match idle.active_tool() {
+                    Some(tool) => {
+                        idle_watchdog::tool_stall_reason(&event_agent_label, &tool, idle.limit())
+                    }
+                    None => {
+                        let progress = match idle.beats() {
+                            0 => "without ever sending a first token".to_owned(),
+                            beats => format!("after {beats} event(s)"),
+                        };
+                        idle_watchdog::stall_reason(&event_agent_label, idle.limit(), &progress)
+                    }
+                };
+                tracing::warn!(agent = %event_agent_label, "{reason}");
+                if let Ok(mut capture) = task_stderr.lock() {
+                    capture.push(reason);
+                }
+                let sent = tokio::time::timeout(ACP_CANCEL_GRACE, host.cancel(&session))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(crate::acp::AcpError::Timeout("session/cancel".to_owned()))
+                    });
+                (sent, false, true)
+            }
+            result = host.prompt(&session, &full_prompt, event_tx) => (result, false, false),
         };
         let _ = forwarder.await;
         let persistence_error = persistence_error.lock().unwrap().take();
@@ -4432,7 +4841,7 @@ async fn run_acp_session(
                 }
                 false
             }
-            (Ok(()), None) if !cancelled => true,
+            (Ok(()), None) if !cancelled && !stalled => true,
             (Ok(()), None) => false,
             (Err(error), None) => {
                 let diagnostic = acp_failure_diagnostic("prompt", &error.to_string());
@@ -4510,7 +4919,7 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
     // because Kronn spawns the ACP process itself (`spawn_native`), so nothing
     // sensitive passes through the protocol.
     let mut servers: Vec<crate::acp::AcpMcpServer> = Vec::new();
-    if let Some(launch) = disc_introspection_mcp_command_for_shared_config() {
+    if let Some(launch) = disc_introspection_mcp_command() {
         servers.push(crate::acp::AcpMcpServer {
             id: "kronn-internal".to_string(),
             command: launch.command,
@@ -4528,6 +4937,9 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
+            if id == "kronn-internal" {
+                return None;
+            }
             let command = entry.command.clone()?;
             // Fail closed: a credential in `env` OR embedded directly in
             // `args` (`["--token", "secret"]`) drops the whole server rather
@@ -4819,11 +5231,13 @@ const OLLAMA_NUM_CTX_BLIND_CEILING: u64 = 32768;
 /// cliff documented above. But a flat 32K was the opposite error — it silently
 /// throttled a large model on a large machine, and said nothing about it.
 ///
-/// Tiers, not a formula: the per-token cost depends on layers, KV heads and
-/// quantisation, none of which `/api/show` reports reliably. A coarse ceiling
-/// that is honest about being coarse beats a precise-looking number built on
-/// figures we do not have. Installed memory, never free memory — free memory
-/// changes minute to minute and would make two identical runs differ.
+/// Tiers, not a formula: this is what stands while the per-token cost of the
+/// model is unknown. `ollama_memory::ceiling_for_model` replaces it with a
+/// per-model figure (KT-943) whenever the model's attention shape and weights
+/// are known, and falls back here when they are not: a coarse ceiling that is
+/// honest about being coarse beats a precise-looking number built on figures we
+/// do not have. Installed memory, never free memory — free memory changes
+/// minute to minute and would make two identical runs differ.
 pub(crate) fn ram_derived_ceiling(total_bytes: Option<u64>) -> u64 {
     const GB: u64 = 1024 * 1024 * 1024;
     match total_bytes {
@@ -4873,8 +5287,13 @@ pub(crate) enum CtxCapOrigin {
     ModelOverride,
     /// The model's own trained context, used in full.
     ModelWindow,
-    /// Below what the model offers, because of what this machine can hold.
+    /// Below what the model offers, because of the coarse band of this machine's
+    /// installed memory — what is used while nothing is known of the model.
     MachineCeiling { model_limit: u64 },
+    /// Below what the model offers, because of what this machine can hold of
+    /// THIS model: its weights and the cost of one token of its cache, computed
+    /// from its own metadata (KT-943), or measured on the running server.
+    ModelEstimate { model_limit: u64 },
     /// Ollama did not answer `/api/show`, so nothing better was known.
     PortableFallback,
 }
@@ -4894,6 +5313,14 @@ impl CtxCap {
                 "{model} supports a {model_limit}-token context; Kronn is running it at {} \
                  — the ceiling this machine's memory allows. Raise it with \
                  KRONN_OLLAMA_NUM_CTX_CAP if the RAM is there.",
+                self.value
+            )),
+            CtxCapOrigin::ModelEstimate { model_limit } => Some(format!(
+                "{model} supports a {model_limit}-token context; Kronn is running it at {} \
+                 — what this machine's memory holds once the model's weights, the cost of \
+                 its cache per token and a safety margin are counted. Raise it with \
+                 KRONN_OLLAMA_NUM_CTX_CAP or this model's override if you know the memory \
+                 is there.",
                 self.value
             )),
             // KT-405 — a prompt fitting inside 8192 is not proof the model was
@@ -4954,7 +5381,7 @@ pub(crate) fn resolve_ctx_cap_for_model(
     model: &str,
     overrides: &std::collections::HashMap<String, u64>,
     model_limit: Option<u64>,
-    ceiling: u64,
+    ceiling: impl Into<ModelCeiling>,
 ) -> CtxCap {
     if let Some(value) = parse_num_ctx_cap(env_raw) {
         return CtxCap {
@@ -4979,7 +5406,7 @@ pub(crate) fn resolve_ctx_cap_for_model(
 pub(crate) fn resolve_ctx_cap_within(
     env_raw: Option<String>,
     model_limit: Option<u64>,
-    ceiling: u64,
+    ceiling: impl Into<ModelCeiling>,
 ) -> CtxCap {
     if let Some(value) = parse_num_ctx_cap(env_raw) {
         return CtxCap {
@@ -4987,13 +5414,22 @@ pub(crate) fn resolve_ctx_cap_within(
             origin: CtxCapOrigin::OperatorOverride,
         };
     }
+    let ceiling: ModelCeiling = ceiling.into();
+    let tokens = ceiling.tokens.max(OLLAMA_NUM_CTX_FLOOR);
     match model_limit {
         Some(limit) => {
-            let value = limit.clamp(OLLAMA_NUM_CTX_FLOOR, ceiling.max(OLLAMA_NUM_CTX_FLOOR));
+            let value = limit.clamp(OLLAMA_NUM_CTX_FLOOR, tokens);
             CtxCap {
                 value,
                 origin: if value < limit {
-                    CtxCapOrigin::MachineCeiling { model_limit: limit }
+                    match ceiling.basis {
+                        CeilingBasis::MemoryBand => {
+                            CtxCapOrigin::MachineCeiling { model_limit: limit }
+                        }
+                        CeilingBasis::ModelEstimate => {
+                            CtxCapOrigin::ModelEstimate { model_limit: limit }
+                        }
+                    }
                 } else {
                     CtxCapOrigin::ModelWindow
                 },
@@ -5001,7 +5437,7 @@ pub(crate) fn resolve_ctx_cap_within(
         }
         // Bound the fallback by host memory.
         None => CtxCap {
-            value: OLLAMA_NUM_CTX_CAP.min(ceiling.max(OLLAMA_NUM_CTX_FLOOR)),
+            value: OLLAMA_NUM_CTX_CAP.min(tokens),
             origin: CtxCapOrigin::PortableFallback,
         },
     }
@@ -5103,6 +5539,36 @@ pub(crate) fn ram_ceiling_for_model(
     }
 }
 
+/// The ceiling this machine can hold for one model (KT-943). `weights` is what
+/// the model occupies on disk, from `/api/tags`; `profile` is its `/api/show`.
+/// The model's own `config.json` is read only where it can matter: on Apple
+/// Silicon, and when `/api/show` did not already give the attention shape.
+pub(crate) async fn ollama_machine_ceiling(
+    machine: &MachineFacts,
+    base: &str,
+    model: &str,
+    profile: Option<&OllamaModelProfile>,
+    weights: Option<u64>,
+) -> ModelCeiling {
+    // A remote server's model store and GPU budget are not this host's.
+    let gpu_budget_bytes = machine
+        .gpu_budget_bytes
+        .filter(|_| super::ollama_memory::server_is_local(base));
+    let shape = match profile.and_then(|profile| profile.kv_shape) {
+        Some(shape) => Some(shape),
+        None if gpu_budget_bytes.is_some() => kv_shape_from_store(model).await,
+        None => None,
+    };
+    ceiling_for_model(&CeilingInputs {
+        total_ram_bytes: machine.total_ram_bytes,
+        gpu_budget_bytes,
+        weights_bytes: weights,
+        measured_kv_bytes_per_token: measured_kv_bytes_per_token(base, model),
+        shape,
+        kv_cache_type: machine.kv_cache_type,
+    })
+}
+
 /// Extract a model's trained context length from an Ollama `/api/show`
 /// response: `model_info` carries an arch-prefixed key (`qwen3.context_length`,
 /// `llama.context_length`, …) — match on the suffix. Pure + unit-tested.
@@ -5119,6 +5585,14 @@ pub(crate) fn parse_context_length(show_response: &serde_json::Value) -> Option<
 pub(crate) struct OllamaModelProfile {
     context_length: Option<u64>,
     storage_format: Option<String>,
+    kv_shape: Option<KvShape>,
+    vision: super::vision::ImageSupport,
+}
+
+impl OllamaModelProfile {
+    pub(crate) fn context_length(&self) -> Option<u64> {
+        self.context_length
+    }
 }
 
 pub(crate) fn parse_ollama_model_profile(show_response: &serde_json::Value) -> OllamaModelProfile {
@@ -5128,13 +5602,49 @@ pub(crate) fn parse_ollama_model_profile(show_response: &serde_json::Value) -> O
             .pointer("/details/format")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        kv_shape: kv_shape_from_show(show_response),
+        vision: super::vision::ollama_show_vision(show_response),
+    }
+}
+
+/// What the PROVIDER says about `model` accepting images (KT-946). The catalogue's
+/// own `vision` tag is consulted first and wins, so a model an operator declared
+/// by hand costs no probe. NVIDIA exposes no model metadata beyond its listing;
+/// it stays `Unknown` unless the catalogue says otherwise.
+async fn provider_image_support(
+    agent_type: &AgentType,
+    images: &super::vision::ContextImages,
+    model: &str,
+    http_base_url: Option<&str>,
+    http_api_key: Option<&str>,
+) -> super::vision::ImageSupport {
+    use super::vision::ImageSupport;
+    if images.catalog_vision_models.contains(model) {
+        return ImageSupport::Supported;
+    }
+    match agent_type {
+        AgentType::LiteLlm => {
+            let base = crate::api::lite_llm::resolve_base_url_pub(http_base_url);
+            super::vision::litellm_vision(&base, http_api_key, model).await
+        }
+        AgentType::Custom => match http_base_url.map(str::trim).filter(|url| !url.is_empty()) {
+            Some(base) => super::vision::litellm_vision(base, http_api_key, model).await,
+            None => ImageSupport::Unknown,
+        },
+        AgentType::Nvidia => ImageSupport::Unknown,
+        _ => {
+            let base = crate::api::ollama::resolve_base_url_pub(http_base_url);
+            ollama_model_profile(&base, model)
+                .await
+                .map_or(ImageSupport::Unknown, |profile| profile.vision)
+        }
     }
 }
 
 /// Ask Ollama for the stable metadata Kronn needs while running `model`, with
 /// a process-lifetime cache (one `/api/show` per model per boot).
 /// `None` means transport failure and is deliberately not cached.
-async fn ollama_model_profile(base: &str, model: &str) -> Option<OllamaModelProfile> {
+pub(crate) async fn ollama_model_profile(base: &str, model: &str) -> Option<OllamaModelProfile> {
     static CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, OllamaModelProfile>>,
     > = std::sync::OnceLock::new();
@@ -5305,14 +5815,6 @@ pub(crate) fn mlx_prefix_cache_reused(version: Option<(u64, u64)>) -> bool {
     version.is_some_and(|version| version >= (0, 34))
 }
 
-/// Ask Ollama for `model`'s trained context length. This compatibility wrapper
-/// shares the full `/api/show` profile cache with the HTTP worker policy.
-pub(crate) async fn ollama_model_ctx_limit(base: &str, model: &str) -> Option<u64> {
-    ollama_model_profile(base, model)
-        .await
-        .and_then(|profile| profile.context_length)
-}
-
 /// Size the context window to the prompt, bounded by [FLOOR, cap]. Text only:
 /// `fit_ollama_num_ctx` is what sizes a request that also carries tools.
 pub(crate) fn ollama_num_ctx(system_context: &str, user_prompt: &str, ctx_cap: u64) -> u64 {
@@ -5355,7 +5857,7 @@ pub(crate) fn reachable_tools_bytes(body: &serde_json::Value) -> usize {
 /// Size once for messages and all reachable tool declarations. Omitting tools
 /// risks silent prompt truncation; changing num_ctx mid-run reloads the model.
 pub(crate) fn fit_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
-    let messages = body["messages"].to_string().len();
+    let messages = super::vision::messages_wire_len(body);
     let tools = reachable_tools_bytes(body);
     let est = estimated_prompt_tokens(messages, tools);
     let ceiling = ctx_cap.max(OLLAMA_NUM_CTX_FLOOR);
@@ -5398,41 +5900,394 @@ pub(crate) fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
     num_predict_for(num_ctx, std::env::var("KRONN_OLLAMA_NUM_PREDICT").ok())
 }
 
+/// Most names a shape lists per level. A wider record is cut with a count, and
+/// the whole-element example shows the rest.
+const SHAPE_MAX_KEYS: usize = 40;
+/// Names kept per level in the smaller rendering, for a window with no room left.
+const SHAPE_BRIEF_KEYS: usize = 12;
+/// Longest string a shape shows as a value rather than as a type.
+const SHAPE_INLINE_CHARS: usize = 40;
+
+/// How to ask again for a part of an API response that was shortened to fit
+/// the window. Shortening a result and saying "ask for a part you have not
+/// seen" is an invitation the model cannot follow unless it knows what the
+/// response holds and has a way to select a piece of it: this carries both.
+/// Built from the ORIGINAL response, before any shortening, so it stays true
+/// however many times the message is cut.
+struct PartialReadHint {
+    /// The layout in full: the response's keys and the main collection's item
+    /// keys one level deep. `None` when the call was already an extract, whose
+    /// layout is not the response's and so cannot be addressed by a new one.
+    full: Option<serde_json::Value>,
+    /// The same, with fewer names per level, for a window with no room left.
+    brief: Option<serde_json::Value>,
+    /// Working JSONPaths over the response, checked against it.
+    examples: Vec<String>,
+    /// The path to one whole element of the main collection.
+    one_item: Option<String>,
+    already_extracted: bool,
+}
+
+impl PartialReadHint {
+    fn shape(&self, brief: bool) -> Option<&serde_json::Value> {
+        if brief {
+            self.brief.as_ref()
+        } else {
+            self.full.as_ref()
+        }
+    }
+
+    /// The instruction appended to a shortened result, with paths that work on
+    /// this very response.
+    fn how_to_ask(&self) -> String {
+        if self.already_extracted {
+            return "This is already the result of your `extract`: make its `path` select \
+                    less — fewer fields (`['a','b']`) or fewer elements (`[0:5]`) — or ask the \
+                    API for a smaller page or a filter in `query`."
+                .to_string();
+        }
+        let mut text = String::from(
+            "To read a part of the response, call `api_call` again with an `extract`, a \
+             JSONPath applied to the response itself, and only what it selects comes back.",
+        );
+        for (index, path) in self.examples.iter().enumerate() {
+            text.push_str(if index == 0 { " For example " } else { ", or " });
+            text.push_str(&serde_json::json!({ "path": path }).to_string());
+        }
+        if let Some(path) = &self.one_item {
+            text.push_str(&format!(
+                ". One whole element, to see all its keys: {}",
+                serde_json::json!({ "path": path })
+            ));
+        }
+        text.push('.');
+        text
+    }
+}
+
+/// A JSONPath member accessor for `key`: `.key` for a plain identifier,
+/// `['key']` otherwise. `None` for a name the quoted form cannot carry.
+fn path_member(key: &str) -> Option<String> {
+    let plain = key
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain {
+        return Some(format!(".{key}"));
+    }
+    path_name(key).map(|name| format!("[{name}]"))
+}
+
+/// `'key'`, the quoted name selector, or `None` when the name would need an
+/// escape a model is unlikely to copy faithfully.
+fn path_name(key: &str) -> Option<String> {
+    (!key
+        .chars()
+        .any(|c| c == '\'' || c == '\\' || c.is_control()))
+    .then(|| format!("'{key}'"))
+}
+
+fn shape_type(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    Value::String(match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(_) => "boolean".to_string(),
+        Value::Number(_) => "number".to_string(),
+        Value::String(_) => "string".to_string(),
+        Value::Array(items) => format!("array[{}]", items.len()),
+        Value::Object(map) => format!("object[{} keys]", map.len()),
+    })
+}
+
+/// What a response says about itself at its top level. Totals, page counters
+/// and links are small and are what lets a model carry on, so a flat object is
+/// shown by its values; the rest by its type.
+fn shape_top_level_entry(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    let shown_whole = match value {
+        Value::Object(map) => map.len() <= 8 && map.values().all(shape_is_short_scalar),
+        scalar => shape_is_short_scalar(scalar),
+    };
+    if shown_whole {
+        value.clone()
+    } else {
+        shape_type(value)
+    }
+}
+
+fn shape_is_short_scalar(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.chars().count() <= SHAPE_INLINE_CHARS,
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
+        _ => true,
+    }
+}
+
+fn shape_keys(
+    map: &serde_json::Map<String, serde_json::Value>,
+    max_keys: usize,
+    describe: impl Fn(&serde_json::Value) -> serde_json::Value,
+) -> serde_json::Value {
+    let mut keys = serde_json::Map::new();
+    for (key, value) in map.iter().take(max_keys) {
+        keys.insert(key.clone(), describe(value));
+    }
+    if map.len() > max_keys {
+        keys.insert(
+            "…".to_string(),
+            serde_json::json!(format!("{} more keys", map.len() - max_keys)),
+        );
+    }
+    serde_json::Value::Object(keys)
+}
+
+/// The array a response is mostly made of: the root itself, or the longest one
+/// reachable through objects alone. Its path is relative to the response.
+fn main_collection(root: &serde_json::Value) -> Option<(String, &Vec<serde_json::Value>)> {
+    fn walk<'a>(
+        value: &'a serde_json::Value,
+        path: String,
+        depth: usize,
+        best: &mut Option<(String, &'a Vec<serde_json::Value>)>,
+    ) {
+        match value {
+            serde_json::Value::Array(items) if !items.is_empty() => {
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, kept)| items.len() > kept.len())
+                {
+                    *best = Some((path, items));
+                }
+            }
+            serde_json::Value::Object(map) if depth < 3 => {
+                for (key, child) in map {
+                    if let Some(member) = path_member(key) {
+                        walk(child, format!("{path}{member}"), depth + 1, best);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = None;
+    walk(root, "$".to_string(), 0, &mut best);
+    best
+}
+
+fn shape_of(root: &serde_json::Value, max_keys: usize, nested: bool) -> serde_json::Value {
+    use serde_json::Value;
+    let mut shape = serde_json::Map::new();
+    match root {
+        Value::Object(map) => {
+            shape.insert(
+                "keys".into(),
+                shape_keys(map, max_keys, shape_top_level_entry),
+            );
+        }
+        other => {
+            shape.insert("root".into(), shape_type(other));
+        }
+    }
+    if let Some((path, items)) = main_collection(root) {
+        let mut collection = serde_json::Map::new();
+        collection.insert("path".into(), Value::String(path));
+        collection.insert("length".into(), serde_json::json!(items.len()));
+        if let Some(Value::Object(item)) = items.first() {
+            let described = shape_keys(item, max_keys, |value| match value {
+                Value::Object(inner) if nested => shape_keys(inner, max_keys, shape_type),
+                other => shape_type(other),
+            });
+            collection.insert("item_keys".into(), described);
+        }
+        shape.insert("collection".into(), Value::Object(collection));
+    }
+    Value::Object(shape)
+}
+
+/// JSONPaths that select something on `root`: the first scalar fields of a
+/// collection's element and, when the element nests an object, the first
+/// scalars inside it. Every path is parsed and run before it is offered, so the
+/// model is never handed a spelling that fails or matches nothing.
+fn working_extract_examples(root: &serde_json::Value) -> (Vec<String>, Option<String>) {
+    use serde_json::Value;
+    let collection = main_collection(root);
+    let (prefix, sample) = match &collection {
+        Some((path, items)) => (format!("{path}[*]"), items.first()),
+        None => ("$".to_string(), Some(root)),
+    };
+    let Some(Value::Object(sample)) = sample else {
+        return (Vec::new(), None);
+    };
+    let scalar_names = |map: &serde_json::Map<String, Value>| {
+        map.iter()
+            .filter(|(_, value)| !value.is_array() && !value.is_object())
+            .filter_map(|(key, _)| path_name(key))
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut examples = Vec::new();
+    let names = scalar_names(sample);
+    if !names.is_empty() {
+        examples.push(format!("{prefix}[{names}]"));
+    }
+    let nested = sample.iter().find_map(|(key, value)| {
+        let inner = value.as_object()?;
+        let names = scalar_names(inner);
+        let member = path_member(key)?;
+        (!names.is_empty()).then(|| format!("{prefix}{member}[{names}]"))
+    });
+    examples.extend(nested);
+    examples.retain(|path| {
+        serde_json_path::JsonPath::parse(path)
+            .is_ok_and(|parsed| !parsed.query(root).all().is_empty())
+    });
+    let one_item = collection.map(|(path, _)| format!("{path}[0]"));
+    (examples, one_item)
+}
+
+/// The arguments the model gave a tool call, found through the assistant
+/// message that carries its id. Some wires carry them as an object, others as
+/// a JSON string.
+fn tool_call_arguments(
+    messages: &[serde_json::Value],
+    tool_call_id: &str,
+) -> Option<serde_json::Value> {
+    messages.iter().rev().find_map(|message| {
+        let call = message["tool_calls"]
+            .as_array()?
+            .iter()
+            .find(|call| call["id"] == tool_call_id)?;
+        Some(match &call["function"]["arguments"] {
+            serde_json::Value::String(text) => {
+                serde_json::from_str(text).unwrap_or(serde_json::Value::Null)
+            }
+            other => other.clone(),
+        })
+    })
+}
+
+/// A way to ask for a part of the API response behind `messages[index]`.
+/// Only `api_call` takes an `extract`, so only its results get one, and only the
+/// success envelope (`success` + `data`), whose `data` is the response.
+fn partial_read_hint(messages: &[serde_json::Value], index: usize) -> Option<PartialReadHint> {
+    let message = &messages[index];
+    if message["name"] != "api_call" {
+        return None;
+    }
+    let content = serde_json::from_str::<serde_json::Value>(message["content"].as_str()?).ok()?;
+    content.get("success")?;
+    let response = content.get("data")?;
+    if response.is_null() {
+        return None;
+    }
+    let already_extracted = message["tool_call_id"]
+        .as_str()
+        .and_then(|id| tool_call_arguments(&messages[..index], id))
+        .is_some_and(|arguments| {
+            arguments
+                .get("extract")
+                .is_some_and(|extract| !extract.is_null())
+        });
+    if already_extracted {
+        return Some(PartialReadHint {
+            full: None,
+            brief: None,
+            examples: Vec::new(),
+            one_item: None,
+            already_extracted,
+        });
+    }
+    let (examples, one_item) = working_extract_examples(response);
+    Some(PartialReadHint {
+        full: Some(shape_of(response, SHAPE_MAX_KEYS, true)),
+        brief: Some(shape_of(response, SHAPE_BRIEF_KEYS, false)),
+        examples,
+        one_item,
+        already_extracted,
+    })
+}
+
 /// Shorten large JSON fields while preserving small scalars and valid structure.
 /// Return None for non-JSON input or when no space is saved.
-fn compact_tool_result(raw: &str, allowance: usize) -> Option<String> {
+///
+/// `hint`, when the result is an API response, says what the response holds and
+/// how to ask for a part of it: a model told to "ask for a part you have not
+/// seen" with no way to do so asks for the same thing again.
+fn compact_tool_result(
+    raw: &str,
+    allowance: usize,
+    hint: Option<&PartialReadHint>,
+) -> Option<String> {
     let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-    let mut facts = Vec::new();
-    let mut excerpts = Vec::new();
-    let mut visited = 0;
-    collect_checkpoint_json_facts(&parsed, "", &mut facts, &mut excerpts, &mut visited);
+    // Shortened on an earlier turn and still too big: give up more of what it
+    // kept. Collecting facts from the envelope would describe the envelope, and
+    // report its size as the original's. Its note and shape stay: the hint
+    // cannot be rebuilt from an envelope, only from the response itself.
+    let earlier = (parsed["kronn_shortened"] == true).then_some(&parsed);
+    let (original_bytes, mut facts, mut excerpts) = if let Some(earlier) = earlier {
+        let kept = |field: &str| earlier[field].as_array().cloned().unwrap_or_default();
+        let original = earlier["original_bytes"]
+            .as_u64()
+            .map_or(raw.len(), |bytes| bytes as usize);
+        (original, kept("kept"), kept("excerpts"))
+    } else {
+        let mut facts = Vec::new();
+        let mut excerpts = Vec::new();
+        let mut visited = 0;
+        collect_checkpoint_json_facts(&parsed, "", &mut facts, &mut excerpts, &mut visited);
+        (raw.len(), facts, excerpts)
+    };
     if facts.is_empty() && excerpts.is_empty() {
         return None;
     }
-    let render = |facts: &[serde_json::Value], excerpts: &[serde_json::Value]| {
-        serde_json::json!({
+    let render = |facts: &[serde_json::Value], excerpts: &[serde_json::Value], brief: bool| {
+        let mut result = serde_json::json!({
             "kronn_shortened": true,
-            "original_bytes": raw.len(),
+            "original_bytes": original_bytes,
             "kept": facts,
             "excerpts": excerpts,
-            // Never invite the same call again: it returns the same result and
-            // it is shortened the same way, so the turn is spent for nothing.
-            "note": "Shortened to fit the context window. Calling this again returns the same \
-                     result, shortened the same way. Work from what is here, or ask for a part \
-                     you have not seen yet.",
-        })
-        .to_string()
+        });
+        // Never invite the same call again: it returns the same result and
+        // it is shortened the same way, so the turn is spent for nothing.
+        result["note"] = match (hint, earlier) {
+            (Some(hint), _) => serde_json::Value::String(format!(
+                "Shortened to fit the context window. Calling this again with the same \
+                 arguments returns the same result, shortened the same way. {}",
+                hint.how_to_ask()
+            )),
+            (None, Some(earlier)) => earlier["note"].clone(),
+            (None, None) => serde_json::json!(
+                "Shortened to fit the context window. Calling this again returns the same \
+                 result, shortened the same way. Work from what is here, or ask for a part \
+                 you have not seen yet."
+            ),
+        };
+        let shape = match (hint, earlier) {
+            (Some(hint), _) => hint.shape(brief).cloned(),
+            (None, Some(earlier)) => Some(earlier["shape"].clone()).filter(|s| !s.is_null()),
+            (None, None) => None,
+        };
+        if let Some(shape) = shape {
+            result["shape"] = shape;
+        }
+        result.to_string()
     };
-    let mut rendered = render(&facts, &excerpts);
+    let mut rendered = render(&facts, &excerpts, false);
     // Give up the biggest excerpts first, then the least protocol-critical
-    // facts, rather than cutting the middle of the JSON.
+    // facts, then the detail of the shape, rather than cutting the middle of
+    // the JSON.
     while rendered.len() > allowance && !excerpts.is_empty() {
         excerpts.pop();
-        rendered = render(&facts, &excerpts);
+        rendered = render(&facts, &excerpts, false);
     }
     while rendered.len() > allowance && facts.len() > 1 {
         facts.pop();
-        rendered = render(&facts, &excerpts);
+        rendered = render(&facts, &excerpts, false);
+    }
+    if rendered.len() > allowance {
+        rendered = render(&facts, &excerpts, true);
     }
     (rendered.len() < raw.len()).then_some(rendered)
 }
@@ -5579,19 +6434,27 @@ fn collection_snapshot(raw: &str) -> Option<CollectionSnapshot> {
     })
 }
 
-fn complete_collection_note(total: usize) -> String {
+fn complete_collection_note(total: usize, hint: Option<&PartialReadHint>) -> String {
+    let next = match hint {
+        Some(hint) => hint.how_to_ask(),
+        None => "Narrow the query or use an `extract` if you need the omitted detail.".to_string(),
+    };
     format!(
         "\n\n[compacted by Kronn: all {total} collection items are still present; nested fields \
-         and long values were removed or shortened to fit the context window. Narrow the query \
-         or use an `extract` if you need the omitted detail.]"
+         and long values were removed or shortened to fit the context window. {next}]"
     )
 }
 
-fn incomplete_collection_note(kept: usize, total: usize) -> String {
+fn incomplete_collection_note(kept: usize, total: usize, hint: Option<&PartialReadHint>) -> String {
+    let next = match hint {
+        Some(hint) => hint.how_to_ask(),
+        None => "Narrow the query (a filter, a smaller page size, or an `extract` of the fields \
+                 you need) and ask again."
+            .to_string(),
+    };
     format!(
         "\n\n[truncated by Kronn: this list is INCOMPLETE — {kept} of {total} items kept to \
-         fit the context window. Do NOT report the count as final; narrow the query (a filter, \
-         a smaller page size, or an `extract` of the fields you need) and ask again.]"
+         fit the context window. Do NOT report the count as final. {next}]"
     )
 }
 
@@ -5599,13 +6462,17 @@ fn collection_replacement(
     snapshot: &CollectionSnapshot,
     max_encoded_len: usize,
     current_len: usize,
+    hint: Option<&PartialReadHint>,
 ) -> Option<String> {
     for candidate in [&snapshot.shallow, &snapshot.identifiers]
         .into_iter()
         .flatten()
     {
         let serialized = serde_json::to_string(candidate).ok()?;
-        let replacement = format!("{serialized}{}", complete_collection_note(snapshot.total));
+        let replacement = format!(
+            "{serialized}{}",
+            complete_collection_note(snapshot.total, hint)
+        );
         let encoded_len = serde_json::to_string(&replacement).ok()?.len();
         if encoded_len <= max_encoded_len && replacement.len() < current_len {
             return Some(replacement);
@@ -5626,7 +6493,7 @@ fn collection_replacement(
         let serialized = serde_json::to_string(&candidate).ok()?;
         Some(format!(
             "{serialized}{}",
-            incomplete_collection_note(kept, snapshot.total)
+            incomplete_collection_note(kept, snapshot.total, hint)
         ))
     };
 
@@ -5705,6 +6572,10 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
     // system or user turn, and returns on its own once nothing is left to cut.
     // Trimming hard is the correct answer to a large catalogue, not a hazard.
     let budget = budget.saturating_sub(declared_bytes);
+    if super::vision::messages_wire_len(body) <= budget {
+        // Nothing to trim: skip parsing every result to describe it.
+        return;
+    }
 
     // Keep the untouched collection once. Every trimming pass can then rebuild
     // valid JSON from it instead of reparsing a previous diagnostic suffix.
@@ -5722,9 +6593,20 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
                 .collect()
         })
         .unwrap_or_default();
+    // How to ask for a part of each API response, from the original and before
+    // any cutting: the shortened text below can only say it was shortened.
+    let hints: std::collections::HashMap<usize, PartialReadHint> = body["messages"]
+        .as_array()
+        .map(|messages| {
+            (0..messages.len())
+                .filter(|&i| messages[i]["role"] == "tool")
+                .filter_map(|i| Some((i, partial_read_hint(messages, i)?)))
+                .collect()
+        })
+        .unwrap_or_default();
 
     loop {
-        let over = body["messages"].to_string().len().saturating_sub(budget);
+        let over = super::vision::messages_wire_len(body).saturating_sub(budget);
         if over == 0 {
             return;
         }
@@ -5761,13 +6643,15 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
         let other_messages_len = body_len.saturating_sub(encoded_content_len);
         let max_encoded_len = budget.saturating_sub(other_messages_len);
         if let Some(snapshot) = collections.get(&idx) {
-            if let Some(replacement) = collection_replacement(snapshot, max_encoded_len, len) {
+            if let Some(replacement) =
+                collection_replacement(snapshot, max_encoded_len, len, hints.get(&idx))
+            {
                 messages[idx]["content"] = serde_json::json!(replacement);
                 continue;
             }
         }
         // Compact before truncating so retrying cannot keep returning the same cut result.
-        if let Some(shortened) = compact_tool_result(&content, max_encoded_len) {
+        if let Some(shortened) = compact_tool_result(&content, max_encoded_len, hints.get(&idx)) {
             messages[idx]["content"] = serde_json::json!(shortened);
             continue;
         }
@@ -5808,13 +6692,16 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
 pub(crate) fn resize_ollama_num_ctx(body: &mut serde_json::Value, ctx_cap: u64) {
     let est = estimated_chat_history_tokens(body);
     let sized = est.clamp(OLLAMA_NUM_CTX_FLOOR, ctx_cap.max(OLLAMA_NUM_CTX_FLOOR));
-    if body["options"]["num_ctx"]
+    let num_ctx = body["options"]["num_ctx"]
         .as_u64()
-        .is_some_and(|cur| cur >= sized)
-    {
-        return;
+        .map_or(sized, |cur| cur.max(sized));
+    body["options"]["num_ctx"] = serde_json::json!(num_ctx);
+    // The output budget follows the window. Sized once on the small first-turn
+    // window, it capped every later turn at ~1.9k tokens: a whole document in
+    // one write_file was cut off and the model never wrote it (KT-967).
+    if let Some(num_predict) = ollama_num_predict(num_ctx) {
+        body["options"]["num_predict"] = serde_json::json!(num_predict);
     }
-    body["options"]["num_ctx"] = serde_json::json!(sized);
 }
 
 /// Point file-capable agents at the project document; inline it otherwise.
@@ -6542,6 +7429,50 @@ fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &s
     .any(|needle| detail.contains(needle))
 }
 
+/// KT-942 — Ollama parses the model's tool call itself (Qwen writes it as XML)
+/// and, when the text is not well-formed, ends the stream with an error instead
+/// of a call: `XML syntax error on line 13: element <parameter> closed by
+/// </function>`. That text is the one observed in production. The other needles
+/// are neighbouring wordings of the same parser failing, kept so a sibling model
+/// format is replayed the same way; none of them is a capacity or quota signal.
+fn is_unreadable_tool_call_failure(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "xml syntax error",
+        "error parsing tool call",
+        "failed to parse tool call",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
+/// What the run owes the reader once the model's tool call stayed unreadable
+/// through every replay. The context-window note was written to the run's
+/// stderr before the first request and would otherwise lead the failure: it is
+/// not the cause here, and it sends the reader to the wrong setting. It goes,
+/// and the sentence that names the real failure takes the head of the log.
+fn record_unreadable_tool_call_failure(
+    stderr: &Arc<Mutex<Vec<String>>>,
+    backend: &str,
+    model: &str,
+    ctx_notice: Option<&str>,
+    attempts: usize,
+) {
+    let sentence = format!(
+        "{backend} could not read a tool call that {model} wrote — the model produced an \
+         unreadable tool call (attempts at this request: {attempts}). This is a failure of \
+         the model's output, not of the context window. Retry the turn, or choose a model \
+         that calls tools more reliably."
+    );
+    tracing::warn!(target: "kronn::agent::tools", "{sentence}");
+    if let Ok(mut lines) = stderr.lock() {
+        if let Some(notice) = ctx_notice {
+            lines.retain(|line| line != notice);
+        }
+        lines.insert(0, sentence);
+    }
+}
+
 fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
     #[cfg(test)]
     {
@@ -6616,6 +7547,8 @@ fn provider_failure_label(status: Option<reqwest::StatusCode>, detail: &str) -> 
         .contains("worker local total request limit reached")
     {
         "worker saturation".to_string()
+    } else if is_unreadable_tool_call_failure(detail) {
+        "unreadable tool call".to_string()
     } else if let Some(status) = status {
         format!("HTTP {status}")
     } else {
@@ -6634,6 +7567,7 @@ async fn send_http_agent_request(
     max_attempts: usize,
     retry_allowed: bool,
     stderr: &Arc<Mutex<Vec<String>>>,
+    idle: Duration,
 ) -> Result<(reqwest::Response, usize), HttpProviderFailure> {
     // Anthropic caches only the prefixes a request marks. Measured at about a
     // quarter of the uncached input cost; `KRONN_LITELLM_PROMPT_CACHE=0` opts out.
@@ -6642,14 +7576,44 @@ async fn send_http_agent_request(
     .then(|| crate::agents::chat_codec::with_prompt_cache_hints(body))
     .flatten();
     let body = hinted.as_ref().unwrap_or(body);
+    // KT-932 — a streamed answer starts with its first token, so response
+    // headers that never come mean a model that never started (or a connection
+    // that died while it loaded). A non-streamed answer carries nothing until
+    // the whole generation is over: silence there proves nothing, and only the
+    // request's own total timeout bounds it.
+    let first_token_within = body["stream"].as_bool().unwrap_or(true).then_some(idle);
     let mut attempt = first_attempt;
     loop {
         let mut request = client.post(url).json(body);
         if let Some(key) = auth_key {
             request = request.bearer_auth(key);
         }
-        match request.send().await {
-            Ok(response) if response.status().is_success() => return Ok((response, attempt)),
+        let sent = match first_token_within {
+            Some(limit) => match tokio::time::timeout(limit, request.send()).await {
+                Ok(sent) => sent,
+                // No retry: the wait already cost the whole delay, and a retry
+                // would only buy another one for the same dead connection. The
+                // dropped future closes it, which is what frees the model.
+                Err(_) => {
+                    super::http_diagnostics::record_failure(stderr, None);
+                    return Err(HttpProviderFailure {
+                        status: None,
+                        detail: idle_watchdog::stall_reason(
+                            backend,
+                            limit,
+                            "without ever sending a first token",
+                        ),
+                        attempts: attempt,
+                    });
+                }
+            },
+            None => request.send().await,
+        };
+        match sent {
+            Ok(response) if response.status().is_success() => {
+                super::http_diagnostics::clear_failure(stderr);
+                return Ok((response, attempt));
+            }
             Ok(response) => {
                 let status = response.status();
                 let detail = response.text().await.unwrap_or_default();
@@ -6672,6 +7636,7 @@ async fn send_http_agent_request(
                     attempt += 1;
                     continue;
                 }
+                super::http_diagnostics::record_failure(stderr, Some(status));
                 return Err(HttpProviderFailure {
                     status: Some(status),
                     detail,
@@ -6695,6 +7660,7 @@ async fn send_http_agent_request(
                     attempt += 1;
                     continue;
                 }
+                super::http_diagnostics::record_failure(stderr, None);
                 return Err(HttpProviderFailure {
                     status: None,
                     detail,
@@ -6721,6 +7687,10 @@ fn format_provider_failure(
             "{backend} error {status}{attempts}:{suffix} Provider response: {}",
             failure.detail
         ),
+        // Already a complete sentence that says what Kronn did. Calling this
+        // "unreachable" would send the operator to the network when the server
+        // answered the connection and then said nothing.
+        None if idle_watchdog::is_stall_reason(&failure.detail) => failure.detail.clone(),
         None => format!(
             "{backend} unreachable at {base}{attempts}: {}",
             failure.detail
@@ -6728,16 +7698,10 @@ fn format_provider_failure(
     }
 }
 
-/// Start Ollama via HTTP API (/api/chat) instead of a CLI process.
-/// Returns an AgentProcess with a dummy child process and an rx fed by
-/// the HTTP response. System context and user prompt are sent as separate
-/// messages (role: system, role: user) so the model doesn't confuse MCP
-/// instructions with the user's question.
-///
-/// `format` = an optional JSON Schema (a `TypedSchema` step's schema, already
-/// wrapped in the canonical envelope shape by the caller). When set, decoding
-/// is grammar-constrained and the request is non-streaming (one JSON object).
+/// The default inactivity delay — what every test that does not care about the
+/// watchdog runs under. Production goes through `start_ollama_http_with_idle`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn start_ollama_http(
     agent_type: &AgentType,
     user_prompt: &str,
@@ -6754,11 +7718,87 @@ async fn start_ollama_http(
     max_tokens: Option<u64>,
     provenance: Option<AgentProvenanceCapture>,
 ) -> Result<AgentProcess, String> {
+    start_ollama_http_with_idle(
+        agent_type,
+        user_prompt,
+        system_context,
+        model,
+        format,
+        http_base_url,
+        http_api_key,
+        executor,
+        ollama_context_overrides,
+        http_request_timeout,
+        parent_cancel,
+        reasoning_effort,
+        max_tokens,
+        provenance,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Start Ollama via HTTP API (/api/chat) instead of a CLI process.
+/// Returns an AgentProcess with a dummy child process and an rx fed by
+/// the HTTP response. System context and user prompt are sent as separate
+/// messages (role: system, role: user) so the model doesn't confuse MCP
+/// instructions with the user's question.
+///
+/// `format` = an optional JSON Schema (a `TypedSchema` step's schema, already
+/// wrapped in the canonical envelope shape by the caller). When set, decoding
+/// is grammar-constrained and the request is non-streaming (one JSON object).
+///
+/// `idle_timeout` (KT-932) = how long the server may send nothing — before the
+/// first token, or between two chunks — before the run fails and the connection
+/// is dropped, which is what tells Ollama to stop generating. `None` is
+/// [`idle_watchdog::DEFAULT_IDLE_TIMEOUT`]. It does not apply to a request that
+/// is not streamed (`format` set): that one answers once, when it is finished.
+///
+/// `images` (KT-946) = the discussion's attached images. When the model can see
+/// them they ride the user message as image parts; otherwise the system context
+/// says, per image, that it is attached and unseen.
+#[allow(clippy::too_many_arguments)]
+async fn start_ollama_http_with_idle(
+    agent_type: &AgentType,
+    user_prompt: &str,
+    system_context: &str,
+    model: &str,
+    format: Option<&serde_json::Value>,
+    http_base_url: Option<&str>,
+    http_api_key: Option<&str>,
+    executor: Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>>,
+    ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
+    http_request_timeout: Option<std::time::Duration>,
+    parent_cancel: Option<&tokio_util::sync::CancellationToken>,
+    reasoning_effort: Option<&str>,
+    max_tokens: Option<u64>,
+    provenance: Option<AgentProvenanceCapture>,
+    idle_timeout: Option<Duration>,
+    images: Option<&super::vision::ContextImages>,
+) -> Result<AgentProcess, String> {
+    let idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
     let identity_context = http_agent_identity_context(agent_type, model);
     let system_context = if system_context.trim().is_empty() {
         identity_context
     } else {
         format!("{identity_context}\n\n{system_context}")
+    };
+    // KT-946 — decide what the model gets of the attached images BEFORE the body
+    // exists: the notice joins the system context, the parts join the user
+    // message. A discussion without images costs nothing here.
+    let prepared_images = match images.filter(|images| !images.items.is_empty()) {
+        Some(images) => {
+            let provider =
+                provider_image_support(agent_type, images, model, http_base_url, http_api_key)
+                    .await;
+            super::vision::prepare(images, model, provider).await
+        }
+        None => super::vision::PreparedImages::default(),
+    };
+    let system_context = match prepared_images.notice() {
+        notice if notice.is_empty() => system_context,
+        notice => format!("{system_context}\n\n{notice}"),
     };
     // Endpoint, request body and line decoding are the only per-backend parts;
     // everything below this block is shared transport. Codec choice is the
@@ -6780,13 +7820,14 @@ async fn start_ollama_http(
             };
             // No `num_ctx` equivalent: the window belongs to whatever upstream the
             // proxy fronts, so there is nothing here to cap or to warn about.
-            let body = crate::agents::chat_codec::build_openai_chat_body(
+            let mut body = crate::agents::chat_codec::build_openai_chat_body(
                 model,
                 &system_context,
                 user_prompt,
                 format,
                 format.is_none(),
             );
+            super::vision::attach_to_chat_body(&mut body, true, &prepared_images.sent);
             tracing::info!(
                 target: "kronn::lite_llm",
                 model = %model,
@@ -6810,11 +7851,14 @@ async fn start_ollama_http(
                 .and_then(|profile| profile.storage_format.clone());
             // Bound this model by resident weights and observed cache cost when available.
             sample_ollama_memory(&base, model).await;
-            let machine_ceiling = ram_ceiling_for_model(
-                total_system_memory_bytes(),
+            let machine_ceiling = ollama_machine_ceiling(
+                &MachineFacts::read(),
+                &base,
+                model,
+                model_profile.as_ref(),
                 ollama_model_size_bytes(&base, model).await,
-                measured_kv_bytes_per_token(&base, model),
-            );
+            )
+            .await;
             let cap = match ollama_context_overrides {
                 Some(overrides) => resolve_ctx_cap_for_model(
                     std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
@@ -6839,8 +7883,10 @@ async fn start_ollama_http(
                 .as_ref()
                 .map(|exec| serde_json::Value::Array(exec.catalogue()).to_string().len())
                 .unwrap_or(0);
-            let est =
-                estimated_prompt_tokens(system_context.len() + user_prompt.len(), tools_bytes);
+            let est = estimated_prompt_tokens(
+                system_context.len() + user_prompt.len() + prepared_images.prompt_bytes(),
+                tools_bytes,
+            );
             if est > ctx_cap {
                 // KT-382 — refuse, do not announce and send anyway. Ollama does not
                 // reject an oversized prompt: it silently drops the head of the
@@ -6877,6 +7923,15 @@ async fn start_ollama_http(
                         "raise KRONN_OLLAMA_NUM_CTX_CAP if the RAM is there, or shorten the \
                      step's input",
                     ),
+                    CtxCapOrigin::ModelEstimate { model_limit } => (
+                        format!(
+                            "what this machine's memory holds of this model (weights, \
+                         cache cost per token and a safety margin) — the model itself \
+                         supports {model_limit}"
+                        ),
+                        "raise KRONN_OLLAMA_NUM_CTX_CAP or this model's override if the \
+                     memory is there, or shorten the step's input",
+                    ),
                     CtxCapOrigin::PortableFallback => (
                         "the portable fallback, because Ollama did not answer /api/show"
                             .to_string(),
@@ -6899,7 +7954,7 @@ async fn start_ollama_http(
                  from the remainder, so Kronn refuses instead: {remedy}."
                 ));
             }
-            let body = build_ollama_chat_body(
+            let mut body = build_ollama_chat_body(
                 model,
                 &system_context,
                 user_prompt,
@@ -6907,6 +7962,7 @@ async fn start_ollama_http(
                 ctx_cap,
                 ollama_server_version(&base).await,
             );
+            super::vision::attach_to_chat_body(&mut body, false, &prepared_images.sent);
             (
                 base,
                 body,
@@ -6982,9 +8038,31 @@ async fn start_ollama_http(
     let mut worker_original_catalogue_seed = Vec::new();
     // Keep reader declarations for restoration in every run mode.
     let mut progress_reader_seed: Vec<serde_json::Value> = Vec::new();
+    let mut workspace_reader_seed: Vec<serde_json::Value> = Vec::new();
+    let mut audit_writer_seed: Vec<serde_json::Value> = Vec::new();
     if let Some(exec) = executor.as_ref() {
         let catalogue = exec.catalogue();
         progress_reader_seed = progress_reader_declarations(&catalogue);
+        if tool_run_mode == crate::agents::tools::ToolRunMode::Audit {
+            audit_writer_seed = catalogue
+                .iter()
+                .filter(|tool| {
+                    tool.pointer("/function/name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_audit_deliverable_tool)
+                })
+                .cloned()
+                .collect();
+        }
+        workspace_reader_seed = catalogue
+            .iter()
+            .filter(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_workspace_observation_tool)
+            })
+            .cloned()
+            .collect();
         if tool_run_mode == crate::agents::tools::ToolRunMode::Worker {
             worker_original_catalogue_seed = catalogue.clone();
         }
@@ -7079,9 +8157,9 @@ async fn start_ollama_http(
     let stderr_capture: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     // Romu's rule, and it is the right one: if we hold a model below what it can
     // do, say it where the run is read — not only in a log.
-    if let Some(notice) = ctx_notice {
+    if let Some(notice) = &ctx_notice {
         if let Ok(mut capture) = stderr_capture.lock() {
-            capture.push(notice);
+            capture.push(notice.clone());
         }
     }
     // Capture the immutable request seed before any provider/tool turn is
@@ -7112,6 +8190,7 @@ async fn start_ollama_http(
             HTTP_PROVIDER_MAX_ATTEMPTS,
             true,
             &stderr_capture,
+                    idle_limit,
         ) => response,
     };
     // Workflow prompts already carry the schema and the caller validates the
@@ -7149,6 +8228,7 @@ async fn start_ollama_http(
                 response = send_http_agent_request(
                     &client, &url, &body, auth_key.as_deref(), backend,
                     attempt, attempt, false, &stderr_capture,
+                    idle_limit,
                 ) => response,
             };
         }
@@ -7205,9 +8285,14 @@ async fn start_ollama_http(
     // only lets generic callers await an exit status; cancelling/killing that
     // child cannot by itself stop a Tokio provider/tool loop.
     let task_cancel = http_cancel.clone();
+    let usage = Arc::new(Mutex::new(AgentUsage::default()));
+    let task_usage = usage.clone();
 
+    // The task outlives this call, so it cannot borrow the caller's `model`.
+    let model_owned = model.to_string();
     // Spawn a background task to read the HTTP stream and forward text to the channel.
     tokio::spawn(async move {
+        let model = model_owned.as_str();
         // Holds the lifeline's stdin open for the duration of the stream.
         let mut lifeline = stdin_guard;
         // Report the stream's outcome as the lifeline child's exit code.
@@ -7222,7 +8307,6 @@ async fn start_ollama_http(
         use crate::agents::tools::{
             assistant_tool_call_message, tool_result_message, trace_line, ToolCallAccumulator,
         };
-        use futures::StreamExt;
         let mut response = response;
         let mut provider_attempt = initial_provider_attempt;
         let mut request_started_at = initial_request_started_at;
@@ -7288,7 +8372,7 @@ async fn start_ollama_http(
         let mut consecutive_error_only_rounds = 0usize;
         let mut useful_tool_results = 0usize;
         let mut forced_synthesis = false;
-        // Collect reached ceilings only where a human can answer.
+        // Structured telemetry is also consumed by the audit artifact gate.
         let mut ceiling_report = CeilingReport::default();
         let mut round_ceiling_reached = false;
         // A worker gets one bounded exploration phase and then a small
@@ -7332,6 +8416,9 @@ async fn start_ollama_http(
         // with none of the work, though the tools HAD run.
         let mut emitted_text = false;
         let mut asked_for_answer = false;
+        let mut audit_deliverable_written = false;
+        // Set once Kronn has told an audit to write now (window or convergence).
+        let mut audit_write_phase = false;
         let ok = loop {
             http_turn_index = http_turn_index.saturating_add(1);
             let current_http_turn = http_turn_index;
@@ -7355,6 +8442,15 @@ async fn start_ollama_http(
             // boundary unless Kronn verifies it before calling the executor.
             let declared_tools_for_turn = declared_tool_names(&body);
             let mut stream = response.bytes_stream();
+            // KT-932 — each read of a streamed answer is bounded by the idle
+            // delay, so every chunk that arrives restarts it. A response that is
+            // not streamed arrives whole when the generation is over; its
+            // silence says nothing, so it is bounded only by the request timeout.
+            let chunk_within = body["stream"]
+                .as_bool()
+                .unwrap_or(true)
+                .then_some(idle_limit);
+            let mut received_chunks: usize = 0;
             let mut buffer = String::new();
             let mut got_done = false;
             let mut got_error = false;
@@ -7373,9 +8469,30 @@ async fn start_ollama_http(
                         finish(&mut lifeline, false).await;
                         return;
                     }
-                    chunk = stream.next() => chunk,
+                    chunk = idle_watchdog::next_within(&mut stream, chunk_within) => match chunk {
+                        Ok(chunk) => chunk,
+                        Err(idle_watchdog::Silent) => {
+                            // Returning drops the response, which closes the
+                            // connection: that is what makes Ollama abandon
+                            // the generation instead of finishing it for
+                            // nobody while the next request queues behind it.
+                            let progress = if received_chunks == 0 {
+                                "without ever sending a first token".to_owned()
+                            } else {
+                                format!("after {received_chunks} chunk(s)")
+                            };
+                            let reason = idle_watchdog::stall_reason(backend, idle_limit, &progress);
+                            tracing::warn!(target: "kronn::agent::idle", "{reason}");
+                            if let Ok(mut se) = stderr_clone.lock() {
+                                se.push(reason);
+                            }
+                            finish(&mut lifeline, false).await;
+                            return;
+                        }
+                    },
                 };
                 let Some(chunk) = chunk else { break };
+                received_chunks += 1;
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
@@ -7453,6 +8570,30 @@ async fn start_ollama_http(
             emitted_text |= emitted_this_turn;
 
             let calls = pending_tools.finish();
+            // Each response reports cumulative usage; add it once per tool turn,
+            // not once per usage frame. Audit consumers read this shared counter.
+            if let Ok(mut usage) = task_usage.lock() {
+                usage.input_tokens = usage.input_tokens.saturating_add(tally.prompt);
+                usage.output_tokens = usage.output_tokens.saturating_add(tally.eval);
+                if let Some(cached) = tally.cached_prompt {
+                    usage.prompt_cache.cached_prompt_tokens = Some(
+                        usage
+                            .prompt_cache
+                            .cached_prompt_tokens
+                            .unwrap_or(0)
+                            .saturating_add(cached),
+                    );
+                }
+                if let Some(written) = tally.cache_write_prompt {
+                    usage.prompt_cache.cache_write_prompt_tokens = Some(
+                        usage
+                            .prompt_cache
+                            .cache_write_prompt_tokens
+                            .unwrap_or(0)
+                            .saturating_add(written),
+                    );
+                }
+            }
             let worker_repair_stage_for_turn = worker_repair_stage;
             push_http_turn_trace(
                 &stderr_clone,
@@ -7493,21 +8634,39 @@ async fn start_ollama_http(
             // failure. Re-send the exact request only while nothing escaped to
             // the user and no tool has run; the same AgentProcess and dispatch
             // remain in place, so one run still persists one agent message.
+            // KT-942 — a tool call Ollama could not parse. Nothing was executed
+            // for it (calls run only after the stream ends, and never on an
+            // error), so re-sending the same request is a pure model invocation
+            // even when earlier rounds ran tools: their results are already in the
+            // request. Text the failed attempt streamed is the price of the
+            // replay, cheaper than losing the whole turn. Stochastic generation
+            // usually produces a valid call the second time; no instruction is
+            // added to the prompt.
+            let unreadable_tool_call = !is_openai_wire
+                && provider_error
+                    .as_deref()
+                    .is_some_and(is_unreadable_tool_call_failure);
             let retryable_stream_failure = if let Some(detail) = provider_error.as_deref() {
-                is_transient_provider_failure(None, detail)
+                unreadable_tool_call || is_transient_provider_failure(None, detail)
             } else {
                 !got_done && !got_error && calls.is_empty()
             };
+            let replay_is_safe =
+                unreadable_tool_call || (!external_effect_observed && !emitted_this_turn);
             if retryable_stream_failure
                 && !used_format_fallback
-                && !external_effect_observed
-                && !emitted_this_turn
+                && replay_is_safe
                 && provider_attempt < HTTP_PROVIDER_MAX_ATTEMPTS
             {
                 let detail = provider_error
                     .as_deref()
                     .unwrap_or("stream ended before its terminal frame");
-                let delay = provider_retry_delay(provider_attempt);
+                // A regeneration needs no breathing room, unlike a saturated worker.
+                let delay = if unreadable_tool_call {
+                    Duration::ZERO
+                } else {
+                    provider_retry_delay(provider_attempt)
+                };
                 push_provider_retry_trace(
                     &stderr_clone,
                     format!(
@@ -7541,8 +8700,11 @@ async fn start_ollama_http(
                         backend,
                         provider_attempt + 1,
                         HTTP_PROVIDER_MAX_ATTEMPTS,
-                        true,
+                        // The replayed request may itself hit a transient HTTP
+                        // failure; once a tool has run, that one is not replayed.
+                        !external_effect_observed,
                         &stderr_clone,
+                    idle_limit,
                     ) => result,
                 };
                 match retried {
@@ -7562,8 +8724,7 @@ async fn start_ollama_http(
             }
             if retryable_stream_failure
                 && !used_format_fallback
-                && !external_effect_observed
-                && !emitted_this_turn
+                && replay_is_safe
                 && provider_attempt >= HTTP_PROVIDER_MAX_ATTEMPTS
             {
                 let detail = provider_error
@@ -7577,11 +8738,27 @@ async fn start_ollama_http(
                     ),
                 );
             }
-            if forced_synthesis && !calls.is_empty() && !got_error {
+            // Past the replay budget the failure stays visible, and says what it is.
+            if unreadable_tool_call {
+                record_unreadable_tool_call_failure(
+                    &stderr_clone,
+                    backend,
+                    model,
+                    ctx_notice.as_deref(),
+                    provider_attempt,
+                );
+            }
+            if forced_synthesis
+                && !calls.is_empty()
+                && !got_error
+                && declared_tools_for_turn.is_empty()
+            {
                 // The model ignored a tool-free synthesis turn and emitted another
                 // tool call anyway. Do not give it 40 more chances: return one
                 // bounded, honest diagnostic instead of ending as a generic agent
-                // error after the global cap.
+                // error after the global cap. An audit that kept its writers is
+                // not tool-free: stray calls are refused below and the ceiling
+                // still bounds it.
                 let diagnostic = tool_convergence_diagnostic(
                     &calls_per_tool,
                     &errors_per_tool,
@@ -7662,6 +8839,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match delivery_retry {
@@ -7751,6 +8929,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match repair_retry {
@@ -7826,6 +9005,7 @@ async fn start_ollama_http(
                         1,
                         false,
                         &stderr_clone,
+                    idle_limit,
                     ) => result,
                 };
                 response = match finalization_retry {
@@ -7940,6 +9120,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match finalization_retry {
@@ -8004,6 +9185,7 @@ async fn start_ollama_http(
                         1,
                         false,
                         &stderr_clone,
+                    idle_limit,
                     ) => result,
                 };
                 response = match worker_retry {
@@ -8068,6 +9250,7 @@ async fn start_ollama_http(
                             1,
                             false,
                             &stderr_clone,
+                    idle_limit,
                         ) => result,
                     };
                     response = match final_answer {
@@ -8199,6 +9382,25 @@ async fn start_ollama_http(
                     );
                 }
             } else if turn > round_cap {
+                // A model told to write that did write, then kept rewriting, has
+                // delivered: the step validator judges the file, not the loop.
+                if audit_write_phase && audit_deliverable_written {
+                    tracing::info!(
+                        target: "kronn::agent::tools",
+                        turn, round_cap,
+                        "audit deliverable written — ending at the round ceiling"
+                    );
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(format!(
+                            "{backend} wrote its audit deliverable and was stopped at the {round_cap}-round ceiling"
+                        ));
+                    }
+                    break true;
+                }
+                if tool_run_mode == crate::agents::tools::ToolRunMode::Audit {
+                    ceiling_report.rounds = Some(round_cap);
+                    ceiling_report.publish(&stderr_clone);
+                }
                 // Refusing to converge is a failure, not a silent
                 // truncation: surface it so the step fails with a reason.
                 let msg =
@@ -8435,19 +9637,7 @@ async fn start_ollama_http(
                 // bytes and teach the model nothing, so answer from the first result
                 // and say plainly that repeating will not change it. This breaks the
                 // loop several rounds before the cap, and the cap stays as backstop.
-                // Canonical: serde_json preserves insertion order, so the same
-                // call re-emitted with its keys in another order would otherwise
-                // look new. Sorting the pairs makes the signature about content.
-                let canonical_args = match call.arguments.as_object() {
-                    Some(map) => {
-                        let mut pairs: Vec<_> =
-                            map.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                        pairs.sort();
-                        pairs.join(",")
-                    }
-                    None => call.arguments.to_string(),
-                };
-                let signature = format!("{}|{}", call.name, canonical_args);
+                let (canonical_args, signature) = tool_call_signature(&call.name, &call.arguments);
 
                 let used = calls_per_tool.entry(call.name.clone()).or_insert(0);
                 *used += 1;
@@ -8492,7 +9682,9 @@ async fn start_ollama_http(
                 if *used > tool_limit {
                     *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
                     withdrawn_tools.insert(call.name.clone());
-                    if ceiling_allowance.ask_on_ceiling {
+                    if ceiling_allowance.ask_on_ceiling
+                        || tool_run_mode == crate::agents::tools::ToolRunMode::Audit
+                    {
                         ceiling_report.record_tool_refusal(&call.name, tool_limit, call);
                         ceiling_report.publish(&stderr_clone);
                     }
@@ -8535,7 +9727,12 @@ async fn start_ollama_http(
                                 tool = %call.name, turn, repeats = *repeats,
                                 "identical tool call repeated after replay — refusing and forcing synthesis"
                             );
-                            withdrawn_tools.insert(call.name.clone());
+                            // An audit reads many files: one bad path repeated
+                            // must not cost it the tool for the whole step.
+                            // This signature stays refused; budgets still bound it.
+                            if tool_run_mode != crate::agents::tools::ToolRunMode::Audit {
+                                withdrawn_tools.insert(call.name.clone());
+                            }
                             let refusal = crate::agents::tools::ToolOutcome {
                                 call: call.clone(),
                                 ok: false,
@@ -8598,6 +9795,7 @@ async fn start_ollama_http(
                 if edit_tool {
                     if outcome.ok {
                         successful_edit_this_turn = true;
+                        audit_deliverable_written = true;
                         repair_edit_succeeded = true;
                         if let Some(path) =
                             call.arguments.get("path").and_then(|path| path.as_str())
@@ -8774,9 +9972,12 @@ async fn start_ollama_http(
                         if worker_run && is_workspace_observation_tool(&call.name) {
                             explored_without_progress += 1;
                             annotate_worker_exploration(&mut outcome, explored_without_progress);
-                        } else if worker_run && is_workspace_progress_tool(&call.name) {
-                            explored_without_progress = 0;
-                            worker_workspace_mutated = true;
+                        }
+                        if is_workspace_progress_tool(&call.name) {
+                            if worker_run {
+                                explored_without_progress = 0;
+                                worker_workspace_mutated = true;
+                            }
                             // Repository observations are snapshots. Replaying a
                             // pre-edit read_file/git_status result after a write
                             // can hand the worker a stale CAS receipt or falsely
@@ -8787,6 +9988,34 @@ async fn start_ollama_http(
                                 &mut repeated_calls,
                                 &mut results_seen_per_tool,
                             );
+                            // Workers restore readers through their bounded
+                            // finalization policy. Audits and discussions must
+                            // also regain readers withdrawn for stale repeats.
+                            if !worker_run {
+                                let restorable = observation_readers_to_restore(
+                                    &withdrawn_tools,
+                                    &open_tool_circuits,
+                                    &calls_per_tool,
+                                    tool_run_mode,
+                                    &ceiling_allowance,
+                                    is_workspace_observation_tool,
+                                );
+                                for name in &restorable {
+                                    withdrawn_tools.remove(name);
+                                }
+                                let declarations: Vec<_> = workspace_reader_seed
+                                    .iter()
+                                    .filter(|tool| {
+                                        tool.pointer("/function/name")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|name| {
+                                                restorable.iter().any(|r| r == name)
+                                            })
+                                    })
+                                    .cloned()
+                                    .collect();
+                                restore_tool_declarations(&mut body, &declarations);
+                            }
                         }
                     } else {
                         *errors_per_tool.entry(call.name.clone()).or_insert(0) += 1;
@@ -8810,6 +10039,10 @@ async fn start_ollama_http(
                     tool = %call.name, ok = outcome.ok, turn,
                     "HTTP agent tool call"
                 );
+                if let Ok(mut usage) = task_usage.lock() {
+                    usage.last_tool = Some(tool_activity_label(call));
+                    usage.tool_calls = usage.tool_calls.saturating_add(1);
+                }
                 if let Ok(mut se) = stderr_clone.lock() {
                     se.push(trace_line(&outcome));
                 }
@@ -9311,26 +10544,35 @@ async fn start_ollama_http(
                 && nothing_left_to_call)
                 || error_loop_exhausted
             {
-                if let Some(map) = body.as_object_mut() {
-                    map.remove("tools");
-                }
+                withdraw_tools_for_convergence(&mut body, &audit_writer_seed, &withdrawn);
+                let writers_kept = body.get("tools").is_some();
+                audit_write_phase |= writers_kept && !audit_writer_seed.is_empty();
                 let diagnostic = tool_convergence_diagnostic(
                     &calls_per_tool,
                     &errors_per_tool,
                     &refusals_per_tool,
                 );
                 if !forced_synthesis {
+                    let content = if writers_kept {
+                        format!(
+                            "Kronn stopped a non-progressing tool loop: {diagnostic}. \
+                             Reading and search tools are no longer available. Write \
+                             your deliverable now with the write tools still declared, \
+                             using only the evidence already obtained: mark what you \
+                             could not verify as unknown instead of guessing, and \
+                             mention the failed tools only once."
+                        )
+                    } else {
+                        format!(
+                            "Kronn stopped a non-progressing tool loop: {diagnostic}. \
+                             Do not call any more tools. Answer now with the useful \
+                             evidence already obtained, clearly separate confirmed \
+                             facts from missing information, and mention the failed \
+                             tools only once in a concise limitation note."
+                        )
+                    };
                     if let Some(messages) = body["messages"].as_array_mut() {
-                        messages.push(serde_json::json!({
-                            "role": "user",
-                            "content": format!(
-                                "Kronn stopped a non-progressing tool loop: {diagnostic}. \
-                                 Do not call any more tools. Answer now with the useful \
-                                 evidence already obtained, clearly separate confirmed \
-                                 facts from missing information, and mention the failed \
-                                 tools only once in a concise limitation note."
-                            ),
-                        }));
+                        messages.push(serde_json::json!({ "role": "user", "content": content }));
                     }
                     forced_synthesis = true;
                 }
@@ -9346,6 +10588,41 @@ async fn start_ollama_http(
                     se.push(format!(
                         "{backend} forced tool convergence after {consecutive_error_only_rounds} error-only rounds: {diagnostic}; useful_results={useful_tool_results}"
                     ));
+                }
+            }
+            // An audit that is still exploring when its rounds or context run out
+            // fails at the ceiling with its file unwritten. Keep a few rounds in
+            // reserve for the only output that counts: the deliverable.
+            if !forced_synthesis
+                && !audit_writer_seed.is_empty()
+                && (turn.saturating_add(AUDIT_WRITE_RESERVE_ROUNDS) >= round_cap
+                    || worker_context_pressure(&body, ctx_cap, WORKER_CONTEXT_PRESSURE_PERCENT)
+                        .is_some())
+            {
+                withdraw_tools_for_convergence(&mut body, &audit_writer_seed, &withdrawn);
+                if body.get("tools").is_some() {
+                    if let Some(messages) = body["messages"].as_array_mut() {
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": "This audit step is close to its round or context limit. \
+                                        Reading and search tools are no longer available. Write \
+                                        your deliverable now with the write tools still declared, \
+                                        using only the evidence already obtained: mark what you \
+                                        could not verify as unknown instead of guessing.",
+                        }));
+                    }
+                    audit_write_phase = true;
+                    forced_synthesis = true;
+                    tracing::info!(
+                        target: "kronn::agent::tools",
+                        turn, round_cap,
+                        "audit write window — only the deliverable writers remain"
+                    );
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(format!(
+                            "{backend} audit write window opened at turn {turn} of {round_cap}"
+                        ));
+                    }
                 }
             }
             // The messages just grew by the tool results: the window sized for turn
@@ -9418,6 +10695,7 @@ async fn start_ollama_http(
                     1,
                     false,
                     &stderr_clone,
+                    idle_limit,
                 ) => result,
             };
             response = match next_turn {
@@ -9438,7 +10716,7 @@ async fn start_ollama_http(
                         )
                     } else {
                         format!(
-                            "{backend} error {status} on tool round-trip {turn}. The provider accepted the initial tool declaration but rejected the follow-up; verify that this route/model supports native tool calling. Automatic retry was skipped because a tool had already executed. Provider response: {}",
+                            "{backend} error {status} on tool round-trip {turn}. Automatic retry was skipped because a tool had already executed. Provider response: {}",
                             provider_body.trim()
                         )
                     };
@@ -9472,7 +10750,7 @@ async fn start_ollama_http(
         agent_type: agent_type.clone(),
         rx,
         stderr_capture,
-        usage: Arc::new(Mutex::new(AgentUsage::default())),
+        usage,
         stderr_task: None,
         http_cancel: Some(http_cancel),
         pgid: None,
@@ -9522,6 +10800,29 @@ fn claude_project_slug(work_dir: &Path) -> String {
         .chars()
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect()
+}
+
+/// Working directory of a discussion without a project: one folder per
+/// discussion under `~/.kronn/discussions`, outside Kronn's data dir.
+pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
+    let home = directories::BaseDirs::new()
+        .ok_or_else(|| "The user home directory is unavailable".to_string())?;
+    discussion_scratch_dir_under(home.home_dir(), discussion_id)
+}
+
+fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
+    // The id becomes a path segment: anything but a plain id could escape it.
+    if discussion_id.is_empty()
+        || !discussion_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("Invalid discussion id for its working directory".into());
+    }
+    let dir = home.join(".kronn").join("discussions").join(discussion_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Cannot create the discussion working directory: {error}"))?;
+    Ok(dir)
 }
 
 /// The directory an agent will actually run in.
@@ -10231,6 +11532,10 @@ fn agent_command_with_task_worker_policy(
                 args.push("acceptEdits".into());
             } else if full_access {
                 args.push("--dangerously-skip-permissions".into());
+            } else {
+                // `--print` cannot ask, so Kronn's own tools must be allowed up front.
+                // The `=` form matters: a variadic flag followed by a space eats the prompt.
+                args.push("--allowedTools=mcp__kronn-internal".into());
             }
             // Inject MCP context via --append-system-prompt (separate from user prompt)
             if !mcp_context.is_empty() {
@@ -10257,15 +11562,17 @@ fn agent_command_with_task_worker_policy(
             // children. Pin the same narrow allowlist per invocation so the
             // current discussion/task capability cannot depend on a later
             // global config sync and concurrent workers stay isolated.
-            args.push("-c".into());
-            args.push(if task_worker {
+            if task_worker {
                 // `start_agent_with_config` validates availability before this
                 // builder is reached. The fallback keeps direct unit calls
                 // deterministic without ever broadening the worker surface.
-                codex_task_worker_mcp_override().unwrap_or_else(|| "mcp_servers={}".into())
+                args.push("-c".into());
+                args.push(
+                    codex_task_worker_mcp_override().unwrap_or_else(|| "mcp_servers={}".into()),
+                );
             } else {
-                codex_kronn_internal_env_override()
-            });
+                args.extend(codex_discussion_mcp_overrides());
+            }
             // KT-646 — official per-run TOML override for reasoning effort
             // (https://learn.chatgpt.com/docs/config-file/config-reference,
             // https://learn.chatgpt.com/docs/developer-commands?surface=cli).
@@ -10436,6 +11743,9 @@ fn agent_command_with_task_worker_policy(
             }
             if full_access && !task_worker {
                 args.push("--allow-all-tools".into());
+            } else if !task_worker {
+                // Non-interactive Copilot refuses any tool it would have to ask about.
+                args.push("--allow-tool=kronn-internal".into());
             }
             // Copilot has no system prompt flag — prepend context to prompt
             let full_prompt = if mcp_context.is_empty() {
@@ -10897,6 +12207,39 @@ fn looks_secret(value: &str) -> bool {
     crate::core::redact::redact_for_audit_artifact(value).1 > 0
 }
 
+/// Claude Code loads the workstation's own auto-memory (the user's interactive
+/// notes) into every session, ~8.8k tokens re-read on each call. `=1` keeps it
+/// for a native discussion turn; nothing else Kronn launches ever gets it.
+pub(crate) fn claude_auto_memory_opted_in() -> bool {
+    std::env::var("KRONN_CLAUDE_AUTO_MEMORY")
+        .as_deref()
+        .map(str::trim)
+        == Ok("1")
+}
+
+fn is_claude_code_launch(binary: &str, npx_package: Option<&str>) -> bool {
+    Path::new(binary)
+        .file_name()
+        .is_some_and(|name| name == "claude")
+        || npx_package == Some("@anthropic-ai/claude-code")
+}
+
+/// A native discussion turn carries a discussion and none of the step, room
+/// principal or worker capabilities.
+fn claude_auto_memory_kept(
+    opted_in: bool,
+    discussion_id: Option<&str>,
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
+) -> bool {
+    opted_in
+        && discussion_id.is_some()
+        && task_worker_context.is_none()
+        && room_agent_context.is_none()
+        && workflow_step_context.is_none()
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
@@ -10987,6 +12330,8 @@ pub(crate) fn try_spawn(
     tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
 
     let mut cmd = async_cmd(&final_cmd);
+    // Under Docker, the MCP values the project's `.mcp.json` refers to (KT-964).
+    crate::core::mcp_secret_refs::apply_to(&mut cmd, std::path::Path::new(&effective_work_dir));
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
         .stdin(
@@ -11146,6 +12491,22 @@ pub(crate) fn try_spawn(
         cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
     } else {
         cmd.env_remove("CLAUDE_CODE_BUBBLEWRAP");
+    }
+    // `--setting-sources ""` does not stop the CLI from loading the auto-memory,
+    // so the switch is the environment. Removed when kept, so an inherited `=1`
+    // cannot override the opt-in.
+    if is_claude_code_launch(binary, npx_package) {
+        if claude_auto_memory_kept(
+            claude_auto_memory_opted_in(),
+            discussion_id,
+            task_worker_context,
+            room_agent_context,
+            workflow_step_context,
+        ) {
+            cmd.env_remove("CLAUDE_CODE_DISABLE_AUTO_MEMORY");
+        } else {
+            cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+        }
     }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.
@@ -11667,6 +13028,14 @@ fn codex_token_count(marker: &str, count: &str) -> Option<u64> {
 #[path = "runner_test.rs"]
 mod runner_test;
 
+#[cfg(test)]
+#[path = "runner_idle_test.rs"]
+mod runner_idle_test;
+
+#[cfg(test)]
+#[path = "runner_vision_test.rs"]
+mod runner_vision_test;
+
 fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     let provider = match env_key {
         "ANTHROPIC_API_KEY" => "anthropic",
@@ -11911,6 +13280,7 @@ mod acp_resume_tests {
                 fallback_prompt,
                 provenance: None,
                 activity: None,
+                idle_timeout: None,
             },
             transport,
         )
@@ -12255,6 +13625,7 @@ mod acp_resume_tests {
                     fallback_prompt: Some("complete history"),
                     provenance: None,
                     activity: None,
+                    idle_timeout: None,
                 },
                 transport.clone(),
             )
@@ -12367,6 +13738,229 @@ mod acp_resume_tests {
         assert!(diagnostics
             .iter()
             .all(|line| !line.contains("fixture-value")));
+    }
+
+    /// A session that lists models the way OpenCode does and records what the
+    /// runner asks it to run. The model reaches the agent only through
+    /// `session/set_config_option`, so that call is "the model that runs".
+    struct ModelSessionTransport {
+        options: Vec<AcpConfigOption>,
+        selections: Mutex<Vec<(String, String)>>,
+        prompts: AtomicUsize,
+        shutdowns: AtomicUsize,
+    }
+
+    impl ModelSessionTransport {
+        fn offering(models: &[&str]) -> Arc<Self> {
+            let options = if models.is_empty() {
+                Vec::new()
+            } else {
+                vec![AcpConfigOption {
+                    id: "model".into(),
+                    current: models.first().map(|model| (*model).to_owned()),
+                    available: models
+                        .iter()
+                        .map(|model| crate::acp::AcpConfigValue {
+                            id: (*model).to_owned(),
+                            name: (*model).to_owned(),
+                        })
+                        .collect(),
+                }]
+            };
+            Arc::new(Self {
+                options,
+                selections: Mutex::new(Vec::new()),
+                prompts: AtomicUsize::new(0),
+                shutdowns: AtomicUsize::new(0),
+            })
+        }
+
+        fn selections(&self) -> Vec<(String, String)> {
+            self.selections.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AcpTransport for ModelSessionTransport {
+        async fn initialize(
+            &self,
+            _: AcpInitialize,
+        ) -> Result<AcpNegotiatedCapabilities, AcpError> {
+            Ok(AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: BTreeSet::from([
+                    AcpCapability::Sessions,
+                    AcpCapability::Resume,
+                    AcpCapability::Streaming,
+                    AcpCapability::Cancellation,
+                    AcpCapability::McpInjection,
+                ]),
+            })
+        }
+        async fn create_session(&self) -> Result<AcpSessionTarget, AcpError> {
+            AcpSessionTarget::new(AcpAgent::OpenCode, "model-session")
+        }
+        async fn config_options(&self) -> Vec<AcpConfigOption> {
+            self.options.clone()
+        }
+        async fn set_config_option(
+            &self,
+            _: &AcpSessionTarget,
+            config_id: &str,
+            value_id: &str,
+        ) -> Result<(), AcpError> {
+            self.selections
+                .lock()
+                .unwrap()
+                .push((config_id.to_owned(), value_id.to_owned()));
+            Ok(())
+        }
+        async fn resume_session(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn prompt(
+            &self,
+            _: &AcpSessionTarget,
+            _: &str,
+            events: tokio::sync::mpsc::Sender<AcpSessionEvent>,
+        ) -> Result<(), AcpError> {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            events.send(AcpSessionEvent::Completed).await.unwrap();
+            Ok(())
+        }
+        async fn cancel(&self, _: &AcpSessionTarget) -> Result<(), AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), AcpError> {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn model_request<'a>(
+        agent_type: &'a AgentType,
+        model_flag: Option<&'a str>,
+    ) -> AcpSessionRequest<'a> {
+        AcpSessionRequest {
+            agent_type,
+            work_dir: Path::new("."),
+            prompt: "fixture prompt",
+            system_context: "",
+            project_path: "",
+            model_flag,
+            reasoning_effort: None,
+            parent_cancel: None,
+            discussion_id: None,
+            resume_id: None,
+            session_store: None,
+            fallback_prompt: None,
+            provenance: None,
+            activity: None,
+            idle_timeout: None,
+        }
+    }
+
+    /// The model Kronn shows and stores is the model OpenCode is told to run:
+    /// the tier a user configured, or an explicit pin on the step, travels
+    /// unchanged — colon and all — into `session/set_config_option`.
+    #[tokio::test]
+    async fn the_model_chosen_in_kronn_is_the_model_set_on_the_opencode_session() {
+        let listed = ["opencode/big-pickle", "ollama/qwen3.8:27b"];
+        let tiers = crate::models::ModelTiersConfig {
+            open_code: crate::models::ModelTierConfig {
+                default: Some("ollama/qwen3.8:27b".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let by_tier = ModelSessionTransport::offering(&listed);
+        let flag =
+            effective_model_flag(None, &AgentType::OpenCode, ModelTier::Default, Some(&tiers));
+        let mut process = run_acp_session(
+            model_request(&AgentType::OpenCode, flag.as_deref()),
+            by_tier.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("launch on the configured tier: {error}"));
+        collect_output(&mut process).await;
+        assert_eq!(
+            by_tier.selections(),
+            vec![("model".to_owned(), "ollama/qwen3.8:27b".to_owned())]
+        );
+        assert_eq!(by_tier.prompts.load(Ordering::SeqCst), 1);
+
+        let by_pin = ModelSessionTransport::offering(&listed);
+        let flag = effective_model_flag(
+            Some("opencode/big-pickle"),
+            &AgentType::OpenCode,
+            ModelTier::Default,
+            Some(&tiers),
+        );
+        let mut process = run_acp_session(
+            model_request(&AgentType::OpenCode, flag.as_deref()),
+            by_pin.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("launch on the pinned model: {error}"));
+        collect_output(&mut process).await;
+        assert_eq!(
+            by_pin.selections(),
+            vec![("model".to_owned(), "opencode/big-pickle".to_owned())],
+            "an explicit pin outranks the tier, and is what runs"
+        );
+    }
+
+    /// OpenCode lists the models of the directory it runs in. A model the user
+    /// chose that this session does not list used to be dropped in silence —
+    /// OpenCode answered with its own default while Kronn reported the chosen
+    /// one. It is refused now, and nothing is sent to the agent.
+    #[tokio::test]
+    async fn a_model_the_opencode_session_does_not_list_is_refused_not_replaced() {
+        let transport = ModelSessionTransport::offering(&["opencode/big-pickle"]);
+
+        let outcome = run_acp_session(
+            model_request(&AgentType::OpenCode, Some("ollama/qwen3.8:27b")),
+            transport.clone(),
+        )
+        .await;
+
+        let message = match outcome {
+            Ok(_) => panic!("a model the session does not list must not start a run"),
+            Err(message) => message,
+        };
+        assert!(
+            message.contains("ollama/qwen3.8:27b") && message.contains("does not offer"),
+            "the refusal must name the model: {message}"
+        );
+        assert!(
+            transport.selections().is_empty(),
+            "no other model may be selected in its place"
+        );
+        assert_eq!(transport.prompts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            transport.shutdowns.load(Ordering::SeqCst),
+            1,
+            "the refused session must not leak its process"
+        );
+    }
+
+    /// An agent whose session lists no models at all keeps the deliberate
+    /// no-op: there is nothing to match against, and it runs its own default.
+    #[tokio::test]
+    async fn a_session_that_lists_no_models_keeps_the_agents_own_default() {
+        let transport = ModelSessionTransport::offering(&[]);
+
+        let mut process = run_acp_session(
+            model_request(&AgentType::OpenCode, Some("ollama/qwen3.8:27b")),
+            transport.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a catalogue-less session must launch: {error}"));
+        collect_output(&mut process).await;
+
+        assert!(transport.selections().is_empty());
+        assert_eq!(transport.prompts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

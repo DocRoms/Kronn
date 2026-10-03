@@ -1390,8 +1390,9 @@ pub fn write_backup_ref(repo_path: &Path, slug: &str, sha: &str) -> Result<Strin
 /// a fast-forward and never a merge.
 pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<CandidateOutcome, String> {
     reject_option_like_rev(base_sha)?;
+    // Repositories that enforce DCO reject an unsigned merge commit.
     let out = sync_cmd("git")
-        .args(["merge", "--no-edit", base_sha])
+        .args(["merge", "--no-edit", "--signoff", base_sha])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git merge failed: {e}"))?;
@@ -4432,6 +4433,83 @@ mod tests {
         assert!(
             merge_base.status.success(),
             "candidate must descend from the parent tip"
+        );
+
+        let message = sync_cmd("git")
+            .args(["log", "-1", "--format=%B", &sha])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&message.stdout).contains("Signed-off-by: "),
+            "the merge commit must carry a sign-off"
+        );
+    }
+
+    /// A repository that enforces the DCO rejects an unsigned merge commit at
+    /// `commit-msg` time (KT-854: the merge Kronn made for KT-840 had no
+    /// `Signed-off-by`, so the release PR went red). The integration candidate must
+    /// be built, signed with the identity git is configured with.
+    #[cfg(unix)]
+    #[test]
+    fn the_integration_merge_commit_satisfies_a_dco_enforcing_repository() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = make_test_repo("candidate-dco");
+        commit_file(repo.path(), "shared.txt", "one", "base");
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "child"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        commit_file(repo.path(), "child.txt", "work", "child work");
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
+        std::process::Command::new("git")
+            .args(["checkout", "child"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        // `git merge` runs `commit-msg` for the merge commit it creates.
+        let hook = repo.path().join(".git/hooks/commit-msg");
+        fs::write(
+            &hook,
+            "#!/bin/sh\ngrep -q '^Signed-off-by: ' \"$1\" || { echo 'DCO: missing Signed-off-by' >&2; exit 1; }\n",
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outcome = build_candidate(repo.path(), &parent_tip).unwrap();
+        let CandidateOutcome::Built { sha } = outcome else {
+            panic!("a DCO-enforcing repository must accept the integration merge, got {outcome:?}");
+        };
+
+        let message = sync_cmd("git")
+            .args(["log", "-1", "--format=%B", &sha])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&message.stdout)
+                .contains("Signed-off-by: Test <test@test.com>"),
+            "the sign-off is the configured git identity"
+        );
+        let parents = sync_cmd("git")
+            .args(["log", "-1", "--format=%P", &sha])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&parents.stdout)
+                .split_whitespace()
+                .count(),
+            2,
+            "the candidate is a real merge commit"
         );
     }
 

@@ -20,7 +20,7 @@ pub async fn audit_info(
 ) -> Json<ApiResponse<AuditInfo>> {
     let project = match state
         .db
-        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
         .await
     {
         Ok(Some(p)) => p,

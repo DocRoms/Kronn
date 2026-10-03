@@ -44,6 +44,8 @@ async fn fixture(endpoint: &str) -> (AppState, ExternalApiConnection) {
                 &[catalog::DiscoveredModel {
                     model_id: "saved/model".into(),
                     display_name: "Saved model".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,

@@ -62,6 +62,14 @@ pub enum ModelUnavailableReason {
     /// This runtime has no live discovery path implemented; only cache,
     /// manual or migrated entries can exist for it.
     Unsupported,
+    /// The model is listed by the runtime but an actual call answered
+    /// not-found (HTTP 404/410): the upstream deployment behind the alias
+    /// does not exist for this project or region (KT-941).
+    NotFound,
+    /// The model is listed by the runtime but an actual call was refused for
+    /// this account or key — the proxy's own allow-list, tags or entitlements
+    /// (KT-941). Not a verdict on the credential itself.
+    AccessDenied,
 }
 
 /// Coarse, catalog-driven cost classification. Never inferred from a
@@ -101,6 +109,15 @@ pub struct CatalogModelEntry {
     /// `--model` flag or API `model` field must receive.
     pub model_id: String,
     pub display_name: String,
+    /// Provider-reported canonical model identity. For Claude aliases this
+    /// lets Kronn relate two CLI identifiers without treating either one as
+    /// an automatic substitute for the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    /// Provider-supplied explanatory text, retained verbatim when discovery
+    /// exposes it. `None` means the source did not report a description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Operator-set label override. When present, selectors show this
     /// instead of `display_name`, even after the record is reconciled to
     /// `Live` (KT-531: operator display choices survive reconciliation).
@@ -147,6 +164,10 @@ pub struct CatalogModelEntry {
     pub last_seen_at: Option<DateTime<Utc>>,
     /// Last time Kronn attempted to verify this identity, live or not.
     pub last_checked_at: DateTime<Utc>,
+    /// Last time a real call to this model answered. Being listed is not
+    /// being served: `None` means no call has proven it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_answered_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -210,6 +231,40 @@ pub struct ModelCatalogView {
     pub last_error_reason: Option<ModelUnavailableReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_detail: Option<String>,
+    /// Referenced models that the latest successful catalogue no longer
+    /// contains. This is a warning only: changing a reference remains an
+    /// explicit operator action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<ModelCatalogAlert>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ModelCatalogReferenceKind {
+    WorkflowStep,
+    ModelTier,
+    QuickPrompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct ModelCatalogReference {
+    pub kind: ModelCatalogReferenceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    /// Human-facing resource and location name, for example
+    /// `Release workflow · review` or `ClaudeCode · reasoning`.
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct ModelCatalogAlert {
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+    pub references: Vec<ModelCatalogReference>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -248,8 +303,45 @@ pub struct CatalogPreflightFailure {
     pub detail: String,
     pub last_checked_at: DateTime<Utc>,
     /// Machine-readable recommended next step (`"configure_manual_model"`,
-    /// `"recheck_catalog"`, `"install_cli"`, `"authenticate"`). The frontend
+    /// `"recheck_catalog"`, `"install_cli"`, `"authenticate"`,
+    /// `"choose_another_model"`). The frontend
     /// maps this to the recheck/settings shortcut; it is deliberately not a
     /// prose sentence so i18n stays centralized in the frontend dictionaries.
     pub recommended_action: String,
+    /// Live identifier resolving to the same provider model, when discovery
+    /// reported one. Refusals expose it as operator guidance; successful
+    /// same-agent fallbacks use `CatalogPreflightWarning` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CatalogReplacementSource {
+    ResolvedModel,
+    EquivalentTier,
+}
+
+/// Non-blocking catalogue decision made immediately before a launch. The
+/// requested and effective identifiers remain distinct so execution history
+/// can explain an automatic same-agent replacement without rewriting config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CatalogPreflightWarning {
+    pub requested_model: String,
+    pub effective_model: String,
+    pub reason: ModelUnavailableReason,
+    pub detail: String,
+    pub replacement_source: CatalogReplacementSource,
+    pub equivalent_tier: ModelTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CatalogPreflightResolution {
+    pub requested_model: Option<String>,
+    pub effective_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<CatalogPreflightWarning>,
 }

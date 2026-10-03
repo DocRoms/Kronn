@@ -67,7 +67,7 @@ test.describe('0.8.5 — QP AI Improver + bindings (frontend wiring)', () => {
     const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
-    await workflows.clickQuickPromptsTab();
+    await workflows.selectKind('quickPrompts');
 
     const improveBtns = page.locator('[data-testid="qp-improve-btn"]');
     const count = await improveBtns.count();
@@ -94,7 +94,7 @@ test.describe('0.8.5 — QP AI Improver + bindings (frontend wiring)', () => {
     const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
-    await workflows.clickQuickPromptsTab();
+    await workflows.selectKind('quickPrompts');
 
     // If a QP exists, edit it; otherwise click "New prompt" via the eye-
     // edit on any first QP card. Either path opens the form.

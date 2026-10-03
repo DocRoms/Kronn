@@ -125,8 +125,12 @@ test.describe.serial('publication authority, end to end', () => {
     const section = page.getByRole('region', { name: 'Identifiants de publication' });
     await expect(section).toBeVisible();
     // The person who cannot get past this form is the one no button here can
-    // serve, so the way back is named on the screen they are stuck on.
-    await expect(section.getByText(/recover-admin-secret/)).toBeVisible();
+    // serve, so the way back is named on the screen they are stuck on — on
+    // demand, behind the "Secret admin perdu ?" disclosure, not in plain sight.
+    const recoveryHint = section.getByText(/recover-admin-secret/);
+    await expect(recoveryHint).toBeHidden();
+    await section.getByText('Secret admin perdu ?', { exact: true }).click();
+    await expect(recoveryHint).toBeVisible();
 
     const field = section.getByLabel('Secret admin ou identifiant humain');
     await field.fill('kr-admin-wrong-on-purpose');

@@ -220,8 +220,8 @@ afterEach(() => {
 
 it('confirms and re-arms only the provider reported as quota-blocked', async () => {
   vi.mocked(agentsApi.quotaStates).mockResolvedValueOnce([
-    { provider: 'ClaudeCode', blocked: true },
-    { provider: 'Codex', blocked: false },
+    { provider: 'ClaudeCode', blocked: true, reset_at: null },
+    { provider: 'Codex', blocked: false, reset_at: null },
   ]);
   const originalConfirm = window.confirm;
   window.confirm = vi.fn().mockReturnValue(true);

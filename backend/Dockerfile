@@ -214,9 +214,13 @@ COPY scripts/ /app/scripts/
 RUN mkdir -p /data && chown kronn:kronn /data
 
 # Pre-create directories that volumes will mount into
+# A new named volume copies its mount point's owner: without these, Claude
+# Code cannot save a session and every resumed discussion turn fails.
 RUN mkdir -p /home/kronn/.local/bin /home/kronn/.local/share/uv \
     /home/kronn/.npm /home/kronn/.cache/uv /home/kronn/.config \
-    && chown -R kronn:kronn /home/kronn/.local /home/kronn/.npm /home/kronn/.cache /home/kronn/.config
+    /home/kronn/.claude/projects /home/kronn/.claude/sessions \
+    && chown -R kronn:kronn /home/kronn/.local /home/kronn/.npm /home/kronn/.cache /home/kronn/.config \
+       /home/kronn/.claude
 
 # Allow kronn user to create symlinks in /home (for host-path compatibility).
 # Agent configs mounted from the host may contain absolute host paths

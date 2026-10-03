@@ -3,6 +3,7 @@ import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
 import { DiscussionQuestionBanner } from '../components/DiscussionQuestionBanner';
+import { WorkflowStepActivityBubble } from '../components/WorkflowStepActivityBubble';
 import { ImportantMessagesBar } from '../components/ImportantMessageCard';
 import { ImportantMessageForm } from '../components/ImportantMessageForm';
 import { submitImportantMessage } from '../lib/submitImportantMessage';
@@ -54,6 +55,7 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
+import { useSustainedFlag } from '../hooks/useSustainedFlag';
 import { AGENT_LABELS, agentColor, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isRoomAgentDisabled, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
@@ -79,7 +81,14 @@ import {
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
-  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response' | 'default_targets'>>;
+  & Partial<Pick<DiscussionDetail,
+    'active_agent_dispatches'
+    | 'active_workflow_steps'
+    | 'workflow_step_authors'
+    | 'message_targets'
+    | 'partial_response'
+    | 'default_targets'
+  >>;
 
 type InterruptedStreamState = {
   text: string;
@@ -92,6 +101,8 @@ type InterruptedStreamState = {
 // `shared_run_updated` events for brand-new media jobs collapses into one
 // relist instead of one per event.
 const MEDIA_JOBS_RELIST_DEBOUNCE_MS = 250;
+// How long a WebSocket reconnect lasts before the banner says so (#220).
+const REALTIME_BANNER_DELAY_MS = 3000;
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -969,6 +980,8 @@ export function DiscussionsPage({
   // refresh so the server can omit an unchanged transcript.
   const detailRevisionsRef = useRef<Record<string, string>>({});
   const detailReloadsRef = useRef<Record<string, { again: boolean; done: Promise<void> }>>({});
+  // A discussion whose first load failed has no state to keep: show why.
+  const [detailLoadErrors, setDetailLoadErrors] = useState<Record<string, string>>({});
   const reloadDiscussion = useCallback((discId: string): Promise<void> => {
     // A burst of events for one discussion collapses into the poll in flight
     // plus at most one more, started after the latest request.
@@ -986,13 +999,24 @@ export function DiscussionsPage({
           const result = await discussionsApi.poll(discId, detailRevisionsRef.current[discId] ?? null);
           if (!result) continue;
           detailRevisionsRef.current[discId] = result.revision;
+          setDetailLoadErrors(prev => {
+            if (!(discId in prev)) return prev;
+            const next = { ...prev };
+            delete next[discId];
+            return next;
+          });
           /*
            * A stream interrupted by a backend reload keeps its local text until
            * this detail fetch proves either a newer durable checkpoint or a
            * settled Agent message. Network failure deliberately changes nothing.
            */
           if (result.detail) reconcileLoadedDiscussion(result.detail);
-        } catch { /* keep the current state */ }
+        } catch (error) {
+          // A refresh failure keeps the current state; a first load has none.
+          if (!detailRevisionsRef.current[discId]) {
+            setDetailLoadErrors(prev => ({ ...prev, [discId]: userError(error) }));
+          }
+        }
       } while (reload.again);
       delete detailReloadsRef.current[discId];
     };
@@ -1482,6 +1506,10 @@ export function DiscussionsPage({
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   const interruptedStream = activeDiscussionId ? interruptedStreams[activeDiscussionId] : undefined;
   const durablePartial = activeDiscussion?.partial_response;
+  // #220 — the local stream can drop while the server keeps running the agent;
+  // only a run the server no longer reports is "interrupted".
+  const serverStillRunning = !!allDiscussions.find(d => d.id === activeDiscussionId)?.agent_running;
+  const streamLost = !sending && !serverStillRunning;
   const pendingReplySlots = useMemo(() => {
     if (!activeDiscussion || (
       !sending
@@ -1858,6 +1886,9 @@ export function DiscussionsPage({
     }
     refreshContactsPresence();
   });
+  // #220 — a socket that reconnects within seconds (tab throttling, a missed
+  // pong) is not worth a banner: the agent runs server-side either way.
+  const realtimeReconnecting = useSustainedFlag(wsConnectionState === 'reconnecting', REALTIME_BANNER_DELAY_MS);
 
   // Baseline presence poll (every 30s) — edge events handle instant transitions
   // in between; this guarantees the dots converge to the truth even if an event
@@ -3321,6 +3352,32 @@ export function DiscussionsPage({
     setActiveDiscussionId(prev => prev === discId ? null : prev);
     refetchDiscussions();
   }, [refetchDiscussions]);
+  const handleDiscTogglePin = useCallback(async (discId: string, pinned: boolean) => {
+    try {
+      await discussionsApi.update(discId, { pinned });
+      refetchDiscussions();
+    } catch (e) {
+      toast(t('disc.pinError', userError(e)), 'error');
+    }
+  }, [refetchDiscussions, t, toast]);
+  const handleDiscStop = useCallback(async (discId: string) => {
+    try {
+      const res = await discussionsApi.stop(discId);
+      if (res.cancelled) {
+        toast(t('disc.stopAgentToast'), 'success');
+        // Don't manually clear sendingMap — the backend's cancel
+        // path in make_agent_stream finishes its finally-block,
+        // saves the partial message, then the WS batch_run_progress
+        // (or the normal done event) will tick sendingMap for us.
+        // Refetch to pick up the partial response promptly.
+        setTimeout(() => refetchDiscussions(), 500);
+      } else {
+        toast(t('disc.stopAgentNothing'), 'info');
+      }
+    } catch (e) {
+      toast(t('disc.stopAgentError', userError(e)), 'error');
+    }
+  }, [refetchDiscussions, t, toast]);
   const handleDiscDelete = useCallback(async (discId: string) => {
     if (!confirm(t('disc.confirmDelete'))) return;
     // Abort any in-flight stream + clear lifted streaming state BEFORE the
@@ -3799,11 +3856,11 @@ export function DiscussionsPage({
                     onToggleLogs={() => setShowLogs(value => !value)}
                     stopping={stoppingDispatchIds.has(reply.id)}
                     onStop={() => { void handleStopDispatch(reply.id); }}
-                    recovering={!sending || durablePartial?.dispatch?.last_error === 'backend_restarted'}
+                    recovering={streamLost || durablePartial?.dispatch?.last_error === 'backend_restarted'}
                     recoveryLabel={
                       durablePartial?.dispatch?.last_error === 'backend_restarted'
                         ? t('disc.streamRestartSaved', durablePartial.dispatch.attempts ?? 1)
-                        : !sending
+                        : streamLost
                           ? t('disc.streamDisconnectedSaved')
                           : null
                     }
@@ -3896,6 +3953,7 @@ export function DiscussionsPage({
               {separator}
               <MessageBubble
                 msg={msg}
+                workflowStep={activeDiscussion.workflow_step_authors?.[msg.id]}
                 targets={activeDiscussion.message_targets?.[msg.id] ?? EMPTY_TARGETS}
                 defaultTargets={activeDiscussion.default_targets ?? EMPTY_TARGETS}
                 idx={idx}
@@ -3963,7 +4021,7 @@ export function DiscussionsPage({
     handleMsgEditStart, handleMsgExpandSummary, handleMsgReply, handleMsgTts, handleReplyNavigate,
     handleRetryAgentDispatch, handleStopDispatch, hasFullAccess, locale, mediaJobsByMessage,
     messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, orchState, pendingFileMsgIds,
-    pendingReplySlots, recoveryAgentLabel, resilientStreamingText, sending, sendingElapsed,
+    pendingReplySlots, recoveryAgentLabel, resilientStreamingText, sending, sendingElapsed, streamLost,
     showLogs, stableEditMessage, stableLaunchQp, stableOpenActionDiscussion, stableRetry,
     stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply]);
 
@@ -4016,14 +4074,7 @@ export function DiscussionsPage({
           onBulkArchive={handleBulkArchive}
           onBulkDelete={handleBulkDelete}
           onCompareSelected={openSelectedComparison}
-          onTogglePin={async (discId, pinned) => {
-            try {
-              await discussionsApi.update(discId, { pinned });
-              refetchDiscussions();
-            } catch (e) {
-              toast(t('disc.pinError', userError(e)), 'error');
-            }
-          }}
+          onTogglePin={handleDiscTogglePin}
           onNewDiscussion={() => setShowNewDiscussion(true)}
           onImportDiscussion={async file => {
             const content = await file.text();
@@ -4056,24 +4107,7 @@ export function DiscussionsPage({
           toast={toast}
           t={t}
           lang={configLanguage ?? 'fr'}
-          onStopDiscussion={async (discId) => {
-            try {
-              const res = await discussionsApi.stop(discId);
-              if (res.cancelled) {
-                toast(t('disc.stopAgentToast'), 'success');
-                // Don't manually clear sendingMap — the backend's cancel
-                // path in make_agent_stream finishes its finally-block,
-                // saves the partial message, then the WS batch_run_progress
-                // (or the normal done event) will tick sendingMap for us.
-                // Refetch to pick up the partial response promptly.
-                setTimeout(() => refetchDiscussions(), 500);
-              } else {
-                toast(t('disc.stopAgentNothing'), 'info');
-              }
-            } catch (e) {
-              toast(t('disc.stopAgentError', userError(e)), 'error');
-            }
-          }}
+          onStopDiscussion={handleDiscStop}
           batchSummaries={batchSummaries}
           onNavigateWorkflow={(workflowId) => onNavigate('workflows', { workflowId })}
           onDeleteBatch={async (runId, count) => {
@@ -4393,7 +4427,7 @@ export function DiscussionsPage({
               </div>
             )}
 
-            {wsConnectionState === 'reconnecting' && (
+            {realtimeReconnecting && (
               <div className="disc-realtime-status" role="status" aria-live="polite">
                 <WifiOff size={14} aria-hidden="true" />
                 <span>{t('disc.realtimeReconnecting')}</span>
@@ -4530,7 +4564,29 @@ export function DiscussionsPage({
               ref={messagesContainerRef}
               onScroll={handleMessagesScroll}
             >
+              {!loadedDiscussions[activeDiscussion.id] && detailLoadErrors[activeDiscussion.id] && (
+                <div className="disc-worktree-error" role="alert">
+                  <AlertTriangle size={14} className="text-error flex-shrink-0" />
+                  <span className="flex-1">
+                    {t('disc.loadFailed', detailLoadErrors[activeDiscussion.id])}
+                  </span>
+                  <button
+                    type="button"
+                    className="disc-worktree-retry-btn"
+                    onClick={() => { void reloadDiscussion(activeDiscussion.id); }}
+                  >
+                    {t('disc.loadRetry')}
+                  </button>
+                </div>
+              )}
               {transcriptElements}
+
+              {(activeDiscussion.active_workflow_steps ?? []).map(step => (
+                <WorkflowStepActivityBubble
+                  key={`${step.run_id}:${step.step_key}`}
+                  step={step}
+                />
+              ))}
 
               {/* Streaming: orchestration mode */}
               {orchState[activeDiscussion.id] && (() => {

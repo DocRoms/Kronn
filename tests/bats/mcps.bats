@@ -231,3 +231,62 @@ TOML
     run grep -q 'false' "$repo/.mcp.json"
     assert_success
 }
+
+# ─── KT-963 — no clear-text tokens in repositories under Docker ─────────────
+
+_fake_docker() {
+    local ids="$1"
+    FAKE_BIN="$(mktemp -d /tmp/kronn-fake-bin-XXXXXX)"
+    cat > "$FAKE_BIN/docker" <<SH
+#!/usr/bin/env bash
+[[ "\$1 \$2 \$3 \$4" == "compose ps -q backend" ]] && printf '%s' "$ids"
+exit 0
+SH
+    chmod +x "$FAKE_BIN/docker"
+    PATH="$FAKE_BIN:$PATH"
+}
+
+@test "sync_mcp_all: refuses to write clear-text tokens while Kronn runs in Docker" {
+    _fake_docker "3f2a91bc"
+    REPO_PATHS=()
+    run sync_mcp_all
+    assert_failure
+    assert_output --partial "Refused: Kronn runs in Docker"
+    assert_output --partial "KRONN_ALLOW_PLAINTEXT_MCP=1"
+    rm -rf "$FAKE_BIN"
+}
+
+@test "sync_mcp_all: natively it still syncs, warning that the tokens are in clear" {
+    _fake_docker ""
+    REPO_PATHS=()
+    run sync_mcp_all
+    assert_output --partial "hold your tokens in clear"
+    refute_output --partial "Refused"
+    rm -rf "$FAKE_BIN"
+}
+
+@test "sync_mcp_all: the Docker refusal can be overridden on purpose" {
+    _fake_docker "3f2a91bc"
+    REPO_PATHS=()
+    KRONN_ALLOW_PLAINTEXT_MCP=1 run sync_mcp_all
+    refute_output --partial "Refused"
+    rm -rf "$FAKE_BIN"
+}
+
+@test "init_secrets: the template says its values are not encrypted" {
+    rm -f "$KRONN_CONFIG_DIR/secrets.toml"
+    init_secrets >/dev/null
+    grep -q "NOT encrypted" "$KRONN_CONFIG_DIR/secrets.toml"
+}
+
+@test "sync_mcp_for_repo: a repository added directly is refused too under Docker" {
+    _fake_docker "3f2a91bc"
+    local repo
+    repo="$(mktemp -d /tmp/kronn-repo-XXXXXX)"
+    echo '{"mcpServers":{"gh":{"env":{"T":"${GITHUB_PERSONAL_ACCESS_TOKEN}"}}}}' > "$repo/.mcp.json.example"
+    run sync_mcp_for_repo "$repo"
+    assert_failure
+    assert_output --partial "Refused: Kronn runs in Docker"
+    [ ! -f "$repo/.mcp.json" ]
+    rm -rf "$FAKE_BIN" "$repo"
+}

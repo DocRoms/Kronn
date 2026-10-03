@@ -256,10 +256,11 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:1006-1031] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:468-485] |
 
-Audits currently forbid HTTP/Vibe/Custom targets because those paths cannot
-perform the required filesystem work. This is a concrete example of why local
-or merely installed candidates cannot be universally eligible. [src: file:
-backend/src/api/audit/mod.rs:1186-1205]
+Audits still refuse Vibe, which has no file tools Kronn can scope to the
+project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
+target only with a validated named connection. Eligibility is therefore a
+property of each surface, not of an agent being installed. [src: file:
+backend/src/api/audit/mod.rs:1222-1250]
 
 | Surface | Desired behavior | Initial rollout |
 |---|---|---:|

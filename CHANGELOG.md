@@ -11,6 +11,997 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-10-03
+
+### Added
+
+- The project card's Audit tab is now a timeline (KT-977): briefing,
+  template, the audit's steps grouped as the pipeline runs them (documentation
+  core, specialised audits, consolidation), validation, validated. Every step
+  shows, before it runs, the file it writes and what it covers (from the new
+  read-only `GET /api/audit/steps`, built from the chain the pipeline runs),
+  then its status, a readable reason when it failed or was interrupted, its
+  duration and when it last ran. A resumed run is shown whole: its steps are
+  merged with the run it continued. A failed group resumes from its own button,
+  and the timeline says that the consolidation reruns after it. The agent panel
+  groups installed CLIs (recommended), HTTP agents and local models, shows the
+  model of each level (⚡ Eco, 🎯 Standard, 🧠 Advanced, the recommended one)
+  and warns about lower levels, local slowness and data sent to an HTTP
+  provider. The briefing is filled in and saved from the timeline without
+  opening a discussion, and a note explains what changed in the audit.
+
+- Any HTTP agent can now run an audit, at the user's choice (KT-980): NVIDIA
+  and named connections such as OpenRouter join Ollama and LiteLLM. Full and
+  partial audit requests take an optional `connection_id`; the audit uses that
+  connection's endpoint, key and model for the chosen level, and its
+  validation discussion keeps the connection. A `Custom` agent without a
+  connection is refused by name. Vibe, which has no file tools, still cannot
+  audit.
+
+- The Automation page lists the skills. "Skills" is a fifth type in the
+  sidebar Filter, with its count, next to Workflows, Quick APIs, Quick Prompts
+  and Quick Execs, and covers the built-in skills as well as the ones you
+  wrote. A skill sits under every project that lists it among its default
+  skills, and under "No project" when none does; the flat lists (Favorites,
+  Recent) show it once. Opening one shows its sheet in the main column: name,
+  description, category, the projects that use it, and its `SKILL.md` — rendered
+  as Markdown without raw HTML (the same rendering as a repository resource) or
+  as Source. Name and description are searchable, like the other types. The
+  sheet is for reading: no variable, no launch. A skill is still edited in
+  Config › Skills, which the sheet links to; a skill you wrote can be deleted
+  from its row or its sheet, a built-in one cannot. A skill has no pin on the
+  server, so its favorites are kept in this browser. Merging skills with Quick
+  Prompts stays KT-906 (KT-914).
+
+- Skills are real Agent Skills, written where agents look for them. Writing a
+  skill into the repository now produces `.agents/skills/<slug>/SKILL.md` in the
+  standard format (valid `name` and `description`, Kronn's own fields under
+  `metadata`), never `kronn/skills/`, which keeps only what has no native home.
+  A repository that already has `kronn/skills/<slug>` is offered the move, with
+  its lock entry, identity and approvals following the skill and no duplicate
+  left behind. The Skills tab gets "Migrate everything to .agents/skills" when
+  skills sit in `.claude/skills`, `.gemini/skills`, `.codex/skills`,
+  `.github/skills`, `.opencode/skill(s)`, `.cursor/skills` or `kronn/skills`:
+  a recap lists every move (source → target) and every conflict (same slug,
+  different contents — you pick the version, nothing is overwritten
+  silently) before anything is written, and nothing is committed
+  (KT-903).
+
+- Each Agent step attempt exposes the CLI session it ran in and what it cost:
+  `agent_provenance.attempts[].session_id` is the id Claude Code reports on its
+  `init` line, the name of its transcript, and `cost_usd` is priced like a
+  discussion reply (KT-894) — `null` with `cost_unknown_reason` when the
+  counters or the rate are missing. Callers no longer have to find transcripts
+  by the worktree name or a token added to the prompt. `task_exec_status` lists
+  the worker's CLI sessions, rework attempts and relaunches included
+  (`worker_sessions`, with their cost), and its compact view names the latest.
+
+- The project's repository resources (`GET /api/projects/:id/repository-resources`)
+  now describe both sides of every item. Its `status` is one of
+  `repository_only`, `kronn_only`, `up_to_date`, `repository_newer`,
+  `kronn_newer`, `conflict`, `approval_required` (or `native_skill` for a skill
+  found outside `kronn/`). Each item carries the repository date (last commit's
+  author and date, else the file's mtime), the Kronn date and `aligned_at`; its
+  `required_secrets` with whether Kronn's stored configs hold each name; its
+  ADR-005 level; and `write_preview`, every path a publish would write,
+  `docs/AGENTS.md` and the router skill included. The listing also reports
+  `can_write_repository` with its reason and `uncommitted_managed_paths`. What
+  differs is not in the listing: `GET .../repository-resources/comparison?kind=&id=`
+  returns, for the three states where the sides differ, a unified diff per file
+  (`file_diffs`, the artifact's HTML included) and, for workflows, Quick APIs
+  and Quick Execs, a field-by-field diff (`field_diff`). The Compare sheet asks
+  for it when it opens and shows a loading state meanwhile.
+- The sheet of a resource in the "AI & automation" tab (skill, Quick Prompt,
+  Quick Exec, Quick API, workflow, artifact) now shows the resource itself, under
+  its details: a "Repository / Kronn / Diff" picker over the file as the
+  repository holds it, as Kronn holds it (masked, as a publish would write it) or
+  what differs, using the same diff as the Compare sheet. A skill's `SKILL.md` is
+  rendered as Markdown, with a "Rendered / Source" switch; every other kind is
+  shown as text. A mode with nothing to show is off with the reason on hover
+  ("not in the repository", "not in Kronn", "identical"). The sheet opens on
+  Repository when only the repository has it, on Kronn when only Kronn has it or
+  when the two are identical, and on Diff when they differ, saying which side is
+  newer when only one moved. The text comes from
+  `GET .../repository-resources/comparison`, which now answers for every
+  resource, not only the ones that differ: `files` lists each file with its
+  `repository` and `kronn` text (either absent when that side has no file, cut
+  and flagged `truncated` past 512 KiB). Both sides are masked the same way,
+  the repository's too — a secret typed by hand into a file in Git never
+  reaches the texts, the diffs or the field view — while a `secret://NAME`
+  reference stays readable. The listing still carries no content (KT-913).
+- The skills the Kronn catalog provides that a project does not have yet
+  ("Available in Kronn, not in this project": built-in ones and the ones a user
+  wrote) open their sheet like every other row: the `SKILL.md` as Kronn holds
+  it, rendered or as source, with the repository mode off ("not in the
+  repository") and "Attach to the project" unchanged (KT-913).
+- A native skill outside `kronn/` can be used in Kronn without `kronn.lock`
+  (`POST .../repository-resources/skills/use`: a read-only reference to its
+  path) or copied into Kronn as a managed skill
+  (`POST .../repository-resources/skills/copy`, which writes nothing into the
+  repository and replaces an edited copy only with `overwrite_kronn_changes`).
+  The same skill under several skill folders is grouped by slug, every path
+  kept, and flagged when the copies differ.
+- The Automation sub-tab of a project's "AI & automation" tab filters by type
+  (All / QP / QA / QE / Workflow), each chip with its count. It stacks with the
+  location filter and the search, and every chip counts what choosing it would
+  show given the others.
+- The global Automation page filters by state (All / Favorites / Active /
+  Inactive; only a disabled workflow is inactive) next to the type and project
+  filters, and sorts its sidebar by name, last modification or type (favorites
+  stay first). On a screen narrower than 640 px, the project tab's filters fold
+  behind one "Filters (n)" button.
+- `task_exec_update_validations({task_execution_id, validations, reason})`: the
+  principal replaces the validations of an existing execution without
+  relaunching it. The set replaces the current one, is held to the launch rules,
+  and is journaled (`validations_replaced`) with the actor, the reason and the
+  previous set; the room, the worktree, the attempts and the earlier validation
+  results are untouched. It is refused while an integration runs, once the
+  execution is terminal, and for a campaign run's shared gates.
+- `task_exec_reassign({task_execution_id, validations, reason})`: the principal
+  replaces the validations of an existing execution without relaunching it, with
+  `validations` in place of `worker` (one change per call). The set replaces the
+  current one, is held to the launch rules, and is journaled
+  (`validations_replaced`) with the actor, the reason and the previous set; the
+  room, the worktree, the attempts and the earlier validation results are
+  untouched. It is refused while an integration runs, once the execution is
+  terminal, and for a campaign run's shared gates. It is a change of an existing
+  tool rather than a new one so the MCP catalogue does not grow.
+- `task_exec_prepare` accepts the `validations` it will launch with and answers
+  `launchable: false` (reason `invalid_validations`) for one that could never run.
+- `tool_manual({tool: "task_exec_prepare"})` now states how a validation runs: one
+  allowlisted binary and literal arguments, no shell, from the root of the
+  worktree, with `pnpm --dir …` / `cargo … --manifest-path … --target-dir …` as
+  the forms that replace `cd … &&` and `VAR=…`.
+- Resources of a project's repository listing now say what they are linked to
+  (KT-905). Each item of `GET /api/projects/:id/repository-resources` carries
+  `uses` (what a workflow's steps or an Artifact's action blocks reference:
+  Quick Prompts, Quick APIs, Quick Execs, sub-workflows, Artifacts) and
+  `used_by`, as `{ kind, id, slug, name, missing }`; a reference to something
+  the project does not hold is kept and flagged `missing`. A row shows a
+  discreet "3 linked" count and its sheet lists "Uses" and "Used by", each
+  entry opening the linked resource. Ticking a resource ticks everything it
+  needs (recursively, loops included) with a "3 linked items added" line; a
+  resource a ticked one still needs cannot be unticked ("required by
+  nightly-triage"); "Align all" follows the same rule. Writing or loading a
+  single resource announces its dependencies and includes them by default;
+  leaving them out warns that it will only partly work.
+- An audit, Full or partial, can run on Ollama or LiteLLM (KT-924). Both were
+  refused on the ground that an HTTP agent has no filesystem, which stopped being
+  true when Kronn gave them native file tools: the audit now hands the agent
+  those tools, scoped to the project. Every path is canonicalised against the
+  project and refused when it leaves it (`..`, an absolute path, a symlink), there
+  is no shell, and a truncated read says so. The audit's agent is offered only
+  `read_file`, `list_files`, `find_files`, `search_text`, `git_status`,
+  `git_diff`, `git_log` and the four write tools — no `web_fetch`, no
+  `git_commit`, no plan or REST-plugin tools. The model and endpoint come from the
+  tiers and endpoints set in Settings → Agents, like a discussion or a workflow
+  step. A step whose agent writes nothing is still recorded as failed, whether it
+  left its file missing, still the template, or untouched. Stop reaches an HTTP
+  agent's request and tool loop, which a process kill cannot. The refusal that
+  remains (Vibe, NVIDIA, Custom) now names the agents that are accepted, and the
+  audit's agent picker offers Ollama and LiteLLM. NVIDIA and Custom stay refused:
+  sending a whole repository to a hosted service is a decision the audit does not
+  take for you.
+
+- An installed Ollama model can be updated from its card, and a Mac is offered
+  the builds made for it (KT-930). In Config › Agents › Local models › Ollama,
+  the download block now lists the installed models, each with an **Update**
+  button, except a model confirmed up to date: it asks Ollama to pull that exact
+  tag again, with the download's own progress, Cancel and error messages. A badge beside it says **Update
+  available** when the official Ollama library's copy of that tag is no longer
+  the one you hold, **Up to date** when it is, and **Not checked** whenever Kronn
+  could not confirm either way (the registry did not answer, or the model is not
+  from the official library): never "up to date" on a guess. The comparison
+  downloads nothing: the SHA-256 of the registry's manifest for the tag is the
+  digest Ollama reports locally. Answers are cached for hours; Refresh, and a
+  finished update, check again instead. The block's folded summary counts the
+  updates waiting. On a Mac with Apple Silicon running Ollama 0.34 or later, the `-mlx`
+  builds (`gemma4:12b-mlx`, `qwen3.8:27b-mlx`) come first in the suggestions,
+  marked "Optimized for Mac". The backend decides (`mlx_capable` and `version` on
+  `GET /api/ollama/health`, from the host and the server's own version), never
+  the browser's user agent; on any other machine the list is unchanged.
+
+### Changed
+
+- The Ollama card's "Download a model" block is folded once a model is installed
+  (KT-930). It was always open, and took the card over even with a full model
+  library. It stays open for a first use, remembers your choice in this browser
+  and, folded, says how many suggestions it holds and how many downloads are
+  running; a download in flight stays visible, with its Cancel. The suggestions
+  are now one portable model per hardware tier — `qwen3.5:4b`, `qwen3:8b`,
+  `qwen3:30b-a3b` — in place of the former six, each with the repository run that
+  shows it exists, and all five are checked against the Ollama library (see
+  `docs/operations/ollama-local-models.md`). Each suggestion shows its real
+  size, read off the library's manifest rather than typed into Kronn; when the
+  library does not answer, no size is shown instead of an invented one. The
+  card draws from your local Ollama first and fills in what the library says
+  when it arrives (answers are cached for hours, and the only thing sent is a
+  library tag name).
+
+- No prompt Kronn sends to a model lists your other Kronn projects any more
+  (KT-926). The steps of a Full or partial audit, and every discussion (the
+  audit's briefing and validation included), orchestration round and workflow
+  Agent step, used to carry the name and absolute path of every other project
+  registered in Kronn; the audit steps also asked the agent to read their
+  `docs/AGENTS.md` and to write a `## Suggested companion repos` section into
+  the audited repository's own `docs/AGENTS.md`. That prompt goes to the model
+  provider, which may be a remote service with no relation to those projects,
+  and the section landed in a versioned file; for an HTTP agent, whose file
+  tools cannot leave the project since KT-924, the instruction to read another
+  repository contradicted the tools. The only other repositories a prompt names
+  are the ones you linked to the project yourself ("Linked repos" on the
+  project): every audit step names them inline, and discussions and workflow
+  Agent steps keep reading them from the project's `docs/linked-repos.md`, as
+  before. Nothing else about the audit changes: it still describes the
+  repository from what the repository says. A `## Suggested companion repos`
+  section an earlier audit left in a `docs/AGENTS.md` is not removed by this
+  change.
+- The Plugins sidebar no longer carries a per-project tree, so each plugin is
+  listed once (a global plugin used to appear once per project, and again
+  under "No project"). It is a flat list: Favorites and "Recently tested"
+  (both collapsible, and taken out of the full list) then "All plugins", each
+  row keeping its scope chips ("All projects · 3 projects"). Project, Health
+  (error / to check / ready) and Local sync (available in local CLIs / not
+  synced) join Type in the filter panel; the filter icon stays lit while one is
+  set, and "Clear filters" resets them all. The Project filter drives the
+  overview panel, whose summary and "Test all" / "Test the project" button
+  follow it. A plugin's scope is now edited only from the Access tab of its
+  sheet.
+- The global Automation page's search, Filter and Sort are back in the sidebar,
+  under the title, as on Plugins and Discussions. The Filter panel unfolds
+  under the search with a full-width select each for Type (with counts), State
+  and Project, and "Clear filters"; the icon stays lit while one is set. The
+  filter bar KT-904 had put above the list is removed, and `/` still reaches
+  the search.
+- The Automation sidebar is regrouped and lighter (KT-916). Under the search, a
+  "Group by" control — Type, Project or None, Type by default and remembered in
+  this browser — splits the list into collapsible groups (a coloured dot, the
+  name and the count), or keeps it flat. The panel of three selects and the
+  separate Sort button are gone: the filters are chips on a line that wraps —
+  a type chip that reads "All" until you pick one (its list shows each type with
+  its count), "Pinned", "Active" and "Recent" toggles that stack with it and with
+  the search, and "+ Project", which turns into a removable `project ×` chip.
+  "Clear filters" appears only while a chip is set. Rows are 44 px: name, then
+  the trigger, the step count and the state of the last run for a workflow; the
+  pin and the ⋯ menu still show on hover. The Favorites and Recent sections are
+  replaced by the "Pinned" and "Recent" chips ("Recent" keeps the last 20
+  automations you opened, latest first). The order is set from the header's ⋯
+  menu: name, last modified, last opened, and reverse. A skill still sits under
+  every project that lists it. The type list is now in the order Workflows,
+  Quick Prompts, Quick APIs, Quick Execs, Skills, and the "Inactive" state
+  filter is gone (an inactive workflow is shown by its ○ icon; "Active" hides
+  it).
+- `not_published`, `repository_modified` and `kronn_modified` are now
+  `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
+  only in the repository is `repository_only`. A resource that exists on both
+  sides but was never aligned is `up_to_date` when identical and `conflict`
+  otherwise. `approval_required` is a status of its own, and only for the
+  kinds Kronn can execute.
+- Importing a repository resource no longer silently replaces a Kronn copy
+  that holds edits the repository lacks: the import is refused unless the
+  request sets `overwrite_kronn_changes` (the "keep repository version" choice
+  on a conflict does).
+- The lock records `N2` rather than `N0` for a workflow or a Quick API, and
+  `N1` for prompts, skills and Quick Execs.
+- The router skill `.agents/skills/kronn/SKILL.md`, written on every
+  publication, now briefs an agent that opens the repository without Kronn:
+  what `kronn/` is (index, lock, levels N0/N1/N2), how to run a Quick Prompt, a
+  Quick Exec (secrets passed by name through the environment, never written)
+  and a skill by hand, what only Kronn can run (workflows, Quick APIs, living
+  artifacts), why and where to install Kronn (links from the README) and to
+  read a Quick Exec before running it. The file carries its model version
+  (`metadata.version`); a copy a human edited is still refused, not replaced.
+- Claude Code sessions launched by Kronn no longer load the workstation's
+  automatic memory (`MEMORY.md`): `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` is set for
+  workflow Agent steps, `task_exec` principals and workers, about 8.8k fewer
+  tokens on the first call and on every re-read. A native discussion turn is off
+  by default too; start the backend with `KRONN_CLAUDE_AUTO_MEMORY=1` to keep it
+  there. See [Claude auto-memory](docs/operations/claude-auto-memory.md).
+- The repository resources of a project are masked ahead of the first listing
+  instead of on it. A background task renders the workflows, Quick Prompts,
+  Quick APIs, Quick Execs and Artifacts of every project a couple of seconds
+  after the backend starts, and again once they have stopped being edited
+  (from the API, an agent tool, an import or a workflow run alike, with a
+  debounce), filling the memory Kronn already keeps for that (capped at
+  48 MiB, and the task stops when it is nearly full). It never delays the
+  startup or a request — it reads the database in short slices, masks off its
+  lock, breathes between two resources and stops with the backend — so the
+  first listing after a restart reads from memory like the following ones.
+  Reads copy less: a rendering shares its document and files with that memory,
+  the workflow references, the approval fingerprint and the field diff no longer
+  copy the JSON they read, each resource and each repository file is read once
+  per listing, and only the project's own rows are read. Nothing changes in the
+  answers, byte for byte, nor in what is masked (KT-915).
+
+### Fixed
+
+- Testing a LiteLLM connection no longer fails with "Could not persist the
+  saved connection's model catalog" (KT-939). A LiteLLM proxy lists a model once
+  per deployment; the second copy broke the catalogue's unique key and the whole
+  refresh rolled back, leaving the model pickers empty. A model listed twice is
+  now stored once.
+
+- A Full audit in which a step fails no longer invalidates the whole run.
+  Until now one failed step — often for an outside reason, such as the Mac going
+  to sleep — left the run Interrupted with no validation discussion, even when
+  the other fifteen documents existed. The run still ends Interrupted (only a
+  complete run can be validated and earn the Validated badge), but it now gets a
+  validation discussion for the steps that succeeded, which names the steps to
+  redo and tells the agent not to validate their documents — unless the step
+  that failed is the one that writes `docs/AGENTS.md`, the entry point every
+  other document hangs off: without it there is nothing to validate, so the run
+  stays Interrupted with no discussion and the Resume button still names that
+  step to redo. The documentary check that refuses a run with an invented link
+  still applies. The progress is now the exact number of steps that succeeded,
+  the ones after a failure included — a run that lost step 5 of 16 reads 15/16,
+  no longer 4 or 16. The Resume button names the steps it will run ("Resume —
+  redo step(s) 5"), and a resume runs only those: a resumed run now records the
+  steps it carried over, so resuming it again no longer replays the whole
+  chain, and a step that was started but never finished is no longer mistaken
+  for a successful one (KT-931).
+
+- The project card follows an audit it did not launch, or one still running
+  after a page reload (KT-994). The card used to miss it: the launch button
+  stayed active (a second audit could start over the first), the running step
+  showed as interrupted and the agent panel stayed editable. During an audit
+  the panel now shows who runs it (agent, tier, model) and cannot change, the
+  button reads "Audit running…", and the briefing waits for the end. An HTTP
+  agent's activity shows as it happens (`read_file · package.json (12)`), as a
+  CLI's did. Each step shows its tokens. A partial audit marks the step it
+  runs, keeps the other results and counts once finished.
+
+- A native Ollama audit can write its documents again (KT-967). Five Kronn
+  defects kept a local model from producing an audit step. The main one: the
+  output budget (`num_predict`) was sized once, on the small first-turn
+  window (about 1,900 tokens), and never followed the window as it grew, so a
+  `write_file` holding a whole document was cut off and, since Ollama only
+  emits a completed tool call, nothing was written. The model seemed to
+  announce its write and stop. The output budget now follows the window. In
+  an audit, forced convergence also keeps the write tools, a repeated read
+  stays refused without withdrawing `read_file`, the last eight rounds (or
+  the last quarter of the context) keep only the writers, and a step that
+  wrote its document is no longer failed for reaching the round ceiling. On
+  the same audit step, recorded raw, qwen3.8:27b-mlx and qwen3.6:35b-mlx both
+  went from failing to writing a complete, cited document.
+  A full audit on qwen3.6:35b-mlx then completed 7 of its 16 steps. Most of
+  the failures traced back to Kronn, and these are fixed:
+  - Two tool calls that Ollama sent in parallel were merged into one call with
+    no arguments. The model got "missing required field `path`" and copied the
+    empty call from its own history. Each call now keeps its own arguments.
+  - Filling `docs/AGENTS.md`, the model also wrote four later steps' documents,
+    and those steps found nothing to rewrite. An audit step now writes only its
+    own document (the consolidation step reviews them all).
+  - The date reached the model through three exact phrasings, and step 8
+    matched none, so its TD files were dated 2025. Every step prompt now
+    states today's date, and a `{{DATE}}` left alone in a finished document is
+    filled by Kronn.
+  - Diagnostics now say what to fix: a forgotten field is named instead of the
+    file being called an untouched template, a cited directory (with or
+    without a line) is reported as a directory rather than a missing path, a
+    comment written inside a citation marker is told to move outside it, and
+    a link written from the repository root names the link to write from the
+    document's folder.
+  - Between two attempts Kronn rewrote a step's document itself, so the
+    receipt the model held went stale, and the final write window had already
+    withdrawn `read_file`: the model could no longer write its own document.
+    A step now rewrites its own document without a receipt; every other file
+    keeps the requirement.
+  - The security step looked for keys by extension only (`*.pem`, `id_rsa*`).
+    It now also treats the file beside an `X.pub`, and anything under `.ssh/`,
+    as a key: committed keys were found in 0 of 3 runs before, 3 of 3 after.
+    During an audit, `read_file` refuses a file holding a private key, so the
+    key never reaches the model, which on a hosted model would mean leaving the
+    machine.
+
+- Codex, launched by Kronn in a discussion or a room, can use Kronn's own
+  tools again (KT-953). Kronn starts Codex non-interactively, so a tool left on
+  "ask" was refused ("MCP tool call requires approval, but approval policy is
+  never"): Codex could not read a message, post one, attach a file, generate a
+  media or create a task — even with full access. Kronn now approves its own
+  tools, and only them, in the configuration it hands Codex at launch (so it
+  no longer depends on the sync of `~/.codex/config.toml`) and in the Kronn
+  entry of that file; your other MCP servers keep Codex's own setting. Claude Code and Copilot CLI
+  without full access hit the same wall for a fresh install: they now get
+  Kronn's tools, and nothing else, explicitly allowed (Claude:
+  `--allowedTools=mcp__kronn-internal`; Copilot: `--allow-tool=kronn-internal`).
+  Full access and task workers keep their current permissions.
+  Native MCP posts no longer start an extra answer from their own discussion
+  agent merely because the CLI supplies a runtime session id. Joined peers
+  and explicitly addressed responders keep their routing.
+  Native ACP sessions also receive the owned Kronn bridge without a project;
+  the project-server filter no longer removes it. Its scoped tool permissions
+  cover reads and writes without requiring full access.
+
+- Native tool history now keeps reported names, redacted argument excerpts
+  and observed completion/error status, correlating updates by call id.
+  Repeated calls remain distinct; missing metadata is shown as unknown.
+  Command output, MCP results and patch bodies are not copied into the trace
+  (KT-953).
+
+- A link an agent writes to a file on its machine now leads somewhere
+  (KT-954). Agents often hand over a file by its path
+  (`[the GIF](/private/var/…/loop.gif)`); the link resolved against Kronn's own
+  address and opened nothing. When the agent's message is saved, Kronn now
+  attaches the files it links that sit in the agent's own folder or in the
+  project. Known credential filenames and directories (including `.env`,
+  private keys and `.ssh`) and Kronn's data directory are excluded; each
+  message can add at most eight files and read 64 MiB in total. Persisted links
+  identify the exact attachment, including when two files share a name. Images,
+  videos and text open in the attachment viewer; other files download under
+  their original names. Unavailable paths show a reason instead of a dead
+  link. Project-relative paths open the project viewer at the requested line;
+  attached Markdown images render inline. A discussion without a project runs its agent in its own
+  folder (`~/.kronn/discussions/<id>`) instead of the system's shared temp
+  folder. If that folder cannot be prepared, the turn stops with a visible
+  error instead of falling back to shared temporary files. This working
+  directory and the attachment filters do not sandbox
+  the CLI's filesystem access.
+
+- HTTP audits can write more than twelve findings and their index within a
+  dedicated bounded budget. A missing artifact after a tool ceiling now keeps
+  that cause in its persisted warning (KT-951). Full audits correct verifiable
+  bundled citations, retain originals, and retry remaining documentary blockers
+  at most twice. Resume includes previously successful steps whose documents
+  failed the final gate; invented paths and invalid lines still prevent
+  validation, and human sections remain protected (KT-952).
+
+- An HTTP audit interrupted by a provider error now keeps that cause in the
+  step recap alongside any missing-output warning. A 429 identifies a rate
+  limit or exhausted quota and no longer suggests incompatible tools. Provider
+  bodies stay out of this diagnostic and partial files are preserved. This
+  failure does not automatically retry the request or replay tool effects
+  (KT-955).
+
+- A Full audit gives the model the exact error when its dimension-coverage
+  table is incomplete, using the existing limit of two corrective attempts.
+  Resume recomputes that feedback from the saved index. The table must still
+  pass every check; provider failures do not trigger this correction, and
+  earlier TD files and human-owned sections are preserved (KT-956).
+
+- HTTP audits and discussions can read fresh repository content after writing
+  it. Previously only orchestration workers invalidated cached observations;
+  an audit could receive a pre-edit file or lose its reader as a repeated call.
+  Successful mutations now invalidate those observations and restore readers
+  withdrawn for repetition, while call ceilings, error circuits and cached
+  write effects remain enforced. HTTP token counters also reach the audit's
+  per-step telemetry, summing each provider response once and preserving
+  unknown usage instead of showing zero (KT-948).
+
+- Images attached to a discussion now reach HTTP vision models as image input:
+  OpenAI-compatible connections receive data-URL parts and Ollama receives
+  native image arrays. The model is explicitly told when an image cannot be
+  seen (unknown capability, unreadable file, unsupported format or request
+  limit), instead of receiving only a path and guessing its content. The model
+  catalogue exposes an independent Vision capability and imports image-input
+  declarations separately from image generation. Large uploads are downscaled
+  for transmission without changing the original. A discussion's own attached
+  files are readable outside the workspace, while attachment edits and reads
+  of unrelated outside files remain refused (KT-946).
+
+- Agent instruction templates now defer language and test requirements to the
+  project's parameters. New adapter files no longer copy an English language
+  default, and re-auditing an existing managed block removes its unconditional
+  English rule while preserving user content. The testing checklist follows
+  the configured test policy, and links to Project parameters reach a real
+  Markdown heading.
+
+- The context a local Ollama model is given on a Mac is computed from the model
+  and no longer cut from the installed RAM (KT-943). The ceiling used to be one
+  slice per RAM size — 65,536 tokens on a 64 GB Mac, for every model — which is
+  four times too prudent for `qwen3.8:27b-mlx`: only 16 of its 64 layers cache
+  anything (the others keep a constant state), so a token costs its cache 64 KiB,
+  and 262,144 tokens take 16 GB next to its 18.2 GB of weights, inside the
+  roughly 48 GB macOS lets the GPU use. With nothing configured, the ceiling is
+  now the smaller of the model's own window and what the GPU budget
+  (`iogpu.wired_limit_mb` when set, else 75 % of memory) leaves once the weights
+  and a safety margin (10 %, at least 2 GB) are taken, over the cost of a token
+  of cache. That cost comes from the model itself — `/api/show` for a GGUF
+  model, the `config.json` in Ollama's store for an MLX one, whose `/api/show`
+  does not say — counting only the layers with full attention, and follows
+  `OLLAMA_KV_CACHE_TYPE` (q8_0, q4_0) when the server sets it. That model now
+  runs at its whole 262,144 on 64 GB, about 76,000 on 32 GB, and a dense 70B at
+  about 19,000 on 64 GB. When anything is missing — the attention shape, the
+  weights, a cache type Kronn cannot price, a model with a sliding window — the
+  RAM slice applies exactly as before, and so does it off Apple Silicon. A
+  Settings override and `KRONN_OLLAMA_NUM_CTX_CAP` still win, and the ceiling of
+  a native MLX task worker stays at 32,768. The model list says where the figure
+  comes from — "model estimate (weights + cache)" next to "model window",
+  "machine memory" and the others — and a run held below the model's window
+  names it in its notice. See
+  [Ollama local models](docs/operations/ollama-local-models.md#the-ceiling-is-computed-per-model-kt-943).
+
+- A native backend that relocates its data directory (`KRONN_DATA_DIR`) keeps
+  listening on its configured host instead of `0.0.0.0` (KT-936). The variable
+  used to stand in for "running in Docker", so such a backend was refused at
+  boot by the LAN guard unless `KRONN_HOST=127.0.0.1` was set. Only a real
+  container binds every interface now.
+
+- The model list of Config shows the models OpenCode declares in a project
+  too, and a launch runs the model you chose (KT-928). OpenCode builds its
+  model list per working directory — its user-level config plus the
+  `opencode.json` of that directory — while Kronn read it from a neutral one,
+  so a provider only a project declares, a local Ollama for instance, was in
+  every run of that project and in no selector. Kronn now also asks OpenCode
+  from each registered project that has its own `opencode.json(c)` (or
+  `.opencode/opencode.json(c)`; the files are only checked for, never read),
+  and adds what comes back: a model only a project offers says so in its
+  description, nothing is listed that OpenCode did not report, and a project
+  that fails to answer is left out without failing the refresh. The reader also
+  accepts a model list grouped by provider, which it used to drop whole. On
+  the launch side, a model that the session does not list was silently
+  replaced by OpenCode's own default while the discussion kept showing the one
+  you picked; that launch is now refused with a message naming the model, and
+  nothing is sent to the agent. A value of another session option (an effort
+  level, a mode) can no longer be taken for a model.
+- An audit on OpenCode reads a versioned environment template and no longer
+  aborts when a read is refused (KT-927). OpenCode guards `*.env.*` by pattern
+  and asks Kronn about a read without saying which file, so `.env.dist`, like
+  `.env.example`, `.env.sample` and `.env.template`, was refused together with
+  the real `.env` — and OpenCode ends its whole turn when a question is
+  refused, so one template read aborted the step. Kronn now starts OpenCode
+  with a read policy: the templates are readable, `.env`, `.env.local` and the
+  other real environment files stay refused, and a refusal reaches the agent as
+  the tool's answer instead of ending the turn. For the other ACP agents the
+  broker refuses a read of a real secret file, or of a link to one, even with
+  full access, and allows the templates. A project that already passes its own
+  `OPENCODE_CONFIG_CONTENT` keeps it. See
+  [auditing with an ACP agent](docs/architecture/audit-acp-agents.md).
+
+- "Cancel" stops an audit on an ACP agent in seconds, and the partial audit can
+  be cancelled at all (KT-927). `cancel-audit` killed the process it had on
+  record, which for OpenCode — and for Claude and Codex through their adapters —
+  is a lifeline that does no work: the audit believed the step over while the
+  agent kept reading and writing, for about eight minutes on an OpenCode run. The
+  stop now cancels the agent's ACP session and shuts its process down, with
+  what it started. The partial audit had no cancellation whatsoever, for any
+  agent: Cancel set a flag nothing read and the refresh ran to its end; it now
+  stops between steps and during one, ends as Cancelled, and leaves the baseline
+  alone.
+
+- The steps of an audit on an ACP agent record the tokens they consumed
+  (KT-927). Only Claude's own stream was read, so every step of OpenCode — or of
+  any ACP agent, Claude and Codex included — counted 0 tokens, per step and per
+  run. The recap now keeps input, output and cache read/written apart, as the
+  runtime reports them (migration 205), for the Full and the partial audit. A
+  runtime that reports nothing gives an unknown figure (`—`), never 0; the run
+  total is unknown until a step has reported.
+- A local model can now read a large API response in parts instead of losing it
+  (KT-929). The `api_call` tool of the HTTP agents (Ollama, LiteLLM, NVIDIA)
+  takes an `extract`, a JSONPath applied to the response, the same one workflows
+  and the CLI bridge already took; only what it selects comes back. Until now a
+  response too big for the window was shortened with the advice to "ask for a
+  part you have not seen", and the tool had no way to ask. The model asked again
+  for the same thing, was refused as a repeat, and the turn ended half done: a
+  SpeedCurve answer with LCP, FCP, INP and TTFB missing. A shortened API result
+  now says what it holds (its keys, with the paging shown as values, the length of
+  its main list, the keys of one element down to its nested objects) and gives
+  paths that select something on that very response, one of them for a whole
+  element. A call that differs from the previous one only by its `extract` or a
+  query parameter is a new question and runs; only an identical call is answered
+  as a repeat. A result that was already an extract is told to select less
+  instead. Measured on a 198 KB answer of a hundred runs in a 32K window: the
+  first result is shortened to 8 KB, one targeted call returns the four metrics of
+  all runs in 2 KB, and the conversation stays at 19,319 of 32,768 tokens. The
+  window itself is unchanged: a discussion already runs `qwen3.8:27b-mlx` at
+  65,536 tokens on a 64 GB Mac, and the 32K ceiling applies only to a native MLX
+  worker (see `docs/operations/ollama-local-models.md`).
+
+- A room that a CLI peer joined without being identified opens again
+  (KT-925). The bridge joins such a peer as `Unknown`; the discussion detail,
+  its default targets, native replies and room imports then failed with
+  "unknown persisted agent type", and the room never rendered. That peer is
+  now skipped as a typed target and logged. The bridge also recognises
+  OpenCode, which was joining as `Unknown`, and a discussion whose first load
+  fails says why, with a retry, instead of loading forever.
+
+- Frontend dependencies: `brace-expansion` is pinned to 5.0.12, which fixes
+  GHSA-qhr7-859c-m2p7 and two related advisories (denial of service by
+  recursion, quadratic expansion). It is only used by the lint tooling.
+
+- Backend tests: the workflow test that reads a running step's tool call no
+  longer depends on a Claude CLI being installed on the machine. The agent
+  preflight now accepts an agent served by a test ACP route, so the test
+  passes on a CI runner without `claude` on the PATH. Nothing changes outside
+  tests.
+
+- The Automation sidebar folds every group, the first one included (KT-921).
+  The group that held the open automation was forced open, and the first group
+  (Workflows) almost always does: clicking its header did nothing. A group now
+  folds and unfolds like the others, whatever it holds, by type or by project;
+  the open automation stays open in the main column. A search or a multiple
+  selection still lays the groups open. With "None" there is no group, hence
+  nothing to fold.
+
+- The Skills type lists the skills a project actually uses, wherever they come
+  from (KT-921). A native skill of a repository that you "used in Kronn" from
+  the AI & automation tab (`block-migration` in `.agents/skills/`, say) had no
+  place on the Automation page, which only read the Kronn catalog and the
+  projects' default skills. It now sits under its project, with where it lives
+  ("Repository · .agents/skills"), and its sheet shows the `SKILL.md` read from
+  the repository — masked and rendered as safe Markdown like any repository
+  file, and read only for a skill the project really uses. So does a skill Kronn
+  published into a repository (`kronn.lock`). Such a skill is edited in its
+  repository: the sheet offers neither the Config link nor a delete. New routes:
+  `GET /api/projects/used-skills` (all projects at once, two small reads each)
+  and `GET /api/projects/:id/repository-resources/skills/content`.
+
+- The Automation list no longer shows the whole skills catalog (KT-921). In
+  "All" and in Skills, only the skills used by at least one project are listed
+  — attached, referenced from a repository, or published into it. The others
+  wait at the bottom, folded, under "Voir les skills disponibles (N)", in the
+  three groupings. A search still finds them and lays the section open; the
+  type and project counters and the library total count what the list shows.
+
+- The skills of a discussion are grouped, searchable, and include the ones a
+  repository holds (KT-923). The skill picker of "New discussion" and of a
+  discussion's settings listed the whole catalog flat, without the native
+  skills of the project's repository (`block-migration` in `.agents/skills/`
+  could not be picked). Both now share one picker with the Automation page's
+  logic: "Utilisés par ce projet" first (attached, referenced from the
+  repository or published, with "Dépôt · .agents/skills" for a repository
+  skill), then the skills already ticked, then the rest of the catalog by
+  category behind "Voir les skills disponibles (N)". A search on the name or
+  the description lays out what matches; a discussion with no project shows the
+  catalog by category. Nothing is fixed in the front: the lists are read from
+  `GET /api/skills` and `GET /api/projects/used-skills` each time the picker
+  opens, the section follows the project chosen in the form at once, and a skill
+  used, published or attached since — or gone from the repository — shows or
+  disappears on the next opening, without reloading the page. A ticked skill
+  that no longer exists stays visible, flagged, so it can be removed. A
+  repository skill is stored as `repository:<project>:<slug>` in the
+  discussion's `skill_ids`, and the agent really receives it: at each send the
+  backend reads its `SKILL.md` from the project's repository, for a path the
+  project uses only, never through a symbolic link or out of the repository,
+  masked like any repository text and cut at 64 KiB, then injects it in a
+  "Repository Skills" block of the prompt (compact for the agents that take
+  compact skills). A skill it cannot load — another project's, no longer used,
+  file gone — is said at the head of the reply, never dropped silently. A
+  `SKILL.md` edited between two messages is read again by the second. Only the
+  `SKILL.md` is injected; skills with extra files stay KT-919.
+
+- The AI & automation tab of a project with many automations no longer takes
+  seconds to load (about 5.2 s in front_euronews, the same on every read).
+  Each read rendered every automation and masked its secrets again, and built
+  the diffs of every differing one. The listing now carries no diff, only the
+  status; the diffs come from `.../repository-resources/comparison` when
+  the Compare sheet opens. The masked rendering of a resource is kept in memory
+  under a fingerprint of the content it was made from, so the same content is
+  never masked twice, and text that cannot hold a secret no longer goes through
+  the masking regexes (a check on the literal every match must contain, with a
+  property test that the output is unchanged). Masking is otherwise the same:
+  the same patterns, the same non-leak tests. The links between resources
+  (`uses`, `used_by`, the "N linked" badge, the transfer announcements) stay in
+  the listing and do not depend on the diffs: on 120 resources, 40 of them
+  workflows of 15 steps, they cost about 2 ms when nothing is published and
+  about 9 ms when every resource has its repository file, out of about 100 ms.
+- An approved delivery the integration sends back (a validation that goes red, a
+  merge conflict) no longer stays in `ChangesRequested` with nobody working it
+  and nobody told. The send-back now re-activates the worker with the failing
+  command, its exit code and its output (a joined CLI is re-offered the next
+  attempt, a native worker is redispatched) and posts a notice, with the same
+  evidence, to the principal that approved. The principal can also run the
+  integration again on the same approved delivery with `task_exec_resume` when
+  the failure did not come from it (a flaky test, the environment): no new
+  delivery, the validations already green for that candidate are not re-run, and
+  it is refused once the worker committed or delivered again.
+- `task_exec_launch` no longer accepts a validation Quick Exec can never run
+  (`cd frontend && npx tsc -b`, `CARGO_TARGET_DIR=… cargo test`, a pipe, a
+  binary off the allowlist). It was accepted, the worker delivered, the review
+  approved, and the integration then refused the command (`` `cd` is not in the
+  Quick Exec allowlist ``) and sent an approved task back to `ChangesRequested`.
+  The launch, the campaign policy and the preflight now refuse it up front, with
+  the form that runs.
+- The brief of a worker with a shell no longer tells it to "run the validations".
+  It runs the targeted tests; the long validations the principal persisted are
+  played by Kronn at integration, and the worker commits and delivers in the same
+  turn without waiting on a background command. A full `cargo test` started in the
+  background outlived the 600 s shell limit, the worker handed the turn back to
+  wait for it and ended without delivering (`worker_completed_without_delivery`,
+  twice on KT-847).
+- The merge commit Kronn creates when it integrates a task branch now carries
+  the `Signed-off-by` of the configured git identity, so a repository that
+  enforces the DCO no longer turns the release PR red on it.
+- `task_exec_commit` (and `git_commit` for native workers) can finish a merge in
+  progress: when a worker integrates the target branch into its own, Kronn
+  commits the merge with both parents and the sign-off instead of failing on
+  git's "cannot do a partial commit during a merge". It refuses, without
+  touching the merge state, while a conflict is unresolved or a path outside the
+  merge and `files` is staged. The worker brief now says how to integrate the
+  target branch and never to erase `MERGE_HEAD`: a single-parent commit made
+  the target's files look added on both sides at integration.
+- One exhausted provider quota that escalated several executions no longer
+  keeps each of them from going back to that provider: reassigning one of them
+  to the same provider now counts as the human "the quota is back" signal for
+  the whole outage and re-arms it, so the others stop blocking whichever is
+  reassigned first. A new real quota failure blocks the provider again.
+- When the provider's refusal announces a reset time (Claude Code's
+  `resets 4:20pm (Europe/Paris)`), Settings → Agents now shows "Rearmable at
+  16:20" beside the re-arm button. It is a hint only; nothing re-arms
+  automatically. See [Provider quota re-arm](docs/operations/provider-quota-rearm.md).
+- The cost shown for an agent reply is no longer a guess. It was the reported
+  token total split 60/40 into input and output at one fixed rate per agent, so
+  a Codex run that was 98.6% cache reads (25.2M tokens, about $13.5 at API
+  rates) showed $111. The cost is now computed from the four counters the
+  runtime reports (input not served from cache, cache reads, cache writes,
+  output) at the rates of the model that served the reply, and Codex's
+  `cached_input_tokens` is now read. When the counters or the model's rate are
+  missing, the cost stays unknown, and the execution card says why (a total
+  only, a model with no confirmed rate). Rates cover the GPT-4.1 to GPT-5.6 and
+  Claude 3.5 to Fable 5.1 families, checked against LiteLLM's price list; a
+  model outside them is unpriced until its rate is confirmed. Replies
+  already stored keep their earlier cost.
+- The in-app token total no longer hides the cache. The discussion header and
+  the execution card show the real input, the cache reads and the output apart
+  once every reply reported them, and flag a split that covers only some
+  replies. The `session_budget` signal reports the four traffic counters and
+  the cache share beside its `traffic_tokens` axis; the axis itself still counts
+  cache reads, as it was calibrated to.
+- A model that goes silent now fails the run instead of freezing it, and
+  stopping a run frees the model (KT-932). On 30/09 a laptop slept in the middle
+  of a generation: Ollama was idle when it woke, but OpenCode kept an open,
+  mute connection to it and the step stayed frozen until the process was killed
+  by hand — the 600 s limit on event streams only covers what Kronn sends to the
+  browser. ACP agents and the native HTTP agents (Ollama, LiteLLM, NVIDIA,
+  external API) now carry an inactivity watchdog on the model's own output.
+  Progress restarts it — every chunk of an HTTP stream, every frame of an ACP
+  agent, a reasoning chunk that shows nothing included — so a slow model that
+  keeps talking is never cut; a silence of the full delay fails the run with a
+  message saying what stopped, for how long, how far it had got and what Kronn
+  did about it, and cancels the generation. The delay is the discussion's
+  **Agent inactivity timeout** (Config › Server) or the step's
+  `stall_timeout_secs`, and never less than 15 minutes in a discussion, so the
+  first token of a large model loaded cold gets through; anywhere else it is 15
+  minutes. A stalled step is recognised as a stall by its `on_timeout` routing,
+  as before. A request that is not streamed (constrained JSON) has nothing to
+  watch while it runs and keeps only its own timeout. Stopping an agent — Stop,
+  a cancel, a kill — closes its connection to the model, which is what makes
+  Ollama stop generating instead of finishing for nobody while the next request
+  queues behind it: the HTTP stream is dropped, and an ACP agent is cancelled
+  and shut down with its whole process group. Both are covered by tests against
+  a simulated Ollama that watches the connection. A long but silent ACP tool
+  call — OpenCode running `cargo test` or a build — is not mistaken for a dead
+  model: while a tool call is open the watchdog measures silence against a
+  bound of its own, eight times the model's delay, and hands the clock back to
+  the model the instant a terminal update closes the call; a tool call that
+  never closes is still cut, by its own bound, with a reason naming the tool.
+  See [Agent timeouts](docs/architecture/overview.md).
+- A tool call the model wrote badly no longer ends an Ollama turn, and the
+  failure no longer blames the context window (KT-942). Ollama reads the tool
+  call itself — Qwen writes it as XML — and when the text is malformed it ends
+  the stream with an error such as `XML syntax error on line 13: element
+  <parameter> closed by </function>`; Kronn took that for fatal and stopped the
+  turn, with the note about the context window (« Kronn is running it at 65536 —
+  raise it with `KRONN_OLLAMA_NUM_CTX_CAP` ») ahead of it, pointing at a setting
+  that had nothing to do with it. The same request is now sent again, at most
+  twice: generation is stochastic and a second try usually yields a valid call.
+  Nothing is added to the prompt. Nothing ran for the refused call, so the
+  replay is safe after earlier tool rounds too — the tools already run are not
+  run again — and each replay is written to the run's retry trace. If the model
+  keeps writing an unreadable call, the turn still fails, visibly, and the
+  message now says the model produced an unreadable tool call instead of
+  leading with the context note. Covered by tests against a simulated Ollama
+  that refuses the call once, after a tool round, and every time.
+
+- A LiteLLM model the proxy lists but cannot serve is now caught by the test,
+  marked in the catalogue, and explained in the discussion (KT-941). On 01/10
+  the proxy listed 96 models and Kronn showed all 96 as available, yet every
+  `vertex_ai/…` one answered a 404 ("Publisher model … was not found or your
+  project does not have access") and one a 401 ("Not allowed … due to tags
+  configuration"): a connection whose default was `vertex_ai/claude-sonnet-5`
+  failed every turn, and the error was the proxy's raw, nested and escaped
+  JSON, which named no model and said nothing to do. **Test** now sends a
+  one-token call to the model chosen for each tier — economy, default,
+  reasoning — and shows, under each selector and on the connection card,
+  whether that model answers or is not found, refused by the proxy, failing or
+  too slow. The connection stays usable when one tier fails: the pickers keep
+  the catalogue so another model can be chosen. A bare 401 on every model is
+  still reported as a rejected key, not as three refused models, and neither
+  the upstream body nor the key is ever in the result. A model that answers a
+  real call with a 404, or a 401/403 naming the proxy's own allow-list, is
+  marked unavailable in the model catalogue with its reason (not found, access
+  denied) and its HTTP code — whether it was found by Test or by a turn that
+  failed — and the selectors show it as unavailable with that reason. Being
+  listed again does not clear it; a successful call does (the next Test of that
+  model, or Retry on the LiteLLM card). A flagged model is refused up front,
+  naming it, instead of re-sending a call that cannot succeed, and Kronn never
+  runs another model in its place. The discussion now reads "Model “X” is not
+  accessible through this proxy (HTTP 404: not found or access denied). Choose
+  another model in Config › Agents › LiteLLM." (in the discussion's language),
+  with the proxy's raw answer under *Technical details*. That sentence had never
+  appeared for a real error: Kronn read the status of `LiteLLM error 404: …` as
+  `404:` and found none, so every provider error skipped the model diagnostics
+  and surfaced as the raw body; the status is now read correctly, for every HTTP
+  agent.
+
+- Releases carry their desktop installers again (KT-970). 0.12.0 to 0.14.1
+  were published with no asset: the build workflow only ran on `v*` tags,
+  while this repository tags `0.14.1`, so the update banner led desktop users
+  to empty release pages. The workflow now runs on both forms, creates a
+  draft release with the four installers, and fails unless the published
+  release carries one for every platform. It can also attach installers to
+  an existing release, built from that release's tag. In the desktop app, the
+  update banner only offers a version whose installer exists for your
+  platform. See `docs/operations/releasing.md`.
+
+- A question card written correctly is no longer refused as "not valid JSON"
+  (#223). Claude Code's text blocks were joined with no separator, so the next
+  block — a turn a Stop hook relaunched, or the text after a tool call — was
+  glued to the closing fence of a `kronn-question`, which then never closed.
+  Each new block now starts on a line of its own, in the stored reply as in
+  the live stream, in discussions, orchestration, workflows and the ACP
+  adapter. A fence that is really left open is now named as such rather than
+  as invalid JSON.
+
+- A discussion no longer says its connection was interrupted while the agent
+  is fine (#220). The "Realtime connection interrupted — reconnecting" banner
+  showed on every WebSocket close, even one that reconnected within a second;
+  it now waits until the reconnect has lasted three seconds. A reply's
+  "Stream connection interrupted" note followed the local stream only; it now
+  shows only when the server no longer reports the agent as running.
+
+- The Projects page opens without waiting seconds (KT-987). Every refresh of
+  the project list, on any page, asked each audited project for its drift —
+  which hashes every source the audit mapped — and repeated it on the next
+  refresh; the first open measured 3.9 s for one project. Drift is now asked
+  only on the Projects page, once per project and audit state, and the
+  backend reuses a result for a minute while the audit manifest is unchanged
+  (an audit recomputes it at once). The project list, a project, its drift and
+  audit details no longer wait behind database writes (a first list measured
+  8.5 s while a workflow was writing), and the projects' docs are read in
+  parallel.
+
+- Kronn shows one loading screen from launch to ready, and no longer looks
+  broken while its local service restarts (KT-986). Starting showed the Kronn
+  loader, then unstyled black text, then "Cannot connect to backend" after
+  about 10 s — a restart with migrations takes longer — and each tab then
+  showed its own "Chargement…". Now the loader painted by the first frame stays
+  until the first projects and discussions are in, and only its sentence
+  changes ("Connecting to the local service…", then "The local service is
+  starting…" with a Retry). It keeps trying instead of giving up, and every tab
+  is fetched in the background so switching never waits. When the service
+  stops while Kronn is open, a "Local service restarting — reconnecting…" pill
+  appears at once (it used to wait for a 30 s poll, leaving Projects or
+  Plugins empty with no explanation), and the loads that failed retry on their
+  own when it answers again.
+
+- The Discussions page no longer freezes on a large base (KT-983). Opening it
+  listed batch runs by reading every workflow run's results, 20 to 40 s on a
+  10 GB base, while the first opened discussion waited behind that request; it
+  now reads an index (45 ms). A discussion's git status also waited on
+  `gh pr view` every time: the pull-request link is now cached for two minutes
+  and the lookup gives up after 4 s. Selecting a discussion re-rendered every
+  card of the sidebar (about 200 ms per click); only the two cards that change
+  now re-render.
+
+- In Docker, agents can no longer control the host's Docker (KT-979). The
+  host's Docker socket was mounted into the container, so any agent could use
+  it to take over the machine. It is now off by default; the project Docker
+  panel says how to turn it on (`KRONN_DOCKER_SOCKET=1` in `.env`, then
+  `make start`) and what that allows.
+
+- In Docker, the backend's MCP sync no longer writes tokens into the CLIs'
+  global configs (KT-965). `~/.codex/config.toml`, `~/.copilot/mcp-config.json`,
+  `~/.gemini/settings.json` and `~/.claude.json` are mounted from your home and
+  read by every agent in the container, whatever its project; an MCP that
+  carries secrets is now left out of them, with a warning in the log. Natively
+  nothing changes.
+
+- Kronn's data directory is now readable by its owner only (KT-990, first
+  step). On Linux it was `0755`, and the database, its WAL and its backups
+  `0644`: any account on the machine could read discussions and the encrypted
+  secrets. The directory is set to `0700` and every database file to `0600` at
+  start-up. Agents run as your user, so this does not keep them out — that
+  isolation is planned for 0.14.3.
+
+- In Docker, a project's MCP file that already held a token gives it up
+  (found by the 0.14.2 Docker run-through). An entry Kronn had not written
+  itself, by hand or by the old `kronn mcp sync`, was kept as the user's, value
+  included, even after Kronn imported that MCP and encrypted its token; and the
+  backup taken before the rewrite held the token too. An entry that runs the
+  server of an MCP Kronn manages is now rewritten with references, and the
+  backups are written without the values.
+
+- In Docker, Codex can run commands in a discussion again. Since 0.13.0 the
+  adapter that discussions use kept Codex's own sandbox inside the container,
+  where it cannot start ("bwrap: No permissions to create a new namespace"),
+  so every command failed; there the container is the boundary, as it already
+  was for the direct launch. This covers the later turns of a discussion too,
+  which resume the Codex session and could not take the sandbox flag.
+
+- In Docker, an agent in a discussion receives the values its project's MCP
+  references stand for. Kronn recorded them under the project's host path,
+  while discussion agents start under the container's `/host-home` mount of the
+  same directory, so no reference resolved and the project's MCPs ran without
+  their tokens.
+
+- In Docker, a Claude Code discussion gets its project's MCPs. The adapter
+  that discussions use dropped the whole project registry: it read a
+  `${KRONN_MCP_…}` reference as a credential, and the synced `kronn-internal`
+  entry, which points at the script path the host can see, as a foreign
+  declaration. A pure reference now counts as what it is, and Kronn's own
+  bridge replaces the synced copy.
+
+- In Docker, a Claude Code discussion works past its first message. The
+  volumes that keep Claude Code's sessions were created owned by root, so
+  Claude Code, which runs with your UID, could not save a session and every
+  later turn failed with "Claude Code reported an unsuccessful result". The
+  image now creates them for your user, and `make start` repairs volumes
+  created before.
+
+- `kronn mcp sync` no longer writes tokens in clear into repositories while
+  Kronn runs in Docker (KT-963). It generated each repository's `.mcp.json`
+  from `~/.config/kronn/secrets.toml`, values included, where every agent of
+  the container could read them. It now refuses there and points to Kronn's
+  MCPs page, which keeps secrets encrypted; natively it still works and says
+  that the tokens are in clear. `KRONN_ALLOW_PLAINTEXT_MCP=1` forces it.
+
+- Kronn no longer writes agent files for CLIs this machine does not have, and
+  a project can keep them out of its repository altogether (KT-971). The MCP
+  sync wrote `.mcp.json`, `.kiro/`, `.gemini/`, `.vibe/`, `.ai/` and `.gitignore`
+  lines into every repository, for every CLI, installed or not, with no way to
+  turn it off. It now writes only the files of installed CLIs, and the project
+  overview offers **Agent files: in the repository / outside the repository**.
+  Outside, Kronn writes nothing in the repository and takes back what it had
+  put there — your own MCP entries stay; Claude Code keeps its MCP servers,
+  read from Kronn's data directory, while Kiro, Gemini and Vibe have none for
+  that project.
+
+- The first `make start` no longer leaves root-owned folders in your home
+  (KT-960). Docker created every missing mount source itself, as root —
+  `~/.codex`, `~/.config/rtk`, `~/.kiro`… — and turned a missing
+  `~/.claude.json` into a directory. They are now created as you before the
+  containers start, read from `docker-compose.yml` so the list never drifts.
+
+- In Docker, agents can no longer read the host's credential files through
+  the read-only home mount (KT-962). `make start` now covers each credential
+  path that exists on the host (`~/.config/kronn`, `~/.ssh`, `~/.aws`,
+  `~/.config/gh`, `~/.netrc`…) with an empty read-only mount in the generated
+  `docker-compose.override.yml`. Restart with `make start` to apply it.
+
+- In Docker, project MCP files no longer hold credential values (KT-964).
+  Claude Code's `.mcp.json` now refers to them (`${KRONN_MCP_…}`), and Kronn
+  gives the values only to an agent it starts in that project. Kiro, Gemini
+  and Vibe get no credential-bearing MCP in Docker until they are proven to
+  read such references. Natively, nothing changes.
+
+- An HTTP agent's file search can no longer flood its own context (KT-959).
+  On 02/10 a framing step asked `find_files` for `**/*` over a PHP repository
+  with `vendor/`: the answer listed every one of up to 20 000 files, about
+  880 000 tokens, which every later turn sent again until the request outgrew
+  the model and the proxy failed it nine minutes in. `find_files` and recursive
+  `list_files` still walk and count the whole tree, but return only the entries
+  that fit in 64 KiB, with the number left out and a hint to narrow the
+  pattern. Any other tool answer is cut at 320 KiB, saying so, before it enters
+  the history.
+
+- A LiteLLM model that answers 404 is now flagged wherever it is picked, and
+  can no longer be saved on a tier by mistake (KT-957). On 02/10
+  `vertex_ai/claude-opus-5` was set as the standard tier, failed every message
+  with a 404, and stayed "available": a discussion with no connection chosen
+  runs on the LiteLLM connection, but Kronn recorded the failure under the
+  agent's own catalogue, where no model is listed, so nothing was ever flagged
+  and the next message was sent anyway. The failure, the up-front refusal and
+  the Retry button now use the connection's catalogue, and the model pickers of
+  such a discussion read it too. **Test** on a LiteLLM connection now calls
+  every chat model the proxy lists, once and with one token, in parallel and
+  within about a minute, and records what each answered: on 02/10 the proxy
+  took 9 s to refuse `vertex_ai/claude-fable-5@default` by its tag rules, so
+  model calls now wait up to 20 s instead of 6 s, which had read that refusal
+  as a timeout. Saving a LiteLLM connection calls each tier model it changes;
+  a model the proxy refuses (not found, or not allowed for this key), or that
+  the catalogue already knows it refuses when the call proves nothing, is kept
+  only after an explicit confirmation that names it. A rejected key does not
+  block the save, and an unchanged model is not called again. Lists mark a
+  model ✅ once a real call (a test, a save, a reply) has answered, ❌ when the
+  proxy refused it, with the reason on hover, and nothing when no call has
+  proved either — being listed is not being served. A refused model cannot be
+  picked for a tier, nor for the image or video slot. While the test calls
+  the models, it shows how far it has got (`12/96`), so a minute of waiting
+  never looks like a hang. What each model is for — chat, image or video
+  generation, embedding — is now read from the proxy itself (`model_info.mode`,
+  from `/model/info` or `/model_group/info`): image and video lists are
+  filtered on it as for OpenRouter, and only chat models are called.
+
 ## [0.14.1] - 2026-09-26
 
 ### Added

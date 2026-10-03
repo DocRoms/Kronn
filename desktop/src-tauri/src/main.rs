@@ -752,6 +752,11 @@ async fn start_backend(
     // Start wake lock watcher (toggles OS wake lock based on active cron workflows)
     tokio::spawn(wake_lock_watcher(database));
 
+    // KT-915 — render the resources of every project ahead of its first
+    // listing, and again after they are edited. Mirror of the spawn in
+    // backend/src/main.rs (feature in the lib, spawn per-binary).
+    let prewarm = kronn::api::projects::resource_prewarm::Prewarm::start(state.db.clone());
+
     // Build API router
     let api_router = build_router(state);
 
@@ -777,11 +782,13 @@ async fn start_backend(
     kronn::core::net_expose::record_bound_host(&bind_host);
     tracing::info!("Kronn ready on http://{}", addr);
 
-    axum::serve(
+    let served = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await?;
+    .await;
+    prewarm.stop().await;
+    served?;
     Ok(())
 }
 
@@ -849,6 +856,8 @@ async fn pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 // ── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
+    // The update banner then only offers a release that has an installer.
+    std::env::set_var(kronn::api::version::DESKTOP_APP_ENV, "1");
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_writer(std::io::stdout)

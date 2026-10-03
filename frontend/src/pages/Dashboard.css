@@ -976,6 +976,66 @@ html[data-density="large"] .dash-main {
 }
 
 /* ── Delete confirmation area ──────────────────────────── */
+.project-agent-files {
+  margin-top: var(--kr-sp-6);
+  padding-top: var(--kr-sp-6);
+  border-top: 1px solid var(--kr-border-ghost);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.project-agent-files h4 {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.project-agent-files-help,
+.project-agent-files-where,
+.project-agent-files-cleaned {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+}
+
+.project-agent-files-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  cursor: pointer;
+}
+
+.project-agent-files-option[data-selected='true'] {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+
+.project-agent-files-option span {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+}
+
+.project-agent-files-option strong {
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.project-agent-files-error {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: rgb(var(--kr-error-rgb));
+}
+
 .dash-delete-zone {
   margin-top: var(--kr-sp-6);
   padding-top: var(--kr-sp-6);
@@ -3072,6 +3132,31 @@ html[data-density="large"] .dash-main {
   color: var(--kr-warning);
 }
 
+.project-overview-linked-repos {
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-md);
+  background: var(--kr-bg-card);
+}
+
+.project-overview-linked-repos-title {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+}
+
+.project-overview-linked-repos-title > svg {
+  color: var(--kr-accent-ink);
+}
+
+.project-overview-linked-repos-title > span {
+  margin-left: auto;
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+}
+
 .project-overview-dependencies {
   overflow: hidden;
   border: 1px solid var(--kr-border-light);
@@ -3233,7 +3318,7 @@ html[data-density="large"] .dash-main {
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='code'] .project-detail-section[data-project-view='code'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='docker'] .project-detail-section[data-project-view='docker'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='git'] .project-detail-section[data-project-view='git'],
-.project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='resources'] .project-detail-section[data-project-view='resources'] {
+.project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='resources'] .project-repository-resources[data-project-view='resources'] {
   display: block;
 }
 

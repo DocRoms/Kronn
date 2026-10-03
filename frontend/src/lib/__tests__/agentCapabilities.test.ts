@@ -29,6 +29,16 @@ describe('agentCapabilities', () => {
       expect(canRunAudit(agent({ agent_type: 'OpenCode' }))).toBe(true);
     });
 
+    it('allows Ollama and LiteLLM, whose file tools Kronn runs scoped to the project (KT-924)', () => {
+      expect(canRunAudit(agent({ agent_type: 'Ollama' }))).toBe(true);
+      expect(canRunAudit(agent({ agent_type: 'LiteLlm' }))).toBe(true);
+    });
+
+    it('allows every HTTP provider at the user\'s choice (KT-980)', () => {
+      expect(canRunAudit(agent({ agent_type: 'Nvidia' }))).toBe(true);
+      expect(canRunAudit(agent({ agent_type: 'Custom' }))).toBe(true);
+    });
+
     it('rejects an agent absent from the allowlist even when usable', () => {
       expect(canRunAudit(agent({ agent_type: 'Vibe' }))).toBe(false);
     });

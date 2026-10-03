@@ -21,7 +21,8 @@ const COLUMNS: &str =
     "id, runtime_target_id, agent_type, model_id, display_name, display_alias, provenance, \
     availability, unavailable_reason, unavailable_detail, capabilities_json, \
     reasoning_modes_json, default_reasoning_mode, tier_assignment, cost_hint, privacy_note, \
-    manual_origin, first_seen_at, last_seen_at, last_checked_at, created_at, updated_at";
+    manual_origin, first_seen_at, last_seen_at, last_checked_at, created_at, updated_at, \
+    resolved_model, description, last_answered_at";
 
 pub fn canonical_id(runtime_target_id: &str, model_id: &str) -> String {
     let payload = format!("{runtime_target_id}\0{model_id}");
@@ -177,6 +178,8 @@ fn format_reason(r: ModelUnavailableReason) -> &'static str {
         ModelUnavailableReason::InvalidCatalog => "invalid_catalog",
         ModelUnavailableReason::ProviderError => "provider_error",
         ModelUnavailableReason::Unsupported => "unsupported",
+        ModelUnavailableReason::NotFound => "not_found",
+        ModelUnavailableReason::AccessDenied => "access_denied",
     }
 }
 
@@ -188,6 +191,8 @@ fn parse_reason(s: &str) -> ModelUnavailableReason {
         "cli_missing" => ModelUnavailableReason::CliMissing,
         "invalid_catalog" => ModelUnavailableReason::InvalidCatalog,
         "unsupported" => ModelUnavailableReason::Unsupported,
+        "not_found" => ModelUnavailableReason::NotFound,
+        "access_denied" => ModelUnavailableReason::AccessDenied,
         _ => ModelUnavailableReason::ProviderError,
     }
 }
@@ -235,6 +240,8 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
         agent_type: parse_agent_type(&row.get::<_, String>(2)?)?,
         model_id: row.get(3)?,
         display_name: row.get(4)?,
+        resolved_model: row.get(22)?,
+        description: row.get(23)?,
         display_alias: row.get(5)?,
         provenance: parse_provenance(&row.get::<_, String>(6)?),
         availability: if row.get::<_, String>(7)? == "available" {
@@ -265,6 +272,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
         last_checked_at: parse_dt(row.get(19)?),
         created_at: parse_dt(row.get(20)?),
         updated_at: parse_dt(row.get(21)?),
+        last_answered_at: row.get::<_, Option<String>>(24)?.map(parse_dt),
     })
 }
 
@@ -332,7 +340,7 @@ pub fn create_manual(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10)"
+             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10,NULL,NULL,NULL)"
         ),
         params![
             id,
@@ -489,6 +497,8 @@ pub fn resolve_tier_entry(
 pub struct DiscoveredModel {
     pub model_id: String,
     pub display_name: String,
+    pub resolved_model: Option<String>,
+    pub description: Option<String>,
     pub capabilities: Vec<String>,
     pub reasoning_modes: Vec<String>,
     pub default_reasoning_mode: Option<String>,
@@ -550,6 +560,13 @@ pub fn reconcile_live(
     validate_runtime_target_projection(runtime_target_id, agent_type)?;
     let now = Utc::now().to_rfc3339();
     let existing = list_for_target(conn, runtime_target_id)?;
+    // A LiteLLM proxy lists a model once per deployment: keep the first, or the
+    // second insert breaks the unique key and the whole refresh rolls back.
+    let mut seen = std::collections::HashSet::new();
+    let discovered: Vec<&DiscoveredModel> = discovered
+        .iter()
+        .filter(|model| seen.insert(model.model_id.as_str()))
+        .collect();
     let discovered_ids: std::collections::HashSet<&str> =
         discovered.iter().map(|d| d.model_id.as_str()).collect();
 
@@ -562,13 +579,21 @@ pub fn reconcile_live(
                     ModelProvenance::Manual | ModelProvenance::Migrated
                 )
                 .then(|| existing_entry.display_name.clone());
+                // A model the proxy lists but refuses to serve (KT-941) stays
+                // flagged: being listed again proves nothing about whether it
+                // answers. Only a successful call (`mark_available`) clears it.
                 conn.execute(
                     "UPDATE model_catalog_entries SET display_name = ?1, \
                      display_alias = COALESCE(display_alias, ?2), provenance = 'live', \
-                     availability = 'available', unavailable_reason = NULL, \
-                     unavailable_detail = NULL, capabilities_json = ?3, \
+                     availability = CASE WHEN unavailable_reason IN ('not_found','access_denied') \
+                         THEN availability ELSE 'available' END, \
+                     unavailable_reason = CASE WHEN unavailable_reason IN ('not_found','access_denied') \
+                         THEN unavailable_reason ELSE NULL END, \
+                     unavailable_detail = CASE WHEN unavailable_reason IN ('not_found','access_denied') \
+                         THEN unavailable_detail ELSE NULL END, capabilities_json = ?3, \
                      reasoning_modes_json = ?4, default_reasoning_mode = ?5, \
-                     last_seen_at = ?6, last_checked_at = ?6, updated_at = ?6 WHERE id = ?7",
+                     last_seen_at = ?6, last_checked_at = ?6, updated_at = ?6, \
+                     resolved_model = ?8, description = ?9 WHERE id = ?7",
                     params![
                         model.display_name,
                         promoted_alias,
@@ -577,6 +602,8 @@ pub fn reconcile_live(
                         model.default_reasoning_mode,
                         now,
                         id,
+                        model.resolved_model,
+                        model.description,
                     ],
                 )?;
             }
@@ -586,7 +613,7 @@ pub fn reconcile_live(
                 conn.execute(
                     &format!(
                         "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9)"
+                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9,?12,?13,NULL)"
                     ),
                     params![
                         id,
@@ -600,6 +627,8 @@ pub fn reconcile_live(
                         now,
                         cost_hint.map(format_cost_hint),
                         privacy_note,
+                        model.resolved_model,
+                        model.description,
                     ],
                 )?;
             }
@@ -683,6 +712,31 @@ pub fn mark_available(conn: &Connection, runtime_target_id: &str, model_id: &str
         "UPDATE model_catalog_entries SET availability = 'available', unavailable_reason = NULL, \
          unavailable_detail = NULL, last_seen_at = ?1, last_checked_at = ?1, updated_at = ?1 \
          WHERE id = ?2",
+        params![now, id],
+    )?;
+    Ok(affected > 0)
+}
+
+/// Record that the model answered a real call and forget a not-found /
+/// access-denied verdict (KT-941). Narrower than [`mark_available`]: an entry
+/// that is unavailable for another reason (it `Disappeared` from the live
+/// catalogue, say) is never revived by a successful call.
+pub fn clear_model_failure(
+    conn: &Connection,
+    runtime_target_id: &str,
+    model_id: &str,
+) -> Result<bool> {
+    let id = canonical_id(runtime_target_id, model_id);
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE model_catalog_entries SET last_answered_at = ?1, last_checked_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
+    let affected = conn.execute(
+        "UPDATE model_catalog_entries SET availability = 'available', unavailable_reason = NULL, \
+         unavailable_detail = NULL, last_checked_at = ?1, updated_at = ?1 \
+         WHERE id = ?2 AND availability = 'unavailable' \
+         AND unavailable_reason IN ('not_found','access_denied')",
         params![now, id],
     )?;
     Ok(affected > 0)
@@ -842,7 +896,7 @@ pub fn insert_migrated_seed_for_target(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9)"
+             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9,NULL,NULL,NULL)"
         ),
         params![
             id,
@@ -977,6 +1031,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "shared-model".into(),
                 display_name: "Provider Name".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec!["chat".into(), "tools".into()],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1007,6 +1063,8 @@ mod tests {
         let discovered = vec![DiscoveredModel {
             model_id: "m1".into(),
             display_name: "M1".into(),
+            resolved_model: Some("provider/model-1".into()),
+            description: Some("Provider description".into()),
             capabilities: vec![],
             reasoning_modes: vec![],
             default_reasoning_mode: None,
@@ -1019,6 +1077,158 @@ mod tests {
             1,
             "replaying the same snapshot must not duplicate rows"
         );
+        assert_eq!(all[0].resolved_model.as_deref(), Some("provider/model-1"));
+        assert_eq!(all[0].description.as_deref(), Some("Provider description"));
+    }
+
+    fn listed(model_id: &str) -> DiscoveredModel {
+        DiscoveredModel {
+            model_id: model_id.into(),
+            display_name: model_id.into(),
+            resolved_model: None,
+            description: None,
+            capabilities: vec![],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        }
+    }
+
+    #[test]
+    fn a_listed_model_that_refuses_a_call_is_flagged_with_its_reason_and_stays_flagged() {
+        // KT-941 — the proxy lists `vertex_ai/claude-sonnet-5`, a real call
+        // answers 404. Listing it again must not wash that verdict away.
+        let conn = test_conn();
+        let target = "http:connection-a";
+        let discovered = vec![
+            listed("vertex_ai/claude-sonnet-5"),
+            listed("claude-sonnet-4-6"),
+        ];
+        reconcile_live(&conn, target, &AgentType::LiteLlm, &discovered).unwrap();
+
+        assert!(mark_unavailable(
+            &conn,
+            target,
+            "vertex_ai/claude-sonnet-5",
+            ModelUnavailableReason::NotFound,
+            Some("Not found (HTTP 404)"),
+        )
+        .unwrap());
+        reconcile_live(&conn, target, &AgentType::LiteLlm, &discovered).unwrap();
+
+        let entries = list_for_target(&conn, target).unwrap();
+        let flagged = entries
+            .iter()
+            .find(|e| e.model_id == "vertex_ai/claude-sonnet-5")
+            .unwrap();
+        assert_eq!(flagged.availability, ModelAvailability::Unavailable);
+        assert_eq!(
+            flagged.unavailable_reason,
+            Some(ModelUnavailableReason::NotFound),
+            "the reason must round-trip through the catalogue"
+        );
+        assert_eq!(
+            flagged.unavailable_detail.as_deref(),
+            Some("Not found (HTTP 404)")
+        );
+        let healthy = entries
+            .iter()
+            .find(|e| e.model_id == "claude-sonnet-4-6")
+            .unwrap();
+        assert_eq!(healthy.availability, ModelAvailability::Available);
+
+        // A flagged model is no longer a tier's available assignment.
+        let mut assigned = flagged.clone();
+        assigned.tier_assignment = Some(ModelTier::Default);
+        assert!(resolve_tier_entry(&[assigned], ModelTier::Default).is_none());
+    }
+
+    #[test]
+    fn access_denied_round_trips_and_a_successful_call_clears_only_a_call_verdict() {
+        let conn = test_conn();
+        let target = "http:connection-a";
+        reconcile_live(
+            &conn,
+            target,
+            &AgentType::LiteLlm,
+            &[listed("tagged-model"), listed("gone-model")],
+        )
+        .unwrap();
+        mark_unavailable(
+            &conn,
+            target,
+            "tagged-model",
+            ModelUnavailableReason::AccessDenied,
+            Some("tags"),
+        )
+        .unwrap();
+        let entry = list_for_target(&conn, target)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.model_id == "tagged-model")
+            .unwrap();
+        assert_eq!(
+            entry.unavailable_reason,
+            Some(ModelUnavailableReason::AccessDenied)
+        );
+
+        assert!(clear_model_failure(&conn, target, "tagged-model").unwrap());
+        let entry = list_for_target(&conn, target)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.model_id == "tagged-model")
+            .unwrap();
+        assert_eq!(entry.availability, ModelAvailability::Available);
+        assert_eq!(entry.unavailable_reason, None);
+        assert_eq!(entry.unavailable_detail, None);
+        assert!(entry.last_answered_at.is_some(), "the answer is remembered");
+
+        // A model that left the live catalogue is not revived by an answer.
+        reconcile_live(
+            &conn,
+            target,
+            &AgentType::LiteLlm,
+            &[listed("tagged-model")],
+        )
+        .unwrap();
+        assert!(
+            list_for_target(&conn, target)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.model_id == "tagged-model")
+                .unwrap()
+                .last_answered_at
+                .is_some(),
+            "a catalogue refresh keeps what a call proved"
+        );
+        assert!(!clear_model_failure(&conn, target, "gone-model").unwrap());
+        let gone = list_for_target(&conn, target)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.model_id == "gone-model")
+            .unwrap();
+        assert_eq!(
+            gone.unavailable_reason,
+            Some(ModelUnavailableReason::Disappeared)
+        );
+    }
+
+    #[test]
+    fn a_model_listed_twice_by_the_provider_is_stored_once() {
+        let conn = test_conn();
+        let model = |name: &str| DiscoveredModel {
+            model_id: "gpt-shared".into(),
+            display_name: name.into(),
+            resolved_model: None,
+            description: None,
+            capabilities: vec![],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        let discovered = vec![model("first deployment"), model("second deployment")];
+        reconcile_live(&conn, "http:connection-a", &AgentType::LiteLlm, &discovered).unwrap();
+        let all = list_for_target(&conn, "http:connection-a").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].display_name, "first deployment");
     }
 
     #[test]
@@ -1031,6 +1241,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "m1".into(),
                 display_name: "M1".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1057,6 +1269,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "m1".into(),
                 display_name: "M1".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1117,6 +1331,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "m1".into(),
                 display_name: "M1".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1184,6 +1400,8 @@ mod tests {
             agent_type: AgentType::LiteLlm,
             model_id: model_id.into(),
             display_name: model_id.into(),
+            resolved_model: None,
+            description: None,
             display_alias: None,
             provenance: ModelProvenance::Manual,
             availability: ModelAvailability::Available,
@@ -1201,6 +1419,7 @@ mod tests {
             last_checked_at: now,
             created_at: now,
             updated_at: now,
+            last_answered_at: None,
         }
     }
 
@@ -1274,6 +1493,8 @@ mod tests {
                 DiscoveredModel {
                     model_id: "opencode/big-pickle".into(),
                     display_name: "Big Pickle".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1281,6 +1502,8 @@ mod tests {
                 DiscoveredModel {
                     model_id: "anthropic/claude-sonnet-5".into(),
                     display_name: "Claude Sonnet 5".into(),
+                    resolved_model: None,
+                    description: None,
                     capabilities: vec!["chat".into()],
                     reasoning_modes: vec![],
                     default_reasoning_mode: None,
@@ -1312,6 +1535,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "opencode/big-pickle".into(),
                 display_name: "Big Pickle".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,
@@ -1341,6 +1566,8 @@ mod tests {
             &[DiscoveredModel {
                 model_id: "opencode/big-pickle".into(),
                 display_name: "Big Pickle".into(),
+                resolved_model: None,
+                description: None,
                 capabilities: vec![],
                 reasoning_modes: vec![],
                 default_reasoning_mode: None,

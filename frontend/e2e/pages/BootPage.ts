@@ -9,5 +9,8 @@ export class BootPage {
   async goto() {
     await this.page.goto('/', { waitUntil: 'domcontentloaded' });
     await this.mark.waitFor({ state: 'visible' });
+    // The screen is painted by index.html before any script; wait until the
+    // app has mounted and taken it over (its theme provider sets data-theme).
+    await this.page.waitForFunction(() => document.documentElement.dataset.theme !== undefined);
   }
 }

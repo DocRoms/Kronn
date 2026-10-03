@@ -107,6 +107,36 @@ describe('Live Page sandbox', () => {
     relay.dispose();
   });
 
+  it('navigates internal discussion and Page links in the current tab', async () => {
+    const postMessage = vi.fn();
+    const openExternal = vi.fn();
+    const navigateInternal = vi.fn();
+    const relay = createLivePageOpenLinkRelay(
+      'channel-1',
+      openExternal,
+      undefined,
+      undefined,
+      undefined,
+      navigateInternal,
+    );
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    const appUrl = `${window.location.origin}${window.location.pathname}`;
+
+    port.postMessage({
+      type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1',
+      url: `${appUrl}#discussion-disc-42`,
+    });
+    port.postMessage({
+      type: 'kronn:page-open-link', version: 1, channel_id: 'channel-1',
+      url: `${appUrl}#page/page-7`,
+    });
+
+    await vi.waitFor(() => expect(navigateInternal).toHaveBeenCalledTimes(2));
+    expect(openExternal).not.toHaveBeenCalled();
+    relay.dispose();
+  });
+
   it('rejects forged, active-scheme, credentialed and oversized link requests', async () => {
     const postMessage = vi.fn();
     const target = { postMessage } as unknown as Window;

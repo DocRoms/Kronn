@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CatalogModelEntry, ModelCatalogView } from '../../types/generated';
-import { catalogModelOptions, catalogModelProvenance, catalogTierEntry, modelRuntimeTargetId } from '../modelCatalogSelection';
+import { catalogModelOptions, catalogModelProvenance, catalogTierEntry, modelCallVerdict, modelRuntimeTargetId, modelSweepCounts } from '../modelCatalogSelection';
 
 function entry(id: string, patch: Partial<CatalogModelEntry> = {}): CatalogModelEntry {
   return {
@@ -65,19 +65,102 @@ describe('catalogue selection contract', () => {
     }]);
   });
 
+  it.each([
+    ['not_found', 'modelCatalog.reason.not_found'],
+    ['access_denied', 'modelCatalog.reason.access_denied'],
+  ] as const)('flags a listed model the proxy refuses to serve (%s) in the selector, with its reason and detail (KT-941)', (reason, key) => {
+    const detail = 'Not found or access denied (HTTP 404): choose another model.';
+    const target = view([
+      entry('vertex_ai/claude-sonnet-5', { availability: 'unavailable', unavailable_reason: reason, unavailable_detail: detail }),
+      entry('claude-sonnet-4-6'),
+    ]);
+    const options = catalogModelOptions(target, 'claude-sonnet-4-6', (k, ...args) => [k, ...args].join(' '), () => '');
+    const flagged = options.find(option => option.value === 'vertex_ai/claude-sonnet-5')!;
+    // Visible in the list, not selectable, and the reason is in the label.
+    expect(flagged.label).toBe(`❌ vertex_ai/claude-sonnet-5 — modelCatalog.unavailable (${key})`);
+    expect(flagged.disabled).toBe(true);
+    expect(flagged.description).toContain(detail);
+    // The model that answers stays an ordinary, selectable option.
+    const healthy = options.find(option => option.value === 'claude-sonnet-4-6')!;
+    expect(healthy.label).toBe('claude-sonnet-4-6');
+    expect(healthy.disabled).toBe(false);
+  });
+
+  it('marks only a model a real call proved with a check, never one merely listed (KT-957)', () => {
+    const target = view([
+      entry('answered', { last_answered_at: '2026-10-02T07:10:00Z' }),
+      entry('listed'),
+    ]);
+    const options = catalogModelOptions(target, '', (k, ...args) => [k, ...args].join(' '), () => '');
+    const answered = options.find(option => option.value === 'answered')!;
+    expect(answered.label).toBe('✅ answered');
+    expect(answered.description).toContain('modelCatalog.answered 2026-10-02T07:10:00Z');
+    expect(answered.disabled).toBe(false);
+    expect(options.find(option => option.value === 'listed')!.label).toBe('listed');
+  });
+
+  it('reads a legacy LiteLLM or NVIDIA agent from its canonical connection (KT-957)', () => {
+    expect(modelRuntimeTargetId('LiteLlm')).toBe('http:external-api-litellm');
+    expect(modelRuntimeTargetId('Nvidia')).toBe('http:external-api-nvidia');
+    expect(modelRuntimeTargetId('LiteLlm', 'named')).toBe('http:named');
+    expect(modelRuntimeTargetId('Ollama')).toBe('agent:ollama');
+  });
+
+  it('tells what a call proved: this test first, then the saved catalogue (KT-957)', () => {
+    const saved = [
+      entry('refused', { availability: 'unavailable', unavailable_reason: 'not_found', unavailable_detail: 'HTTP 404' }),
+      entry('answered', { last_answered_at: '2026-10-02T07:10:00Z' }),
+      entry('gone', { availability: 'unavailable', unavailable_reason: 'disappeared' }),
+      entry('listed'),
+    ];
+    expect(modelCallVerdict('refused', undefined, saved)).toEqual({ state: 'refused', detail: 'HTTP 404' });
+    expect(modelCallVerdict('answered', undefined, saved)).toEqual({ state: 'answered' });
+    // Unavailable for another reason, or only listed: no call proved anything.
+    expect(modelCallVerdict('gone', undefined, saved)).toBeNull();
+    expect(modelCallVerdict('listed', undefined, saved)).toBeNull();
+    // A fresh test wins over what the catalogue remembers.
+    const checks = [
+      { tier: 'default' as const, model: 'refused', ok: true, status: 'ok' as const },
+      { tier: 'economy' as const, model: 'answered', ok: false, status: 'access_denied' as const, hint: 'refused by tags' },
+      { tier: 'reasoning' as const, model: 'listed', ok: false, status: 'timeout' as const },
+    ];
+    expect(modelCallVerdict('refused', checks, saved)).toEqual({ state: 'answered' });
+    expect(modelCallVerdict('answered', checks, saved)).toEqual({ state: 'refused', detail: 'refused by tags' });
+    // A timeout proves nothing about the model.
+    expect(modelCallVerdict('listed', checks, saved)).toBeNull();
+  });
+
+  it('counts what a connection test learnt about the listed models (KT-957)', () => {
+    expect(modelSweepCounts(undefined)).toEqual({ called: 0, answered: 0, refused: 0 });
+    expect(modelSweepCounts([
+      { ok: true, status: 'ok' },
+      { ok: false, status: 'not_found' },
+      { ok: false, status: 'access_denied' },
+      // Neither answered nor refused: says nothing about the model.
+      { ok: false, status: 'timeout' },
+      { ok: false, status: 'http_error' },
+    ])).toEqual({ called: 5, answered: 1, refused: 2 });
+  });
+
   it('includes exact ID, alias, reasoning, freshness, unavailable reason, cost and privacy metadata', () => {
     const unavailable = entry('exact/id', {
       display_name: 'Technical name', display_alias: 'Alias', reasoning_modes: ['high'],
       availability: 'unavailable', unavailable_reason: 'disappeared', unavailable_detail: 'No longer listed',
+      resolved_model: 'provider/canonical', description: 'Provider description',
       privacy_note: 'Operator note', cost_hint: 'paid',
     });
-    const [option] = catalogModelOptions({ ...view([unavailable]), stale: true }, 'exact/id', (key, ...args) => [key, ...args].join(' '), () => 'Observed $0.01');
-    expect(option.label).toBe('Alias — modelCatalog.unavailable');
+    const [option] = catalogModelOptions({
+      ...view([unavailable]), stale: true,
+      alerts: [{ model_id: 'exact/id', replacement: 'replacement/id', references: [] }],
+    }, 'exact/id', (key, ...args) => [key, ...args].join(' '), () => 'Observed $0.01');
+    expect(option.label).toBe('❌ Alias — modelCatalog.unavailable');
     expect(option.disabled).toBe(true);
-    for (const text of ['exact/id', 'modelCatalog.provenance.cached', unavailable.last_checked_at, 'high', 'No longer listed', 'Observed $0.01', 'Operator note']) {
+    for (const text of ['exact/id', 'Provider description', 'modelCatalog.provenance.cached', unavailable.last_checked_at, 'high', 'No longer listed', 'modelCatalog.replacement replacement/id', 'Observed $0.01', 'Operator note']) {
       expect(option.description).toContain(text);
     }
     expect(option.keywords).toContain('Technical name');
+    expect(option.keywords).toContain('provider/canonical');
+    expect(option.keywords).toContain('replacement/id');
     expect(catalogModelOptions(undefined, '', key => key, () => '')).toEqual([]);
   });
 });

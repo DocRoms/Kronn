@@ -74,7 +74,7 @@ test.describe('QP launch — double-click race', () => {
     await dashboard.clickWorkflows();
 
     // Switch to the Quick Prompts tab.
-    await workflows.clickQuickPromptsTab();
+    await workflows.selectKind('quickPrompts');
 
     // Find a launchable QP card. The launch button has class
     // `qp-launch-btn` per WorkflowsPage.tsx; we click the first one we

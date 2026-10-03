@@ -26,13 +26,13 @@ Sections are delimited by **HTML comments** — invisible in every Markdown rend
 ```markdown
 <!-- kronn:doc-version="1.0" -->
 
-<!-- kronn:section name="stack" curated="ai" audit="2026-05-25" -->
+<!-- kronn:section name="stack" curated="ai" owner="audit" audit="2026-05-25" -->
 ## Stack
 - Rust 1.78 [src: file: Cargo.toml:5]
 - Frontend uses pnpm strict mode [src: file: frontend/.npmrc:2]
 <!-- kronn:section:end -->
 
-<!-- kronn:section name="conventions" curated="human" -->
+<!-- kronn:section name="conventions" curated="human" owner="human" -->
 ## Conventions
 Free-form prose owned by humans. Kronn never validates this section.
 <!-- kronn:section:end -->
@@ -44,6 +44,7 @@ Free-form prose owned by humans. Kronn never validates this section.
 |---|---|---|
 | `name` | yes | Stable, unique-within-file section id. Survives reordering/renames. |
 | `curated` | yes | `"ai"` (provenance required) or `"human"` (free-form, never validated). |
+| `owner` | template v2 | `"audit"` (the audit may refresh it) or `"human"` (the audit must preserve it byte-for-byte and propose changes separately). If absent on a legacy marker, `curated="human"` implies human ownership; otherwise audit ownership is assumed. |
 | `audit` | for `curated="ai"` | ISO-8601 date the section was last **verified against reality**. Distinct from git's "last edited". |
 
 The file SHOULD open with `<!-- kronn:doc-version="1.0" -->`. A file with **no**
@@ -55,6 +56,12 @@ is strictly opt-in by presence.
 - **`curated="ai"`** — provenance is required: every non-trivial assertion needs a
   `[src: …]` citation.
 - **`curated="human"`** — owned by a person, free-form, never validated.
+- **`owner="human"`** — never rewritten by a full or partial audit. A re-audit
+  restores the original block and records its proposal as a dated diff. The
+  legacy `curated="human"` spelling receives the same protection. This holds for
+  the audit's own STEP 0 too (the `anti-hallu` section included), and a
+  `kronn:section` marker inside a fenced code block (``` or `~~~`) is an example,
+  never a boundary: it neither opens nor closes a protected section.
 - **Asymmetric conversion** — a human may convert a `curated="ai"` section to
   `curated="human"`. The reverse never happens automatically: human authority outranks AI,
   never the other way around.
@@ -178,7 +185,7 @@ tool can emit a Kronn-compatible document without using the brand.
 ```markdown
 <!-- kronn:doc-version="1.0" -->
 
-<!-- kronn:section name="stack" curated="ai" audit="2026-05-25" -->
+<!-- kronn:section name="stack" curated="ai" owner="audit" audit="2026-05-25" -->
 ## Stack
 - Backend: Rust, axum 0.8 [src: file: backend/Cargo.toml:79]
 - API base path is `/api` [src: file: backend/src/lib.rs:440]

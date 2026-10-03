@@ -13,8 +13,8 @@
 //!   observe it directly).
 //! - `codex exec resume <thread_id> --json <prompt>` continues that thread —
 //!   but `--sandbox` is NOT accepted on `resume` (verified via `codex exec
-//!   resume --help`, unlike the top-level `codex exec`), so the sandbox
-//!   policy only applies to a session's first turn.
+//!   resume --help`, unlike the top-level `codex exec`), and a resumed turn
+//!   does not keep the first turn's mode, so it gets `-c sandbox_mode=...`.
 //!
 //! Codex cannot hand out a session id before the first turn runs (unlike
 //! Claude's `--session-id`), so `create_session` allocates Kronn's own
@@ -33,7 +33,7 @@
 //! Task workers instead reuse the direct worker's narrower launch policy.
 
 use super::adapter_process::{AdapterProcess, StderrTail};
-use crate::agents::runner::{AdapterLaunchOptions, SpawnIo};
+use crate::agents::runner::{AdapterLaunchOptions, PromptCacheUsage, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -197,8 +197,10 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
     let args_json = serde_json::to_string(&launch.args).ok()?;
     let env_vars_json =
         serde_json::to_string(crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
+    // `codex exec` cannot ask: a Kronn tool left on `prompt` is refused (KT-953).
+    // Project servers keep Codex's default.
     entries.push_str(&format!(
-        "\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30}}"
+        "\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30,default_tools_approval_mode=\"approve\"}}"
     ));
     Some(format!("mcp_servers={{{entries}}}"))
 }
@@ -210,10 +212,15 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
 enum CodexLineEvent {
     ThreadStarted(Option<String>),
     Text(String),
-    ToolCall(String),
+    ToolCall {
+        name: String,
+        trace: Option<crate::agents::tool_trace::ToolTraceUpdate>,
+        ended: bool,
+    },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        prompt_cache: PromptCacheUsage,
     },
     Fatal(String),
     Skip,
@@ -235,12 +242,12 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         ),
-        "item.completed" => match json
+        "item.started" | "item.updated" | "item.completed" => match json
             .get("item")
             .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
         {
-            Some("agent_message") => {
+            Some("agent_message") if json["type"] == "item.completed" => {
                 let text = json
                     .pointer("/item/text")
                     .and_then(Value::as_str)
@@ -254,7 +261,17 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
             Some(
                 kind @ ("command_execution" | "file_change" | "mcp_tool_call" | "collab_tool_call"
                 | "web_search"),
-            ) => CodexLineEvent::ToolCall(kind.to_owned()),
+            ) => {
+                let trace = crate::agents::tool_trace::from_codex(&json["item"]);
+                CodexLineEvent::ToolCall {
+                    name: trace
+                        .as_ref()
+                        .and_then(|trace| trace.name.clone())
+                        .unwrap_or_else(|| kind.to_owned()),
+                    trace,
+                    ended: json["type"] == "item.completed",
+                }
+            }
             _ => CodexLineEvent::Skip,
         },
         "turn.completed" => {
@@ -266,9 +283,20 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
                 .pointer("/usage/output_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            // Codex's `input_tokens` INCLUDES `cached_input_tokens`; the cost
+            // computation needs the two apart, and an absent field must stay
+            // absent rather than read as zero cached tokens.
             CodexLineEvent::Usage {
                 input_tokens,
                 output_tokens,
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: json
+                        .pointer("/usage/cached_input_tokens")
+                        .and_then(Value::as_u64),
+                    cache_write_prompt_tokens: json
+                        .pointer("/usage/cache_write_input_tokens")
+                        .and_then(Value::as_u64),
+                },
             }
         }
         "turn.failed" => CodexLineEvent::Fatal(
@@ -394,12 +422,16 @@ impl AcpTransport for CodexAcpAdapter {
                 serde_json::to_string(effort).unwrap_or_else(|_| "\"\"".into())
             ));
         }
-        // `--sandbox` is not accepted by `codex exec resume` (verified via
-        // `codex exec resume --help`): only the first turn of a thread can
-        // set it.
-        if known_thread.is_none() && self.launch.worker_context.is_none() {
+        // `codex exec resume` rejects `--sandbox` and does not keep the first
+        // turn's mode, so a resumed turn passes it as a config override.
+        if self.launch.worker_context.is_none() {
             if let Some(sandbox) = self.broker.session_policy().codex_sandbox {
-                args.push(format!("--sandbox={sandbox}"));
+                if known_thread.is_none() {
+                    args.push(format!("--sandbox={sandbox}"));
+                } else {
+                    args.push("-c".into());
+                    args.push(format!("sandbox_mode=\"{sandbox}\""));
+                }
             }
         }
         args.push("-".into());
@@ -455,18 +487,25 @@ impl AcpTransport for CodexAcpAdapter {
                     CodexLineEvent::Text(text) => {
                         let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
                     }
-                    CodexLineEvent::ToolCall(name) => {
+                    CodexLineEvent::ToolCall { name, trace, ended } => {
                         let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
+                        if let Some(trace) = trace {
+                            let _ = events.send(AcpSessionEvent::ToolTrace(trace)).await;
+                        }
+                        if ended {
+                            let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                        }
                     }
                     CodexLineEvent::Usage {
                         input_tokens,
                         output_tokens,
+                        prompt_cache,
                     } => {
                         let _ = events
                             .send(AcpSessionEvent::Usage {
                                 input_tokens,
                                 output_tokens,
-                                prompt_cache: Default::default(),
+                                prompt_cache,
                             })
                             .await;
                     }
@@ -547,7 +586,7 @@ mod tests {
             parse_codex_line(
                 r#"{"type":"item.completed","item":{"id":"i2","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0,"status":"completed"}}"#
             ),
-            CodexLineEvent::ToolCall(kind) if kind == "command_execution"
+            CodexLineEvent::ToolCall { name, ended: true, .. } if name == "command_execution"
         ));
         assert!(matches!(
             parse_codex_line(
@@ -555,7 +594,11 @@ mod tests {
             ),
             CodexLineEvent::Usage {
                 input_tokens: 3,
-                output_tokens: 5
+                output_tokens: 5,
+                prompt_cache: PromptCacheUsage {
+                    cached_prompt_tokens: Some(0),
+                    cache_write_prompt_tokens: Some(0),
+                },
             }
         ));
         assert!(matches!(
@@ -566,6 +609,32 @@ mod tests {
             parse_codex_line(r#"{"type":"turn.started"}"#),
             CodexLineEvent::Skip
         ));
+    }
+
+    #[test]
+    fn turn_usage_carries_the_cached_share_of_the_input_and_keeps_absence_absent() {
+        // The real KT-837 counters (`total_token_usage` of the Codex journal).
+        let CodexLineEvent::Usage {
+            input_tokens,
+            output_tokens,
+            prompt_cache,
+        } = parse_codex_line(
+            r#"{"type":"turn.completed","usage":{"input_tokens":25209778,"cached_input_tokens":24851584,"output_tokens":51617,"reasoning_output_tokens":18354}}"#,
+        )
+        else {
+            panic!("turn.completed carries usage");
+        };
+        assert_eq!((input_tokens, output_tokens), (25_209_778, 51_617));
+        assert_eq!(prompt_cache.cached_prompt_tokens, Some(24_851_584));
+        // Not in the payload: not reported, which is not zero.
+        assert_eq!(prompt_cache.cache_write_prompt_tokens, None);
+
+        let CodexLineEvent::Usage { prompt_cache, .. } = parse_codex_line(
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}"#,
+        ) else {
+            panic!("turn.completed carries usage");
+        };
+        assert_eq!(prompt_cache, PromptCacheUsage::default());
     }
 
     /// A fixture "codex" that always reports `thread.started` with a fixed
@@ -678,6 +747,39 @@ mod tests {
         host.prompt(&target, &prompt, tx).await.unwrap();
         let events = drain(rx).await;
         assert!(events.contains(&AcpSessionEvent::TextDelta("resumed".into())));
+    }
+
+    #[tokio::test]
+    async fn a_resumed_turn_keeps_the_full_access_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = dir.path().join("argv.txt");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" > '{}'\n{FIXTURE_BODY}",
+                argv.display(),
+            ),
+        );
+        let adapter = std::sync::Arc::new(CodexAcpAdapter::new_with_program(
+            fixture.to_string_lossy(),
+            None,
+            true,
+            Some("th-persisted".into()),
+        ));
+        let mut host = AcpHost::new(1, adapter.clone());
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        host.prompt(&target, "hello", tx).await.unwrap();
+        let args = std::fs::read_to_string(argv).unwrap();
+        assert!(args.contains("resume th-persisted"), "argv: {args}");
+        assert!(
+            args.contains("sandbox_mode=\"danger-full-access\""),
+            "argv: {args}"
+        );
+        assert!(!args.contains("--sandbox"), "argv: {args}");
     }
 
     #[tokio::test]
@@ -944,6 +1046,14 @@ exec sleep 30"#,
                 crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS
             );
             assert!(internal.get("env").is_none());
+            assert_eq!(
+                internal["default_tools_approval_mode"].as_str(),
+                Some("approve"),
+                "`codex exec` cannot ask, so Kronn's own tools must be pre-approved"
+            );
+            assert!(servers["project-safe"]
+                .get("default_tools_approval_mode")
+                .is_none());
         }
     }
 

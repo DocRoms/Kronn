@@ -18,17 +18,20 @@ interface SourceCodeViewerProps {
   projectId: string;
   /** Optional file selected when another project view deep-links into Code. */
   initialPath?: string | null;
+  /** 1-based line of `initialPath` to scroll to and mark (KT-954). */
+  initialLine?: number | null;
   /** KT-75 — open the full patch of a commit in the panel's temporary tab.
    *  Absent when the host has no tab to open it in. */
   onOpenCommit?: (sha: string) => void;
 }
 
-export function SourceCodeViewer({ projectId, initialPath, onOpenCommit }: SourceCodeViewerProps) {
+export function SourceCodeViewer({ projectId, initialPath, initialLine, onOpenCommit }: SourceCodeViewerProps) {
   return (
     <SourceCodeViewerProject
-      key={`${projectId}:${initialPath ?? ''}`}
+      key={`${projectId}:${initialPath ?? ''}:${initialLine ?? ''}`}
       projectId={projectId}
       initialPath={initialPath}
+      initialLine={initialLine}
       onOpenCommit={onOpenCommit}
     />
   );
@@ -64,7 +67,7 @@ interface SearchResult {
 
 const EMPTY_SEARCH_RESULTS = new Map<string, number>();
 const HTML_FILE_PATH = /\.html?$/i;
-function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: SourceCodeViewerProps) {
+function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCommit }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -349,6 +352,14 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
   const content = contentIsCurrent ? contentResult.content : null;
   const contentError = contentIsCurrent && contentResult.error;
   const contentLoading = selectedPath !== null && !contentIsCurrent;
+  // A deep link lands on its line once that file is the one displayed.
+  const targetLine = initialLine && selectedPath === initialPath ? initialLine : null;
+  useEffect(() => {
+    if (!targetLine || content === null) return;
+    contentRef.current
+      ?.querySelector(`[data-line="${targetLine}"]`)
+      ?.scrollIntoView({ block: 'center', inline: 'nearest' });
+  }, [content, targetLine]);
   const isHtmlFile = Boolean(selectedPath && HTML_FILE_PATH.test(selectedPath));
   const blameIsCurrent = annotate
     && blameResult?.projectId === projectId
@@ -634,8 +645,13 @@ function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: Sourc
               {content.split('\n').map((line, index) => {
                 const blame = blameByLine.get(index + 1);
                 const blameLabel = blame ? formatBlame(blame) : blameLoading ? '…' : '—';
+                const isTarget = targetLine === index + 1;
                 return (
-                  <span className="source-line" key={`${index}-${line.slice(0, 12)}`}>
+                  <span
+                    className={isTarget ? 'source-line source-line--target' : 'source-line'}
+                    data-line={index + 1}
+                    key={`${index}-${line.slice(0, 12)}`}
+                  >
                     {annotate && (
                       // Keep the table cell as the layout owner and the button as
                       // its interactive child. The cell has an explicit width:

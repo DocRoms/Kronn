@@ -1,9 +1,9 @@
 // Audit vs briefing capability split (Codex A4 v2).
 //
-// The audit pipeline writes docs/ (filesystem required) — positive
-// allowlist mirroring the backend. The briefing is a pure conversation —
-// Ollama stays eligible there. An Ollama-only install must therefore show
-// NO audit agents but still allow the briefing.
+// The audit pipeline writes docs/ (it must reach the project's files) —
+// positive allowlist mirroring the backend. Since KT-924 that includes Ollama
+// and LiteLLM, whose native file tools Kronn runs scoped to the project. The
+// briefing is a pure conversation, so it stays open to every agent but Vibe.
 
 import { describe, it, expect } from 'vitest';
 import { canRunAudit, canRunBriefing } from '../../lib/agentCapabilities';
@@ -17,13 +17,11 @@ const agent = (agent_type: AgentDetection['agent_type']): AgentDetection => ({
 });
 
 describe('audit/briefing capability predicates', () => {
-  it('audit is a positive allowlist — Ollama, Vibe and Custom are out', () => {
-    for (const t of ['ClaudeCode', 'Codex', 'GeminiCli', 'Kiro', 'CopilotCli'] as const) {
+  it('audit is a positive allowlist — every HTTP provider is in (KT-980), Vibe is out', () => {
+    for (const t of ['ClaudeCode', 'Codex', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia', 'Custom'] as const) {
       expect(canRunAudit(agent(t)), t).toBe(true);
     }
-    for (const t of ['Ollama', 'Vibe', 'Custom'] as const) {
-      expect(canRunAudit(agent(t)), t).toBe(false);
-    }
+    expect(canRunAudit(agent('Vibe'))).toBe(false);
   });
 
   it('briefing keeps Ollama (conversation-only), excludes only Vibe', () => {
@@ -32,10 +30,13 @@ describe('audit/briefing capability predicates', () => {
     expect(canRunBriefing(agent('ClaudeCode'))).toBe(true);
   });
 
-  it('an Ollama-only install: zero audit agents, briefing still possible', () => {
-    const fleet = [agent('Ollama')];
-    expect(fleet.filter(canRunAudit)).toHaveLength(0);
-    expect(fleet.filter(canRunBriefing)).toHaveLength(1);
+  it('an Ollama-only install can audit and brief; a Vibe-only one can do neither', () => {
+    const ollama = [agent('Ollama')];
+    expect(ollama.filter(canRunAudit)).toHaveLength(1);
+    expect(ollama.filter(canRunBriefing)).toHaveLength(1);
+    const vibe = [agent('Vibe')];
+    expect(vibe.filter(canRunAudit)).toHaveLength(0);
+    expect(vibe.filter(canRunBriefing)).toHaveLength(0);
   });
 
   it('a disabled agent is out of both', () => {

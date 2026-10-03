@@ -21,8 +21,16 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
+#[path = "agent_audit_scope_tests.rs"]
+mod audit_scope_tests;
+
+#[cfg(test)]
 #[path = "agent_quick_prompt_tests.rs"]
 mod quick_prompt_tests;
+
+#[cfg(test)]
+#[path = "agent_attachment_tests.rs"]
+mod attachment_tests;
 
 #[cfg(test)]
 #[path = "agent_quick_prompt_bench.rs"]
@@ -66,6 +74,13 @@ pub struct KronnToolExecutor {
     /// Principal-authored mechanical target for a tiny native HTTP worker.
     /// Kept separate from the prompt so the runner can freeze its catalogue.
     worker_scope: Option<crate::models::TaskWorkerScope>,
+    /// An audit step (KT-924): the directory the file tools are scoped to, already
+    /// resolved by the pipeline. Present only for `audit_arc`, and it narrows the
+    /// catalogue to `AUDIT_TOOLS` — an audit has no discussion to scope a
+    /// workspace to and no business with the plan, the REST plugins or the web.
+    audit_workspace: Option<std::path::PathBuf>,
+    /// The audit step's own target file, to refuse writing another step's.
+    audit_step_target: Option<String>,
 }
 
 impl KronnToolExecutor {
@@ -81,6 +96,8 @@ impl KronnToolExecutor {
             source_dispatch_job_id: None,
             worker_room: false,
             worker_scope: None,
+            audit_workspace: None,
+            audit_step_target: None,
         }
     }
 
@@ -104,6 +121,8 @@ impl KronnToolExecutor {
             source_dispatch_job_id,
             worker_room: false,
             worker_scope: None,
+            audit_workspace: None,
+            audit_step_target: None,
         })
     }
 
@@ -130,6 +149,8 @@ impl KronnToolExecutor {
             source_dispatch_job_id,
             worker_room: true,
             worker_scope,
+            audit_workspace: None,
+            audit_step_target: None,
         })
     }
 
@@ -153,8 +174,124 @@ impl KronnToolExecutor {
             source_dispatch_job_id: None,
             worker_room: false,
             worker_scope: None,
+            audit_workspace: None,
+            audit_step_target: None,
         })
     }
+
+    /// Native file tools for an HTTP agent running an audit step (KT-924).
+    ///
+    /// `workspace` is the project directory the pipeline already resolved, handed
+    /// over as-is rather than re-read from the database: it is the very directory
+    /// the audit validates, snapshots and redacts, and `resolve_host_path` has
+    /// already mapped it inside a container. Every path the model names is
+    /// canonicalised against it and refused when it leaves it, exactly as for a
+    /// discussion (KT-338). The catalogue is `AUDIT_TOOLS`: no shell, no web, no
+    /// commit, nothing that reaches beyond the project.
+    /// An audit step writes its own document; another step's target is that
+    /// step's to write. Without this, a model filling `docs/AGENTS.md` also
+    /// filled three later documents, and those steps then failed for having
+    /// nothing to rewrite (run O6). The consolidation step reviews every
+    /// document and stays free.
+    fn foreign_step_target_refusal(&self, call: &ToolCall) -> Option<String> {
+        let own = self.audit_step_target.as_deref()?;
+        if own == "docs/decisions.md" || own == "REVIEW" {
+            return None;
+        }
+        if !matches!(
+            call.name.as_str(),
+            "write_file" | "edit_file" | "edit_lines" | "insert_after_line"
+        ) {
+            return None;
+        }
+        let path = call.arguments.get("path").and_then(|p| p.as_str())?;
+        let normalized = normalized_rel(path);
+        if normalized == own {
+            return None;
+        }
+        let owner = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+            .iter()
+            .position(|step| step.target_file == normalized)?;
+        Some(format!(
+            "`{normalized}` is the document of audit step {}; this step writes `{own}`. \
+             Leave `{normalized}` to its own step and write only `{own}` (and the detail \
+             files this step's instructions name).",
+            owner + 1
+        ))
+    }
+
+    pub fn audit_arc(
+        state: AppState,
+        workspace: std::path::PathBuf,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        Self::audit_arc_for_step(state, workspace, None)
+    }
+
+    /// An audit executor that knows which step it serves: it refuses writes to
+    /// the target file of another step of the chain.
+    pub fn audit_arc_for_step(
+        state: AppState,
+        workspace: std::path::PathBuf,
+        step_target: Option<&str>,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        std::sync::Arc::new(Self {
+            state,
+            disc_id: None,
+            project_id: None,
+            workflow_run_id: None,
+            actor_id: "Kronn audit".into(),
+            actor_type: None,
+            source_message_id: None,
+            source_dispatch_job_id: None,
+            worker_room: false,
+            worker_scope: None,
+            audit_workspace: Some(workspace),
+            audit_step_target: step_target.map(str::to_string),
+        })
+    }
+}
+
+/// A workspace path as the audit pipeline names its targets.
+fn normalized_rel(path: &str) -> &str {
+    path.trim().trim_start_matches("./").trim_start_matches('/')
+}
+
+/// A PEM or OpenSSH private key block, the header alone being enough.
+fn holds_private_key(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("-----BEGIN ") && line.ends_with("PRIVATE KEY-----")
+    })
+}
+
+/// The tools an audit step hands an HTTP agent: read the project, write its
+/// `docs/` deliverables, read its git history. Deliberately narrower than
+/// `workflow_workspace_tool_catalogue`: `web_fetch` would send the model off the
+/// project, `git_commit` would mutate history the audit never asked it to touch,
+/// and the discussion readers have no room to read.
+pub(crate) const AUDIT_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "edit_lines",
+    "insert_after_line",
+    "list_files",
+    "find_files",
+    "search_text",
+    "git_status",
+    "git_diff",
+    "git_log",
+];
+
+fn audit_tool_catalogue() -> Vec<Value> {
+    crate::api::agent_workspace_tools::tool_definitions()
+        .into_iter()
+        .filter(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .is_some_and(|name| AUDIT_TOOLS.contains(&name))
+        })
+        .collect()
 }
 
 fn ok(call: &ToolCall, content: Value) -> ToolOutcome {
@@ -634,7 +771,9 @@ pub fn tool_catalogue() -> Vec<Value> {
                 "name": "api_call",
                 "description": "Call a Kronn-configured API. Credentials are injected by \
                                 Kronn server-side and never exposed. Use mcp_list first to \
-                                find the plugin slug and endpoint path.",
+                                find the plugin slug and endpoint path. A large response is \
+                                shortened to fit your context window and cannot be re-read \
+                                whole: pass `extract` to get only the part you need.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -643,6 +782,12 @@ pub fn tool_catalogue() -> Vec<Value> {
                         "endpoint_path": { "type": "string", "description": "path from api_endpoints, e.g. /v1/sites" },
                         "method": { "type": "string", "description": "GET (default), POST, …" },
                         "query": { "type": "object", "description": "query-string parameters" },
+                        "extract": {
+                            "type": "object",
+                            "description": "JSONPath applied to the API response; only what it selects comes back. E.g. {\"path\": \"$.data[*]['name','id']\"}.",
+                            "properties": { "path": { "type": "string" } },
+                            "required": ["path"],
+                        },
                     },
                     "required": ["api_plugin_slug", "endpoint_path"],
                 },
@@ -930,6 +1075,22 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         "required": ["mode", "path"],
         "additionalProperties": false
     });
+    let validations_schema = |description: &str| {
+        json!({
+            "type": "array",
+            "description": description,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "minLength": 1, "description": "ONE allowlisted binary and literal arguments, no shell, run from the worktree root — contract in tool_manual({tool: \"task_exec_prepare\"})."},
+                    "quick_exec_id": {"type": "string"},
+                    "timeout_secs": {"type": "integer", "minimum": 1}
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }
+        })
+    };
     vec![
         tool(
             "agent_list",
@@ -985,7 +1146,8 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "task_reference": {"type": "string"},
                 "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier."},
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Required sentinel proving the current tool contract was transported. scoped requires worker_scope; generic forbids it."},
-                "worker_scope": worker_scope_schema.clone()
+                "worker_scope": worker_scope_schema.clone(),
+                "validations": validations_schema("Optional: the gates you will launch with. A command that could never run (shell syntax, a binary off the allowlist) makes launchable false, with the form that runs.")
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
         ),
@@ -999,20 +1161,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker_scope": worker_scope_schema,
                 "base_rev": {"type": "string"},
                 "idempotency_key": {"type": "string"},
-                "validations": {
-                    "type": "array",
-                    "description": "Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "command": {"type": "string", "minLength": 1},
-                            "quick_exec_id": {"type": "string"},
-                            "timeout_secs": {"type": "integer", "minimum": 1}
-                        },
-                        "required": ["command"],
-                        "additionalProperties": false
-                    }
-                }
+                "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run.")
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
         ),
@@ -1055,13 +1204,14 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
         ),
         tool(
             "task_exec_reassign",
-            "Reassign a blocked, interrupted or awaiting-review execution (a pending delivery is rejected) as its parent-room principal while preserving durable child/worktree/checkpoints.",
+            "Amend an existing execution as its parent-room principal, keeping its durable child/worktree/checkpoints. ONE change per call: `worker` reassigns a blocked, interrupted or awaiting-review execution (a pending delivery is rejected); `validations` replaces its gates without relaunching. Contract: tool_manual({tool: \"task_exec_reassign\"}).",
             json!({
                 "task_execution_id": {"type": "string"},
                 "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier — the same object agent_list hands back and task_exec_prepare/task_exec_launch accept as worker."},
+                "validations": validations_schema("The COMPLETE new set of gates (it replaces, never merges); [] removes every gate."),
                 "reason": {"type": "string"}
             }),
-            json!(["task_execution_id", "worker", "reason"]),
+            json!(["task_execution_id", "reason"]),
         ),
     ]
 }
@@ -1318,6 +1468,9 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
 #[async_trait::async_trait]
 impl ToolExecutor for KronnToolExecutor {
     fn catalogue(&self) -> Vec<Value> {
+        if self.audit_workspace.is_some() {
+            return audit_tool_catalogue();
+        }
         let mut catalogue = tool_catalogue();
         if self.workflow_run_id.is_none() {
             // A discussion run gets the web and its workspace: without them an
@@ -1351,7 +1504,9 @@ impl ToolExecutor for KronnToolExecutor {
     }
 
     fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
-        if self.worker_room {
+        if self.audit_workspace.is_some() {
+            crate::agents::tools::ToolRunMode::Audit
+        } else if self.worker_room {
             crate::agents::tools::ToolRunMode::Worker
         } else {
             crate::agents::tools::ToolRunMode::General
@@ -1395,6 +1550,21 @@ impl ToolExecutor for KronnToolExecutor {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+        // A model can name a tool it was never offered. In an audit the catalogue
+        // is the whole contract, so anything outside it is refused before dispatch
+        // reaches a handler that would honour it (`api_call`, plan writes…).
+        if let Some(refusal) = self.foreign_step_target_refusal(call) {
+            return fail(call, refusal);
+        }
+        if self.audit_workspace.is_some() && !AUDIT_TOOLS.contains(&call.name.as_str()) {
+            return fail(
+                call,
+                format!(
+                    "tool `{}` is not available during an audit; use only the file tools declared on this request",
+                    call.name
+                ),
+            );
+        }
         if self.workflow_run_id.is_some()
             && !self.catalogue().iter().any(|tool| {
                 tool["function"]["name"]
@@ -1761,15 +1931,11 @@ impl ToolExecutor for KronnToolExecutor {
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "api_call" => {
-                let (Some(slug), Some(path)) = (
-                    call.arguments["api_plugin_slug"].as_str(),
-                    call.arguments["endpoint_path"].as_str(),
-                ) else {
-                    return fail(
-                        call,
-                        "missing required fields `api_plugin_slug` and/or `endpoint_path`",
-                    );
+                let mut req = match api_call_request(&call.arguments) {
+                    Ok(req) => req,
+                    Err(message) => return fail(call, message),
                 };
+                let slug = req.api_plugin_slug.clone().unwrap_or_default();
                 // Making the model carry a UUID across turns is a reliability
                 // tax it fails to pay: a 4B model paired `api-speedcurve` with
                 // Resend's config id (2026-08-09). Kronn owns that mapping, so
@@ -1777,10 +1943,10 @@ impl ToolExecutor for KronnToolExecutor {
                 // disambiguation hint, not a requirement.
                 let config_id = match call.arguments["api_config_id"].as_str() {
                     Some(explicit) if !explicit.trim().is_empty() => self
-                        .config_id_in_scope(slug, explicit)
+                        .config_id_in_scope(&slug, explicit)
                         .await
                         .then(|| explicit.to_string()),
-                    _ => self.resolve_config_id(slug).await,
+                    _ => self.resolve_config_id(&slug).await,
                 };
                 if config_id.is_none() {
                     return fail(
@@ -1788,26 +1954,11 @@ impl ToolExecutor for KronnToolExecutor {
                         format!("no API configuration wired for plugin `{slug}` — call mcp_list to see what is available"),
                     );
                 }
-                let req = crate::api::agent_api::AgentApiCallRequest {
-                    disc_id: self.disc_id.clone(),
-                    project_id: self.project_id.clone(),
-                    api_plugin_slug: Some(slug.to_string()),
-                    api_config_id: config_id,
-                    quick_api_id: None,
-                    endpoint_path: path.to_string(),
-                    method: call.arguments["method"].as_str().map(str::to_string),
-                    path_params: None,
-                    query: call.arguments["query"].as_object().map(|o| {
-                        o.iter()
-                            .map(|(k, v)| (k.clone(), as_plain_string(v)))
-                            .collect()
-                    }),
-                    body: call.arguments.get("body").cloned(),
-                    headers: None,
-                    extract: None,
-                    workflow_run_id: self.workflow_run_id.clone(),
-                    agent: Some(self.actor_id.clone()),
-                };
+                req.api_config_id = config_id;
+                req.disc_id = self.disc_id.clone();
+                req.project_id = self.project_id.clone();
+                req.workflow_run_id = self.workflow_run_id.clone();
+                req.agent = Some(self.actor_id.clone());
                 let Json(res) =
                     crate::api::agent_api::agent_api_call(State(self.state.clone()), Json(req))
                         .await;
@@ -2303,6 +2454,15 @@ impl KronnToolExecutor {
                 };
                 let scope_refusal =
                     crate::api::orchestration::worker_scope_refusal(&worker, worker_scope.as_ref());
+                // Optional here, like a scope: when the principal already knows its
+                // gates, an unrunnable one makes the preflight refuse, not the
+                // integration hours later.
+                let validations_refusal = match validations_argument(call) {
+                    Ok(validations) => crate::api::orchestration::validations_refusal(
+                        &validations.unwrap_or_default(),
+                    ),
+                    Err(error) => return fail(call, error),
+                };
                 let parent = discussion_id;
                 match self
                     .state
@@ -2314,7 +2474,7 @@ impl KronnToolExecutor {
                             &parent,
                             &worker,
                         )?;
-                        if let Some(reason) = scope_refusal {
+                        for reason in [scope_refusal, validations_refusal].into_iter().flatten() {
                             preparation.launchable = false;
                             preparation.reasons.push(reason);
                         }
@@ -2380,30 +2540,20 @@ impl KronnToolExecutor {
                 // The principal's mechanical gates are opt-in but never silently
                 // dropped: only a genuinely ABSENT field defaults to no gates.
                 // An explicit `null`, an unknown field (ValidationSpec denies
-                // them), or a structurally-valid-but-empty command/timeout is
-                // refused explicitly rather than folded into an ungated run.
-                let validations = match call.arguments.get("validations") {
-                    None => Vec::new(),
-                    Some(Value::Null) => {
-                        return fail(call, "invalid validations: must be an array, not null")
-                    }
-                    Some(value) => {
-                        let parsed = match serde_json::from_value::<
-                            Vec<crate::models::ValidationSpec>,
-                        >(value.clone())
-                        {
-                            Ok(validations) => validations,
-                            Err(error) => {
-                                return fail(call, format!("invalid validations: {error}"))
-                            }
-                        };
+                // them), a structurally-valid-but-empty command/timeout, or a
+                // command Quick Exec would refuse at integration is refused
+                // explicitly rather than folded into an ungated run.
+                let validations = match validations_argument(call) {
+                    Ok(Some(validations)) => {
                         if let Err(reason) =
-                            crate::api::orchestration::validate_new_validation_specs(&parsed)
+                            crate::api::orchestration::validate_new_validation_specs(&validations)
                         {
                             return fail(call, format!("invalid validations: {reason}"));
                         }
-                        parsed
+                        validations
                     }
+                    Ok(None) => Vec::new(),
+                    Err(error) => return fail(call, error),
                 };
                 match crate::api::orchestration::provision_single_task_execution_with_scope_and_validations(
                     &self.state.db,
@@ -2635,26 +2785,41 @@ impl KronnToolExecutor {
                 let Some(reason) = required_string(call, "reason") else {
                     return fail(call, "missing required field `reason`");
                 };
-                let target = match serde_json::from_value::<crate::models::MessageTarget>(
-                    call.arguments["worker"].clone(),
-                ) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        return fail(
-                            call,
-                            format!(
-                                "worker must be the typed MessageTarget object copied verbatim \
-                                 from agent_list (kind/agent_type/...), not the internal \
-                                 CampaignWorkerSelection envelope: {error}"
-                            ),
-                        )
+                // One change per call (KT-839): a `worker` reassigns, `validations`
+                // replaces the gates. Absent means absent; an explicit null gate
+                // list is refused by `validations_argument`, never read as "no gates".
+                let target = match call
+                    .arguments
+                    .get("worker")
+                    .filter(|value| !value.is_null())
+                {
+                    None => None,
+                    Some(value) => {
+                        match serde_json::from_value::<crate::models::MessageTarget>(value.clone())
+                        {
+                            Ok(target) => Some(target),
+                            Err(error) => {
+                                return fail(
+                                    call,
+                                    format!(
+                                        "worker must be the typed MessageTarget object copied \
+                                         verbatim from agent_list (kind/agent_type/...), not the \
+                                         internal CampaignWorkerSelection envelope: {error}"
+                                    ),
+                                )
+                            }
+                        }
                     }
                 };
-                let worker = crate::models::CampaignWorkerSelection {
-                    target,
-                    model: None,
-                    profile_id: None,
+                let validations = match validations_argument(call) {
+                    Ok(validations) => validations,
+                    Err(error) => return fail(call, error),
                 };
+                let amendment =
+                    match crate::api::orchestration::execution_amendment(target, validations) {
+                        Ok(amendment) => amendment,
+                        Err(refusal) => return fail(call, refusal),
+                    };
                 let authorized = {
                     let execution_id = execution_id.clone();
                     let discussion_id = discussion_id.clone();
@@ -2671,20 +2836,57 @@ impl KronnToolExecutor {
                                 source_message_id.as_deref(),
                                 true,
                             )
-                            .map(|_| ())
+                            .map(|execution| execution.id)
                         })
                         .await
                 };
-                if let Err(error) = authorized {
-                    return fail(call, error.to_string());
+                // The reference may have been a task reference; the swap is keyed by
+                // the resolved execution id.
+                let resolved_id = match authorized {
+                    Ok(id) => id,
+                    Err(error) => return fail(call, error.to_string()),
+                };
+                match amendment {
+                    crate::api::orchestration::ExecutionAmendment::Reassign(target) => {
+                        let worker = crate::models::CampaignWorkerSelection {
+                            target,
+                            model: None,
+                            profile_id: None,
+                        };
+                        let Json(response) = crate::api::orchestration::reassign_execution(
+                            State(self.state.clone()),
+                            Path(execution_id),
+                            Json(crate::api::orchestration::ReassignExecutionRequest {
+                                worker,
+                                reason,
+                            }),
+                        )
+                        .await;
+                        unwrap_api(call, response.success, response.data, response.error)
+                    }
+                    crate::api::orchestration::ExecutionAmendment::ReplaceValidations(
+                        validations,
+                    ) => {
+                        let actor = crate::models::PlanningActor {
+                            kind: crate::models::PlanningActorKind::Agent,
+                            id: Some(self.actor_id.clone()),
+                            session_id: self.actor_session_id(),
+                            source_message_id: self.source_message_id.clone(),
+                        };
+                        match crate::api::orchestration::replace_execution_validations(
+                            &self.state.db,
+                            &resolved_id,
+                            validations,
+                            &reason,
+                            actor,
+                        )
+                        .await
+                        {
+                            Ok(replacement) => ok(call, json!(replacement)),
+                            Err((_, message)) => fail(call, message),
+                        }
+                    }
                 }
-                let Json(response) = crate::api::orchestration::reassign_execution(
-                    State(self.state.clone()),
-                    Path(execution_id),
-                    Json(crate::api::orchestration::ReassignExecutionRequest { worker, reason }),
-                )
-                .await;
-                unwrap_api(call, response.success, response.data, response.error)
             }
             other => fail(call, format!("unknown task execution tool `{other}`")),
         }
@@ -2840,6 +3042,11 @@ impl KronnToolExecutor {
     /// `None` stays a readable refusal (a room attached to nothing): never a
     /// fallback to the server's cwd, which would hand the model the whole host.
     async fn workspace_root(&self) -> Option<std::path::PathBuf> {
+        // An audit hands its directory over explicitly (`audit_arc`): it is
+        // neither a discussion's workspace row nor a project looked up by id.
+        if let Some(root) = &self.audit_workspace {
+            return Some(root.clone());
+        }
         // A workflow step has no discussion but does carry a project, and a project
         // is a directory. Refusing the file tools there was the same mistake as
         // demanding a `discussion_workspaces` row from a discussion: the path was
@@ -3019,6 +3226,40 @@ impl KronnToolExecutor {
         )
     }
 
+    /// KT-946 — `read_file` on a file attached to this very discussion. `None`
+    /// means "not an attachment of this room": the caller proceeds with the
+    /// ordinary workspace rules, which stay exactly as KT-338 drew them.
+    async fn read_attached_file(&self, call: &ToolCall) -> Option<ToolOutcome> {
+        use crate::api::agent_workspace_tools as ws;
+        let requested = call.arguments["path"].as_str()?;
+        if !ws::could_reference_attachment(requested) {
+            return None;
+        }
+        let disc_id = self.disc_id.clone()?;
+        let attachments = self
+            .state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussions::list_attachment_files(conn, &disc_id)
+                    .map_err(|error| anyhow::anyhow!(error))
+            })
+            .await
+            .ok()?;
+        let disk_path = ws::match_attachment(&attachments, requested)?;
+        let as_count = |field: &str| count_arg(call, field).map(|value| value as usize);
+        Some(
+            match ws::read_attachment_payload(
+                disk_path,
+                requested,
+                as_count("offset"),
+                as_count("limit"),
+            ) {
+                Ok(payload) => ok(call, payload),
+                Err(message) => fail(call, message),
+            },
+        )
+    }
+
     /// KT-338 — web and workspace tools. Every refusal is a readable `fail`, never
     /// an opaque error: the model must be able to correct its own call.
     async fn execute_workspace_tool(&self, call: &ToolCall) -> ToolOutcome {
@@ -3035,10 +3276,33 @@ impl KronnToolExecutor {
                 },
             };
         }
+        // KT-946 — a file attached to THIS discussion is readable wherever Kronn
+        // stored it, even by a room with no workspace at all, so this comes
+        // before the workspace is demanded. Anything that is not one of the
+        // room's own attachments falls through to the unchanged scope below.
+        if call.name == "read_file" {
+            if let Some(outcome) = self.read_attached_file(call).await {
+                return outcome;
+            }
+        }
         // The remaining tools are workspace-scoped.
         let Some(root) = self.workspace_root().await else {
             return fail(call, ws::Refusal::NoWorkspace.message());
         };
+        if matches!(
+            call.name.as_str(),
+            "write_file" | "edit_file" | "edit_lines" | "insert_after_line"
+        ) {
+            if let (Some(path), Ok(storage)) = (
+                call.arguments["path"].as_str(),
+                root.join(".kronn/context-files").canonicalize(),
+            ) {
+                if ws::resolve_in_workspace(&root, path).is_ok_and(|path| path.starts_with(storage))
+                {
+                    return fail(call, "Discussion attachments are read-only; copy the content to a separate workspace file to edit it.");
+                }
+            }
+        }
         match call.name.as_str() {
             "read_file" => match call.arguments["path"].as_str() {
                 None => fail(call, "missing required field `path`"),
@@ -3046,6 +3310,21 @@ impl KronnToolExecutor {
                     let as_count = |field: &str| count_arg(call, field).map(|value| value as usize);
                     match ws::read_file_payload(&root, path, as_count("offset"), as_count("limit"))
                     {
+                        // An audit may run on a hosted model: a private key read
+                        // into its context leaves the machine. Its path is the finding.
+                        Ok(payload)
+                            if self.audit_workspace.is_some()
+                                && payload["text"].as_str().is_some_and(holds_private_key) =>
+                        {
+                            fail(
+                                call,
+                                format!(
+                                    "`{path}` holds a private key. Its content is never read during \
+                                     an audit: report the path as the finding (a private key committed \
+                                     to the repository) without quoting any of it."
+                                ),
+                            )
+                        }
                         Ok(payload) => ok(call, payload),
                         Err(message) => fail(call, message),
                     }
@@ -3058,11 +3337,22 @@ impl KronnToolExecutor {
                 let Some(content) = call.arguments["content"].as_str() else {
                     return fail(call, "missing required field `content`");
                 };
+                // An audit step is the only writer of its own document, and Kronn
+                // itself rewrites that document between attempts (citation repair),
+                // so a receipt the model kept goes stale; once the write window has
+                // withdrawn read_file it could not get a fresh one (run O7, step 8).
+                let own_receipt = (call.arguments["expected_sha256"].as_str().is_none()
+                    && self.audit_step_target.as_deref() == Some(normalized_rel(path)))
+                .then(|| std::fs::read(root.join(normalized_rel(path))).ok())
+                .flatten()
+                .map(|bytes| ws::content_sha256(&bytes));
                 match ws::write_file_payload_with_receipt(
                     &root,
                     path,
                     content,
-                    call.arguments["expected_sha256"].as_str(),
+                    call.arguments["expected_sha256"]
+                        .as_str()
+                        .or(own_receipt.as_deref()),
                 ) {
                     Ok(payload) => ok(call, payload),
                     Err(message) => fail(call, message),
@@ -3495,6 +3785,23 @@ fn required_string(call: &ToolCall, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The `validations` argument of a principal tool, structure only. `None` is a
+/// genuinely ABSENT field; an explicit `null` is refused, never read as "no
+/// gates". Whether a command can run is decided by
+/// `validate_new_validation_specs`, which each caller applies as its role needs
+/// (launch and update refuse, prepare reports it as a reason).
+fn validations_argument(
+    call: &ToolCall,
+) -> Result<Option<Vec<crate::models::ValidationSpec>>, String> {
+    match call.arguments.get("validations") {
+        None => Ok(None),
+        Some(Value::Null) => Err("invalid validations: must be an array, not null".into()),
+        Some(value) => serde_json::from_value::<Vec<crate::models::ValidationSpec>>(value.clone())
+            .map(Some)
+            .map_err(|error| format!("invalid validations: {error}")),
+    }
+}
+
 fn task_worker_scope_contract(
     call: &ToolCall,
 ) -> Result<
@@ -3760,6 +4067,67 @@ fn tool_manual(name: Option<&str>) -> Value {
              The argv rules are the same as for `qe_create_draft`: no shell, one element \
              per argument.",
         ),
+        (
+            "task_exec_prepare",
+            "Preflight only: nothing is created. Pass the task, the typed `worker` copied from \
+             agent_list, `worker_scope_intent` (`generic`, or `scoped` with a `worker_scope`), and \
+             optionally the `validations` you will launch with. Only `launchable: true` permits a \
+             matching task_exec_launch.\n\n\
+             **Validations** — `[{command, quick_exec_id?, timeout_secs?}]` are YOUR mechanical \
+             gates: Kronn runs them on the candidate at integration, after review, and never \
+             reads them from the worker's manifest. They are NOT run by a shell. Each `command` \
+             is split on whitespace into ONE binary and its literal arguments, then run like a \
+             Quick Exec:\n\
+             • the binary is a bare allowlisted name — `cargo`, `make`, `node`, `pnpm`, `npm`, \
+             `tsc`, `eslint`, `vitest`, `python3`, `git`, `gh`, `rtk`, and probes such as \
+             `echo`/`true` (a refusal lists the exact current set). Never a path, `sh`, `bash`, \
+             `env`, `xargs`; `cd` and `npx` are not on it;\n\
+             • no shell syntax: `&&`, `||`, `|`, `;`, `&`, redirections (`>`, `2>&1`), `$(…)`, \
+             backticks and a leading `VAR=value` are refused — they would reach the binary as \
+             literal text. There is no quoting or globbing either;\n\
+             • the working directory is ALWAYS the root of the execution's worktree. Aim at a \
+             subdirectory with the tool's own option: `pnpm --dir frontend exec tsc -b \
+             --pretty false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` \
+             (there is no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n\
+             • `timeout_secs` defaults to 600 and is capped at 1800.\n\n\
+             A command that breaks this contract makes the preflight answer `launchable: false` \
+             with reason `invalid_validations` and the form that runs, and makes \
+             task_exec_launch refuse it the same way — it is never accepted to fail at \
+             integration. To correct the gates of an execution that already exists, without \
+             relaunching it, call `task_exec_reassign` with `validations`.",
+        ),
+        (
+            "task_exec_launch",
+            "Launch exactly what task_exec_prepare accepted: same task, worker, scope intent and \
+             scope, plus one stable `idempotency_key` reused on retry and the same \
+             `validations`. The validation contract — one allowlisted binary and literal \
+             arguments, no shell, run from the worktree root — is in \
+             tool_manual({tool: \"task_exec_prepare\"}); a command that breaks it is refused \
+             here, before anything is created.",
+        ),
+        (
+            "task_exec_reassign",
+            "Principal-only, and ONE change per call: pass either a `worker` or `validations`, \
+             never both and never neither. Room, worktree, attempts and evidence are kept \
+             either way.\n\n\
+             **`worker`** reassigns a blocked, interrupted or awaiting-review execution (a \
+             pending delivery is rejected and stays in the attempt history). Pass the flat typed \
+             MessageTarget copied from `agent_list`, never the internal \
+             `{target, model, profile_id}` envelope.\n\n\
+             **`validations`** replaces the gates of an existing, non-terminal execution without \
+             relaunching it. Pass the COMPLETE new set — it replaces the old one, it is not \
+             merged; `[]` removes every gate — and a `reason`. The set is held to the launch \
+             rules (tool_manual({tool: \"task_exec_prepare\"})): a command that could never run \
+             is refused. The swap is journaled on the execution with the actor, the reason and \
+             the previous set, and the answer returns `previous`, `validations` and `changed` \
+             (false when the set was already the current one). Earlier validation results are \
+             kept as evidence; what integration requires is a pass of each CURRENT gate on the \
+             exact candidate, so a corrected command is simply run at the next integration. \
+             Refused while the execution is Integrating, Validating or Applying (the running \
+             integration started with the old set — retry when it settles), once it is Done, \
+             Failed or Cancelled, and for an execution of a campaign, whose gates are the \
+             campaign's shared policy.",
+        ),
     ];
 
     match name.map(str::trim).filter(|name| !name.is_empty()) {
@@ -3910,6 +4278,66 @@ fn compact_quick_apis(items: &Value, project_id: Option<&str>) -> Value {
         })
         .unwrap_or_default();
     json!({ "quick_apis": list })
+}
+
+/// The broker request an `api_call` stands for, from what the model wrote.
+/// Who is asking (discussion, project, configuration, run, actor) is Kronn's to
+/// fill in, never the model's, so those fields are left for the caller.
+fn api_call_request(
+    arguments: &Value,
+) -> Result<crate::api::agent_api::AgentApiCallRequest, String> {
+    let (Some(slug), Some(path)) = (
+        arguments["api_plugin_slug"].as_str(),
+        arguments["endpoint_path"].as_str(),
+    ) else {
+        return Err("missing required fields `api_plugin_slug` and/or `endpoint_path`".into());
+    };
+    Ok(crate::api::agent_api::AgentApiCallRequest {
+        disc_id: None,
+        project_id: None,
+        api_plugin_slug: Some(slug.to_string()),
+        api_config_id: None,
+        quick_api_id: None,
+        endpoint_path: path.to_string(),
+        method: arguments["method"].as_str().map(str::to_string),
+        path_params: None,
+        query: arguments["query"].as_object().map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), as_plain_string(v)))
+                .collect()
+        }),
+        body: arguments.get("body").cloned(),
+        headers: None,
+        extract: api_call_extract(arguments)?,
+        workflow_run_id: None,
+        agent: None,
+    })
+}
+
+/// The `extract` a model attached to an `api_call`, in the shape the broker
+/// already takes from workflows (`ExtractSpec`). A bare JSONPath string is
+/// accepted as its `path`: local models write that as often as the object, and
+/// refusing it costs a turn to teach a spelling.
+pub(crate) fn api_call_extract(
+    arguments: &Value,
+) -> Result<Option<crate::models::ExtractSpec>, String> {
+    let path_error =
+        "`extract` needs a JSONPath in `path`, e.g. {\"path\": \"$.data[*]['name','id']\"}";
+    let spec = match arguments.get("extract") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(path)) => crate::models::ExtractSpec {
+            path: path.clone(),
+            fallback: None,
+            fail_on_empty: true,
+        },
+        Some(object @ Value::Object(_)) => serde_json::from_value(object.clone())
+            .map_err(|error| format!("invalid `extract`: {error}. {path_error}"))?,
+        Some(_) => return Err(format!("invalid `extract`: {path_error}")),
+    };
+    if spec.path.trim().is_empty() {
+        return Err(format!("empty `extract`: {path_error}"));
+    }
+    Ok(Some(spec))
 }
 
 /// Collapse a handler's `ApiResponse` into the payload the model sees.
@@ -4989,12 +5417,75 @@ mod tests {
         );
     }
 
+    /// KT-839 — validations were accepted at launch and refused at integration
+    /// because nothing told a principal that they run without a shell.
+    #[test]
+    fn the_task_exec_manual_states_how_a_validation_actually_runs() {
+        let page = tool_manual(Some("task_exec_prepare"));
+        let text = page["manual"].as_str().expect("task_exec_prepare manual");
+        for fact in [
+            "NOT run by a shell",
+            "ONE binary",
+            "allowlisted",
+            "`cd`",
+            "`&&`",
+            "`VAR=value`",
+            "root of the execution's worktree",
+            "pnpm --dir frontend exec tsc",
+            "cargo test --manifest-path backend/Cargo.toml --target-dir",
+            "invalid_validations",
+            "task_exec_reassign",
+        ] {
+            assert!(
+                text.contains(fact),
+                "the manual must state `{fact}`: {text}"
+            );
+        }
+        // What the manual promises about the binaries is what Quick Exec allows:
+        // every binary it names as usable is on the allowlist, and the ones it
+        // names as unusable are not.
+        for usable in [
+            "cargo", "make", "node", "pnpm", "npm", "tsc", "eslint", "vitest", "git",
+        ] {
+            assert!(
+                crate::core::quick_exec::ALLOWED_BINARIES.contains(&usable),
+                "`{usable}` is named usable in the manual but is not allowlisted"
+            );
+        }
+        for unusable in ["cd", "npx", "sh", "bash", "env", "xargs"] {
+            assert!(
+                !crate::core::quick_exec::ALLOWED_BINARIES.contains(&unusable),
+                "`{unusable}` is named unusable in the manual but is allowlisted"
+            );
+        }
+
+        assert!(tool_manual(Some("task_exec_launch"))["manual"]
+            .as_str()
+            .expect("launch page")
+            .contains("tool_manual({tool: \"task_exec_prepare\"})"));
+        let update = tool_manual(Some("task_exec_reassign"));
+        let update = update["manual"].as_str().expect("reassign page");
+        for fact in [
+            "ONE change per call",
+            "COMPLETE",
+            "journaled",
+            "Integrating",
+            "campaign",
+        ] {
+            assert!(update.contains(fact), "{fact}: {update}");
+        }
+    }
+
     #[test]
     fn every_manual_entry_belongs_to_a_declared_tool_or_the_signal_registry() {
         // A page for a tool nobody can call is documentation of a capability
         // that does not exist — the exact shape that taught models to
         // hallucinate calls (tools.rs).
-        let declared: Vec<String> = tool_catalogue()
+        //
+        // The FULL catalogue: the delegation tools are declared to native agents
+        // too (as a family, when tiering is on), and their pages are the point of
+        // KT-839.
+        let declared: Vec<String> = full_discussion_catalogue()
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();
@@ -5115,6 +5606,119 @@ mod tests {
             by_name("task_update_dod")["function"]["parameters"]["required"],
             serde_json::json!(["task_id", "dod_id", "completed"])
         );
+    }
+
+    /// A shortened result tells the model to ask for a part of it, which it can
+    /// only do if the tool takes a way to say which part. `extract` was accepted
+    /// by the broker and by the CLI bridge, and missing from this declaration.
+    #[test]
+    fn api_call_declares_extract_and_says_why_to_use_it() {
+        let items = tool_catalogue();
+        let api_call = items
+            .iter()
+            .find(|item| item["function"]["name"] == "api_call")
+            .expect("api_call is declared");
+        let extract = &api_call["function"]["parameters"]["properties"]["extract"];
+        assert_eq!(extract["type"], "object");
+        assert_eq!(extract["properties"]["path"]["type"], "string");
+        assert_eq!(extract["required"], serde_json::json!(["path"]));
+        assert!(
+            api_call["function"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("large response") && text.contains("`extract`")),
+            "the description must say when `extract` is for: a large response"
+        );
+        // Optional: a small response needs none, and the model is not asked for it.
+        assert_eq!(
+            api_call["function"]["parameters"]["required"],
+            serde_json::json!(["api_plugin_slug", "endpoint_path"])
+        );
+    }
+
+    #[test]
+    fn api_call_hands_its_extract_query_and_method_to_the_broker() {
+        let request = api_call_request(&json!({
+            "api_plugin_slug": "api-speedcurve",
+            "endpoint_path": "/v1/tests",
+            "method": "GET",
+            "query": { "site_id": 4, "per_page": "100" },
+            "extract": { "path": "$.data[*]['browser','largest_contentful_paint']" },
+        }))
+        .expect("a complete call");
+
+        let extract = request.extract.expect("the extract reaches the broker");
+        assert_eq!(
+            extract.path,
+            "$.data[*]['browser','largest_contentful_paint']"
+        );
+        assert!(
+            extract.fail_on_empty,
+            "a path that matches nothing is reported to the model, not passed off as data"
+        );
+        assert_eq!(request.endpoint_path, "/v1/tests");
+        assert_eq!(request.method.as_deref(), Some("GET"));
+        let query = request.query.expect("query");
+        assert_eq!(query.get("site_id").map(String::as_str), Some("4"));
+        assert_eq!(query.get("per_page").map(String::as_str), Some("100"));
+        // Who is asking is Kronn's to say.
+        assert!(request.disc_id.is_none() && request.agent.is_none());
+    }
+
+    #[test]
+    fn a_call_without_extract_asks_for_the_whole_response_as_before() {
+        for arguments in [
+            json!({ "api_plugin_slug": "p", "endpoint_path": "/x" }),
+            json!({ "api_plugin_slug": "p", "endpoint_path": "/x", "extract": null }),
+        ] {
+            assert!(api_call_request(&arguments).unwrap().extract.is_none());
+        }
+        let error = api_call_request(&json!({ "endpoint_path": "/x" })).unwrap_err();
+        assert!(error.contains("api_plugin_slug"), "{error}");
+    }
+
+    #[test]
+    fn api_call_accepts_the_extract_spellings_a_local_model_writes() {
+        // The object the broker documents, with its optional fields.
+        let object = api_call_extract(&json!({
+            "extract": { "path": "$.items", "fallback": [], "fail_on_empty": false }
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(object.path, "$.items");
+        assert_eq!(object.fallback, Some(json!([])));
+        assert!(!object.fail_on_empty);
+
+        // The bare JSONPath, which is what a small model reaches for.
+        let bare = api_call_extract(&json!({ "extract": "$.items[*].id" }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bare.path, "$.items[*].id");
+        assert!(bare.fail_on_empty);
+    }
+
+    #[test]
+    fn a_malformed_extract_is_refused_with_the_spelling_to_use() {
+        for arguments in [
+            json!({ "extract": {} }),
+            json!({ "extract": { "path": "" } }),
+            json!({ "extract": "   " }),
+            json!({ "extract": 12 }),
+            json!({ "extract": ["$.a"] }),
+        ] {
+            let error = api_call_extract(&arguments).expect_err(&arguments.to_string());
+            assert!(
+                error.contains("\"path\"") && error.contains("$.data"),
+                "the refusal must show a working extract: {error}"
+            );
+        }
+        // And it is refused before the call, so nothing is sent for it.
+        let error = api_call_request(&json!({
+            "api_plugin_slug": "p",
+            "endpoint_path": "/x",
+            "extract": 12,
+        }))
+        .unwrap_err();
+        assert!(error.contains("extract"), "{error}");
     }
 
     #[test]

@@ -106,6 +106,11 @@ pub enum ProvisionError {
 /// boundary prevents a newly-created run from carrying a timeout that the
 /// validation runner would later refuse. Persisted runs from older Kronn builds
 /// are handled separately by `run_one_validation` so upgrades remain resumable.
+///
+/// The command line is held to the rules its run applies (KT-839): a validation
+/// that Quick Exec will refuse — `cd frontend && …`, a `VAR=` prefix, a binary
+/// off the allowlist — is refused HERE, while the principal can still fix it,
+/// rather than at integration after the worker delivered and the review passed.
 pub(crate) fn validate_new_validation_specs(
     validations: &[crate::models::ValidationSpec],
 ) -> Result<(), String> {
@@ -120,6 +125,14 @@ pub(crate) fn validate_new_validation_specs(
             "command must be non-empty and timeout_secs must be between 1 and {max_timeout} (got {})",
             serde_json::to_string(bad).unwrap_or_default()
         ));
+    }
+    for spec in validations {
+        if let Err(rejection) = crate::core::quick_exec::check_command_line(&spec.command) {
+            return Err(format!(
+                "validation `{}` can never run: {rejection}",
+                spec.command
+            ));
+        }
     }
     Ok(())
 }
@@ -1738,12 +1751,11 @@ async fn provision_task_execution_inner(
     let target = worker_target_from_execution(&prepared.execution)
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
-    // A joined CLI worker cannot be woken by a native dispatch inside the child (a
-    // session owns exactly one room, and `wait_for_peer` only wakes in that room).
-    // Instead of the native launchable-checkpoint, open a durable CONTROL OFFER in
-    // the ORIGIN room targeted at the exact session and park the execution
-    // `Blocked(awaiting_worker_acceptance)`; acceptance (KT-328 tranche 2) drives it
-    // to Working. Phases A–D already provisioned its sub-disc + worktree.
+    // A joined CLI worker keeps ownership of its principal room. Instead of a native
+    // child-room dispatch, open a durable CONTROL OFFER in that room, targeted at the
+    // exact session, and park the execution `Blocked(awaiting_worker_acceptance)`;
+    // acceptance grants the execution-scoped worker role and drives it to Working.
+    // Phases A–D already provisioned its sub-discussion + worktree.
     if matches!(target.kind, MessageTargetKind::Cli) {
         return open_cli_worker_control_offer(
             db,
@@ -2083,7 +2095,9 @@ pub enum IntegrationOutcome {
     /// The parent branch advanced onto the validated candidate.
     Integrated { sha: String },
     /// The candidate could not be built or did not validate. Branch, worktree and
-    /// sub-discussion are untouched and the worker is back in the loop.
+    /// sub-discussion are untouched. The worker was re-activated with the failure
+    /// and the principal that approved was told (KT-862): by the time this is
+    /// returned, both are durable, so a caller only has to log it.
     SentBack { reason: String },
     /// A precondition was not met and the target is untouched. A live execution
     /// is parked with the reason (approval hold, `Blocked` or `Interrupted`).
@@ -2393,7 +2407,7 @@ pub async fn run_integration(
             send_back(
                 db,
                 exec_id,
-                format!("merge conflict in {}", files.join(", ")),
+                &ReworkReport::conflict(format!("merge conflict in {}", files.join(", "))),
             )
             .await?;
             return Ok(IntegrationOutcome::SentBack {
@@ -2444,12 +2458,15 @@ async fn validate_and_apply(
     let generic = BlockedReasonCode::IntegrationRefused;
     let mut rebuilds = 0;
     loop {
-        if let Some(reason) =
+        if let Some(failure) =
             run_pending_validations(db, exec_id, &run.validations, child, &candidate.merge_sha)
                 .await?
         {
-            send_back(db, exec_id, reason.clone()).await?;
-            return Ok(IntegrationOutcome::SentBack { reason });
+            let report = ReworkReport::validation(failure);
+            send_back(db, exec_id, &report).await?;
+            return Ok(IntegrationOutcome::SentBack {
+                reason: report.reason,
+            });
         }
         checkpoint(
             db,
@@ -2533,7 +2550,7 @@ async fn validate_and_apply(
                     "merge conflict after the target advanced in {}",
                     files.join(", ")
                 );
-                send_back(db, exec_id, reason.clone()).await?;
+                send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
                 return Ok(IntegrationOutcome::SentBack { reason });
             }
             Err(error) => {
@@ -2683,7 +2700,7 @@ async fn resume_recovered_integration(
                 Ok(worktree::CandidateOutcome::Built { sha }) => sha,
                 Ok(worktree::CandidateOutcome::Conflict { files }) => {
                     let reason = format!("merge conflict after recovery in {}", files.join(", "));
-                    send_back(db, exec_id, reason.clone()).await?;
+                    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
                     return Ok(IntegrationOutcome::SentBack { reason });
                 }
                 Err(error) => {
@@ -2765,7 +2782,7 @@ async fn resume_recovered_integration(
         .ok_or_else(|| internal("recovery candidate SHA is missing".into()))?;
     if let Err(error) = worktree::verify_worktree_head(child, &merge_sha) {
         let reason = format!("candidate worktree drifted before recovered validation: {error}");
-        send_back(db, exec_id, reason.clone()).await?;
+        send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
         return Ok(IntegrationOutcome::SentBack { reason });
     }
     let target_sha = recovered_execution
@@ -3258,42 +3275,286 @@ async fn checkpoint(
     }
 }
 
-/// Hand the work back to the worker without touching branch, worktree or task.
-async fn send_back(db: &Database, exec_id: &str, reason: String) -> Result<(), ProvisionError> {
-    let id = exec_id.to_string();
-    db.with_conn(move |conn| {
-        let transaction = conn.unchecked_transaction()?;
-        let execution = crate::db::orchestration::get_task_execution(&transaction, &id)?
-            .context("execution vanished before integration rework")?;
-        let moved = crate::db::orchestration::transition_execution(
-            &transaction,
-            &id,
-            TaskExecutionStatus::ChangesRequested,
-            &backend_actor(),
-            serde_json::json!({
-                "reason": reason,
-                "from_attempt": execution.attempt_no,
-                "to_attempt": execution.attempt_no + 1,
-            }),
-        )?;
-        if moved {
-            // An approved attempt already owns both a delivery/review row and the
-            // deterministic `orch-review-request:<exec>:<attempt>` message. Reusing
-            // that attempt after a candidate conflict or failed validation makes the
-            // next otherwise-valid delivery collide with the old message primary key.
-            // Integration rework is a distinct worker attempt, just like an explicit
-            // request_changes review, so advance it in the same durable checkpoint.
-            transaction.execute(
-                "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \
-                 WHERE id = ?1",
-                rusqlite::params![id, chrono::Utc::now().to_rfc3339()],
-            )?;
+/// Why the integration handed an approved delivery back.
+struct ReworkReport {
+    /// One line naming the cause; it is also the `SentBack` reason.
+    reason: String,
+    /// The validation that went red, when that is the cause.
+    failure: Option<ValidationFailure>,
+}
+
+impl ReworkReport {
+    fn conflict(reason: String) -> Self {
+        Self {
+            reason,
+            failure: None,
         }
-        transaction.commit()?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| ProvisionError::Internal(e.to_string()))
+    }
+
+    fn validation(failure: ValidationFailure) -> Self {
+        Self {
+            reason: format!("validation failed: {}", failure.command),
+            failure: Some(failure),
+        }
+    }
+}
+
+/// How much of a failing validation's output travels in a message. The end is
+/// kept: a compiler or a test runner prints its verdict last.
+const REWORK_OUTPUT_LIMIT: usize = 4_000;
+
+/// A fenced block that the text itself cannot close early.
+fn fenced_output(output: &str) -> String {
+    let total = output.chars().count();
+    let shown: String = if total > REWORK_OUTPUT_LIMIT {
+        let tail: String = output.chars().skip(total - REWORK_OUTPUT_LIMIT).collect();
+        format!(
+            "[… {} caractères omis]\n{tail}",
+            total - REWORK_OUTPUT_LIMIT
+        )
+    } else {
+        output.to_string()
+    };
+    let longest_run = shown
+        .split(|c| c != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat((longest_run + 1).max(3));
+    format!("{fence}text\n{}\n{fence}", shown.trim_end())
+}
+
+/// The evidence block both messages carry: the command, how it ended and what it
+/// printed, or the bare cause when no validation is involved (a merge conflict).
+fn rework_evidence(report: &ReworkReport) -> String {
+    let Some(failure) = &report.failure else {
+        return format!("**Cause :** {}", report.reason);
+    };
+    let code = failure
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "aucun (le processus n'a pas abouti)".to_string());
+    let output = if failure.output.trim().is_empty() {
+        "_(la commande n'a rien affiché)_".to_string()
+    } else {
+        fenced_output(&failure.output)
+    };
+    format!(
+        "**Commande :** `{}`\n**Code de sortie :** {code}\n\n**Sortie :**\n{output}",
+        failure.command
+    )
+}
+
+/// What the worker reads in its own room when the integration sends its approved
+/// delivery back: the cause, the command and its output, and the way forward.
+/// Deterministic id per `(exec, attempt)` so a resume never double-posts.
+fn build_integration_rework_message(
+    exec_id: &str,
+    next_attempt: u32,
+    task_reference: &str,
+    task_title: &str,
+    target_branch: Option<&str>,
+    report: &ReworkReport,
+) -> DiscussionMessage {
+    let way_forward = match (&report.failure, target_branch) {
+        (Some(_), _) => "Reproduis l'échec, corrige-le **dans ce worktree**".to_string(),
+        (None, Some(target)) => format!(
+            "Corrige la cause ci-dessus **dans ce worktree** (pour un conflit : intègre \
+             `{target}` dans ta branche et résous-le)"
+        ),
+        (None, None) => "Corrige la cause ci-dessus **dans ce worktree**".to_string(),
+    };
+    let content = format!(
+        "**Intégration refusée — {task_reference} : {task_title}**\n\n\
+         Ta livraison a été approuvée, mais l'intégration protégée l'a renvoyée : {reason}. \
+         La branche cible n'a pas bougé.\n\n\
+         {evidence}\n\n\
+         {way_forward} (il est conservé, comme cette sous-discussion), puis re-livre un \
+         nouveau DeliveryManifest via `task_exec_deliver`. Si l'échec ne vient pas de ton \
+         changement, dis-le dans le résumé de ta livraison.",
+        reason = report.reason,
+        evidence = rework_evidence(report),
+    );
+    orchestrator_message(
+        format!("orch-integration-rework:{exec_id}:{next_attempt}"),
+        content,
+    )
+}
+
+/// What the principal that approved reads in the parent room when the
+/// integration sends the delivery back: the same evidence the worker got, and the
+/// two ways forward. Deterministic id per `(exec, attempt)`.
+fn build_integration_rework_notice(
+    exec_id: &str,
+    next_attempt: u32,
+    task_reference: &str,
+    task_title: &str,
+    child_discussion_id: &str,
+    report: &ReworkReport,
+) -> DiscussionMessage {
+    let content = format!(
+        "**Intégration renvoyée au worker — {task_reference}**\n\n\
+         L'exécution `{exec_id}` (**{task_title}**) était approuvée, mais l'intégration l'a \
+         renvoyée : {reason}. La branche cible n'a pas bougé.\n\n\
+         {evidence}\n\n\
+         Le worker est relancé avec cette sortie dans la sous-discussion \
+         `{child_discussion_id}` (tentative {next_attempt}). Deux issues :\n\
+         - l'échec vient de la livraison : attends la re-livraison, puis relis-la avec \
+         `task_exec_review` ;\n\
+         - l'échec ne vient pas de la livraison (test instable, environnement) : relance les \
+         mêmes validations sur le même candidat, sans nouvelle livraison, avec \
+         `task_exec_resume`.",
+        reason = report.reason,
+        evidence = rework_evidence(report),
+    );
+    orchestrator_message(
+        format!("orch-integration-reworked:{exec_id}:{next_attempt}"),
+        content,
+    )
+}
+
+/// Hand the work back to the worker without touching branch, worktree or task.
+///
+/// One durable checkpoint sends the failure to the worker in its room, wakes the
+/// worker for the next attempt (a joined CLI through a control offer, a native
+/// worker through a dispatch — the way a reviewer's `request_changes` does) and
+/// tells the principal that approved. A send-back that only flipped the status
+/// left the execution `ChangesRequested` with nobody working it and nobody told.
+async fn send_back(
+    db: &Database,
+    exec_id: &str,
+    report: &ReworkReport,
+) -> Result<(), ProvisionError> {
+    let internal = |e: String| ProvisionError::Internal(e);
+    let (execution, task, target_branch, head_sha) = {
+        let id = exec_id.to_string();
+        let (execution, task, run, workspace) = db
+            .with_conn(move |conn| {
+                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                    .context("execution vanished before integration rework")?;
+                let task = crate::db::planning::get_task(conn, &execution.task_id)?
+                    .context("task vanished before integration rework")?;
+                let run = crate::db::orchestration::get_orchestration_run(
+                    conn,
+                    &execution.orchestration_run_id,
+                )?;
+                let workspace =
+                    crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)?;
+                Ok((execution, task, run, workspace))
+            })
+            .await
+            .map_err(|e| internal(e.to_string()))?;
+        let head_sha = workspace
+            .and_then(|workspace| workspace.canonical_path)
+            .and_then(|path| worktree::resolve_commit(std::path::Path::new(&path), "HEAD").ok());
+        (
+            execution,
+            task,
+            run.and_then(|run| run.target_branch),
+            head_sha,
+        )
+    };
+    let child = execution.sub_discussion_id.clone().ok_or_else(|| {
+        internal("execution has no sub-discussion to send the work back to".into())
+    })?;
+    let worker_target =
+        worker_target_from_execution(&execution).map_err(|e| internal(e.to_string()))?;
+    let next_attempt = execution.attempt_no + 1;
+    let reference = task.summary.reference.as_str();
+    let title = task.summary.title.as_str();
+    let worker_message = build_integration_rework_message(
+        &execution.id,
+        next_attempt,
+        reference,
+        title,
+        target_branch.as_deref(),
+        report,
+    );
+    let principal_message = build_integration_rework_notice(
+        &execution.id,
+        next_attempt,
+        reference,
+        title,
+        &child,
+        report,
+    );
+    // The same two re-activation shapes a reviewer's `request_changes` uses: a
+    // joined CLI re-accepts a control offer, a native worker gets a fresh dispatch.
+    let control_offer = execution.worker_cli_session_id.map(|_| {
+        let offer_id = Uuid::new_v4().to_string();
+        let message = build_control_offer_message(
+            &execution.id,
+            next_attempt,
+            &offer_id,
+            reference,
+            title,
+            &child,
+        );
+        (offer_id, message)
+    });
+    let native_dispatch = execution.worker_cli_session_id.is_none().then(|| {
+        (
+            Uuid::new_v4().to_string(),
+            format!("orch-rework:{}:{next_attempt}", execution.id),
+        )
+    });
+
+    let reason = report.reason.clone();
+    let outcome = db
+        .with_conn(move |conn| {
+            let reactivation = match (&control_offer, worker_target.cli_session_id) {
+                (Some((offer_id, control_message)), Some(session)) => {
+                    Some(crate::db::orchestration::ReworkReoffer {
+                        offer_id,
+                        new_attempt_no: next_attempt,
+                        target_cli_session_id: session,
+                        origin_discussion_id: &execution.parent_discussion_id,
+                        child_discussion_id: &child,
+                        control_message,
+                        control_target: &worker_target,
+                    })
+                }
+                _ => None,
+            };
+            let native_dispatch = native_dispatch.as_ref().map(|(job_id, dedupe_key)| {
+                crate::db::orchestration::NativeReworkDispatch { job_id, dedupe_key }
+            });
+            crate::db::orchestration::commit_integration_rework(
+                conn,
+                &crate::db::orchestration::IntegrationRework {
+                    exec_id: &execution.id,
+                    from_attempt: execution.attempt_no,
+                    reason: &reason,
+                    head_sha: head_sha.as_deref(),
+                    child_discussion_id: &child,
+                    worker_message: &worker_message,
+                    worker_target: &worker_target,
+                    principal_message: &principal_message,
+                    reactivation,
+                    native_dispatch,
+                    actor: &backend_actor(),
+                },
+            )
+        })
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    match outcome {
+        crate::db::orchestration::IntegrationReworkOutcome::Reworked => Ok(()),
+        crate::db::orchestration::IntegrationReworkOutcome::ExecutionRaced => {
+            Err(ProvisionError::CheckpointRefused(
+                "the execution moved while the integration sent it back".into(),
+            ))
+        }
+    }
+}
+
+/// The validation that went red on a candidate, as the worker and the principal
+/// need it: the command, how it ended and what it printed.
+#[derive(Debug, PartialEq, Eq)]
+struct ValidationFailure {
+    command: String,
+    exit_code: Option<i32>,
+    output: String,
 }
 
 /// Execute only validations without an already-persisted success for this
@@ -3305,7 +3566,7 @@ async fn run_pending_validations(
     validations: &[crate::models::ValidationSpec],
     child: &std::path::Path,
     merge_sha: &str,
-) -> Result<Option<String>, ProvisionError> {
+) -> Result<Option<ValidationFailure>, ProvisionError> {
     for spec in validations {
         let id = exec_id.to_string();
         let candidate = merge_sha.to_string();
@@ -3346,7 +3607,11 @@ async fn run_pending_validations(
             .await
             .map_err(|error| ProvisionError::Internal(error.to_string()))?;
         if !recorded.passed() {
-            return Ok(Some(format!("validation failed: {command}")));
+            return Ok(Some(ValidationFailure {
+                command,
+                exit_code: recorded.exit_code,
+                output: recorded.output.unwrap_or_default(),
+            }));
         }
     }
     Ok(None)
@@ -3753,20 +4018,20 @@ async fn open_cli_worker_control_offer(
     .map_err(|e| ProvisionError::Internal(e.to_string()))
 }
 
-/// The verdict of a CLI worker accepting its control offer and attaching to its
-/// sub-discussion (KT-328 tranche 2, commit 2).
+/// The verdict of a CLI worker accepting its control offer without leaving its
+/// principal discussion.
 #[derive(Debug)]
 // Outcome enum: the success payload travels inline rather than boxed, so the
 // nominal path pays no allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum AcceptAttachOutcome {
-    /// The exact target session accepted: its durable binding + membership moved to the
-    /// child, the work brief is posted there (Cli-targeted, no dispatch), the execution
-    /// is `Working`, the task `InProgress`, the offer `accepted`, and the origin room
-    /// carries the durable attach notice. Carries the child disc id + refreshed execution.
+    /// The exact target session accepted. Worker authority is carried by the execution's
+    /// pinned session id while the session's durable binding and live membership stay in
+    /// the principal room. The child remains the durable task/evidence room.
     Attached {
         child_discussion_id: String,
         execution: TaskExecution,
+        worker_instructions: String,
     },
     /// No offer with that opaque id.
     NotFound,
@@ -3787,25 +4052,20 @@ pub enum AcceptAttachOutcome {
     CheckpointRefused(String),
 }
 
-/// Accept a CLI worker control offer and attach the worker to its sub-discussion
-/// (KT-328 tranche 2, commit 2). Both identities are derived by the trusted bridge:
+/// Accept a CLI worker control offer without transferring the caller's room ownership.
+/// Both identities are derived by the trusted bridge:
 /// the live `(source_agent, source_session_id)` resolves the exact target session,
 /// while `source_binding_session_id` names its separate reload-stable room binding.
-/// The model supplies neither. Three durable steps, each idempotent so a crash between
-/// any two resumes cleanly:
+/// The model supplies neither. Two durable steps are idempotent:
 ///   1. stage the accept (CAS `pending → accepting`, commit 1) — reversible, no external
 ///      effect yet;
-///   2. move the worker session origin → child — durable source binding (idempotent,
-///      fail-closed on an ownership race) AND `discussion_sessions` membership, so the
-///      brief targeted at it in the child routes/wakes correctly and the invariant "one
-///      active session = one discussion" holds literally;
-///   3. the final atomic checkpoint (brief in child, `Working`, task `InProgress`, offer
-///      `accepted`, durable attach notice in origin).
+///   2. verify that the execution still owns the exact session, then commit the brief in
+///      the child, `Working`, task `InProgress`, offer `accepted`, and an activation notice
+///      in the origin. The brief content is also returned directly to the accepting CLI.
 ///
-/// The two-phase move (step 2) and checkpoint (step 3) are deliberately separate durable
-/// txns — the server binding and the bridge's local binding/cursor cannot share one — so
-/// a crash after the transfer, before the checkpoint, resumes: the transfer replays as a
-/// no-op and the checkpoint runs from the still-`accepting` offer.
+/// Keeping room ownership unchanged is what lets a CLI principal continue polling its
+/// room and authorizing the other executions it coordinates while this execution grants
+/// it the additional worker role.
 pub async fn accept_worker_offer_and_attach(
     db: &Database,
     offer_id: &str,
@@ -3869,13 +4129,13 @@ pub async fn accept_worker_offer_and_attach(
     let exec_id = offer.task_execution_id.clone();
     let session_pk = offer.target_cli_session_id;
 
-    // ── Rework re-accept fast path (KT-319 tranche 3b, DoD-9). A re-offer sets origin == child
-    // (the worker never left its sub-discussion during the review), so there is NO session to
-    // move and the task is already `InProgress`. Route straight to the rework checkpoint
+    // ── Rework re-accept fast path (KT-319 tranche 3b, DoD-9). A re-offer advances the
+    // attempt number; the task is already `InProgress`. Route straight to the rework checkpoint
     // (`Blocked → Provisioning → Working` + settle the offer), skipping the provisioning
-    // session-move and task-CAS. Idempotent: a resumed already-`accepted` offer converges here
+    // task-CAS. This works for both legacy child-bound workers and principal-room workers.
+    // Idempotent: a resumed already-`accepted` offer converges here
     // to Attached. ──
-    if origin == child && offer.reason.as_deref() != Some("cli_reassignment") {
+    if offer.attempt_no > 0 && offer.reason.as_deref() != Some("cli_reassignment") {
         use crate::db::orchestration::CliReworkOutcome;
         let (eid, oid) = (exec_id.clone(), offer.id.clone());
         let outcome = db
@@ -3891,17 +4151,34 @@ pub async fn accept_worker_offer_and_attach(
             .map_err(|e| ProvisionError::Internal(e.to_string()))?;
         return match outcome {
             CliReworkOutcome::Resumed | CliReworkOutcome::AlreadyResumed => {
-                let eid = exec_id.clone();
-                let execution = db
+                let (eid, child_id) = (exec_id.clone(), child.clone());
+                let (execution, worker_instructions) = db
                     .with_conn(move |conn| {
-                        crate::db::orchestration::get_task_execution(conn, &eid)?
-                            .context("execution vanished right after the rework checkpoint")
+                        let execution = crate::db::orchestration::get_task_execution(conn, &eid)?
+                            .context("execution vanished right after the rework checkpoint")?;
+                        let instructions = conn
+                            .query_row(
+                                "SELECT m.content FROM messages m \
+                                 JOIN message_targets mt ON mt.message_id = m.id \
+                                 WHERE m.discussion_id = ?1 AND mt.target_kind = 'cli' \
+                                   AND mt.cli_session_id = ?2 \
+                                 ORDER BY m.sort_order DESC LIMIT 1",
+                                rusqlite::params![child_id, session_pk],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()?
+                            .unwrap_or_else(|| {
+                                "Rework accepted. Read the execution detail and continue the current attempt."
+                                    .to_string()
+                            });
+                        Ok((execution, instructions))
                     })
                     .await
                     .map_err(|e| ProvisionError::Internal(e.to_string()))?;
                 Ok(AcceptAttachOutcome::Attached {
                     child_discussion_id: child,
                     execution,
+                    worker_instructions,
                 })
             }
             CliReworkOutcome::OfferNotAccepting { status } => {
@@ -3913,49 +4190,30 @@ pub async fn accept_worker_offer_and_attach(
         };
     }
 
-    // ── 2. Move the worker session origin → child (binding + membership). The accepting
-    // caller's LIVE identity IS the target session's (accept verified the pk match).
-    // Transfer its independently-derived DURABLE room binding. Keeping these values
-    // separate is essential after an MCP reload: the active row rotates to `adhoc-*`,
-    // while the source-history owner remains `cli-*`. Idempotent + fail-closed. ──
-    if origin != child {
-        let (o, c) = (origin.clone(), child.clone());
-        let execution_id = exec_id.clone();
-        let (agent, binding_session) = (
-            source_agent.to_string(),
-            source_binding_session_id.to_string(),
-        );
-        db.with_conn(move |conn| {
-            // An accepted offer survives task completion/reassignment. Its
-            // retry must never move a released worker back into the child.
-            // Check on the same write connection as the transfer, not only
-            // before yielding between the acceptance saga's phases.
-            let current = crate::db::orchestration::get_task_execution(conn, &execution_id)?
-                .context("worker transfer execution vanished")?;
-            if current.status.is_terminal()
-                || current.worker_target_kind != Some(MessageTargetKind::Cli)
-                || current.worker_cli_session_id != Some(session_pk)
-                || current.worker_agent_type.as_deref() != Some(agent.as_str())
-            {
-                anyhow::bail!(
-                    "worker transfer refused: execution no longer owns this CLI assignment"
-                );
-            }
-            crate::db::disc_source::transfer_source_binding(
-                conn,
-                &o,
-                &c,
-                &agent,
-                &binding_session,
-            )?;
-            crate::db::discussion_sessions::move_session_to_discussion(conn, session_pk, &c)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| ProvisionError::Internal(format!("session transfer failed: {e}")))?;
-    }
+    // ── 2. Revalidate the execution-scoped worker grant. Acceptance must never move the
+    // live session or its reload-stable source binding: the caller may simultaneously be
+    // the principal of `origin`, and that room ownership is what keeps its waits and other
+    // principal actions alive. The exact `(execution, session_pk)` pair is the worker role.
+    let execution_id = exec_id.clone();
+    let agent = source_agent.to_string();
+    db.with_conn(move |conn| {
+        let current = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+            .context("worker acceptance execution vanished")?;
+        if current.status.is_terminal()
+            || current.worker_target_kind != Some(MessageTargetKind::Cli)
+            || current.worker_cli_session_id != Some(session_pk)
+            || current.worker_agent_type.as_deref() != Some(agent.as_str())
+        {
+            anyhow::bail!(
+                "worker acceptance refused: execution no longer owns this CLI assignment"
+            );
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
-    // CLI reassignment uses the same durable offer + exact-session transfer as
+    // CLI reassignment uses the same durable offer + exact execution/session grant as
     // initial provisioning, but the plan task is already InProgress. Settle a
     // bounded handoff without replaying the task CAS or reposting the original
     // brief.
@@ -3963,7 +4221,7 @@ pub async fn accept_worker_offer_and_attach(
         let eid = exec_id.clone();
         db.with_conn(move |conn| {
             let execution = crate::db::orchestration::get_task_execution(conn, &eid)?
-                .context("execution vanished after reassignment session transfer")?;
+                .context("execution vanished after reassignment acceptance")?;
             let recovery = crate::db::orchestration::get_execution_recovery(conn, &eid)?;
             Ok((execution, recovery))
         })
@@ -3992,6 +4250,7 @@ pub async fn accept_worker_offer_and_attach(
                 recovery.assignment_generation, recovery.recovery_reason
             ),
         );
+        let worker_instructions = handoff.content.clone();
         let (eid, oid, child_id) = (exec_id.clone(), offer.id.clone(), child.clone());
         let outcome = db
             .with_conn(move |conn| {
@@ -4021,6 +4280,7 @@ pub async fn accept_worker_offer_and_attach(
                 Ok(AcceptAttachOutcome::Attached {
                     child_discussion_id: child,
                     execution,
+                    worker_instructions,
                 })
             }
             CliReassignmentOutcome::OfferNotAccepting { status } => {
@@ -4069,6 +4329,7 @@ pub async fn accept_worker_offer_and_attach(
         &branch,
         &base_sha,
     );
+    let worker_instructions = brief.content.clone();
     let notice = build_attach_notice(
         &exec_id,
         execution.attempt_no,
@@ -4120,6 +4381,7 @@ pub async fn accept_worker_offer_and_attach(
             Ok(AcceptAttachOutcome::Attached {
                 child_discussion_id: child,
                 execution,
+                worker_instructions,
             })
         }
         CliCheckpointOutcome::TaskNotStarted(reason) => Ok(AcceptAttachOutcome::CheckpointRefused(
@@ -5069,12 +5331,15 @@ pub async fn decide_review(
             .unwrap_or(fallback)
     };
 
+    // KT-837 keeps an execution-scoped worker in its principal room. That dual room role
+    // must restore review reachability without letting the worker manufacture the separate
+    // principal-only evidence that can override an unmet delivery DoD.
     decide_authorized_review(
         db,
         exec,
         &alias,
         Some(source_session_id.to_string()),
-        is_principal,
+        is_principal && !is_worker,
         decision_json,
     )
     .await
@@ -5376,6 +5641,7 @@ async fn decide_authorized_review(
                         offer_id,
                         new_attempt,
                         worker_target.clone(),
+                        exec.parent_discussion_id.clone(),
                         child.clone(),
                         control_msg,
                     ))
@@ -5418,21 +5684,21 @@ async fn decide_authorized_review(
                     principal_target: target,
                 }
             });
-            let reactivation =
-                reactivation_owned
-                    .as_ref()
-                    .map(|(offer_id, new_attempt, target, child, msg)| {
-                        crate::db::orchestration::ReworkReoffer {
-                            offer_id,
-                            new_attempt_no: *new_attempt,
-                            target_cli_session_id: target
-                                .cli_session_id
-                                .expect("a CLI worker target carries a session pk"),
-                            sub_discussion_id: child,
-                            control_message: msg,
-                            control_target: target,
-                        }
-                    });
+            let reactivation = reactivation_owned.as_ref().map(
+                |(offer_id, new_attempt, target, origin, child, msg)| {
+                    crate::db::orchestration::ReworkReoffer {
+                        offer_id,
+                        new_attempt_no: *new_attempt,
+                        target_cli_session_id: target
+                            .cli_session_id
+                            .expect("a CLI worker target carries a session pk"),
+                        origin_discussion_id: origin,
+                        child_discussion_id: child,
+                        control_message: msg,
+                        control_target: target,
+                    }
+                },
+            );
             let native_dispatch = native_dispatch_owned.as_ref().map(|(job_id, dedupe_key)| {
                 crate::db::orchestration::NativeReworkDispatch { job_id, dedupe_key }
             });
@@ -5563,6 +5829,11 @@ fn enqueue_approved_integration(state: &AppState, outcome: ReviewOutcome) -> Rev
         match run_integration(&db, &execution_id).await {
             Ok(IntegrationOutcome::Refused { reason }) => {
                 tracing::warn!(execution_id, %reason, "protected integration was refused after approval")
+            }
+            // The worker was re-activated and the principal told inside the
+            // send-back checkpoint; this only leaves a trace in the server log.
+            Ok(IntegrationOutcome::SentBack { reason }) => {
+                tracing::info!(execution_id, %reason, "approved delivery sent back to its worker")
             }
             Ok(_) => {}
             Err(error) => tracing::error!(execution_id, ?error, "protected integration job failed"),
@@ -6321,10 +6592,9 @@ fn build_cli_worker_brief(
     orchestrator_message(format!("orch-brief:{exec_id}:{attempt_no}"), content)
 }
 
-/// The durable "session attached" notice posted in the ORIGIN room at acceptance
-/// (KT-328 DoD-6): the worker session just LEFT this room for the sub-discussion, so
-/// its departure must be visible, never silent. Deterministic id so a resume never
-/// double-posts.
+/// The durable worker-activation notice posted in the origin room at acceptance.
+/// The session remains a member of that room; its additional worker authority is
+/// scoped to the execution and child task room named by the notice.
 fn build_attach_notice(
     exec_id: &str,
     attempt_no: u32,
@@ -6337,9 +6607,9 @@ fn build_attach_notice(
         .map(|a| format!("La session worker `{a}`"))
         .unwrap_or_else(|| "La session worker".to_string());
     let content = format!(
-        "{who} a accepté **{reference} : {title}** et a rejoint sa sous-discussion \
-         `{child}`. Elle n'est plus présente dans cette room ; le suivi de la tâche \
-         se poursuit dans la sous-discussion.",
+        "{who} a accepté **{reference} : {title}** comme worker de la sous-discussion \
+         `{child}`. Elle reste présente dans cette room principale ; son rôle worker \
+         est limité à cette exécution.",
         who = who,
         reference = task_reference,
         title = task_title,
@@ -6563,10 +6833,22 @@ fn worker_brief_markdown(
             );
         }
     }
+    // KT-839: a worker was pushed to "run the validations", ran a full suite in the
+    // background because its shell tool cuts a command at 600 s, handed the turn back
+    // to wait for it, and its process ended WITHOUT delivering
+    // (`worker_completed_without_delivery`, twice on KT-847). The long gates the
+    // principal persisted are Kronn's to run at integration; the worker's job is the
+    // targeted tests, then commit and deliver in the same turn.
     let tests = if can_run_shell {
-        "Exécute les commandes de validation adaptées au projet et reporte chaque résultat \
+        "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
-         commande ou sortie vérifiable est refusé."
+         commande ou sortie vérifiable est refusé.\n\
+         Les validations longues persistées par le principal (souvent la suite complète) sont \
+         jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
+         L'outil shell coupe une commande longue (Bash : 600 s) : n'en lance jamais une en \
+         arrière-plan pour l'attendre, car ton processus s'arrête dès que tu rends la main \
+         et l'exécution finit sans livraison. Enchaîne dans le même tour : tests ciblés, \
+         commit, puis `task_exec_deliver`."
             .to_string()
     } else {
         "Tu n'as pas de shell : n'affirme jamais avoir exécuté `cargo`, `pnpm`, `make` \
@@ -6626,7 +6908,7 @@ fn worker_brief_markdown(
             format!(
                 "Utilise les outils natifs de ton CLI (recherche, lecture ciblée, édition et shell). \
                  Cherche d'abord le symbole cité dans l'objectif, lis seulement la région utile, \
-                 puis édite dès que tu sais quoi changer. Exécute les validations pertinentes. {}",
+                 puis édite dès que tu sais quoi changer. Exécute les tests ciblés (section Tests). {}",
                 if mediated_host_commit {
                     "Ne lance pas `git commit` dans le shell : appelle `task_exec_commit` avec \
                      uniquement les fichiers explicites et le message. Kronn possède seul \
@@ -6692,6 +6974,41 @@ fn worker_brief_markdown(
         "Avant la livraison, appelle `git_commit` avec les seuls chemins relatifs réellement \
          modifiés et un message concis."
     };
+    // The one merge a worker is allowed: bringing the target branch INTO its own
+    // branch when the principal asks. A worker that meets git's refusal of a
+    // path-limited commit mid-merge otherwise erases MERGE_HEAD, and the
+    // single-parent commit it then makes turns into add/add conflicts at
+    // integration (KT-854).
+    let target_integration = if !can_run_shell {
+        String::new()
+    } else if mediated_host_commit {
+        "## Intégrer la branche cible\n\
+         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+         1. Lance `git merge --no-commit --no-ff <cible>` dans ton worktree.\n\
+         2. En cas de conflit, résous-le dans les fichiers.\n\
+         3. Appelle `task_exec_commit` avec les fichiers résolus et un message : Kronn termine \
+            la fusion avec ses deux parents et le sign-off. Sans conflit, nomme au moins un \
+            fichier que la fusion apporte ou que tu modifies.\n\
+         N'efface jamais `.git/MERGE_HEAD` et ne lance ni `git merge --abort` ni `git reset` \
+         pour recommiter à la main : un commit à un seul parent fait apparaître les fichiers de \
+         la cible comme « ajoutés des deux côtés » à l'intégration. Si `task_exec_commit` \
+         refuse (conflits non résolus, chemin indexé étranger), il n'a rien changé : corrige \
+         puis rappelle-le.\n\n"
+            .to_string()
+    } else {
+        "## Intégrer la branche cible\n\
+         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+         1. Lance `git merge --signoff <cible>` dans ton worktree.\n\
+         2. En cas de conflit, résous-le, `git add` les fichiers résolus, puis termine avec \
+            `git commit -s --no-edit` — sans chemin ni `-m` : git refuse un commit limité à des \
+            chemins pendant une fusion.\n\
+         N'efface jamais `.git/MERGE_HEAD` pour recommiter à la main : un commit à un seul \
+         parent fait apparaître les fichiers de la cible comme « ajoutés des deux côtés » à \
+         l'intégration.\n\n"
+            .to_string()
+    };
     format!(
         "# {reference} — {title}\n\n\
          ## Objectif\n{objective}\n\n\
@@ -6709,9 +7026,10 @@ fn worker_brief_markdown(
          {mechanical_scope}\
          ## Contraintes\n\
          - Travaille UNIQUEMENT dans ce worktree ; ne touche jamais un autre checkout.\n\
-         - Pas de `git push`, pas de force-push, pas de merge : l'intégration \
+         - Pas de `git push`, pas de force-push, pas de merge vers la cible : l'intégration \
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
+         {target_integration}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -6738,6 +7056,7 @@ fn worker_brief_markdown(
         mechanical_scope = mechanical_scope,
         human_arbitration = human_arbitration,
         parent_milestones = parent_milestones,
+        target_integration = target_integration,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -6790,12 +7109,12 @@ fn build_control_offer_message(
 ) -> DiscussionMessage {
     let content = format!(
         "**Offre de prise en charge — {reference} : {title}**\n\n\
-         Une tâche t'est proposée comme worker. Pour l'accepter et être rattaché à \
-         sa sous-discussion, appelle :\n\n\
+         Une tâche t'est proposée comme worker. Pour l'accepter sans quitter cette \
+         room principale, appelle :\n\n\
          `task_exec_accept_worker_offer({{ offer_id: \"{offer}\" }})`\n\n\
          - Sous-discussion : `{child}`\n\
          - Ceci est une offre de contrôle, pas encore le brief de travail : le brief \
-         n'arrive dans la sous-discussion qu'après ton acceptation.",
+         est renvoyé directement par l'acceptation et conservé dans la sous-discussion.",
         reference = task_reference,
         title = task_title,
         offer = offer_id,
@@ -6923,8 +7242,9 @@ fn worker_project_refusal(
 /// KT-515 — refuse a native/HTTP worker whose provider has an open quota
 /// escalation (see `provider_has_open_quota_exhaustion`). A `cli` worker is
 /// untouched: its own joined-session presence already carries that signal.
-/// `exclude_exec_id` is forwarded verbatim so a reassignment of the exact
-/// execution that raised the escalation can retry the same provider.
+/// `exclude_exec_id` is forwarded verbatim so an execution is never refused by
+/// its own open row. A retry of the provider that stopped it skips this
+/// refusal altogether and re-arms instead (KT-838, `reassign_native_execution`).
 fn worker_quota_refusal(
     conn: &rusqlite::Connection,
     worker: &MessageTarget,
@@ -7010,6 +7330,18 @@ pub(crate) fn worker_scope_contract_refusal(
         (Some(TaskWorkerScopeIntent::Generic), None)
         | (Some(TaskWorkerScopeIntent::Scoped), Some(_)) => None,
     }
+}
+
+/// Preflight verdict on the gates the principal is about to launch with.
+///
+/// The same predicate the launch boundary enforces, so a `launchable: true`
+/// answer cannot be followed by a launch refused for its validations.
+pub(crate) fn validations_refusal(
+    validations: &[crate::models::ValidationSpec],
+) -> Option<crate::models::CampaignTaskReason> {
+    validate_new_validation_specs(validations)
+        .err()
+        .map(|reason| preparation_reason("invalid_validations", reason))
 }
 
 pub(crate) fn worker_scope_refusal(
@@ -7580,6 +7912,8 @@ pub(crate) fn execution_detail(
                     disc_id: String::new(),
                     in_app_tokens: 0,
                     in_app_messages: 0,
+                    in_app_breakdown: None,
+                    in_app_cost_unknown_reasons: Vec::new(),
                     cli_traffic_tokens: None,
                     cli_billable_tokens: None,
                     cli_sessions: 0,
@@ -7608,12 +7942,15 @@ pub(crate) fn execution_detail(
         target_branch: run.target_branch,
         definition_of_done: task.definition_of_done,
         attempts: attempts.into_values().collect(),
+        worker_sessions: crate::db::orchestration::list_worker_cli_sessions(conn, exec_id)?,
         validation_runs: crate::db::orchestration::list_validation_runs(conn, exec_id)?,
         recovery,
         usage: crate::models::TaskExecutionUsage {
             duration_ms,
             in_app_tokens: tokens.in_app_tokens,
             in_app_messages: tokens.in_app_messages,
+            in_app_breakdown: tokens.in_app_breakdown,
+            in_app_cost_unknown_reasons: tokens.in_app_cost_unknown_reasons,
             in_app_cost_usd,
             in_app_cost_is_partial,
             cli_traffic_tokens: tokens.cli_traffic_tokens,
@@ -8116,6 +8453,110 @@ async fn resume_blocked_apply(
     Ok(outcome)
 }
 
+/// Is `exec_id` an integration send-back the principal can take back (KT-862)?
+async fn restorable_rework(
+    db: &Database,
+    exec_id: &str,
+) -> Result<Option<crate::db::orchestration::RestorableApproval>, ProvisionError> {
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)? else {
+            return Ok(None);
+        };
+        if !matches!(
+            execution.status,
+            TaskExecutionStatus::Working
+                | TaskExecutionStatus::Provisioning
+                | TaskExecutionStatus::Blocked
+                | TaskExecutionStatus::ChangesRequested
+        ) {
+            return Ok(None);
+        }
+        crate::db::orchestration::restorable_approval(conn, &execution)
+    })
+    .await
+    .map_err(|error| ProvisionError::Internal(error.to_string()))
+}
+
+/// Run the protected integration again on the SAME approved delivery, after the
+/// principal established that the failure did not come from it (KT-862): a flaky
+/// test, a full disk, a busy machine. No new delivery is asked of the worker.
+///
+/// Sending an approved delivery back re-activates its worker, so this stands it
+/// down first, then returns the execution to `Approved`. The worktree is checked
+/// against the HEAD the worker was sent back with: a worker that already committed
+/// or left changes has made a delivery nobody reviewed, which the approval does not
+/// cover, so the re-validation is refused instead of integrating it.
+async fn revalidate_sent_back_execution(
+    db: &Database,
+    exec_id: &str,
+) -> Result<IntegrationOutcome, ProvisionError> {
+    let internal = |error: String| ProvisionError::Internal(error);
+    let (approval, workspace) = {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)? else {
+                return Ok((None, None));
+            };
+            let approval = crate::db::orchestration::restorable_approval(conn, &execution)?;
+            let workspace = crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)?;
+            Ok((approval, workspace))
+        })
+        .await
+        .map_err(|error| internal(error.to_string()))?
+    };
+    let Some(approval) = approval else {
+        return Err(ProvisionError::CheckpointRefused(
+            "execution is not an integration send-back with an intact approved delivery".into(),
+        ));
+    };
+    let child_path = workspace
+        .and_then(|workspace| workspace.canonical_path)
+        .ok_or_else(|| ProvisionError::CheckpointRefused("no managed worktree".into()))?;
+    let child = std::path::Path::new(&child_path);
+    let dirty = worktree::worktree_dirty_files(child).map_err(ProvisionError::CheckpointRefused)?;
+    if !dirty.is_empty() {
+        return Err(ProvisionError::CheckpointRefused(format!(
+            "the worker left {} uncommitted file(s) in the worktree since the send-back: they are \
+             not part of the approved delivery",
+            dirty.len()
+        )));
+    }
+    if let Some(sent_back_at) = approval.head_sha.as_deref() {
+        let head =
+            worktree::resolve_commit(child, "HEAD").map_err(ProvisionError::CheckpointRefused)?;
+        if head != sent_back_at {
+            return Err(ProvisionError::CheckpointRefused(format!(
+                "the worker committed since the send-back (worktree at {head}, sent back at \
+                 {sent_back_at}): that work is not the approved delivery — wait for its \
+                 re-delivery and review it"
+            )));
+        }
+    }
+
+    let id = exec_id.to_string();
+    let reopened = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::reopen_approval_after_rework(conn, &id, &backend_actor())
+        })
+        .await
+        .map_err(|error| internal(error.to_string()))?;
+    match reopened {
+        crate::db::orchestration::ReopenOutcome::Reopened { .. } => {}
+        crate::db::orchestration::ReopenOutcome::NotRestorable => {
+            return Err(ProvisionError::CheckpointRefused(
+                "the worker already answered the send-back: review its delivery instead".into(),
+            ))
+        }
+        crate::db::orchestration::ReopenOutcome::ExecutionRaced => {
+            return Err(ProvisionError::CheckpointRefused(
+                "the execution moved while its approval was being restored".into(),
+            ))
+        }
+    }
+    run_integration(db, exec_id).await
+}
+
 pub async fn resume_execution(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
@@ -8239,6 +8680,38 @@ async fn resume_claimed_execution(
     }
     if snapshot.execution.status == TaskExecutionStatus::Approved {
         let outcome = match run_integration(&state.db, &exec_id).await {
+            Ok(IntegrationOutcome::Refused { reason }) => {
+                return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, reason));
+            }
+            Ok(outcome) => format!("{outcome:?}"),
+            Err(error) => {
+                let (code, message) = provision_error_parts(&error);
+                return Json(ApiResponse::err_coded(code, message));
+            }
+        };
+        let id = exec_id.clone();
+        return match state
+            .db
+            .with_conn(move |conn| {
+                let mut view = recovery_view(conn, &id)?;
+                view.outcome = Some(outcome);
+                Ok(view)
+            })
+            .await
+        {
+            Ok(view) => Json(ApiResponse::ok(view)),
+            Err(error) => Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                error.to_string(),
+            )),
+        };
+    }
+    // An approved delivery the integration sent back, whose failure the principal
+    // judges did not come from the delivery: run the same validations again on the
+    // same candidate, without a new delivery (KT-862). Any other worker-owned state
+    // falls through to the ordinary refusals below.
+    if matches!(restorable_rework(&state.db, &exec_id).await, Ok(Some(_))) {
+        let outcome = match revalidate_sent_back_execution(&state.db, &exec_id).await {
             Ok(IntegrationOutcome::Refused { reason }) => {
                 return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, reason));
             }
@@ -8733,13 +9206,21 @@ pub(crate) async fn reassign_native_execution(
     let (view, replaced_dispatch_id) = state
         .db
         .with_conn(move |conn| {
+            // Retrying the very provider whose quota stopped this execution is
+            // the human's "the quota is back" signal (KT-838). It re-arms the
+            // whole quota generation below, so a second execution escalated by
+            // the same outage no longer keeps the provider refused, whichever
+            // of the two is reassigned first.
+            let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
+            let quota_retry =
+                crate::db::orchestration::is_quota_retry_on_same_provider(conn, &id, &provider)?;
             // Refuse tôt (KT-515): before starting the transaction, and before
             // creating any new dispatch/worktree, if the target provider still
-            // has an open quota escalation elsewhere. Excluding this exact
-            // execution lets the human explicitly retry the same provider that
-            // raised it once they know the quota is back.
-            if let Some(reason) = worker_quota_refusal(conn, &selection.target, Some(&id))? {
-                bail!("{}: {}", reason.code, reason.detail);
+            // has an open quota escalation elsewhere.
+            if !quota_retry {
+                if let Some(reason) = worker_quota_refusal(conn, &selection.target, Some(&id))? {
+                    bail!("{}: {}", reason.code, reason.detail);
+                }
             }
             let transaction = conn.unchecked_transaction()?;
             let replaced_dispatch_id =
@@ -8777,6 +9258,17 @@ pub(crate) async fn reassign_native_execution(
             let recovery = crate::db::orchestration::get_execution_recovery(&transaction, &id)?
                 .context("reassignment recovery row vanished")?;
             let generation = recovery.assignment_generation;
+            if quota_retry {
+                // Same transaction as the reassignment: a refused or failed
+                // handoff leaves the provider exactly as blocked as before.
+                crate::db::orchestration::rearm_provider_quota(
+                    &transaction,
+                    &provider,
+                    &format!("reassign:{id}:{generation}"),
+                    PlanningActorKind::Human.as_str(),
+                    Some(&format!("reassign:{id}")),
+                )?;
+            }
             let mut handoff = handoff_notice_with_context(
                 has_recorded_delivery(&transaction, &id)?,
                 Some(generation),
@@ -9070,6 +9562,11 @@ pub struct TaskExecPrepareRequest {
     pub worker_scope_intent: Option<TaskWorkerScopeIntent>,
     #[serde(default)]
     pub worker_scope: Option<TaskWorkerScope>,
+    /// The gates the principal intends to launch with. Optional: when given they
+    /// are held to the launch boundary's rules, so a command that could never run
+    /// makes the preflight refuse instead of the integration.
+    #[serde(default)]
+    pub validations: Vec<crate::models::ValidationSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -9142,8 +9639,47 @@ pub struct TaskExecReassignRequest {
     /// the internal `CampaignWorkerSelection` envelope. `model`/`profile_id`
     /// are not publicly overridable here; a reassignment always resolves
     /// them from the target's tier, exactly like a fresh launch would.
-    pub worker: MessageTarget,
+    ///
+    /// Exactly one of `worker` and `validations` per call — see
+    /// `execution_amendment`.
+    #[serde(default)]
+    pub worker: Option<MessageTarget>,
+    /// KT-839 — the complete new set of gates: it REPLACES the execution's
+    /// validations, it is not merged into them. An empty list removes every gate.
+    #[serde(default)]
+    pub validations: Option<Vec<crate::models::ValidationSpec>>,
     pub reason: String,
+}
+
+/// The one change a `task_exec_reassign` call makes to an existing execution.
+///
+/// Reassign is the principal's amendment tool for a live execution — principal-only,
+/// reason-journaled, room and evidence kept — so replacing its validations lives
+/// here rather than in a tool of its own (KT-839: every declaration is paid for on
+/// every session, see `mcp_surface_budget.py`). The two changes are never combined:
+/// each is journaled and refused on its own terms, and a half-applied pair would
+/// be neither.
+pub(crate) enum ExecutionAmendment {
+    Reassign(MessageTarget),
+    ReplaceValidations(Vec<crate::models::ValidationSpec>),
+}
+
+pub(crate) fn execution_amendment(
+    worker: Option<MessageTarget>,
+    validations: Option<Vec<crate::models::ValidationSpec>>,
+) -> Result<ExecutionAmendment, &'static str> {
+    match (worker, validations) {
+        (Some(worker), None) => Ok(ExecutionAmendment::Reassign(worker)),
+        (None, Some(validations)) => Ok(ExecutionAmendment::ReplaceValidations(validations)),
+        (Some(_), Some(_)) => Err(
+            "task_exec_reassign makes one change per call: pass a `worker` to reassign the \
+             execution, or the complete `validations` set to replace its gates — not both",
+        ),
+        (None, None) => Err(
+            "task_exec_reassign needs a change: a typed `worker` to reassign the execution, or \
+             the complete `validations` set to replace its gates ([] removes every gate)",
+        ),
+    }
 }
 
 fn caller_fields(agent: &str, session_id: &str) -> Option<(String, String)> {
@@ -9719,6 +10255,19 @@ const CATALOGUED_PROVIDERS: [AgentType; 10] = [
 /// quota escalation (KT-515)? No live process is spawned — this is a bounded
 /// SQL preflight over already-recorded dispatch history.
 async fn bounded_provider_quota_state(state: &AppState) -> Vec<(AgentType, bool)> {
+    bounded_provider_quota_details(state)
+        .await
+        .into_iter()
+        .map(|quota| (quota.provider, quota.blocked))
+        .collect()
+}
+
+/// Same read as [`bounded_provider_quota_state`], plus the reset instant the
+/// provider announced (KT-838). It is only reported for a provider that is
+/// still blocked: once re-armed there is nothing left to wait for.
+async fn bounded_provider_quota_details(
+    state: &AppState,
+) -> Vec<crate::models::ProviderQuotaState> {
     state
         .db
         .with_read_conn(move |conn| {
@@ -9726,10 +10275,19 @@ async fn bounded_provider_quota_state(state: &AppState) -> Vec<(AgentType, bool)
                 .iter()
                 .map(|agent| {
                     let provider = crate::db::orchestration::agent_type_to_db(agent);
-                    let exhausted = crate::db::orchestration::provider_has_open_quota_exhaustion(
+                    let blocked = crate::db::orchestration::provider_has_open_quota_exhaustion(
                         conn, &provider, None,
                     )?;
-                    Ok((agent.clone(), exhausted))
+                    let reset_at = if blocked {
+                        crate::db::orchestration::provider_quota_reset_at(conn, &provider)?
+                    } else {
+                        None
+                    };
+                    Ok(crate::models::ProviderQuotaState {
+                        provider: agent.clone(),
+                        blocked,
+                        reset_at,
+                    })
                 })
                 .collect::<Result<Vec<_>>>()
         })
@@ -9876,12 +10434,9 @@ pub(crate) async fn target_aware_task_worker_catalogue_for_discussion(
 pub async fn provider_quota_states(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<crate::models::ProviderQuotaState>>> {
-    let states = bounded_provider_quota_state(&state)
-        .await
-        .into_iter()
-        .map(|(provider, blocked)| crate::models::ProviderQuotaState { provider, blocked })
-        .collect();
-    Json(ApiResponse::ok(states))
+    Json(ApiResponse::ok(
+        bounded_provider_quota_details(&state).await,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -9996,6 +10551,7 @@ pub async fn task_exec_prepare(
     let task = request.task_reference.trim().to_string();
     let worker = request.worker;
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
+    let validations_refusal = validations_refusal(&request.validations);
     let result = state
         .db
         .with_conn(move |conn| {
@@ -10003,7 +10559,7 @@ pub async fn task_exec_prepare(
                 bail!("principal discussion not found or caller is not an active member");
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
-            if let Some(reason) = scope_refusal {
+            for reason in [scope_refusal, validations_refusal].into_iter().flatten() {
                 preparation.launchable = false;
                 preparation.reasons.push(reason);
             }
@@ -10185,6 +10741,7 @@ const COMPACT_STATUS_MAX_CHARS: usize = 960;
 const COMPACT_ERROR_MAX_CHARS: usize = 160;
 const COMPACT_COMMAND_MAX_CHARS: usize = 60;
 const COMPACT_VALIDATIONS_MAX: usize = 3;
+const COMPACT_SESSIONS_MAX: usize = 2;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CompactValidation {
@@ -10214,6 +10771,10 @@ pub struct TaskExecutionCompactStatus {
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub validations: Vec<CompactValidation>,
+    /// The worker's most recent CLI sessions, newest last: the names of its
+    /// transcripts (KT-911). `view: full` lists them all, attempts included.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub worker_sessions: Vec<String>,
     pub next_action: Option<CompactNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<ExecutionWaitOutcome>,
@@ -10364,11 +10925,21 @@ pub(crate) fn compact_execution_status(
             .map(|delivery| delivery.head_sha.clone()),
         last_error: compact_last_error(detail),
         validations: compact_validations(detail),
+        worker_sessions: detail.worker_sessions[detail
+            .worker_sessions
+            .len()
+            .saturating_sub(COMPACT_SESSIONS_MAX)..]
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect(),
         next_action: compact_next_action(detail),
         wait,
     };
     while compact_status_chars(&compact) > COMPACT_STATUS_MAX_CHARS {
-        if !compact.validations.is_empty() {
+        // The decision fields outrank the transcript names: drop those first.
+        if !compact.worker_sessions.is_empty() {
+            compact.worker_sessions.remove(0);
+        } else if !compact.validations.is_empty() {
             compact.validations.remove(0);
         } else if let Some(error) = compact.last_error.take() {
             let shorter = error.chars().count() / 2;
@@ -10624,7 +11195,7 @@ pub async fn task_exec_reassign(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
     Json(request): Json<TaskExecReassignRequest>,
-) -> Json<ApiResponse<ExecutionRecoveryView>> {
+) -> Json<ApiResponse<serde_json::Value>> {
     let Some((agent, session_id)) =
         caller_fields(&request.source_agent, &request.source_session_id)
     else {
@@ -10656,20 +11227,90 @@ pub async fn task_exec_reassign(
             "execution not found or caller is not its principal",
         ));
     }
-    pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
-    reassign_execution(
-        State(state),
-        Path(exec_id),
-        Json(ReassignExecutionRequest {
-            worker: crate::models::CampaignWorkerSelection {
-                target: request.worker,
-                model: None,
-                profile_id: None,
+    let amendment = match execution_amendment(request.worker, request.validations) {
+        Ok(amendment) => amendment,
+        Err(refusal) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, refusal)),
+    };
+    match amendment {
+        ExecutionAmendment::Reassign(target) => {
+            pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
+            let Json(response) = reassign_execution(
+                State(state),
+                Path(exec_id),
+                Json(ReassignExecutionRequest {
+                    worker: crate::models::CampaignWorkerSelection {
+                        target,
+                        model: None,
+                        profile_id: None,
+                    },
+                    reason: request.reason,
+                }),
+            )
+            .await;
+            Json(ApiResponse {
+                success: response.success,
+                data: response
+                    .data
+                    .and_then(|view| serde_json::to_value(view).ok()),
+                error: response.error,
+                error_code: response.error_code,
+            })
+        }
+        ExecutionAmendment::ReplaceValidations(validations) => match replace_execution_validations(
+            &state.db,
+            &exec_id,
+            validations,
+            &request.reason,
+            agent_actor(&agent_pin, Some(&session_pin)),
+        )
+        .await
+        {
+            Ok(replacement) => match serde_json::to_value(replacement) {
+                Ok(value) => Json(ApiResponse::ok(value)),
+                Err(error) => Json(ApiResponse::err(error.to_string())),
             },
-            reason: request.reason,
-        }),
-    )
+            Err((code, message)) => Json(ApiResponse::err_coded(code, message)),
+        },
+    }
+}
+
+/// Replace the validations of an existing execution (KT-839), for both principal
+/// channels. The set is held to the same rules as at launch — a fix that could
+/// never run would only move the failure back to integration — and the swap is
+/// journaled with its actor and reason, so nothing is relaunched and nothing
+/// about the earlier gates is lost.
+pub(crate) async fn replace_execution_validations(
+    db: &Database,
+    exec_id: &str,
+    validations: Vec<crate::models::ValidationSpec>,
+    reason: &str,
+    actor: OrchestrationActor,
+) -> Result<crate::db::orchestration::ValidationsReplacement, (ApiErrorCode, String)> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err((
+            ApiErrorCode::Validation,
+            "reason is required: it is journaled with the swap".into(),
+        ));
+    }
+    if let Err(detail) = validate_new_validation_specs(&validations) {
+        return Err((
+            ApiErrorCode::Validation,
+            format!("invalid validations: {detail}"),
+        ));
+    }
+    let id = exec_id.to_string();
+    db.with_conn(move |conn| {
+        crate::db::orchestration::replace_execution_validations(
+            conn,
+            &id,
+            &validations,
+            &actor,
+            &reason,
+        )
+    })
     .await
+    .map_err(|error| (ApiErrorCode::Conflict, error.to_string()))
 }
 
 /// Map a launch-saga refusal/failure to a stable `(code, message)`. `ProvisionError` has
@@ -10741,11 +11382,13 @@ pub struct AcceptOfferRequest {
     pub source_binding_session_id: Option<String>,
 }
 
-/// The attach payload the bridge needs to rebind: the child room to follow.
+/// The accepted execution and its direct worker instructions. The child id remains the
+/// durable task/evidence room; it is not a request to transfer the caller's room binding.
 #[derive(Serialize)]
 pub struct AcceptOfferResponse {
     pub child_discussion_id: String,
     pub execution: TaskExecution,
+    pub worker_instructions: String,
 }
 
 /// Map the accept outcome to an HTTP response. Pure, so the anti-oracle fusion is unit
@@ -10758,9 +11401,11 @@ fn accept_outcome_to_response(outcome: AcceptAttachOutcome) -> ApiResponse<Accep
         AcceptAttachOutcome::Attached {
             child_discussion_id,
             execution,
+            worker_instructions,
         } => ApiResponse::ok(AcceptOfferResponse {
             child_discussion_id,
             execution,
+            worker_instructions,
         }),
         AcceptAttachOutcome::NotFound | AcceptAttachOutcome::WrongAcceptor => {
             ApiResponse::err_coded(
@@ -10788,9 +11433,10 @@ fn accept_outcome_to_response(outcome: AcceptAttachOutcome) -> ApiResponse<Accep
 }
 
 /// `POST /api/orchestration/accept-offer` — the exact targeted CLI session accepts its
-/// control offer and is attached to the sub-discussion. Identity is derived server-side
-/// from the bridge-supplied live pair, then moves the bridge-supplied durable
-/// room binding; the model passes only `offer_id`.
+/// control offer. Identity is derived server-side from the bridge-supplied live pair and
+/// reload-stable binding, but neither live membership nor durable room ownership moves;
+/// the execution's pinned session id carries worker authority. The model passes only
+/// `offer_id`.
 pub async fn accept_offer(
     State(state): State<AppState>,
     Json(request): Json<AcceptOfferRequest>,
@@ -12746,10 +13392,7 @@ mod tests {
             None,
         );
         assert!(brief.contains("outils natifs de ton CLI"), "{brief}");
-        assert!(
-            brief.contains("Exécute les commandes de validation"),
-            "{brief}"
-        );
+        assert!(brief.contains("Lance les tests **ciblés**"), "{brief}");
         assert!(
             brief.contains("exactement un `{ met, evidence }`"),
             "{brief}"
@@ -12759,6 +13402,140 @@ mod tests {
         assert!(brief.contains("N'utilise pas `git commit`"), "{brief}");
         assert!(!brief.contains("opaque-dod-id"), "{brief}");
         assert!(!brief.contains("`head_sha` : le HEAD exact"), "{brief}");
+    }
+
+    /// KT-839 — on KT-847 a worker told to "run the validations" started the full
+    /// `cargo test` in the background (its shell tool cuts a command at 600 s),
+    /// handed the turn back to wait for it and ended WITHOUT delivering, twice
+    /// (`worker_completed_without_delivery`). The brief now says who runs the long
+    /// gates, and that the worker never waits on a background command.
+    #[test]
+    fn shell_worker_brief_leaves_the_long_validations_to_kronn_and_delivers_in_one_turn() {
+        for (spawned_host_cli, label) in [(true, "spawned host CLI"), (false, "joined CLI")] {
+            let brief = worker_brief_markdown(
+                "KT-839",
+                "Validations inexécutables",
+                "Refuser au lancement",
+                &[],
+                "/wt/kt839",
+                "kronn/task/KT-839",
+                "abc1234",
+                true,
+                spawned_host_cli,
+                None,
+            );
+            for promise in [
+                // the worker runs the targeted tests…
+                "Lance les tests **ciblés**",
+                // …the persisted long ones are Kronn's, at integration…
+                "Les validations longues persistées par le principal",
+                "jouées par Kronn à l'intégration",
+                // …and it never waits on a background command…
+                "n'en lance jamais une en arrière-plan pour l'attendre",
+                "Bash : 600 s",
+                // …but commits and delivers within the same turn.
+                "Enchaîne dans le même tour : tests ciblés, commit, puis `task_exec_deliver`",
+            ] {
+                assert!(brief.contains(promise), "{label}: `{promise}` in {brief}");
+            }
+            // The old instruction is what pushed the worker into the long suite.
+            assert!(
+                !brief.contains("Exécute les commandes de validation"),
+                "{label}: {brief}"
+            );
+            assert!(
+                !brief.contains("Exécute les validations pertinentes"),
+                "{label}: {brief}"
+            );
+            // The promise sits in the Tests section, before the delivery format.
+            let tests = brief.find("## Tests").expect("tests section");
+            let contract = brief.find("jouées par Kronn à l'intégration").unwrap();
+            let delivery = brief.find("## Format de livraison").expect("delivery");
+            assert!(tests < contract && contract < delivery, "{label}: {brief}");
+        }
+
+        // A worker with no shell has no long command to wait on, and is never
+        // told it can run one: its own contract (report `skipped`) is unchanged.
+        let http = worker_brief_markdown(
+            "KT-839",
+            "Sous-tâche Ollama",
+            "Refuser au lancement",
+            &[],
+            "/wt/kt839",
+            "kronn/task/KT-839",
+            "abc1234",
+            false,
+            true,
+            None,
+        );
+        assert!(http.contains("Tu n'as pas de shell"), "{http}");
+        assert!(!http.contains("arrière-plan"), "{http}");
+        assert!(!http.contains("Bash : 600 s"), "{http}");
+    }
+
+    /// KT-854: the brief says how to bring the target branch in without erasing
+    /// the merge state, for each way a worker can commit — and never tells a
+    /// worker without a shell to run a merge it cannot run.
+    #[test]
+    fn worker_brief_explains_how_to_integrate_the_target_without_erasing_merge_state() {
+        let brief_for = |can_run_shell: bool, native_delivery_projection: bool| {
+            worker_brief_markdown(
+                "KT-854",
+                "Intégration",
+                "Objectif",
+                &[],
+                "/wt/kt854",
+                "kronn/task/KT-854",
+                "abc1234",
+                can_run_shell,
+                native_delivery_projection,
+                None,
+            )
+        };
+
+        let mediated = brief_for(true, true);
+        for needle in [
+            "## Intégrer la branche cible",
+            "git merge --no-commit --no-ff <cible>",
+            "Appelle `task_exec_commit` avec les fichiers résolus",
+            "deux parents",
+            "N'efface jamais `.git/MERGE_HEAD`",
+            "ajoutés des deux côtés",
+        ] {
+            assert!(mediated.contains(needle), "missing `{needle}`: {mediated}");
+        }
+        assert!(
+            mediated.contains("pas de merge vers la cible"),
+            "the blanket merge ban must not contradict the integration section: {mediated}"
+        );
+
+        let self_committing = brief_for(true, false);
+        assert!(
+            self_committing.contains("## Intégrer la branche cible"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("git merge --signoff <cible>"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("git commit -s --no-edit"),
+            "{self_committing}"
+        );
+        assert!(
+            self_committing.contains("N'efface jamais `.git/MERGE_HEAD`"),
+            "{self_committing}"
+        );
+        assert!(
+            !self_committing.contains("task_exec_commit"),
+            "a worker that commits itself has no task_exec_commit: {self_committing}"
+        );
+
+        let no_shell = brief_for(false, true);
+        assert!(
+            !no_shell.contains("## Intégrer la branche cible"),
+            "{no_shell}"
+        );
     }
 
     #[test]
@@ -15146,6 +15923,593 @@ mod tests {
         );
     }
 
+    /// Bind a native principal executor to a launchable seeded task, the way the
+    /// neighbouring native-launch tests do.
+    async fn native_principal_with_launchable_task(
+        db: &std::sync::Arc<Database>,
+        repo: &std::path::Path,
+    ) -> (
+        std::sync::Arc<dyn crate::agents::tools::ToolExecutor>,
+        String,
+        String,
+    ) {
+        let (task_ref, parent_id, _pid) = seed(db, repo).await;
+        {
+            let task_ref = task_ref.clone();
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task_ref,
+                    &crate::models::LinkPlanningDiscussionRequest {
+                        discussion_id: parent_id,
+                        placement: Default::default(),
+                        is_primary: true,
+                        position: None,
+                        actor: test_actor(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        }
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let exec = crate::api::agent_tools::KronnToolExecutor::arc(
+            state,
+            Some(parent_id.clone()),
+            AgentType::ClaudeCode,
+            None,
+            None,
+        );
+        (exec, task_ref, parent_id)
+    }
+
+    /// KT-839 — KT-830, KT-828 and KT-847 launched with commands written for a
+    /// shell. Both the preflight and the launch must refuse them, saying which
+    /// form runs, while the principal can still fix them.
+    #[tokio::test]
+    async fn prepare_and_launch_refuse_a_validation_quick_exec_can_never_run() {
+        use crate::agents::tools::ToolCall;
+
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (exec, task_ref, _parent_id) =
+            native_principal_with_launchable_task(&db, repo.path()).await;
+        let call = |name: &str, validations: serde_json::Value| ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: serde_json::json!({
+                "task_reference": task_ref,
+                "worker": serde_json::to_value(native_worker()).unwrap(),
+                "worker_scope_intent": "generic",
+                "base_rev": "main",
+                "idempotency_key": "kt-839-never-runs",
+                "validations": validations,
+            }),
+        };
+
+        for (label, command, culprit) in [
+            (
+                "KT-830 frontend",
+                "cd frontend && npx tsc -b --pretty false",
+                "`cd`",
+            ),
+            (
+                "KT-828 backend",
+                "cd backend && CARGO_TARGET_DIR=/tmp/kronn-target cargo test",
+                "`cd`",
+            ),
+            (
+                "env prefix",
+                "CARGO_TARGET_DIR=/tmp/t cargo test",
+                "environment",
+            ),
+            ("chained", "cargo fmt --check && cargo test", "`&&`"),
+            ("pipe", "cargo test | tail", "pipe"),
+            ("sequence", "cargo fmt; cargo test", "separator"),
+            ("off the allowlist", "npx tsc -b", "`npx`"),
+        ] {
+            let validations = serde_json::json!([{"command": command}]);
+
+            let prepared = exec
+                .execute(&call("task_exec_prepare", validations.clone()))
+                .await;
+            assert!(
+                prepared.ok,
+                "{label}: a preflight answers, it does not fail"
+            );
+            assert_eq!(
+                prepared.content["launchable"], false,
+                "{label}: the preflight must refuse: {:?}",
+                prepared.content
+            );
+            let reason = prepared.content["reasons"]
+                .as_array()
+                .and_then(|reasons| reasons.iter().find(|r| r["code"] == "invalid_validations"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: no invalid_validations reason: {:?}",
+                        prepared.content
+                    )
+                });
+            let detail = reason["detail"].as_str().unwrap();
+            assert!(detail.contains(culprit), "{label}: {detail}");
+            assert!(
+                detail.contains("pnpm --dir frontend exec")
+                    && detail.contains("cargo test --manifest-path"),
+                "{label}: the refusal must give the form that runs: {detail}"
+            );
+
+            let launched = exec.execute(&call("task_exec_launch", validations)).await;
+            assert!(
+                !launched.ok,
+                "{label}: launch accepted it: {:?}",
+                launched.content
+            );
+            let message = launched.content.to_string();
+            assert!(message.contains("can never run"), "{label}: {message}");
+            assert!(
+                message.contains("pnpm --dir frontend exec"),
+                "{label}: {message}"
+            );
+        }
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            0,
+            "a refused launch must not leave a run carrying an unrunnable gate"
+        );
+
+        // The forms the refusal recommends are accepted by the same preflight.
+        let runnable = serde_json::json!([
+            {"command": "pnpm --dir frontend exec tsc -b --pretty false"},
+            {"command": "cargo test --manifest-path backend/Cargo.toml --target-dir /tmp/kronn-target"},
+        ]);
+        let prepared = exec.execute(&call("task_exec_prepare", runnable)).await;
+        assert!(prepared.ok);
+        assert_eq!(
+            prepared.content["launchable"], true,
+            "{:?}",
+            prepared.content["reasons"]
+        );
+    }
+
+    /// KT-839 — the HTTP launch route (the CLI principals' path) has no tool
+    /// layer in front of it: the shared provisioning boundary is what refuses.
+    #[tokio::test]
+    async fn the_shared_launch_boundary_refuses_an_unrunnable_validation_before_side_effects() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+
+        let refusal = provision_single_task_execution_with_validations(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt-839-http-launch".into()),
+            },
+            vec![ValidationSpec {
+                command: "cd frontend && npx tsc -b --pretty false".into(),
+                quick_exec_id: None,
+                timeout_secs: None,
+            }],
+        )
+        .await
+        .expect_err("a validation that can never run must not be accepted");
+
+        match refusal {
+            ProvisionError::NotLaunchable(reason) => {
+                assert!(reason.contains("can never run"), "{reason}");
+                assert!(reason.contains("`cd`"), "{reason}");
+                assert!(reason.contains("pnpm --dir frontend exec"), "{reason}");
+            }
+            other => panic!("expected NotLaunchable, got {other:?}"),
+        }
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            0
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 0);
+    }
+
+    /// KT-839 — the principal can correct the gates of a launched execution
+    /// without cancelling it, and the correction is journaled.
+    #[tokio::test]
+    async fn principal_replaces_the_validations_of_a_launched_execution_without_relaunch() {
+        use crate::agents::tools::ToolCall;
+
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (exec, task_ref, parent_id) =
+            native_principal_with_launchable_task(&db, repo.path()).await;
+        let launched = exec
+            .execute(&ToolCall {
+                id: "launch".into(),
+                name: "task_exec_launch".into(),
+                arguments: serde_json::json!({
+                    "task_reference": task_ref,
+                    "worker": serde_json::to_value(native_worker()).unwrap(),
+                    "worker_scope_intent": "generic",
+                    "base_rev": "main",
+                    "idempotency_key": "kt-839-launch",
+                    "validations": [{"command": "cargo fmt --check"}],
+                }),
+            })
+            .await;
+        assert!(launched.ok, "{:?}", launched.content);
+        let exec_id = launched.content["id"].as_str().unwrap().to_string();
+        let run_id = launched.content["orchestration_run_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // The swap is a `task_exec_reassign` call carrying `validations` instead of
+        // a `worker` (KT-839: no tool of its own, see `ExecutionAmendment`).
+        let update = |validations: serde_json::Value, reason: &str| ToolCall {
+            id: "update".into(),
+            name: "task_exec_reassign".into(),
+            arguments: serde_json::json!({
+                "task_execution_id": exec_id,
+                "validations": validations,
+                "reason": reason,
+            }),
+        };
+        let run_validations = |db: std::sync::Arc<Database>, run_id: String| async move {
+            let run = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::get_orchestration_run(conn, &run_id)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            serde_json::to_value(run.validations).unwrap()
+        };
+
+        // A replacement that could never run is refused, and changes nothing.
+        let refused = exec
+            .execute(&update(
+                serde_json::json!([{"command": "cd frontend && npx tsc -b"}]),
+                "still wrong",
+            ))
+            .await;
+        assert!(!refused.ok);
+        assert!(refused
+            .content
+            .to_string()
+            .contains("pnpm --dir frontend exec"));
+        assert_eq!(
+            run_validations(db.clone(), run_id.clone()).await,
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
+
+        // A reason is part of the trace.
+        assert!(!exec.execute(&update(serde_json::json!([]), "  ")).await.ok);
+
+        // One change per call: a worker AND gates is refused, and so is neither.
+        let both = exec
+            .execute(&ToolCall {
+                id: "both".into(),
+                name: "task_exec_reassign".into(),
+                arguments: serde_json::json!({
+                    "task_execution_id": exec_id,
+                    "worker": serde_json::to_value(native_worker()).unwrap(),
+                    "validations": [],
+                    "reason": "two changes at once",
+                }),
+            })
+            .await;
+        assert!(!both.ok);
+        assert!(both.content.to_string().contains("one change per call"));
+        let neither = exec
+            .execute(&ToolCall {
+                id: "neither".into(),
+                name: "task_exec_reassign".into(),
+                arguments: serde_json::json!({
+                    "task_execution_id": exec_id,
+                    "reason": "no change at all",
+                }),
+            })
+            .await;
+        assert!(!neither.ok);
+        assert!(neither.content.to_string().contains("needs a change"));
+        // An explicit null is not "no gates".
+        let null = exec
+            .execute(&ToolCall {
+                id: "null".into(),
+                name: "task_exec_reassign".into(),
+                arguments: serde_json::json!({
+                    "task_execution_id": exec_id,
+                    "validations": null,
+                    "reason": "null is not an empty set",
+                }),
+            })
+            .await;
+        assert!(!null.ok);
+        assert_eq!(
+            run_validations(db.clone(), run_id.clone()).await,
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
+
+        let fixed = serde_json::json!([
+            {"command": "pnpm --dir frontend exec tsc -b --pretty false", "timeout_secs": 300},
+        ]);
+        let replaced = exec
+            .execute(&update(fixed.clone(), "cd is not runnable; use --dir"))
+            .await;
+        assert!(replaced.ok, "{:?}", replaced.content);
+        assert_eq!(replaced.content["changed"], true);
+        assert_eq!(
+            replaced.content["previous"],
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
+        assert_eq!(replaced.content["validations"], fixed);
+        assert_eq!(run_validations(db.clone(), run_id.clone()).await, fixed);
+
+        // Same execution, same run: nothing was relaunched.
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 1);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            1
+        );
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.status, TaskExecutionStatus::Working);
+        assert_eq!(execution.orchestration_run_id, run_id);
+
+        // The trace names who swapped what for what, and why.
+        let events = {
+            let exec_id = exec_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::orchestration::list_execution_events(conn, &exec_id)
+            })
+            .await
+            .unwrap()
+        };
+        let swaps: Vec<_> = events
+            .iter()
+            .filter(|event| event.action == "validations_replaced")
+            .collect();
+        assert_eq!(swaps.len(), 1, "one swap, one journal entry: {events:#?}");
+        assert_eq!(swaps[0].actor_kind, PlanningActorKind::Agent);
+        assert_eq!(swaps[0].changes["reason"], "cd is not runnable; use --dir");
+        assert_eq!(
+            swaps[0].changes["previous"],
+            serde_json::json!([{"command": "cargo fmt --check"}])
+        );
+        assert_eq!(swaps[0].changes["validations"], fixed);
+
+        // Replaying it is a no-op that says so, and journals nothing more.
+        let again = exec.execute(&update(fixed, "again")).await;
+        assert!(again.ok);
+        assert_eq!(again.content["changed"], false);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM task_execution_events WHERE action = 'validations_replaced'"
+            )
+            .await,
+            1
+        );
+
+        // Only the principal room may do it.
+        let outsider = crate::api::agent_tools::KronnToolExecutor::arc(
+            AppState::new_defaults(
+                std::sync::Arc::new(tokio::sync::RwLock::new(
+                    crate::core::config::default_config(),
+                )),
+                db.clone(),
+                crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+            ),
+            Some(format!("{parent_id}-elsewhere")),
+            AgentType::ClaudeCode,
+            None,
+            None,
+        );
+        let denied = outsider
+            .execute(&update(serde_json::json!([]), "not mine"))
+            .await;
+        assert!(!denied.ok, "{:?}", denied.content);
+    }
+
+    /// KT-839 — the CLI principal (Claude Code, Codex…) reaches the same two
+    /// guarantees through the HTTP routes its bridge calls.
+    #[tokio::test]
+    async fn cli_principal_preflight_refuses_unrunnable_validations_over_http() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        {
+            let task_ref = task_ref.clone();
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task_ref,
+                    &crate::models::LinkPlanningDiscussionRequest {
+                        discussion_id: parent_id,
+                        placement: Default::default(),
+                        is_primary: true,
+                        position: None,
+                        actor: test_actor(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        }
+        seed_cli_session(&db, 103, &parent_id, "principal").await;
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let request = |validations: serde_json::Value| -> TaskExecPrepareRequest {
+            serde_json::from_value(serde_json::json!({
+                "task_reference": task_ref,
+                "parent_discussion_id": parent_id,
+                "worker": serde_json::to_value(native_worker()).unwrap(),
+                "source_agent": "ClaudeCode",
+                "source_session_id": "principal",
+                "worker_scope_intent": "generic",
+                "validations": validations,
+            }))
+            .expect("prepare request")
+        };
+
+        let Json(refused) = task_exec_prepare(
+            State(state.clone()),
+            Json(request(serde_json::json!([
+                {"command": "cd backend && CARGO_TARGET_DIR=/tmp/t cargo test"}
+            ]))),
+        )
+        .await;
+        let preparation = refused.data.expect("a preflight answers");
+        assert!(!preparation.launchable);
+        let reason = preparation
+            .reasons
+            .iter()
+            .find(|reason| reason.code == "invalid_validations")
+            .expect("invalid_validations reason");
+        assert!(reason.detail.contains("cargo test --manifest-path"));
+
+        let Json(accepted) = task_exec_prepare(
+            State(state),
+            Json(request(serde_json::json!([
+                {"command": "cargo test --manifest-path backend/Cargo.toml --target-dir /tmp/t"}
+            ]))),
+        )
+        .await;
+        let preparation = accepted.data.expect("a preflight answers");
+        assert!(preparation.launchable, "{:#?}", preparation.reasons);
+    }
+
+    #[tokio::test]
+    async fn cli_principal_replaces_execution_validations_over_http_and_a_worker_cannot() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 103, &parent, "principal").await;
+        seed_cli_session(&db, 104, &child, "the-worker-room-cli").await;
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let request = |session: &str, command: &str| TaskExecReassignRequest {
+            source_agent: "ClaudeCode".into(),
+            source_session_id: session.into(),
+            worker: None,
+            validations: Some(vec![ValidationSpec {
+                command: command.into(),
+                quick_exec_id: None,
+                timeout_secs: None,
+            }]),
+            reason: "the first set could never run".into(),
+        };
+        let gates = |db: std::sync::Arc<Database>, exec_id: String| async move {
+            db.with_conn(move |conn| {
+                let execution =
+                    crate::db::orchestration::get_task_execution(conn, &exec_id)?.unwrap();
+                Ok(crate::db::orchestration::get_orchestration_run(
+                    conn,
+                    &execution.orchestration_run_id,
+                )?
+                .unwrap()
+                .validations
+                .into_iter()
+                .map(|spec| spec.command)
+                .collect::<Vec<_>>())
+            })
+            .await
+            .unwrap()
+        };
+        let before = exec_of(&db, &exec_id).await;
+
+        // The worker's own room is not the principal room.
+        let Json(denied) = task_exec_reassign(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(request("the-worker-room-cli", "cargo test")),
+        )
+        .await;
+        assert!(!denied.success);
+        assert!(gates(db.clone(), exec_id.clone()).await.is_empty());
+
+        // A worker and gates in one call, or neither, is not a single change.
+        let mut both = request("principal", "cargo test");
+        both.worker = Some(MessageTarget::cli(AgentType::ClaudeCode, 104));
+        let Json(both) =
+            task_exec_reassign(State(state.clone()), Path(exec_id.clone()), Json(both)).await;
+        assert!(!both.success);
+        assert!(both.error.unwrap().contains("one change per call"));
+        let mut neither = request("principal", "cargo test");
+        neither.validations = None;
+        let Json(neither) =
+            task_exec_reassign(State(state.clone()), Path(exec_id.clone()), Json(neither)).await;
+        assert!(!neither.success);
+        assert!(neither.error.unwrap().contains("needs a change"));
+        assert!(gates(db.clone(), exec_id.clone()).await.is_empty());
+
+        // The principal cannot swap in a gate that would never run either.
+        let Json(unrunnable) = task_exec_reassign(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(request("principal", "cd backend && cargo test")),
+        )
+        .await;
+        assert!(!unrunnable.success);
+        assert!(unrunnable
+            .error
+            .unwrap()
+            .contains("cargo test --manifest-path"));
+
+        let Json(replaced) = task_exec_reassign(
+            State(state.clone()),
+            Path(exec_id.clone()),
+            Json(request(
+                "principal",
+                "cargo test --manifest-path backend/Cargo.toml",
+            )),
+        )
+        .await;
+        assert!(replaced.success, "{:?}", replaced.error);
+        let replacement = replaced.data.unwrap();
+        assert_eq!(replacement["changed"], true);
+        assert_eq!(replacement["previous"], serde_json::json!([]));
+        assert_eq!(
+            gates(db.clone(), exec_id.clone()).await,
+            ["cargo test --manifest-path backend/Cargo.toml"]
+        );
+
+        // Same execution, same status, same worker: nothing was relaunched.
+        let after = exec_of(&db, &exec_id).await;
+        assert_eq!(
+            (
+                after.id,
+                after.status,
+                after.worker_cli_session_id,
+                after.attempt_no
+            ),
+            (
+                before.id,
+                before.status,
+                before.worker_cli_session_id,
+                before.attempt_no
+            )
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 1);
+    }
+
     #[tokio::test]
     async fn persisted_legacy_validation_timeout_is_clamped_instead_of_refused() {
         let cwd = tempfile::tempdir().unwrap();
@@ -16261,7 +17625,8 @@ mod tests {
         };
         assert!(reason.contains("shared.txt"), "{reason}");
         let sent_back = exec_of(&db, &first.id).await;
-        assert_eq!(sent_back.status, TaskExecutionStatus::ChangesRequested);
+        // The native worker is back at work on the next attempt, not parked.
+        assert_eq!(sent_back.status, TaskExecutionStatus::Working);
         assert_eq!(sent_back.attempt_no, first.attempt_no + 1);
         assert_eq!(git_rev(repo.path(), "main"), second_sha);
         assert!(
@@ -17671,10 +19036,22 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(after.status, TaskExecutionStatus::ChangesRequested);
+        // The conflict goes back to a worker that is running again (KT-862).
+        assert_eq!(after.status, TaskExecutionStatus::Working);
         assert_eq!(after.sub_discussion_id, execution.sub_discussion_id);
         assert_eq!(after.workspace_id, execution.workspace_id);
         assert!(after.integrated_sha.is_none());
+        let (room, brief) = message_row(
+            &db,
+            &format!(
+                "orch-integration-rework:{}:{}",
+                execution.id, after.attempt_no
+            ),
+        )
+        .await
+        .expect("the worker is told what conflicted");
+        assert_eq!(Some(room), after.sub_discussion_id);
+        assert!(brief.contains("merge conflict in README.md"), "{brief}");
         assert!(
             child.exists(),
             "the worker checkout remains available for repair"
@@ -17724,7 +19101,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(after.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(after.status, TaskExecutionStatus::Working);
         assert_eq!(
             after.attempt_no,
             execution.attempt_no + 1,
@@ -17780,22 +19157,20 @@ mod tests {
         let outcome = run_integration(&db, &exec_id).await.unwrap();
         assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
         let sent_back = exec_of(&db, &exec_id).await;
-        assert_eq!(sent_back.status, TaskExecutionStatus::ChangesRequested);
+        // The send-back re-activates the CLI worker (KT-862): it is offered the
+        // next attempt and re-accepts, exactly like after a `request_changes`.
+        assert_eq!(sent_back.status, TaskExecutionStatus::Blocked);
         assert_eq!(sent_back.attempt_no, 1);
-
-        let execution_id = exec_id.clone();
-        db.with_conn(move |conn| {
-            crate::db::orchestration::transition_execution(
-                conn,
-                &execution_id,
-                TaskExecutionStatus::Working,
-                &backend_actor(),
-                serde_json::json!({ "recovery": "test_worker_resumed" }),
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+        let offer = live_offer(&db, &exec_id).await;
+        let accepted =
+            accept_worker_offer_and_attach(&db, &offer.id, "ClaudeCode", "sess-a", "sess-a")
+                .await
+                .unwrap();
+        assert!(matches!(accepted, AcceptAttachOutcome::Attached { .. }));
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Working
+        );
         let manifest = clean_manifest_for_execution(&db, &exec_id).await;
         let redelivery = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
             .await
@@ -17822,6 +19197,615 @@ mod tests {
         assert_eq!(
             review_requests, 2,
             "both review obligations keep distinct durable message ids"
+        );
+    }
+
+    // ── KT-862 — a red validation after approval is not silent ──────────────────
+
+    /// A validation that fails the first time it runs and passes the next: the
+    /// shape of a test with a timeout that is fragile under load.
+    fn flaky_validation(control: &Path) -> ValidationSpec {
+        let marker = format!("{:?}", control.join("ran").to_str().unwrap());
+        scripted_validation(
+            control,
+            &[
+                "import os, sys",
+                &format!("marker = {marker}"),
+                "if not os.path.exists(marker):",
+                "    open(marker, 'w').close()",
+                "    print('FAILED orchestrate_rechecks_changed_catalog: recv_timeout elapsed')",
+                "    sys.exit(3)",
+            ],
+        )
+    }
+
+    /// The room and text of a message, or `None` when it was never posted.
+    async fn message_row(db: &Database, id: &str) -> Option<(String, String)> {
+        use rusqlite::OptionalExtension as _;
+        let id = id.to_string();
+        db.with_conn(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT discussion_id, content FROM messages WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// The control offer a re-activated CLI worker has yet to accept.
+    async fn live_offer(db: &Database, exec_id: &str) -> crate::models::TaskExecutionWorkerOffer {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| crate::db::worker_offers::list_offers_for_execution(conn, &id))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|offer| offer.status.is_live())
+            .expect("a live control offer")
+    }
+
+    async fn message_targets(db: &Database, id: &str) -> Vec<MessageTarget> {
+        let id = id.to_string();
+        db.with_conn(move |conn| crate::db::discussions::list_message_targets(conn, &id))
+            .await
+            .unwrap()
+    }
+
+    /// A delivered CLI worker whose run gates on `validations`, approved by the
+    /// pinned principal (session 102) and sent back by the integration.
+    async fn approved_cli_execution_sent_back(
+        db: &Database,
+        repo: &Path,
+        validations: Vec<ValidationSpec>,
+    ) -> (String, String, String, String) {
+        let (parent, child, exec_id, head, _path) = delivered_awaiting_review(db, repo).await;
+        let run_id = exec_of(db, &exec_id).await.orchestration_run_id;
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![run_id, serde_json::to_string(&validations)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        pin_cli_principal(db, &exec_id, "ClaudeCode", "sess-b").await;
+        decide_review(
+            db,
+            &exec_id,
+            &review_approve(db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let outcome = run_integration(db, &exec_id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::SentBack { .. }),
+            "got {outcome:?}"
+        );
+        (parent, child, exec_id, head)
+    }
+
+    /// DoD-1 — a validation that goes red after the approval relaunches a native
+    /// worker: a fresh dispatch, triggered by a message in its room that carries the
+    /// command, the exit code and what the command printed.
+    #[tokio::test]
+    async fn a_red_validation_after_approval_relaunches_the_native_worker_with_its_output() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let validation = scripted_validation(
+            control.path(),
+            &[
+                "import sys",
+                "print('FAILED orchestrate_rechecks_changed_catalog: recv_timeout elapsed')",
+                "sys.exit(3)",
+            ],
+        );
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "rework-native",
+            "worker.txt",
+            "done",
+            vec![validation.clone()],
+        )
+        .await;
+        let before = exec_of(&db, &execution.id).await;
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
+
+        let after = exec_of(&db, &execution.id).await;
+        assert_eq!(after.status, TaskExecutionStatus::Working);
+        assert_eq!(after.attempt_no, before.attempt_no + 1);
+        let dispatch = after.dispatch_job_id.clone().expect("a fresh dispatch");
+        assert_ne!(
+            Some(&dispatch),
+            before.dispatch_job_id.as_ref(),
+            "the worker is relaunched, not left on the finished dispatch"
+        );
+
+        let message_id = format!(
+            "orch-integration-rework:{}:{}",
+            execution.id, after.attempt_no
+        );
+        let (room, brief) = message_row(&db, &message_id).await.expect("worker brief");
+        assert_eq!(Some(room), after.sub_discussion_id);
+        assert!(brief.contains(&validation.command), "{brief}");
+        assert!(brief.contains("**Code de sortie :** 3"), "{brief}");
+        assert!(
+            brief.contains("FAILED orchestrate_rechecks_changed_catalog"),
+            "the worker reads what the validation printed: {brief}"
+        );
+        let job_id = dispatch.clone();
+        let job = db
+            .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &job_id))
+            .await
+            .unwrap()
+            .expect("dispatch row");
+        assert_eq!(job.trigger_message_id, message_id);
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
+        assert_eq!(
+            job.dedupe_key,
+            format!("orch-rework:{}:{}", execution.id, after.attempt_no)
+        );
+
+        // The relaunched worker can answer: a new delivery is accepted on the new attempt.
+        let manifest = projected_manifest_for_execution(&db, &execution.id).await;
+        let delivered = deliver_native_worker_manifest(
+            &db,
+            &execution.id,
+            NativeExecutionCaller {
+                discussion_id: after.sub_discussion_id.as_deref().unwrap(),
+                agent_type: &AgentType::ClaudeCode,
+                source_message_id: Some(&message_id),
+                alias: "ClaudeCode",
+                actor_session_id: Some("native-rework"),
+            },
+            &dispatch,
+            &manifest,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "{delivered:?}"
+        );
+    }
+
+    /// DoD-1 — a joined CLI worker is re-offered the next attempt exactly as after a
+    /// `request_changes`: parked `Blocked(awaiting_worker_acceptance)` until it
+    /// accepts, and the instructions it receives on accepting carry the output.
+    #[tokio::test]
+    async fn a_red_validation_after_approval_reoffers_the_cli_worker_with_its_output() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let validation = flaky_validation(control.path());
+        let (_parent, child, exec_id, _head) =
+            approved_cli_execution_sent_back(&db, repo.path(), vec![validation.clone()]).await;
+
+        let parked = exec_of(&db, &exec_id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::Blocked);
+        assert_eq!(
+            parked.blocked_reason_code,
+            Some(crate::models::BlockedReasonCode::AwaitingWorkerAcceptance)
+        );
+        assert_eq!(parked.attempt_no, 1);
+        let offer = live_offer(&db, &exec_id).await;
+        assert_eq!(offer.attempt_no, 1);
+        assert_eq!(offer.target_cli_session_id, 101);
+
+        let brief_id = format!("orch-integration-rework:{exec_id}:1");
+        let (room, brief) = message_row(&db, &brief_id).await.expect("worker brief");
+        assert_eq!(room, child);
+        assert!(brief.contains(&validation.command), "{brief}");
+        assert!(brief.contains("recv_timeout elapsed"), "{brief}");
+        let targets = message_targets(&db, &brief_id).await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, MessageTargetKind::Cli);
+        assert_eq!(targets[0].cli_session_id, Some(101));
+
+        let accepted =
+            accept_worker_offer_and_attach(&db, &offer.id, "ClaudeCode", "sess-a", "sess-a")
+                .await
+                .unwrap();
+        let AcceptAttachOutcome::Attached {
+            execution,
+            worker_instructions,
+            ..
+        } = accepted
+        else {
+            panic!("expected the worker to attach, got {accepted:?}");
+        };
+        assert_eq!(execution.status, TaskExecutionStatus::Working);
+        assert!(
+            worker_instructions.contains("recv_timeout elapsed"),
+            "the re-accepting worker is handed the failure: {worker_instructions}"
+        );
+        // The worker gets its checkout back exactly as it was delivered.
+        let path = managed_worktree_path(&db, &exec_id).await;
+        assert!(git(Path::new(&path), &["status", "--porcelain"])
+            .stdout
+            .is_empty());
+    }
+
+    /// DoD-2 — the parent room hears about every send-back, addressed to the
+    /// principal that approved: a red validation, then a conflict.
+    #[tokio::test]
+    async fn every_send_back_after_approval_notifies_the_principal_that_approved() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let validation = flaky_validation(control.path());
+        let (parent, _child, exec_id, _head) =
+            approved_cli_execution_sent_back(&db, repo.path(), vec![validation.clone()]).await;
+
+        let first_id = format!("orch-integration-reworked:{exec_id}:1");
+        let (room, notice) = message_row(&db, &first_id).await.expect("principal notice");
+        assert_eq!(room, parent);
+        assert!(notice.contains(&validation.command), "{notice}");
+        assert!(notice.contains("recv_timeout elapsed"), "{notice}");
+        assert!(notice.contains("`task_exec_resume`"), "{notice}");
+        assert!(notice.contains("`task_exec_review`"), "{notice}");
+        let targets = message_targets(&db, &first_id).await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, MessageTargetKind::Cli);
+        assert_eq!(
+            targets[0].cli_session_id,
+            Some(102),
+            "addressed to the principal that approved, not to the room at large"
+        );
+        let parent_for_cards = parent.clone();
+        let cards = db
+            .with_conn(move |conn| {
+                crate::db::discussion_important::list(conn, &parent_for_cards, None)
+            })
+            .await
+            .unwrap();
+        assert!(
+            cards.items.iter().any(|card| card.message_id == first_id
+                && card.action_required.owner.as_deref() == Some("Principal")),
+            "the send-back is a steering card that says who owes the decision"
+        );
+
+        // The worker redelivers; the principal approves again; the integration now
+        // conflicts with what landed meanwhile: that send-back is announced as well.
+        let offer = live_offer(&db, &exec_id).await;
+        accept_worker_offer_and_attach(&db, &offer.id, "ClaudeCode", "sess-a", "sess-a")
+            .await
+            .unwrap();
+        let path = managed_worktree_path(&db, &exec_id).await;
+        std::fs::write(Path::new(&path).join("README.md"), "worker version").unwrap();
+        assert!(git(Path::new(&path), &["add", "."]).status.success());
+        assert!(git(Path::new(&path), &["commit", "-m", "worker readme"])
+            .status
+            .success());
+        std::fs::write(repo.path().join("README.md"), "parent version").unwrap();
+        assert!(git(repo.path(), &["add", "."]).status.success());
+        assert!(git(repo.path(), &["commit", "-m", "parent readme"])
+            .status
+            .success());
+        let manifest = manifest_json_with_files_for_dod(
+            &git_rev(Path::new(&path), "HEAD"),
+            serde_json::json!([{ "path": "README.md", "kind": "modified" }]),
+            &dod_id_for_execution(&db, &exec_id).await,
+            true,
+        );
+        let redelivery = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(
+            matches!(redelivery, DeliverOutcome::Delivered { .. }),
+            "{redelivery:?}"
+        );
+        let approval = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(approval, ReviewOutcome::Reviewed { .. }),
+            "{approval:?}"
+        );
+        let outcome = run_integration(&db, &exec_id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::SentBack { ref reason } if reason.contains("conflict")),
+            "got {outcome:?}"
+        );
+
+        let second_id = format!("orch-integration-reworked:{exec_id}:2");
+        let (room, notice) = message_row(&db, &second_id).await.expect("second notice");
+        assert_eq!(room, parent);
+        assert!(notice.contains("merge conflict in README.md"), "{notice}");
+        assert_eq!(
+            message_targets(&db, &second_id).await[0].cli_session_id,
+            Some(102)
+        );
+        assert_eq!(event_count(&db, &exec_id, "integration_reworked").await, 2);
+    }
+
+    /// DoD-3 — the failure did not come from the delivery: the principal asks for
+    /// the same validations again and the SAME approved delivery lands, with no new
+    /// delivery and without re-running what already passed on that candidate.
+    #[tokio::test]
+    async fn the_principal_reruns_the_same_validations_without_a_new_delivery() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let steady_dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let steady = scripted_validation(steady_dir.path(), &["print('steady gate')"]);
+        let (_parent, _child, exec_id, _head) = approved_cli_execution_sent_back(
+            &db,
+            repo.path(),
+            vec![steady, flaky_validation(control.path())],
+        )
+        .await;
+        let sent_back = exec_of(&db, &exec_id).await;
+        assert_eq!(sent_back.status, TaskExecutionStatus::Blocked);
+        let candidate = sent_back.candidate_merge_sha.clone().expect("candidate");
+        let offer = live_offer(&db, &exec_id).await;
+        let deliveries_before = {
+            let id = exec_id.clone();
+            db.with_conn(move |conn| crate::db::worker_deliveries::list_deliveries(conn, &id))
+                .await
+                .unwrap()
+        };
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(exec_id.clone())).await;
+        assert!(resumed.success, "revalidation failed: {:?}", resumed.error);
+
+        let done = exec_of(&db, &exec_id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.integrated_sha.as_deref(), Some(candidate.as_str()));
+        assert_eq!(git_rev(repo.path(), "main"), candidate);
+        let id = exec_id.clone();
+        let (deliveries_after, runs, offers) = db
+            .with_conn(move |conn| {
+                Ok((
+                    crate::db::worker_deliveries::list_deliveries(conn, &id)?,
+                    crate::db::orchestration::list_validation_runs(conn, &id)?,
+                    crate::db::worker_offers::list_offers_for_execution(conn, &id)?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            deliveries_after.len(),
+            deliveries_before.len(),
+            "no new delivery was asked of the worker"
+        );
+        assert!(runs
+            .iter()
+            .all(|run| run.candidate_merge_sha.as_deref() == Some(candidate.as_str())));
+        assert_eq!(
+            runs.iter()
+                .filter(|run| run.command.contains("validate.py") && run.passed())
+                .count(),
+            2,
+            "the steady gate ran once, the flaky one passed on its second run"
+        );
+        assert_eq!(runs.len(), 3, "the steady gate is not run again: {runs:?}");
+        assert!(
+            offers
+                .iter()
+                .all(|o| o.id != offer.id || !o.status.is_live()),
+            "the worker's re-offer was withdrawn"
+        );
+        assert_eq!(
+            event_count(&db, &exec_id, "integration_revalidation").await,
+            1
+        );
+    }
+
+    /// DoD-3 — the same request works for a native worker, and stands its
+    /// relaunched dispatch down instead of leaving two actors on the worktree.
+    #[tokio::test]
+    async fn revalidating_stands_down_the_relaunched_native_worker() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let e = exec_id.clone();
+        let validations = vec![flaky_validation(control.path())];
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_executions SET worker_target_kind = 'agent', \
+                     worker_cli_session_id = NULL, worker_agent_type = 'Ollama' WHERE id = ?1",
+                [&e],
+            )?;
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![e, serde_json::to_string(&validations)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let outcome = run_integration(&db, &exec_id).await.unwrap();
+        assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
+        let relaunched = exec_of(&db, &exec_id).await;
+        assert_eq!(relaunched.status, TaskExecutionStatus::Working);
+        let dispatch = relaunched
+            .dispatch_job_id
+            .clone()
+            .expect("relaunch dispatch");
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(exec_id.clone())).await;
+        assert!(resumed.success, "revalidation failed: {:?}", resumed.error);
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Done
+        );
+        let job = db
+            .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &dispatch))
+            .await
+            .unwrap()
+            .expect("dispatch row");
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Cancelled,
+            "the relaunched worker no longer runs against the worktree"
+        );
+    }
+
+    /// DoD-3 guard — the approval covers the delivered work only. A worker that
+    /// committed since the send-back has made a delivery nobody reviewed, so the
+    /// principal's re-validation is refused and nothing moves.
+    #[tokio::test]
+    async fn revalidation_is_refused_once_the_worker_changed_the_worktree() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_parent, _child, exec_id, _head) = approved_cli_execution_sent_back(
+            &db,
+            repo.path(),
+            vec![flaky_validation(control.path())],
+        )
+        .await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+
+        // Uncommitted work is refused…
+        std::fs::write(Path::new(&path).join("scratch.txt"), "wip").unwrap();
+        let Json(dirty) =
+            resume_execution(State(recovery_test_state(&db)), Path(exec_id.clone())).await;
+        assert!(!dirty.success);
+        assert!(
+            dirty
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("uncommitted")),
+            "{:?}",
+            dirty.error
+        );
+        // …and so is committed work.
+        assert!(git(Path::new(&path), &["add", "."]).status.success());
+        assert!(git(Path::new(&path), &["commit", "-m", "unreviewed"])
+            .status
+            .success());
+        let Json(committed) =
+            resume_execution(State(recovery_test_state(&db)), Path(exec_id.clone())).await;
+        assert!(!committed.success);
+        assert!(
+            committed
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("committed since the send-back")),
+            "{:?}",
+            committed.error
+        );
+        let held = exec_of(&db, &exec_id).await;
+        assert_eq!(held.status, TaskExecutionStatus::Blocked);
+        assert_eq!(
+            event_count(&db, &exec_id, "integration_revalidation").await,
+            0
+        );
+    }
+
+    /// DoD-3 guard — once the worker has answered the send-back with a delivery,
+    /// that delivery is what gets reviewed: `task_exec_resume` no longer re-runs
+    /// the old approval.
+    #[tokio::test]
+    async fn revalidation_is_refused_once_the_worker_redelivered() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_parent, _child, exec_id, _head) = approved_cli_execution_sent_back(
+            &db,
+            repo.path(),
+            vec![flaky_validation(control.path())],
+        )
+        .await;
+        let offer = live_offer(&db, &exec_id).await;
+        accept_worker_offer_and_attach(&db, &offer.id, "ClaudeCode", "sess-a", "sess-a")
+            .await
+            .unwrap();
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+
+        let Json(refused) =
+            resume_execution(State(recovery_test_state(&db)), Path(exec_id.clone())).await;
+        assert!(!refused.success);
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+        assert_eq!(
+            event_count(&db, &exec_id, "integration_revalidation").await,
+            0
+        );
+    }
+
+    /// The `Approved` edge out of a worker-owned state exists for the re-validation
+    /// only: an execution nobody reviewed cannot be approved through it.
+    #[tokio::test]
+    async fn a_worker_owned_execution_cannot_be_approved_without_a_send_back() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("never-reviewed".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(execution.status, TaskExecutionStatus::Working);
+        let id = execution.id.clone();
+        let refused = db
+            .with_conn(move |conn| {
+                Ok(crate::db::orchestration::transition_execution(
+                    conn,
+                    &id,
+                    TaskExecutionStatus::Approved,
+                    &backend_actor(),
+                    serde_json::json!({}),
+                )
+                .unwrap_err()
+                .to_string())
+            })
+            .await
+            .unwrap();
+        assert!(refused.contains("cannot return to Approved"), "{refused}");
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Working
         );
     }
 
@@ -18852,19 +20836,17 @@ mod tests {
         (task_ref, parent_id, child_id, offer_id)
     }
 
-    /// Full CLI handshake (KT-328 tranche 2): a parked worker accepts its offer → the
-    /// session moves to the child, the brief lands there targeted (no dispatch), the
-    /// execution is Working, the task InProgress, the offer accepted, and the origin
-    /// carries a durable attach notice.
+    /// KT-837 — accepting a worker offer grants the exact session an execution-scoped
+    /// worker role without moving its principal-room membership or durable binding.
     #[tokio::test]
     async fn cli_worker_accepts_and_attaches_end_to_end() {
         let repo = init_repo();
-        let db = Database::open_in_memory().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let (task_ref, _parent_id, child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
 
         // A real MCP reload rotates the active bridge identity while preserving
-        // the durable room binding. The accept boundary must authorize the
-        // exact LIVE row and move the separate DURABLE binding.
+        // the durable room binding. The accept boundary authorizes both identities
+        // but must not transfer either room owner.
         db.with_conn(|conn| {
             conn.execute(
                 "UPDATE discussion_sessions SET session_id = 'live-sess-a' WHERE id = 101",
@@ -18893,10 +20875,11 @@ mod tests {
             accept_worker_offer_and_attach(&db, &offer_id, "ClaudeCode", "live-sess-a", "sess-a")
                 .await
                 .unwrap();
-        let (attached_child, exec_id) = match outcome {
+        let (attached_child, exec_id, worker_instructions) = match outcome {
             AcceptAttachOutcome::Attached {
                 child_discussion_id,
                 execution,
+                worker_instructions,
             } => {
                 assert_eq!(
                     execution.status,
@@ -18908,11 +20891,15 @@ mod tests {
                     "a resumed execution cannot expose the former acceptance hold as active"
                 );
                 assert_eq!(execution.blocked_reason_code, None);
-                (child_discussion_id, execution.id)
+                (child_discussion_id, execution.id, worker_instructions)
             }
             other => panic!("expected Attached, got {other:?}"),
         };
         assert_eq!(attached_child, child_id);
+        assert!(
+            worker_instructions.contains(&task_ref),
+            "acceptance returns the brief directly to the worker"
+        );
 
         // Task flipped Todo → InProgress (the sole anti-race authority).
         let tref = task_ref.clone();
@@ -18923,7 +20910,8 @@ mod tests {
             .unwrap();
         assert_eq!(task.summary.status, PlanningTaskStatus::InProgress);
 
-        // Offer settled `accepted`; session moved to the child (binding + membership).
+        // Offer settled `accepted`; the durable binding and live membership stay in the
+        // principal room so reload, waits and principal authorization keep working.
         let (offer, bound_disc, session_disc) = {
             let oid = offer_id.clone();
             db.with_conn(move |conn| {
@@ -18946,12 +20934,12 @@ mod tests {
         assert_eq!(offer.status, crate::models::WorkerOfferStatus::Accepted);
         assert_eq!(
             bound_disc.as_deref(),
-            Some(child_id.as_str()),
-            "durable binding moved to the child"
+            Some(_parent_id.as_str()),
+            "durable binding must remain on the principal room"
         );
         assert_eq!(
-            session_disc, child_id,
-            "session membership moved to the child"
+            session_disc, _parent_id,
+            "live membership must remain on the principal room"
         );
 
         // The work brief is in the CHILD (the only message there), Cli-targeted, no dispatch.
@@ -18981,29 +20969,149 @@ mod tests {
         assert_eq!(targets[0].cli_session_id, Some(101));
         assert_eq!(dispatches, 0, "a CLI worker enqueues zero native dispatch");
 
-        // The origin carries a durable attach notice naming the child (never silent).
+        // The origin carries a durable activation notice naming the child (never silent).
+        let notice_exec_id = exec_id.clone();
         let notice = db
             .with_conn(move |conn| {
                 Ok(conn.query_row(
                     "SELECT content FROM messages WHERE id = ?1",
-                    [format!("orch-attach:{exec_id}:0")],
+                    [format!("orch-attach:{notice_exec_id}:0")],
                     |r| r.get::<_, String>(0),
                 )?)
             })
             .await
             .unwrap();
         assert!(
-            notice.contains(&child_id),
-            "attach notice names the child room, got {notice:?}"
+            notice.contains(&child_id) && notice.contains("reste présente"),
+            "activation notice names the child and preserved room, got {notice:?}"
         );
+
+        // While the execution is Working, the exact CLI still receives messages addressed
+        // to it in the principal room.
+        let parent_for_message = _parent_id.clone();
+        db.with_conn(move |conn| {
+            let message = orchestrator_message(
+                "kt837-parent-message".into(),
+                "Parent-room steering remains deliverable.".into(),
+            );
+            crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+                conn,
+                &parent_for_message,
+                &message,
+                &[MessageTarget::cli(AgentType::ClaudeCode, 101)],
+                &[],
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let Json(waited) = crate::api::disc_invite::wait_for_peer(
+            State(kt790_state(&db)),
+            Path(_parent_id.clone()),
+            axum::extract::Query(crate::api::disc_invite::WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".into()),
+                session_id: Some("live-sess-a".into()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let parent_messages = waited.data.expect("principal-room wait must succeed");
+        assert!(parent_messages.messages.iter().any(|message| {
+            message.message_id == "kt837-parent-message" && message.addressed_to_caller
+        }));
+
+        // Parent-room membership also keeps this CLI a party to executions it coordinates,
+        // independently of the one on which it is currently the worker.
+        let eid = exec_id.clone();
+        let principal_party = db
+            .with_conn(move |conn| {
+                let mut coordinated = crate::db::orchestration::get_task_execution(conn, &eid)?
+                    .context("accepted execution vanished")?;
+                coordinated.id = "another-coordinated-execution".into();
+                coordinated.worker_cli_session_id = None;
+                execution_party_is_authorized(conn, &coordinated, "ClaudeCode", "live-sess-a")
+            })
+            .await
+            .unwrap();
+        assert!(
+            principal_party,
+            "the principal stays a party to its other executions"
+        );
+
+        // Delivery reaches AwaitingReview without any return/rejoin operation because the
+        // session never left the principal room.
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let delivered =
+            deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "live-sess-a", &manifest)
+                .await
+                .unwrap();
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        let (status, member_room, source_room) = {
+            let eid = exec_id.clone();
+            db.with_conn(move |conn| {
+                let status = crate::db::orchestration::get_task_execution(conn, &eid)?
+                    .context("delivered execution vanished")?
+                    .status;
+                let member_room: String = conn.query_row(
+                    "SELECT disc_id FROM discussion_sessions WHERE id = 101",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let source_room = crate::db::disc_source::find_disc_by_source_session(
+                    conn,
+                    "ClaudeCode",
+                    "sess-a",
+                )?;
+                Ok((status, member_room, source_room))
+            })
+            .await
+            .unwrap()
+        };
+        assert_eq!(status, TaskExecutionStatus::AwaitingReview);
+        assert_eq!(member_room, _parent_id);
+        assert_eq!(source_room.as_deref(), Some(_parent_id.as_str()));
+
+        // Rejoining the CLI's own principal room is idempotent and the same durable source
+        // can be linked again without any force-reassignment path.
+        let parent_for_join = _parent_id.clone();
+        let (joined_pk, rebound_room) = db
+            .with_conn(move |conn| {
+                let invite =
+                    crate::db::discussion_sessions::create_invite_token(conn, &parent_for_join)?;
+                let joined = crate::db::discussion_sessions::join_via_token(
+                    conn,
+                    &invite.token,
+                    "ClaudeCode",
+                    "live-sess-a",
+                )?;
+                crate::db::disc_source::bind_to_source(
+                    conn,
+                    &parent_for_join,
+                    "ClaudeCode",
+                    "sess-a",
+                )?;
+                let rebound = crate::db::disc_source::find_disc_by_source_session(
+                    conn,
+                    "ClaudeCode",
+                    "sess-a",
+                )?;
+                Ok((joined.session_pk, rebound))
+            })
+            .await
+            .unwrap();
+        assert_eq!(joined_pk, 101);
+        assert_eq!(rebound_room.as_deref(), Some(_parent_id.as_str()));
     }
 
-    /// KT-425 — reproduce the real interruption boundary: phase 1 committed
-    /// `pending → accepting`, but neither durable binding nor live session moved and the
-    /// final checkpoint never ran. The exact target retry must resume the idempotent saga;
+    /// Reproduce the interruption boundary after `pending → accepting` but before the
+    /// final checkpoint. The exact target retry resumes without moving room ownership;
     /// another same-provider session remains opaque and cannot steal it.
     #[tokio::test]
-    async fn accepting_offer_resumes_after_crash_before_transfer() {
+    async fn accepting_offer_resumes_after_crash_before_checkpoint() {
         let repo = init_repo();
         let db = Database::open_in_memory().unwrap();
         let (task_ref, parent_id, child_id, offer_id) = parked_cli_worker(&db, repo.path()).await;
@@ -19040,6 +21148,7 @@ mod tests {
             AcceptAttachOutcome::Attached {
                 child_discussion_id,
                 execution,
+                ..
             } => {
                 assert_eq!(child_discussion_id, child_id);
                 execution
@@ -19066,7 +21175,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(offer_status, crate::models::WorkerOfferStatus::Accepted);
-        assert_eq!(session_disc, child_id);
+        assert_eq!(session_disc, parent_id);
         assert_eq!(task_status, PlanningTaskStatus::InProgress);
         assert_eq!(
             count(
@@ -20169,7 +22278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_restart_same_worker_reassignment_keeps_child_and_requires_acceptance() {
+    async fn cli_restart_same_worker_reassignment_keeps_principal_room_and_requires_acceptance() {
         let repo = init_repo();
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
@@ -20199,7 +22308,8 @@ mod tests {
         let request = |session| TaskExecReassignRequest {
             source_agent: "ClaudeCode".into(),
             source_session_id: "principal".into(),
-            worker: MessageTarget::cli(AgentType::ClaudeCode, session),
+            worker: Some(MessageTarget::cli(AgentType::ClaudeCode, session)),
+            validations: None,
             reason: "explicitly recover this exact worker in its existing child".into(),
         };
         let Json(foreign) = task_exec_reassign(
@@ -20232,7 +22342,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(offer.target_cli_session_id, 101);
-        assert_eq!(offer.origin_discussion_id, child);
+        assert_eq!(offer.origin_discussion_id, parent);
         assert_eq!(offer.child_discussion_id, child);
         assert_eq!(offer.reason.as_deref(), Some("cli_reassignment"));
         let wrong = accept_worker_offer_and_attach(
@@ -20262,13 +22372,13 @@ mod tests {
         db.with_conn(move |conn| {
             let binding =
                 crate::db::disc_source::find_disc_by_source_session(conn, "ClaudeCode", "sess-a")?;
-            assert_eq!(binding.as_deref(), Some(child.as_str()));
+            assert_eq!(binding.as_deref(), Some(parent.as_str()));
             let membership: String = conn.query_row(
                 "SELECT disc_id FROM discussion_sessions WHERE id = 101",
                 [],
                 |row| row.get(0),
             )?;
-            assert_eq!(membership, child);
+            assert_eq!(membership, parent);
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM messages WHERE id = ?1",
                 [format!("orch-reassign-handoff:{id}:1")],
@@ -20438,11 +22548,11 @@ mod tests {
         );
     }
 
-    /// KT-320 DoD-9: terminality is the return boundary for a joined CLI.
-    /// Done, Cancelled and Failed all leave a durable message in both rooms and
-    /// restore both the source binding and the live session membership.
+    /// KT-837: new execution-scoped CLI workers are already in their origin room at every
+    /// terminal boundary. Done, Cancelled and Failed preserve both identities and emit no
+    /// false legacy-return trace.
     #[tokio::test]
-    async fn every_terminal_state_returns_the_cli_worker_to_its_origin() {
+    async fn every_terminal_state_keeps_execution_scoped_cli_in_its_origin() {
         async fn exercise(terminal: TaskExecutionStatus) {
             let repo = init_repo();
             let db = Database::open_in_memory().unwrap();
@@ -20554,13 +22664,10 @@ mod tests {
             assert_eq!(status, terminal);
             assert_eq!(binding.as_deref(), Some(parent_id.as_str()));
             assert_eq!(session_disc, parent_id);
+            assert_eq!(child_trace, 0, "false child return trace for {terminal:?}");
             assert_eq!(
-                child_trace, 1,
-                "child terminal trace missing for {terminal:?}"
-            );
-            assert_eq!(
-                origin_trace, 1,
-                "origin terminal trace missing for {terminal:?}"
+                origin_trace, 0,
+                "false origin return trace for {terminal:?}"
             );
         }
 
@@ -21362,15 +23469,26 @@ mod tests {
         project_id: &str,
         parent_id: &str,
     ) -> String {
+        seed_open_quota_escalation(db, project_id, parent_id, AgentType::Codex, 1).await
+    }
+
+    /// Same as above for any `provider`, at an explicit quota `generation`
+    /// (each real escalation of one provider takes the next one).
+    async fn seed_open_quota_escalation(
+        db: &Database,
+        project_id: &str,
+        parent_id: &str,
+        provider: AgentType,
+        generation: i64,
+    ) -> String {
         let project_id = project_id.to_string();
         let parent_id = parent_id.to_string();
         db.with_conn(move |conn| {
-            let poisoned = create_todo_task(conn, &project_id, "Codex poison");
+            let provider = crate::db::orchestration::agent_type_to_db(&provider);
+            let poisoned = create_todo_task(conn, &project_id, "Quota poison");
             let mut input =
                 crate::models::LaunchSingleTaskInput::new(&poisoned.summary.id, &parent_id);
-            input.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
-                &AgentType::Codex,
-            ));
+            input.worker_agent_type = Some(provider.clone());
             let execution =
                 crate::db::orchestration::launch_single_task(conn, &input, &backend_actor())?
                     .execution;
@@ -21397,20 +23515,21 @@ mod tests {
             )?;
             let now = chrono::Utc::now().to_rfc3339();
             conn.execute(
-                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES ('Codex', 1) \
-                 ON CONFLICT(provider) DO UPDATE SET latest_generation = MAX(latest_generation, 1)",
-                [],
+                "INSERT INTO provider_quota_generations (provider, latest_generation) VALUES (?1, ?2) \
+                 ON CONFLICT(provider) DO UPDATE SET \
+                     latest_generation = MAX(latest_generation, excluded.latest_generation)",
+                rusqlite::params![provider, generation],
             )?;
             conn.execute(
                 "INSERT INTO task_execution_recovery (
                      task_execution_id, recovery_action, recovery_reason, last_activity_at,
                      assignment_generation, watchdog_redispatches, human_wait_started_at,
                      pending, updated_at, quota_signal_generation
-                 ) VALUES (?1, 'await_human', 'quota_exhausted:Codex', ?2, 0, 0, ?2, 0, ?2, 1)
+                 ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3, ?4)
                  ON CONFLICT(task_execution_id) DO UPDATE SET
-                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?2,
+                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?3,
                      quota_signal_generation = excluded.quota_signal_generation",
-                rusqlite::params![execution.id, now],
+                rusqlite::params![execution.id, format!("quota_exhausted:{provider}"), now, generation],
             )?;
             Ok(execution.id)
         })
@@ -21535,6 +23654,280 @@ mod tests {
             Some("ClaudeCode"),
             "the refused reassignment must not have mutated the current worker"
         );
+    }
+
+    /// KT-838 — one Claude Code quota outage stops two executions. `initial` is
+    /// a real provisioned execution escalated exactly as a failing dispatch does
+    /// it; the sibling is escalated by the same outage, before or after it.
+    /// Every escalation of a provider takes the next quota generation.
+    async fn two_executions_escalated_by_one_claude_outage(
+        db: &Database,
+        repo: &Path,
+        sibling_first: bool,
+    ) -> (TaskExecution, String) {
+        let (task_ref, parent_id, project_id) = seed(db, repo).await;
+        let initial = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt838-shared-outage".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let mut sibling = None;
+        if sibling_first {
+            sibling = Some(
+                seed_open_quota_escalation(db, &project_id, &parent_id, AgentType::ClaudeCode, 1)
+                    .await,
+            );
+        }
+        let dispatch = initial.dispatch_job_id.clone().unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &dispatch,
+                "ClaudeCode",
+                None,
+            )
+        })
+        .await
+        .unwrap();
+        let sibling = match sibling {
+            Some(sibling) => sibling,
+            None => {
+                seed_open_quota_escalation(db, &project_id, &parent_id, AgentType::ClaudeCode, 2)
+                    .await
+            }
+        };
+        (initial, sibling)
+    }
+
+    async fn claude_quota_blocked(db: &Database) -> bool {
+        db.with_conn(|conn| {
+            crate::db::orchestration::provider_has_open_quota_exhaustion(conn, "ClaudeCode", None)
+        })
+        .await
+        .unwrap()
+    }
+
+    fn claude_selection() -> crate::models::CampaignWorkerSelection {
+        crate::models::CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::ClaudeCode),
+            model: None,
+            profile_id: None,
+        }
+    }
+
+    fn quota_test_state(db: &std::sync::Arc<Database>) -> AppState {
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    #[tokio::test]
+    async fn reassigning_one_quota_escalated_execution_to_the_same_provider_rearms_its_sibling() {
+        // Whichever of the two executions the human reassigns first, the answer
+        // must not depend on the order of the gestures.
+        for sibling_first in [false, true] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (initial, sibling) =
+                two_executions_escalated_by_one_claude_outage(&db, repo.path(), sibling_first)
+                    .await;
+            assert_eq!(
+                exec_of(&db, &initial.id).await.status,
+                TaskExecutionStatus::Escalated
+            );
+            assert!(
+                claude_quota_blocked(&db).await,
+                "two open escalations block the provider (sibling_first={sibling_first})"
+            );
+
+            let state = quota_test_state(&db);
+            reassign_native_execution(&state, &initial.id, claude_selection(), "the quota is back")
+                .await
+                .expect("retrying the provider that stopped the execution must pass");
+
+            assert_eq!(
+                exec_of(&db, &initial.id).await.status,
+                TaskExecutionStatus::Working
+            );
+            assert!(
+                !claude_quota_blocked(&db).await,
+                "the still-escalated sibling must stop blocking the provider (sibling_first={sibling_first})"
+            );
+            assert_eq!(
+                exec_of(&db, &sibling).await.status,
+                TaskExecutionStatus::Escalated,
+                "re-arming leaves the sibling's history untouched"
+            );
+            let audit = db
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*), MIN(actor_kind) FROM provider_quota_rearm_events \
+                         WHERE provider = 'ClaudeCode'",
+                        [],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(audit, (1, "human".to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_real_quota_failure_after_the_reassignment_rearm_blocks_the_provider_again() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (initial, _sibling) =
+            two_executions_escalated_by_one_claude_outage(&db, repo.path(), false).await;
+        let state = quota_test_state(&db);
+        reassign_native_execution(&state, &initial.id, claude_selection(), "the quota is back")
+            .await
+            .unwrap();
+        assert!(!claude_quota_blocked(&db).await);
+
+        // The provider refuses the replacement dispatch too: a fresh generation.
+        let replacement = exec_of(&db, &initial.id).await.dispatch_job_id.unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &replacement,
+                "ClaudeCode",
+                None,
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            claude_quota_blocked(&db).await,
+            "a new real failure is a new generation and must block again"
+        );
+        let refusal = db
+            .with_conn(|conn| worker_quota_refusal(conn, &native_worker(), None))
+            .await
+            .unwrap()
+            .expect("launch preflight refuses the provider again");
+        assert_eq!(refusal.code, "quota_exhausted");
+        let Json(states) = provider_quota_states(State(state)).await;
+        assert!(states
+            .data
+            .unwrap()
+            .iter()
+            .any(|quota| quota.provider == AgentType::ClaudeCode && quota.blocked));
+    }
+
+    #[tokio::test]
+    async fn retrying_a_different_provider_is_not_a_rearm_of_the_one_that_stopped_it() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (initial, _sibling) =
+            two_executions_escalated_by_one_claude_outage(&db, repo.path(), false).await;
+        let state = quota_test_state(&db);
+        reassign_native_execution(
+            &state,
+            &initial.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "use Codex instead",
+        )
+        .await
+        .unwrap();
+        assert!(
+            claude_quota_blocked(&db).await,
+            "moving to Codex says nothing about Claude's quota"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM provider_quota_rearm_events").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reset_time_the_provider_announced_is_persisted_and_served_until_rearmed() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt838-announced-reset".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The refusal, as Claude Code words it, two hours from now in Paris.
+        let now = chrono::Utc::now();
+        let wall_clock = (now + chrono::Duration::hours(2))
+            .with_timezone(&chrono_tz::Europe::Paris)
+            .format("%-I:%M%P");
+        let refusal = format!("You've hit your limit · resets {wall_clock} (Europe/Paris)");
+        let announced = crate::api::discussions::announced_quota_reset(&refusal, now)
+            .expect("the refusal names a reset time");
+        let dispatch = initial.dispatch_job_id.clone().unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &dispatch,
+                "ClaudeCode",
+                Some(announced),
+            )
+        })
+        .await
+        .unwrap();
+
+        let state = quota_test_state(&db);
+        let Json(response) = provider_quota_states(State(state.clone())).await;
+        let claude = response
+            .data
+            .unwrap()
+            .into_iter()
+            .find(|quota| quota.provider == AgentType::ClaudeCode)
+            .unwrap();
+        assert!(claude.blocked);
+        assert_eq!(
+            claude.reset_at.as_deref(),
+            Some(
+                announced
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    .as_str()
+            ),
+            "Settings > Agents is served the announced instant"
+        );
+
+        // Announcing a time never re-arms by itself: still blocked, and the
+        // human's reassignment is what clears both the block and the display.
+        assert!(claude_quota_blocked(&db).await);
+        reassign_native_execution(&state, &initial.id, claude_selection(), "the quota is back")
+            .await
+            .unwrap();
+        let Json(response) = provider_quota_states(State(state)).await;
+        let claude = response
+            .data
+            .unwrap()
+            .into_iter()
+            .find(|quota| quota.provider == AgentType::ClaudeCode)
+            .unwrap();
+        assert!(!claude.blocked);
+        assert_eq!(claude.reset_at, None);
     }
 
     #[tokio::test]
@@ -22145,6 +24538,147 @@ mod tests {
         assert!(!worst["validations"].as_array().unwrap().is_empty());
     }
 
+    /// KT-911 DoD-3 — `task_exec_status` lists the CLI sessions of the worker,
+    /// attempts included, with what each cost; the compact view names the latest
+    /// and still fits its budget.
+    #[tokio::test]
+    async fn task_exec_status_lists_the_workers_cli_sessions_attempts_included() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, child_id, exec_id) = kt791_delivered_execution(&db, repo.path()).await;
+        let state = kt790_state(&db);
+
+        let (before, _) = kt791_status(&state, &exec_id, TaskExecStatusView::Full).await;
+        assert_eq!(
+            before["worker_sessions"],
+            serde_json::json!([]),
+            "a worker that ran no CLI session lists none"
+        );
+        let (compact, _) = kt791_status(&state, &exec_id, TaskExecStatusView::Compact).await;
+        assert!(compact.get("worker_sessions").is_none());
+
+        // The joined worker of this harness has no dispatch: give the execution
+        // two real ones, the launch and the rework's.
+        let dispatch = "dispatch-launch".to_string();
+        {
+            let (id, child_id, dispatch) = (exec_id.clone(), child_id.clone(), dispatch.clone());
+            db.with_conn(move |conn| {
+                for (n, job) in [dispatch.as_str(), "dispatch-rework"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, content, timestamp, \
+                             sort_order) VALUES (?1, ?2, 'User', 'go', '2026-09-29T00:00:00Z', ?3)",
+                        rusqlite::params![format!("m-{job}"), child_id, 9_000 + n as i64],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+                             trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, \
+                             available_at, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?1, '[]', ?5, '2026-09-29T00:00:00Z', \
+                             '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z')",
+                        // One running dispatch per room: the launch is over.
+                        rusqlite::params![
+                            job,
+                            child_id,
+                            format!("m-{job}"),
+                            9_000 + n as i64,
+                            if n == 0 { "Completed" } else { "Running" }
+                        ],
+                    )?;
+                }
+                crate::db::orchestration::attach_execution_dispatch(conn, &id, &dispatch)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        {
+            let (id, dispatch) = (exec_id.clone(), dispatch.clone());
+            db.with_conn(move |conn| {
+                let usd = |usd| crate::db::orchestration::WorkerSessionCost {
+                    usd,
+                    unknown_reason: usd
+                        .is_none()
+                        .then(|| "cache reads were not reported".into()),
+                };
+                // The first launch, a relaunch of the same dispatch, then a rework.
+                crate::db::orchestration::record_worker_cli_session(
+                    conn,
+                    &id,
+                    &dispatch,
+                    "ClaudeCode",
+                    "11111111-1111-4111-8111-111111111111",
+                    Some(&usd(Some(0.42))),
+                )?;
+                crate::db::orchestration::record_worker_cli_session(
+                    conn,
+                    &id,
+                    &dispatch,
+                    "ClaudeCode",
+                    "22222222-2222-4222-8222-222222222222",
+                    Some(&usd(None)),
+                )?;
+                conn.execute(
+                    "UPDATE task_executions SET attempt_no = attempt_no + 1, \
+                            dispatch_job_id = 'dispatch-rework' WHERE id = ?1",
+                    [&id],
+                )?;
+                crate::db::orchestration::record_worker_cli_session(
+                    conn,
+                    &id,
+                    "dispatch-rework",
+                    "ClaudeCode",
+                    "33333333-3333-4333-8333-333333333333",
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        let (full, _) = kt791_status(&state, &exec_id, TaskExecStatusView::Full).await;
+        let sessions = full["worker_sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 3, "{full:#}");
+        assert_eq!(
+            sessions[0]["session_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(sessions[0]["attempt_no"], 0);
+        assert_eq!(sessions[0]["dispatch_job_id"], dispatch.as_str());
+        assert_eq!(sessions[0]["agent_type"], "ClaudeCode");
+        assert_eq!(sessions[0]["cost_usd"], 0.42);
+        assert!(sessions[0].get("cost_unknown_reason").is_none());
+        assert_eq!(
+            sessions[1]["session_id"],
+            "22222222-2222-4222-8222-222222222222"
+        );
+        assert!(sessions[1]["cost_usd"].is_null());
+        assert_eq!(
+            sessions[1]["cost_unknown_reason"],
+            "cache reads were not reported"
+        );
+        assert_eq!(
+            sessions[2]["attempt_no"], 1,
+            "the rework is its own attempt"
+        );
+        assert_eq!(sessions[2]["dispatch_job_id"], "dispatch-rework");
+
+        let (compact, compact_chars) =
+            kt791_status(&state, &exec_id, TaskExecStatusView::Compact).await;
+        assert!(compact_chars < 1000, "{compact_chars}: {compact:#}");
+        assert_eq!(
+            compact["worker_sessions"],
+            serde_json::json!([
+                "22222222-2222-4222-8222-222222222222",
+                "33333333-3333-4333-8333-333333333333"
+            ]),
+            "the latest sessions, newest last"
+        );
+    }
+
     /// KT-791 DoD-2 — reassigning an execution awaiting review rejects its
     /// delivery, keeps the task and the attempt history, and starts a new
     /// attempt on the requested native worker.
@@ -22162,7 +24696,8 @@ mod tests {
             Json(TaskExecReassignRequest {
                 source_agent: "ClaudeCode".into(),
                 source_session_id: "principal-sess".into(),
-                worker: MessageTarget::discussion_agent(AgentType::Ollama),
+                worker: Some(MessageTarget::discussion_agent(AgentType::Ollama)),
+                validations: None,
                 reason: "the delivery misread the DoD; try a native worker".into(),
             }),
         )
@@ -22244,7 +24779,8 @@ mod tests {
             Json(TaskExecReassignRequest {
                 source_agent: "ClaudeCode".into(),
                 source_session_id: "principal-sess".into(),
-                worker: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
+                validations: None,
                 reason: "hand the rework to another CLI".into(),
             }),
         )
@@ -25606,7 +28142,8 @@ mod tests {
             Json(TaskExecReassignRequest {
                 source_agent: "ClaudeCode".into(),
                 source_session_id: "principal".into(),
-                worker: MessageTarget::cli(AgentType::ClaudeCode, 102),
+                worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
+                validations: None,
                 reason: "redirect to a fresh CLI since the first never accepted".into(),
             }),
         )

@@ -85,7 +85,7 @@ pub(crate) const RUST_SYNTAX_REFUSAL_PREFIX: &str = "Rust syntax validation refu
 /// Hashing the bytes already read matters: hashing the path in a second I/O
 /// would let a concurrent writer make the receipt describe different content
 /// from the text returned to the model.
-fn content_sha256(bytes: &[u8]) -> String {
+pub(crate) fn content_sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -176,6 +176,31 @@ fn try_lock_for_edit(file: std::fs::File, requested: &str) -> Result<ExclusiveEd
 /// Directories that are never worth walking into: they are enormous, generated,
 /// and contain nothing the model reasons about. Skipping them is what makes a
 /// bounded walk useful rather than exhausted on build artefacts.
+/// What a listing may send back to the model. The walk stays whole so `count`
+/// stays true; only the entries returned are bounded. A `**/*` over a PHP tree
+/// with `vendor/` returned ~880k tokens in one answer.
+const MAX_LISTING_BYTES: usize = 64 * 1024;
+
+/// Keep entries, in order, until their JSON reaches [`MAX_LISTING_BYTES`];
+/// the number left out is returned with them.
+fn bounded_entries(entries: Vec<Value>) -> (Vec<Value>, usize) {
+    let total = entries.len();
+    let mut used = 0;
+    let mut kept = Vec::new();
+    for entry in entries {
+        // +1 for the separating comma.
+        used += entry.to_string().len() + 1;
+        if used > MAX_LISTING_BYTES {
+            break;
+        }
+        kept.push(entry);
+    }
+    let omitted = total - kept.len();
+    (kept, omitted)
+}
+
+const LISTING_OMITTED_HINT: &str = "Only the first entries fit in one answer. Narrow the pattern or the directory (a sub-folder, an extension) to see the rest.";
+
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -649,19 +674,35 @@ pub fn git_commit_payload_with_data_dir_lock(
         normalized.insert(relative.to_string_lossy().to_string());
     }
     let normalized: Vec<String> = normalized.into_iter().collect();
-    let committed = crate::api::git_ops::run_git_commit_with_child_lock(
-        &canonical_root,
-        &normalized,
-        message,
-        false,
-        false,
-        data_dir_lock,
-    )?;
+    // Git refuses a path-limited commit while a merge is unfinished. Finish the
+    // merge with both parents rather than leave the worker to erase MERGE_HEAD.
+    let finishing_merge = crate::api::git_ops::merge_in_progress(&canonical_root);
+    let committed = if finishing_merge {
+        crate::api::git_ops::run_git_merge_commit_with_child_lock(
+            &canonical_root,
+            &normalized,
+            message,
+            false,
+            data_dir_lock,
+        )?
+    } else {
+        crate::api::git_ops::run_git_commit_with_child_lock(
+            &canonical_root,
+            &normalized,
+            message,
+            false,
+            false,
+            data_dir_lock,
+        )?
+    };
     let mut payload = json!({
         "hash": committed.hash,
         "message": committed.message,
         "files": normalized,
     });
+    if finishing_merge {
+        payload["merge_commit"] = json!(true);
+    }
     if !removed_trailers.is_empty() {
         payload["removed_trailers"] = json!(removed_trailers);
         payload["note"] = json!(
@@ -710,7 +751,9 @@ pub fn tool_definitions() -> Vec<Value> {
                                 endings, so copied anchors stay byte-exact. `next_offset` is where you COULD \
                                 continue, not where you should: stop as soon as you have what you \
                                 came for. To find something rather than survey a file, use \
-                                `search_text` — reading a large file end to end costs the turn.",
+                                `search_text` — reading a large file end to end costs the turn. \
+                                A file attached to this discussion is also readable, read-only, \
+                                by the path it was announced under.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1203,6 +1246,111 @@ pub fn read_file_payload(
         "next_offset": next_offset,
         "text": text,
     }))
+}
+
+/// The directory name Kronn stores every attachment under, whichever root it
+/// picked (`<project>/.kronn/context-files/` or `<data dir>/context-files/`).
+const ATTACHMENT_DIR_NAME: &str = "context-files";
+
+/// Could `requested` name an attached file? Cheap syntactic filter so an ordinary
+/// workspace read (`src/main.rs`) never costs a database lookup: attachments are
+/// announced by absolute path, by bare file name, or by their in-project
+/// `.kronn/context-files/` path.
+pub fn could_reference_attachment(requested: &str) -> bool {
+    let requested = requested.trim();
+    Path::new(requested).is_absolute()
+        || !requested.contains(['/', '\\'])
+        || requested.starts_with(".kronn/context-files/")
+}
+
+/// Which of this discussion's attachments `requested` names, if any. `attachments`
+/// are `(filename, disk_path)` rows of THIS discussion — the caller supplies only
+/// its own — so a path that is not one of them matches nothing, however it is
+/// spelled: this is a lookup in a closed list, never a path the model can build.
+pub fn match_attachment<'a>(
+    attachments: &'a [(String, String)],
+    requested: &str,
+) -> Option<&'a str> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    attachments
+        .iter()
+        .map(|(_, disk_path)| disk_path.as_str())
+        .find(|disk_path| {
+            let name = Path::new(disk_path)
+                .file_name()
+                .and_then(|name| name.to_str());
+            *disk_path == requested
+                || name.is_some_and(|name| name == requested)
+                || requested
+                    .strip_prefix(".kronn/context-files/")
+                    .is_some_and(|rest| Some(rest) == name)
+        })
+}
+
+/// Read one attached file, read-only (KT-946).
+///
+/// An attachment is stored where Kronn put it — in the project's
+/// `.kronn/context-files/`, or in the data directory when the discussion has no
+/// project — and that is rarely inside the workspace the file tools are scoped
+/// to. Refusing it as "outside the workspace" left a discussion's own files
+/// unreadable by the agent they were attached for. This is the one door through
+/// which they can be read, and it is narrow on purpose:
+///
+/// * the caller passes a `disk_path` taken from THIS discussion's own rows;
+/// * the file is canonicalised and must be a regular file inside a
+///   `context-files` directory — a row pointing anywhere else is refused, so a
+///   damaged or forged row cannot turn this into an arbitrary-file read;
+/// * only reading exists here: no write, edit or listing reaches it, and the
+///   payload carries no revision receipt an edit could be built on;
+/// * an image is refused with an explanation instead of being returned as lossy
+///   text, which is the garbage a model would otherwise "describe".
+pub fn read_attachment_payload(
+    disk_path: &str,
+    requested: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    if std::fs::symlink_metadata(disk_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(Refusal::OutsideWorkspace(requested.to_string()).message());
+    }
+    let canonical = Path::new(disk_path).canonicalize().map_err(|_| {
+        format!(
+            "the attachment `{requested}` is no longer on disk; ask the user to attach it again"
+        )
+    })?;
+    let in_attachment_dir = canonical
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == ATTACHMENT_DIR_NAME);
+    if !canonical.is_file() || !in_attachment_dir {
+        return Err(Refusal::OutsideWorkspace(requested.to_string()).message());
+    }
+    let (Some(directory), Some(name)) = (
+        canonical.parent(),
+        canonical.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return Err(Refusal::OutsideWorkspace(requested.to_string()).message());
+    };
+    if crate::core::context_files::is_image(name) {
+        return Err(format!(
+            "`{requested}` is an image attached to this discussion; it cannot be read as text. \
+             A model that can see receives attached images with the user's message. If you \
+             cannot see it, do not describe it: ask the user to describe it, or to switch to a \
+             model that accepts images."
+        ));
+    }
+    let mut payload = read_file_payload(directory, name, offset, limit)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("path".into(), json!(requested));
+        // No receipt: an attachment is never edited.
+        object.remove("content_sha256");
+        object.insert("attachment".into(), json!(true));
+        object.insert("read_only".into(), json!(true));
+    }
+    Ok(payload)
 }
 
 /// Create a file without overwriting an existing path.
@@ -1984,12 +2132,19 @@ pub fn find_files_payload(root: &Path, pattern: &str) -> Result<Value, String> {
         })
         .collect();
     matches.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-    Ok(json!({
+    let count = matches.len();
+    let (files, omitted) = bounded_entries(matches);
+    let mut payload = json!({
         "pattern": pattern,
         "truncated": truncated,
-        "count": matches.len(),
-        "files": matches,
-    }))
+        "count": count,
+        "files": files,
+    });
+    if omitted > 0 {
+        payload["omitted"] = json!(omitted);
+        payload["hint"] = json!(LISTING_OMITTED_HINT);
+    }
+    Ok(payload)
 }
 
 pub fn list_files_payload(
@@ -2004,13 +2159,20 @@ pub fn list_files_payload(
     if recursive {
         let (mut entries, truncated) = walk_bounded(root, &dir, MAX_WALK_DEPTH);
         entries.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
-        return Ok(json!({
+        let count = entries.len();
+        let (entries, omitted) = bounded_entries(entries);
+        let mut payload = json!({
             "path": requested.unwrap_or(""),
             "recursive": true,
             "truncated": truncated,
-            "count": entries.len(),
+            "count": count,
             "entries": entries,
-        }));
+        });
+        if omitted > 0 {
+            payload["omitted"] = json!(omitted);
+            payload["hint"] = json!(LISTING_OMITTED_HINT);
+        }
+        return Ok(payload);
     }
     let mut entries: Vec<Value> = Vec::new();
     let read = std::fs::read_dir(&dir)
@@ -3452,6 +3614,137 @@ mod tests {
         assert_eq!(still_staged.trim(), "b.txt");
     }
 
+    /// A branch `target` that edits `a.txt` and adds `t.txt`, while `main` edits
+    /// `a.txt` differently. Returns the target tip; nothing is merged yet.
+    #[cfg(unix)]
+    fn diverge_from_target(repo: &Path) -> String {
+        git_read(repo, &["checkout", "-b", "target"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "target\n").unwrap();
+        std::fs::write(repo.join("t.txt"), "t\n").unwrap();
+        git_read(repo, &["add", "."]).unwrap();
+        git_read(repo, &["commit", "-m", "target work"]).unwrap();
+        let target = git_read(repo, &["rev-parse", "HEAD"]).unwrap();
+        git_read(repo, &["checkout", "main"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        git_read(repo, &["commit", "-am", "main work"]).unwrap();
+        target.trim().to_string()
+    }
+
+    fn merge_head_exists(repo: &Path) -> bool {
+        repo.join(".git/MERGE_HEAD").exists()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_finishes_a_merge_with_both_parents() {
+        let repo = tiny_repo();
+        let target = diverge_from_target(repo.path());
+        let ours = git_read(repo.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        // The worker merges the target in its shell and hits a conflict.
+        let _ = git_read(repo.path(), &["merge", "--no-edit", "target"]);
+        assert!(merge_head_exists(repo.path()));
+        std::fs::write(repo.path().join("a.txt"), "main and target\n").unwrap();
+
+        let committed =
+            git_commit_payload(repo.path(), &["a.txt".into()], "merge: integrate target").unwrap();
+
+        assert_eq!(committed["merge_commit"], json!(true));
+        assert!(
+            !merge_head_exists(repo.path()),
+            "finishing the merge consumes MERGE_HEAD"
+        );
+        let parents = git_read(repo.path(), &["log", "-1", "--format=%P"]).unwrap();
+        assert_eq!(
+            parents.split_whitespace().collect::<Vec<_>>(),
+            [ours.as_str(), target.as_str()],
+            "the commit keeps both parents, ours first"
+        );
+        let body = git_read(repo.path(), &["log", "-1", "--format=%B"]).unwrap();
+        assert!(body.contains("Signed-off-by: T <t@t.t>"), "{body}");
+        // The target's own file arrived through the merge, not through `files`.
+        let arrived = git_read(repo.path(), &["show", "HEAD:t.txt"]).unwrap();
+        assert_eq!(arrived, "t\n");
+        let resolved = git_read(repo.path(), &["show", "HEAD:a.txt"]).unwrap();
+        assert_eq!(resolved, "main and target\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_names_unresolved_conflicts_and_leaves_the_merge_alone() {
+        let repo = tiny_repo();
+        diverge_from_target(repo.path());
+        let ours = git_read(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        let _ = git_read(repo.path(), &["merge", "--no-edit", "target"]);
+        std::fs::write(repo.path().join("notes.txt"), "notes\n").unwrap();
+
+        let refused =
+            git_commit_payload(repo.path(), &["notes.txt".into()], "premature").unwrap_err();
+
+        assert!(
+            refused.contains("unresolved conflicts in: a.txt"),
+            "{refused}"
+        );
+        assert!(refused.contains("MERGE_HEAD"), "{refused}");
+        assert!(
+            merge_head_exists(repo.path()),
+            "a refusal must not consume the merge"
+        );
+        assert_eq!(git_read(repo.path(), &["rev-parse", "HEAD"]).unwrap(), ours);
+        let staged = git_read(repo.path(), &["diff", "--cached", "--name-only"]).unwrap();
+        assert!(
+            !staged.contains("notes.txt"),
+            "a refused commit stages nothing: {staged}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_commit_refuses_a_stray_staged_path_while_finishing_a_clean_merge() {
+        let repo = tiny_repo();
+        git_read(repo.path(), &["checkout", "-b", "target"]).unwrap();
+        std::fs::write(repo.path().join("t.txt"), "t\n").unwrap();
+        git_read(repo.path(), &["add", "."]).unwrap();
+        git_read(repo.path(), &["commit", "-m", "target work"]).unwrap();
+        git_read(repo.path(), &["checkout", "main"]).unwrap();
+        std::fs::write(repo.path().join("m.txt"), "m\n").unwrap();
+        git_read(repo.path(), &["add", "."]).unwrap();
+        git_read(repo.path(), &["commit", "-m", "main work"]).unwrap();
+        // `--no-commit` leaves a conflict-free merge waiting for a commit.
+        git_read(repo.path(), &["merge", "--no-commit", "--no-ff", "target"]).unwrap();
+        std::fs::write(repo.path().join("stray.txt"), "stray\n").unwrap();
+        // `m.txt` differs between the two sides only because OUR side added it:
+        // the merge does not touch it, so an edit staged there is not the merge's.
+        std::fs::write(repo.path().join("m.txt"), "m, edited by hand\n").unwrap();
+        git_read(repo.path(), &["add", "stray.txt", "m.txt"]).unwrap();
+
+        let refused = git_commit_payload(repo.path(), &["t.txt".into()], "integrate").unwrap_err();
+
+        assert!(refused.contains("stray.txt"), "{refused}");
+        assert!(refused.contains("m.txt"), "{refused}");
+        assert!(!refused.contains("t.txt"), "{refused}");
+        assert!(merge_head_exists(repo.path()));
+
+        git_read(
+            repo.path(),
+            &["restore", "--staged", "--", "stray.txt", "m.txt"],
+        )
+        .unwrap();
+        git_commit_payload(repo.path(), &["t.txt".into()], "integrate").unwrap();
+
+        let parents = git_read(repo.path(), &["log", "-1", "--format=%P"]).unwrap();
+        assert_eq!(parents.split_whitespace().count(), 2);
+        let tree = git_read(repo.path(), &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
+        assert!(
+            tree.contains("t.txt") && !tree.contains("stray.txt"),
+            "{tree}"
+        );
+        let m = git_read(repo.path(), &["show", "HEAD:m.txt"]).unwrap();
+        assert_eq!(m, "m\n", "the unstaged hand edit stayed out of the commit");
+    }
+
     #[test]
     fn find_files_answers_in_one_call_where_listing_needed_many() {
         // The production failure this fixes: a model asked to find the largest
@@ -3619,6 +3912,44 @@ mod tests {
                 .any(|p| p.starts_with("node_modules") || p.starts_with("target")),
             "build and vendor directories must not be walked: {paths:?}"
         );
+    }
+
+    #[test]
+    fn a_huge_tree_is_counted_in_full_but_returned_within_a_bounded_answer() {
+        // KT-959 — `**/*` over a PHP repo with `vendor/` sent ~880k tokens.
+        let root = tempfile::tempdir().unwrap();
+        let deep = root
+            .path()
+            .join("vendor/twig/extensions/lib/Twig/Extensions");
+        std::fs::create_dir_all(&deep).unwrap();
+        for index in 0..3_000 {
+            std::fs::write(deep.join(format!("Extension{index:05}.php")), "x").unwrap();
+        }
+        std::fs::write(root.path().join("composer.json"), "{}").unwrap();
+
+        let found = find_files_payload(root.path(), "**/*").unwrap();
+        assert_eq!(
+            found["count"],
+            json!(3_001),
+            "the walk still counts everything"
+        );
+        let files = found["files"].as_array().unwrap();
+        assert!(files.len() < 3_001);
+        assert_eq!(
+            found["omitted"].as_u64().unwrap() as usize,
+            3_001 - files.len()
+        );
+        assert!(found["hint"].as_str().unwrap().contains("Narrow"));
+        assert!(found.to_string().len() <= MAX_LISTING_BYTES + 1_024);
+
+        let listing = list_files_payload(root.path(), None, true).unwrap();
+        assert!(listing["omitted"].as_u64().unwrap() > 0);
+        assert!(listing.to_string().len() <= MAX_LISTING_BYTES + 1_024);
+
+        // A narrower pattern gets everything it matches, with no hint.
+        let narrow = find_files_payload(root.path(), "*.json").unwrap();
+        assert_eq!(narrow["count"], json!(1));
+        assert!(narrow.get("omitted").is_none() && narrow.get("hint").is_none());
     }
 
     #[test]

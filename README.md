@@ -23,33 +23,70 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.14.1 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.14.2 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.14.1
+## What's new in 0.14.2
 
-- **Workflows that chain and scale safely:** a `TriggerWorkflow` step launches
-  another workflow with its variables and continues at once; `concurrency_key`
-  limits runs per ticket; an isolated run can start from `origin/main`
-  (`base_ref`); and a run carries a business label found back in one call.
-- **Workflow agents that steer their own room:** an Agent step with `room_id`
-  is the room's principal without an invite token, again after `/resume`, and a
-  room's native agent can launch task executions itself.
-- **Artifacts, formerly Pages:** images from an authenticated API (Jira
-  attachments) display inside an Artifact, an action field can start from the
-  clicked row's data, and Artifacts export and import as versioned bundles.
-- **Lighter and steadier:** Anthropic prompt caching through LiteLLM is on by
-  default, a long discussion no longer freezes or re-downloads its transcript,
-  and the dark themes pass WCAG AA.
-- **Safer with your repositories:** Kronn no longer deletes a repository's own
-  skills and agent files at startup, and the worktree of an interrupted run
-  nobody resumed is reclaimed after 7 days, its commits kept on a branch.
+- **AI & automation, per repository:** a project's tab shows its skills,
+  automations and Artifacts side by side, repository vs Kronn, with what needs
+  your attention first, a Compare sheet, per-version approval and the content of
+  each resource in Repository / Kronn / Diff mode. It loads about 40 times
+  faster on a large project.
+- **Real skills in `.agents/skills`:** Kronn writes its skills as standard
+  Agent Skills, can gather scattered skill folders into `.agents/skills`, and a
+  skill that lives in a repository can be picked for a discussion: its
+  `SKILL.md` is read, masked and sent to the agent at each message.
+- **Cleaner Automation and Plugins pages:** the Automation sidebar groups by
+  type, project or nothing, with filter chips and a new Skills type; the
+  Plugins page lists each plugin once, with project, health and sync as
+  filters. Resources show what they use and what uses them.
+- **More reliable task orchestration:** a worker can finish a merge, a
+  validation that can never run is refused at launch, a red validation sends
+  the work back to the worker and tells the principal, and a shared provider
+  quota is re-armed in one move.
+- **Honest costs, lighter sessions:** costs are computed from input, cache and
+  output at the rate of the model that served the reply, Claude Code sessions
+  launched by Kronn no longer load your workstation's auto-memory, and an HTTP
+  connection test reports a billing error as such.
+- **Audits on a local model:** an audit can run on Ollama or LiteLLM. The model
+  reads and writes only inside the project, through file tools Kronn executes
+  for it, with no shell, web or commit, and a step that writes nothing fails.
+  With OpenCode, environment templates are readable, Stop takes seconds and
+  each step counts its tokens.
+- **Local models that finish the job:** an HTTP agent can ask for just the part
+  of a large API response it needs, a shortened response says what it holds,
+  and OpenCode models declared in a project show up in the model pickers. The
+  Ollama card folds its download block, says when an installed model has an
+  update, and offers MLX builds first on Apple Silicon.
+- **Audits and local runs that hold up:** a failed audit step no longer voids
+  the run (the steps that succeeded are validated, a resume redoes only what
+  failed), sections you own stay untouched, a local model that goes silent is
+  stopped with a clear reason, and testing a LiteLLM connection works again.
+- **Prompts that stay private:** no prompt sent to a model lists your other
+  Kronn projects; only the repositories you linked to a project are named.
+- **Rooms that always open:** a CLI the bridge cannot identify no longer makes
+  its room unreadable, OpenCode is recognised when it joins, and a discussion
+  that fails to load says why, with a retry.
+- **A safer Docker mode:** agents no longer see your home's credential files,
+  the host's Docker socket, or MCP tokens in repositories and in the CLIs'
+  configs; Kronn's data directory is owner-only. See the security advisory and
+  rotate the tokens you had configured.
+- **Fast on a big workspace:** the Discussions and Projects pages open in under
+  a second on a 10 GB database, a click on a discussion re-renders two cards
+  instead of the whole list, and one Kronn loading screen covers start-up and
+  restarts instead of an error page.
+- **LiteLLM models checked:** testing a connection flags every model that
+  answers 404, live, and a refused model cannot be saved.
+- **Desktop installers are back:** each release carries its Windows, macOS and
+  Linux installers again, and the update banner only offers a version you can
+  install.
 
 Earlier releases are described in the [CHANGELOG](CHANGELOG.md).
 
 ## Contents
 
-- [What's new in 0.14.1](#whats-new-in-0141)
+- [What's new in 0.14.2](#whats-new-in-0142)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -110,7 +147,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.14.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.14.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -141,7 +178,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.14.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.14.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140

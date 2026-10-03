@@ -1,0 +1,9 @@
+/* "Filters (n)": the filter controls of a narrow toolbar, folded behind a button.
+   Full width and 44 px tall so it never stretches or overflows a 400 px screen. */
+.kr-filter-fold { display: flex; flex-direction: column; gap: var(--kr-sp-2); width: 100%; min-width: 0; }
+.kr-filter-fold-toggle { display: flex; align-items: center; gap: var(--kr-sp-3); width: 100%; min-height: 44px; padding: 0 var(--kr-sp-5); border: 1px solid var(--kr-border); border-radius: var(--kr-r-md); background: transparent; color: var(--kr-text-muted); font: inherit; font-size: var(--kr-fs-base); cursor: pointer; }
+.kr-filter-fold-toggle:hover { background: var(--kr-bg-hover); color: var(--kr-text-primary); }
+.kr-filter-fold-toggle:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+.kr-filter-fold-toggle[data-active='true'] { border-color: var(--kr-accent-border); background: var(--kr-accent-bg); color: var(--kr-text-primary); }
+.kr-filter-fold-label { flex: 1; min-width: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.kr-filter-fold-panel { display: flex; flex-direction: column; gap: var(--kr-sp-4); min-width: 0; padding: var(--kr-sp-4); border: 1px solid var(--kr-border); border-radius: var(--kr-r-md); background: var(--kr-bg-surface); }

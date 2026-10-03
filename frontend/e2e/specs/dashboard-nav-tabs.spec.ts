@@ -9,6 +9,7 @@
 
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { WorkflowsPage } from '../pages/WorkflowsPage';
 
 test.describe('Dashboard — every nav tab loads', () => {
   test('Projets tab loads', async ({ page }) => {
@@ -21,11 +22,14 @@ test.describe('Dashboard — every nav tab loads', () => {
 
   test('Automatisation tab loads', async ({ page }) => {
     const dashboard = new DashboardPage(page);
+    const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.openWorkflows();
-    // Stable capability hook; counts and translated labels may change.
-    await expect(page.locator('[data-tour-id="automation-kind-quick-prompt"]'))
-      .toBeVisible({ timeout: 5_000 });
+    // Stable capability hook; counts and translated labels may change. The
+    // type chip is how the page reaches every automation type, and it rests
+    // on "all" until one is picked.
+    await expect(workflows.kindChip).toBeVisible({ timeout: 5_000 });
+    await expect(workflows.kindChip).toHaveAttribute('data-value', 'all');
   });
 
   test('Config tab loads', async ({ page }) => {

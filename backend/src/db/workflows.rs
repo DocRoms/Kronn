@@ -139,16 +139,19 @@ pub fn reconcile_stale_runs(
 /// user-facing workflow list.
 pub const BATCH_WORKFLOW_PREFIX: &str = "qp:";
 
+/// The columns `row_to_workflow` reads, in its order.
+const WORKFLOW_COLUMNS: &str = "id, name, project_id, trigger_json, steps_json, actions_json,
+                safety_json, workspace_config_json, concurrency_limit, enabled,
+                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
+                pinned, concurrency_key";
+
 pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     // Filter out batch placeholders (prefix "qp:") — they shouldn't show
     // up in the Workflows page, they're a plumbing detail for the FK.
-    let mut stmt = conn.prepare(
-        "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
-                safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key
-         FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS}
+         FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC"
+    ))?;
 
     let workflows = stmt
         .query_map([], |row| Ok(row_to_workflow(row)))?
@@ -158,14 +161,25 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     Ok(workflows)
 }
 
+/// `list_workflows` for one project, in the same order: the rows of the other
+/// projects are neither read nor parsed.
+pub fn list_workflows_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Workflow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS}
+         FROM workflows WHERE id NOT LIKE 'qp:%' AND project_id = ?1 ORDER BY updated_at DESC"
+    ))?;
+    let workflows = stmt
+        .query_map(params![project_id], |row| Ok(row_to_workflow(row)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(workflows)
+}
+
 pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
-                safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key
-         FROM workflows WHERE id = ?1",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS}
+         FROM workflows WHERE id = ?1"
+    ))?;
 
     let wf = stmt
         .query_row(params![id], |row| Ok(row_to_workflow(row)))
@@ -271,44 +285,52 @@ pub fn list_batch_run_summaries(conn: &Connection) -> Result<Vec<BatchRunSummary
             }
         };
 
-        let (parent_workflow_id, parent_workflow_name, parent_run_sequence) = if let Some(
-            ref parent_id,
-        ) =
-            br.parent_run_id
-        {
-            match get_run(conn, parent_id)? {
-                Some(parent_run) => {
-                    let wf_id = parent_run.workflow_id.clone();
-                    let entry = if let Some(cached) = workflow_cache.get(&wf_id) {
-                        cached.clone()
-                    } else {
-                        let wf = get_workflow(conn, &wf_id)?;
-                        // Run ordering for sequence numbers: ascending by started_at
-                        // so run #1 is the oldest. That matches how users think
-                        // about "the 3rd run of my cron today".
-                        let mut stmt2 = conn.prepare(
-                                "SELECT id FROM workflow_runs WHERE workflow_id = ?1 ORDER BY started_at ASC"
-                            )?;
-                        let rows =
-                            stmt2.query_map(params![wf_id], |row| row.get::<_, String>(0))?;
-                        let run_ids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-                        drop(stmt2); // release borrow on `conn` before further queries
-                        let cached = (wf.map(|w| w.name), run_ids);
-                        workflow_cache.insert(wf_id.clone(), cached.clone());
-                        cached
-                    };
-                    let (name, run_ids) = entry;
-                    let seq = run_ids
-                        .iter()
-                        .position(|id| id == parent_id)
-                        .map(|i| (i + 1) as u32);
-                    (Some(wf_id), name, seq)
+        // Only the parent's workflow and its place among that workflow's runs
+        // are shown. `get_run` also rebuilt every sub-run's metrics for each
+        // parent: 20-25 s for 43 batches on a real base (KT-983).
+        let (parent_workflow_id, parent_workflow_name, parent_run_sequence) =
+            if let Some(ref parent_id) = br.parent_run_id {
+                let parent: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT workflow_id, started_at FROM workflow_runs WHERE id = ?1",
+                        params![parent_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                match parent {
+                    Some((wf_id, started_at)) => {
+                        let name = match workflow_cache.get(&wf_id) {
+                            Some((name, _)) => name.clone(),
+                            None => {
+                                let name: Option<String> = conn
+                                    .query_row(
+                                        "SELECT name FROM workflows WHERE id = ?1",
+                                        params![wf_id],
+                                        |row| row.get(0),
+                                    )
+                                    .optional()?;
+                                workflow_cache.insert(wf_id.clone(), (name.clone(), Vec::new()));
+                                name
+                            }
+                        };
+                        // Run #1 is the oldest, as users count "the 3rd run of my cron".
+                        let seq: i64 = conn.query_row(
+                            "SELECT COUNT(*) FROM workflow_runs \
+                             WHERE workflow_id = ?1 AND started_at <= ?2",
+                            params![wf_id, started_at],
+                            |row| row.get(0),
+                        )?;
+                        (
+                            Some(wf_id),
+                            name,
+                            u32::try_from(seq).ok().filter(|n| *n > 0),
+                        )
+                    }
+                    None => (None, None, None),
                 }
-                None => (None, None, None),
-            }
-        } else {
-            (None, None, None)
-        };
+            } else {
+                (None, None, None)
+            };
 
         out.push(BatchRunSummary {
             run_id: br.id,
@@ -824,6 +846,8 @@ pub fn retry_batch_run(
         .ok_or_else(|| anyhow::anyhow!("Batch run is not linked to a Quick Prompt"))?;
     let qp = crate::db::quick_prompts::get_quick_prompt(conn, qp_id)?
         .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found"))?;
+    crate::core::repository_resources::ensure_quick_prompt_execution_approved(conn, &qp)
+        .map_err(anyhow::Error::msg)?;
     let child_summaries = crate::db::discussions::list_discussions_by_run(conn, old_run_id)?;
     if child_summaries.is_empty() {
         anyhow::bail!("Batch run has no child discussions to retry");

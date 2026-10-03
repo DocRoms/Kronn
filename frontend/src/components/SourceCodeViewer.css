@@ -370,6 +370,13 @@
   background: rgba(255, 255, 255, .035);
 }
 
+/* KT-954 — the line a discussion link pointed at. */
+.source-line--target,
+.source-line--target:hover {
+  background: var(--kr-accent-bg);
+  box-shadow: inset 2px 0 0 var(--kr-accent);
+}
+
 .source-blame {
   display: table-cell;
   width: 180px;

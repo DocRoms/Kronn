@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.14.1"
+version = "0.14.2"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -27,7 +27,7 @@ toml = "1"
 csv = "1"
 
 # Database (embedded)
-rusqlite = { version = "0.39", features = ["bundled", "backup", "trace"] }
+rusqlite = { version = "0.39", features = ["bundled", "backup", "trace", "hooks"] }
 
 # Scheduling
 cron = "0.16"
@@ -50,6 +50,7 @@ async-stream = "0.3"
 aes-gcm = "0.10"
 sha2 = "0.11"
 base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # OS keychain (macOS Keychain / Windows Credential Manager) — a backup tier for
 # the encryption key. DELIBERATELY no Linux Secret Service feature: it pulls
 # `libdbus-sys`, a C system dependency (libdbus-1-dev) that broke CI/Docker

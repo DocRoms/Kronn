@@ -53,12 +53,286 @@ fn insert(conn: &Connection, id: &str, value: serde_json::Value) {
     .unwrap();
 }
 
+fn finished_step_question(value: serde_json::Value) -> Connection {
+    let conn = database();
+    conn.execute(
+        "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+         VALUES ('source-workflow', 'Implementation', '{}', '[]', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO workflow_runs (id, workflow_id, status, started_at)
+         VALUES ('source-run', 'source-workflow', 'Running', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflow_step_rooms::begin_activity(
+        &conn,
+        "source-run",
+        "orchestrate",
+        "Orchestrate",
+        "d",
+        "Codex",
+    )
+    .unwrap();
+    let session = crate::db::workflow_step_rooms::join(
+        &conn,
+        "source-run",
+        "orchestrate",
+        "d",
+        "Codex",
+        "step-session",
+    )
+    .unwrap();
+    crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
+        &conn,
+        "d",
+        &message("step-question", format!("```kronn-question\n{value}\n```")),
+        &[],
+        &[],
+        session.session_pk,
+    )
+    .unwrap();
+    crate::db::workflow_step_rooms::finish_activity(&conn, "source-run", "orchestrate").unwrap();
+    crate::db::workflow_step_rooms::revoke(&conn, &[session.session_pk]).unwrap();
+    conn.execute(
+        "UPDATE workflow_runs SET status='Success', finished_at='now' WHERE id='source-run'",
+        [],
+    )
+    .unwrap();
+    conn
+}
+
 fn request() -> AnswerDiscussionQuestionRequest {
     AnswerDiscussionQuestionRequest {
         selected_option_ids: vec!["retry".into()],
+        item_answers: vec![],
         text: None,
         idempotency_key: "answer-1".into(),
     }
+}
+
+fn td_fixture(status: &str, severity: &str) -> String {
+    format!(
+        "---\nname: td-test\nmetadata:\n  type: tech-debt\n  audit_history:\n    - date: 2026-09-01\n      status: {status}\n      reviewer: Full audit\n---\n\n# TD test\n\n- **Severity**: {severity}\n- **Status**: {status}\n"
+    )
+}
+
+fn audit_database() -> (Connection, tempfile::TempDir) {
+    let conn = database();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("docs/tech-debt")).unwrap();
+    std::fs::write(project.path().join("docs/decisions.md"), "# Decisions\n").unwrap();
+    let path = project.path().to_string_lossy().into_owned();
+    conn.execute(
+        "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','P',?1,'now','now')",
+        [path],
+    )
+    .unwrap();
+    conn.execute("UPDATE discussions SET project_id='p' WHERE id='d'", [])
+        .unwrap();
+    crate::db::audit_runs::insert_running(&conn, "run", "p", "Full", "Codex", chrono::Utc::now())
+        .unwrap();
+    crate::db::audit_runs::complete(
+        &conn,
+        "run",
+        chrono::Utc::now(),
+        "Completed",
+        1,
+        0,
+        1,
+        0,
+        0,
+        2,
+        0,
+        80,
+        None,
+        None,
+    )
+    .unwrap();
+    crate::db::audit_runs::set_validation_discussion(&conn, "run", "d").unwrap();
+    (conn, project)
+}
+
+#[test]
+fn audit_card_answers_update_td_files_and_record_accepted_decisions() {
+    let (conn, project) = audit_database();
+    let td_dir = project.path().join("docs/tech-debt");
+    std::fs::write(
+        td_dir.join("TD-20260928-critical.md"),
+        td_fixture("Verified in source", "Critical"),
+    )
+    .unwrap();
+    std::fs::write(
+        td_dir.join("TD-20260928-medium.md"),
+        td_fixture("Inferred", "Medium"),
+    )
+    .unwrap();
+    std::fs::write(
+        td_dir.join("TD-20260928-low.md"),
+        td_fixture("Inferred", "Low"),
+    )
+    .unwrap();
+    let options = serde_json::json!([
+        {"id":"confirm","label":"Confirm"},
+        {"id":"reject","label":"Reject"},
+        {"id":"accept_decision","label":"Accepted decision"},
+        {"id":"defer","label":"Defer"}
+    ]);
+    insert(
+        &conn,
+        "audit-single",
+        serde_json::json!({
+            "version": 1,
+            "key": "audit-critical",
+            "question": "Critical TD outcome?",
+            "options": options.clone(),
+            "task_ref": "audit-td:TD-20260928-critical"
+        }),
+    );
+    insert(
+        &conn,
+        "audit-batch",
+        serde_json::json!({
+            "version": 1,
+            "key": "audit-rest",
+            "question": "Remaining TD outcomes?",
+            "items": [
+                {"id":"TD-20260928-medium","label":"Medium TD"},
+                {"id":"TD-20260928-low","label":"Low TD"}
+            ],
+            "options": options,
+            "task_ref": "audit-td-batch"
+        }),
+    );
+
+    let single = AnswerDiscussionQuestionRequest {
+        selected_option_ids: vec!["accept_decision".into()],
+        item_answers: vec![],
+        text: Some("The operational trade-off is intentional.".into()),
+        idempotency_key: "audit-single-answer".into(),
+    };
+    answer(
+        &conn,
+        "d",
+        "question:audit-single:0",
+        &single,
+        "Human",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "the agent resumes only after the last audit card"
+    );
+
+    let batch = AnswerDiscussionQuestionRequest {
+        selected_option_ids: vec![],
+        item_answers: vec![
+            DiscussionQuestionItemAnswer {
+                item_id: "TD-20260928-medium".into(),
+                selected_option_id: "confirm".into(),
+            },
+            DiscussionQuestionItemAnswer {
+                item_id: "TD-20260928-low".into(),
+                selected_option_id: "defer".into(),
+            },
+        ],
+        text: None,
+        idempotency_key: "audit-batch-answer".into(),
+    };
+    answer(&conn, "d", "question:audit-batch:0", &batch, "Human", None).unwrap();
+
+    let critical = std::fs::read_to_string(td_dir.join("TD-20260928-critical.md")).unwrap();
+    let medium = std::fs::read_to_string(td_dir.join("TD-20260928-medium.md")).unwrap();
+    let low = std::fs::read_to_string(td_dir.join("TD-20260928-low.md")).unwrap();
+    let decisions = std::fs::read_to_string(project.path().join("docs/decisions.md")).unwrap();
+    assert!(
+        critical.contains("- **Status**: Accepted decision"),
+        "{critical}"
+    );
+    assert!(critical.contains("status: Accepted decision"));
+    assert!(medium.contains("- **Status**: Confirmed by user"));
+    assert!(low.contains("- **Status**: Deferred"));
+    assert!(decisions.contains("TD-20260928-critical"));
+    assert!(decisions.contains("The operational trade-off is intentional."));
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "the final card resumes the validation exactly once"
+    );
+}
+
+#[test]
+fn first_card_in_replacement_validation_relinks_archived_run_and_updates_td() {
+    let (conn, project) = audit_database();
+    let td_path = project.path().join("docs/tech-debt/TD-20260928-resumed.md");
+    std::fs::write(&td_path, td_fixture("Inferred", "High")).unwrap();
+    conn.execute("UPDATE discussions SET archived=1 WHERE id='d'", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO discussions
+         (id, project_id, title, agent, language, created_at, updated_at)
+         VALUES ('d-resumed', 'p', 'Validation audit AI', 'Codex', 'fr', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    let options = serde_json::json!([
+        {"id":"confirm","label":"Confirm"},
+        {"id":"reject","label":"Reject"},
+        {"id":"accept_decision","label":"Accepted decision"},
+        {"id":"defer","label":"Defer"}
+    ]);
+    crate::db::discussions::insert_message(
+        &conn,
+        "d-resumed",
+        &message(
+            "audit-resumed",
+            format!(
+                "```kronn-question\n{}\n```",
+                serde_json::json!({
+                    "version": 1,
+                    "key": "audit-resumed-high",
+                    "question": "High TD outcome?",
+                    "options": options,
+                    "task_ref": "audit-td:TD-20260928-resumed"
+                })
+            ),
+        ),
+    )
+    .unwrap();
+    answer(
+        &conn,
+        "d-resumed",
+        "question:audit-resumed:0",
+        &AnswerDiscussionQuestionRequest {
+            selected_option_ids: vec!["confirm".into()],
+            item_answers: vec![],
+            text: None,
+            idempotency_key: "audit-resumed-answer".into(),
+        },
+        "Human",
+        None,
+    )
+    .unwrap();
+
+    assert!(std::fs::read_to_string(td_path)
+        .unwrap()
+        .contains("- **Status**: Confirmed by user"));
+    assert_eq!(
+        crate::db::audit_runs::get_by_id(&conn, "run")
+            .unwrap()
+            .unwrap()
+            .validation_discussion_id
+            .as_deref(),
+        Some("d-resumed")
+    );
 }
 
 #[test]
@@ -83,6 +357,18 @@ fn question_spec_is_bounded_and_rejects_unknown_or_duplicate_choices() {
     assert!(parse_spec(&value.to_string()).is_none());
     value = payload();
     value["run_command"] = "anything".into();
+    assert!(parse_spec(&value.to_string()).is_none());
+
+    value = payload();
+    value["items"] = serde_json::json!([
+        {"id":"TD-1","label":"First TD"},
+        {"id":"TD-2","label":"Second TD"}
+    ]);
+    assert!(parse_spec(&value.to_string()).is_some());
+    value["items"] = serde_json::json!([
+        {"id":"TD-1","label":"First TD"},
+        {"id":"TD-1","label":"Duplicate TD"}
+    ]);
     assert!(parse_spec(&value.to_string()).is_none());
 }
 
@@ -270,6 +556,7 @@ fn free_text_replies_to_exact_cli_even_when_it_is_offline() {
     crate::db::discussions::set_message_cli_author(&conn, "m", 41).unwrap();
     let request = AnswerDiscussionQuestionRequest {
         selected_option_ids: vec![],
+        item_answers: vec![],
         text: Some("  Une troisième réponse 中文  ".into()),
         idempotency_key: "free".into(),
     };
@@ -304,6 +591,7 @@ fn invalid_cross_room_or_empty_answers_do_not_resolve_the_question() {
     ] {
         let request = AnswerDiscussionQuestionRequest {
             selected_option_ids: selected.into_iter().map(str::to_string).collect(),
+            item_answers: vec![],
             text: Some("  ".into()),
             idempotency_key: "bad".into(),
         };
@@ -611,4 +899,123 @@ fn a_comment_reaches_the_asker_and_leaves_the_question_waiting() {
         comment(&conn, "d", "question:m:0", &late, "Romu", None),
         Err(AnswerError::Conflict)
     ));
+}
+
+#[test]
+fn every_reply_to_a_finished_workflow_step_says_nobody_reads_it_now() {
+    let warning = "L'étape qui a posé cette question est terminée";
+
+    let answered = finished_step_question(payload());
+    let source = list(&answered, "d").unwrap().questions.remove(0);
+    let step = source
+        .requester_workflow_step
+        .expect("the question keeps workflow-step provenance");
+    assert_eq!(step.identity.workflow_name, "Implementation");
+    assert_eq!(step.identity.step_name, "Orchestrate");
+    assert!(!step.active);
+    let answer = answer(
+        &answered,
+        "d",
+        "question:step-question:0",
+        &request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+    let answer_content: String = answered
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [answer.answer.unwrap().message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(answer_content.contains(warning), "{answer_content}");
+
+    let declined = finished_step_question(payload());
+    let refusal = decline(
+        &declined,
+        "d",
+        "question:step-question:0",
+        &decline_request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+    let refusal_content: String = declined
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [refusal.answer.unwrap().message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(refusal_content.contains(warning), "{refusal_content}");
+
+    let commented = finished_step_question(payload());
+    let remark = CommentDiscussionQuestionRequest {
+        idempotency_key: "finished-comment".into(),
+        text: "Peux-tu préciser ?".into(),
+    };
+    comment(
+        &commented,
+        "d",
+        "question:step-question:0",
+        &remark,
+        "Romu",
+        None,
+    )
+    .unwrap();
+    let comment_content: String = commented
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            ["question-comment:question:step-question:0:finished-comment"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(comment_content.contains(warning), "{comment_content}");
+
+    for conn in [&answered, &declined, &commented] {
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0,
+            "a revoked step session has no native dispatch to wake"
+        );
+    }
+}
+
+#[test]
+fn a_resolved_step_question_claims_exactly_one_resume_run() {
+    let mut resumable = payload();
+    resumable["resume"] = serde_json::json!({
+        "workflow_id": "resume-workflow",
+        "variables": {"ticket": "KT-883"}
+    });
+    let conn = finished_step_question(resumable);
+    conn.execute(
+        "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+         VALUES ('resume-workflow', 'Resume', '{}', '[]', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    answer(
+        &conn,
+        "d",
+        "question:step-question:0",
+        &request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+
+    let claim = claim_resume(&conn, "d", "question:step-question:0")
+        .unwrap()
+        .expect("the first resolution caller claims the resume");
+    assert_eq!(claim.workflow_id, "resume-workflow");
+    assert_eq!(claim.variables["ticket"], "KT-883");
+    assert_eq!(claim.source_run_id, "source-run");
+    assert!(claim_resume(&conn, "d", "question:step-question:0")
+        .unwrap()
+        .is_none());
 }

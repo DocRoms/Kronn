@@ -12,31 +12,38 @@
  */
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { WorkflowsPage } from '../pages/WorkflowsPage';
 
 test.describe('Quick APIs section', () => {
   test('opens from the Automation sidebar and flips data-active', async ({ page }) => {
     const dashboard = new DashboardPage(page);
+    const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
 
-    const qaSection = page.locator('[data-tour-id="automation-kind-quick-api"]');
-    await expect(qaSection).toBeVisible({ timeout: 5_000 });
-    await qaSection.click();
-    await expect(qaSection).toHaveAttribute('data-active', 'true');
+    // The type chip rests on "all"; choosing Quick APIs flips it to active.
+    await expect(workflows.kindChip).toBeVisible({ timeout: 5_000 });
+    await expect(workflows.kindChip).toHaveAttribute('data-active', 'false');
+    await workflows.selectKind('quickApis');
+    await expect(workflows.kindChip).toHaveAttribute('data-value', 'quickApis');
+    await expect(workflows.kindChip).toHaveAttribute('data-active', 'true');
   });
 
   test('does NOT activate the Quick Prompt section (regression: 0.6.0 ternary leak)', async ({ page }) => {
     // Confirm the Quick API section is the only active category, ensuring the
     // shared detail panel exercises the correct code path.
     const dashboard = new DashboardPage(page);
+    const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
-    await page.locator('[data-tour-id="automation-kind-quick-api"]').click();
+    await workflows.selectKind('quickApis');
 
-    const qaSection = page.locator('[data-tour-id="automation-kind-quick-api"]');
-    await expect(qaSection).toHaveAttribute('data-active', 'true');
-    // Workflow + Quick API sections must NOT be active concurrently.
-    const workflowSection = page.locator('[data-tour-id="automation-kind-workflow"]');
-    await expect(workflowSection).not.toHaveAttribute('data-active', 'true');
+    await expect(workflows.kindChip).toHaveAttribute('data-value', 'quickApis');
+    // Reopen the listbox: Quick APIs is the one selected type, so neither the
+    // Workflow nor the Quick Prompt type may be selected alongside it.
+    await workflows.openKindMenu();
+    await expect(workflows.kindOption('quickApis')).toHaveAttribute('aria-selected', 'true');
+    await expect(workflows.kindOption('workflows')).toHaveAttribute('aria-selected', 'false');
+    await expect(workflows.kindOption('quickPrompts')).toHaveAttribute('aria-selected', 'false');
   });
 });

@@ -1,4 +1,4 @@
-import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult } from '../types/generated';
+import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
@@ -11,6 +11,19 @@ import type {
   ApiKeyDisplay,
   ApiKeysResponse,
   Project,
+  ApproveProjectRepositoryResourceRequest,
+  ImportProjectRepositoryResourceRequest,
+  ProjectRepositoryResourceKind,
+  ProjectRepositoryResourceMutation,
+  ProjectRepositoryResources,
+  ProjectSkillFile,
+  ProjectUsedSkill,
+  PublishProjectRepositoryResourceRequest,
+  RepositoryNativeSkillRequest,
+  SkillMigrationPlan,
+  SkillMigrationRequest,
+  SkillMigrationResult,
+  RepositoryResourceComparison,
   ProjectDockerAction,
   ProjectDockerLogs,
   ProjectDockerRunningSummary,
@@ -21,6 +34,8 @@ import type {
   McpOverview,
   McpConfigDisplay,
   McpProbeResponse,
+  McpRescanReport,
+  McpTestAllResponse,
   InviteResponse,
   MessageSearchHit,
   DiscLinkRequest,
@@ -155,6 +170,7 @@ import type {
   ImportQuickExecRequest,
   OllamaHealthResponse,
   OllamaModelsResponse,
+  OllamaRegistryResponse,
   SetOllamaContextOverrideResponse,
   LiteLlmHealthResponse,
   NvidiaModelsResponse,
@@ -234,7 +250,10 @@ import type {
   DeclineDiscussionQuestionRequest,
   ProviderQuotaState,
 } from '../types/generated';
+import { ApiRequestError } from './apiRequestError';
+import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
+import type { AgentFilesPolicy, ProjectAgentFiles } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -261,9 +280,61 @@ import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } 
 // browser / Tauri webview localStorage always exists, so behaviour is unchanged.
 const _ls: Storage | undefined = typeof localStorage !== 'undefined' ? localStorage : undefined;
 
+const SHARED_GET_WINDOW_MS = 2_000;
+const STARTUP_GET_CACHE_PATHS = new Set([
+  '/config/server',
+  '/skills',
+  '/agents',
+  '/config/agent-access',
+]);
+interface SharedGetEntry {
+  promise: Promise<unknown>;
+}
+const sharedGets = new Map<string, SharedGetEntry>();
+
+function clearSharedGets(): void {
+  sharedGets.clear();
+}
+
+function retainSettledStartupGet(path: string): boolean {
+  return STARTUP_GET_CACHE_PATHS.has(path)
+    || /^\/discussions\/[^/]+\/native-agent$/.test(path);
+}
+
+function sharedGet<T>(
+  key: string,
+  request: () => Promise<T>,
+  retainAfterResolution = false,
+): Promise<T> {
+  const existing = sharedGets.get(key);
+  if (existing) return existing.promise as Promise<T>;
+
+  const entry: SharedGetEntry = {
+    promise: request(),
+  };
+  sharedGets.set(key, entry);
+  void entry.promise.then(
+    () => {
+      if (sharedGets.get(key) !== entry) return;
+      if (!retainAfterResolution) {
+        sharedGets.delete(key);
+        return;
+      }
+      globalThis.setTimeout(() => {
+        if (sharedGets.get(key) === entry) sharedGets.delete(key);
+      }, SHARED_GET_WINDOW_MS);
+    },
+    () => {
+      if (sharedGets.get(key) === entry) sharedGets.delete(key);
+    },
+  );
+  return entry.promise as Promise<T>;
+}
+
 let _authToken: string | null = _ls?.getItem('kronn_auth_token') ?? null;
 
 export function setAuthToken(token: string | null) {
+  clearSharedGets();
   _authToken = token;
   if (token) {
     _ls?.setItem('kronn_auth_token', token);
@@ -289,6 +360,7 @@ export function authHeaders(): Record<string, string> {
 let _apiBase = '';
 
 export function setApiBase(base: string) {
+  clearSharedGets();
   _apiBase = base.replace(/\/$/, ''); // strip trailing slash
 }
 
@@ -532,9 +604,10 @@ interface AuditSseEvent {
   // total_tokens is the running sum across steps. started_at is an
   // ISO-8601 timestamp surfaced once on the `start` event so the
   // frontend can compute live elapsed without local-clock drift.
-  tokens?: number;
+  // `null` (KT-927): the agent reported no usage — unknown, never 0.
+  tokens?: number | null;
   duration_ms?: number;
-  total_tokens?: number;
+  total_tokens?: number | null;
   started_at?: string;
   // 0.8.3 (#281) — live step progress + tool-call events fired
   // mid-step (Claude stream-json only). step_tokens = current
@@ -588,6 +661,7 @@ interface ApiResponse<T> {
   success: boolean;
   data: T | null;
   error: string | null;
+  error_code?: string;
 }
 
 async function api<T>(
@@ -605,37 +679,57 @@ async function api<T>(
   const hasBody = body !== undefined;
   if (hasBody) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`${_apiBase}/api${path}`, {
-    method,
-    headers,
-    body: hasBody ? JSON.stringify(body) : undefined,
-    signal,
-  });
+  const execute = async (): Promise<T> => {
+    let res: Response;
+    try {
+      res = await fetch(`${_apiBase}/api${path}`, {
+        method,
+        headers,
+        body: hasBody ? JSON.stringify(body) : undefined,
+        signal,
+      });
+    } catch (error) {
+      if (looksLikeBackendDown(error)) reportBackendSuspect();
+      throw error;
+    }
 
-  const contentType = res.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/json')) {
-    // 0.8.5 — when axum's `Json<T>` extractor rejects a request
-    // (missing field, unknown enum variant, type mismatch), it
-    // returns 422 with `Content-Type: text/plain` and the actual
-    // deserialization failure in the body. Pre-fix we threw away
-    // the body and surfaced a bare "Server error (HTTP 422)" with
-    // zero actionable info — exactly what tripped the QP-Improver
-    // agent on the JIRA helper during 0.8.4 dogfooding. Same path
-    // also covers gateway-style 5xx HTML bodies; we cap at 500
-    // chars so a 10MB nginx error page doesn't drown the toast.
-    const body = await res.text().catch(() => '');
-    const trimmed = body.trim();
-    const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
-    throw new Error(`Server error (HTTP ${res.status})${suffix}`);
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) {
+      if (looksLikeBackendDown(undefined, res.status)) reportBackendSuspect();
+      // 0.8.5 — when axum's `Json<T>` extractor rejects a request
+      // (missing field, unknown enum variant, type mismatch), it
+      // returns 422 with `Content-Type: text/plain` and the actual
+      // deserialization failure in the body. Pre-fix we threw away
+      // the body and surfaced a bare "Server error (HTTP 422)" with
+      // zero actionable info — exactly what tripped the QP-Improver
+      // agent on the JIRA helper during 0.8.4 dogfooding. Same path
+      // also covers gateway-style 5xx HTML bodies; we cap at 500
+      // chars so a 10MB nginx error page doesn't drown the toast.
+      const responseBody = await res.text().catch(() => '');
+      const trimmed = responseBody.trim();
+      const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
+      throw new Error(`Server error (HTTP ${res.status})${suffix}`);
+    }
+
+    const json: ApiResponse<T> = await res.json();
+
+    if (!json.success) {
+      throw new ApiRequestError(json.error ?? 'Unknown API error', json.error_code);
+    }
+
+    return json.data as T;
+  };
+
+  if (method === 'GET' && !hasBody && !signal) {
+    const authorization = headers.Authorization ?? '';
+    return sharedGet(
+      `${_apiBase}/api${path}\n${authorization}`,
+      execute,
+      retainSettledStartupGet(path),
+    );
   }
-
-  const json: ApiResponse<T> = await res.json();
-
-  if (!json.success) {
-    throw new Error(json.error ?? 'Unknown API error');
-  }
-
-  return json.data as T;
+  if (method !== 'GET') clearSharedGets();
+  return execute();
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -675,8 +769,15 @@ export const health = {
   /** `GET /api/health` — unauthed and NOT enveloped (raw JSON), so it bypasses
    *  the `api<T>()` `{success,data}` unwrap. */
   get: async (): Promise<HealthInfo> => {
-    const res = await fetch(`${_apiBase}/api/health`, { headers: { ...authHeaders() } });
-    return res.json() as Promise<HealthInfo>;
+    const headers = { ...authHeaders() };
+    return sharedGet(
+      `${_apiBase}/api/health\n${headers.Authorization ?? ''}`,
+      async () => {
+        const res = await fetch(`${_apiBase}/api/health`, { headers });
+        return res.json() as Promise<HealthInfo>;
+      },
+      true,
+    );
   },
 };
 
@@ -818,6 +919,48 @@ export interface MigrateDocsResponse {
 export const projects = {
   list: () => api<Project[]>('GET', '/projects'),
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
+  /** Where Kronn writes this project's agent files (KT-971). */
+  agentFiles: (id: string) =>
+    api<ProjectAgentFiles>('GET', `/projects/${encodeURIComponent(id)}/agent-files`),
+  setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
+    api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
+  repositoryResources: (id: string) =>
+    api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
+  /** The diffs behind one listed resource, built when its Compare sheet opens:
+   *  the listing itself only says that the two sides differ. */
+  repositoryResourceComparison: (id: string, kind: ProjectRepositoryResourceKind, resourceId: string) =>
+    api<RepositoryResourceComparison>(
+      'GET',
+      `/projects/${encodeURIComponent(id)}/repository-resources/comparison?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(resourceId)}`,
+    ),
+  publishRepositoryResource: (id: string, request: PublishProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/publish`, request),
+  importRepositoryResource: (id: string, request: ImportProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/import`, request),
+  approveRepositoryResource: (id: string, request: ApproveProjectRepositoryResourceRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/approve`, request),
+  /** Every project's used skills that `default_skill_ids` do not tell — the
+   *  native skills "Use in Kronn" pointed at and the ones Kronn published —
+   *  for the Automation page's Skills type. */
+  usedSkills: () => api<ProjectUsedSkill[]>('GET', '/projects/used-skills'),
+  /** The `SKILL.md` of one of those, read from the repository when its sheet
+   *  opens. */
+  usedSkillFile: (id: string, relativePath: string) =>
+    api<ProjectSkillFile>(
+      'GET',
+      `/projects/${encodeURIComponent(id)}/repository-resources/skills/content?relative_path=${encodeURIComponent(relativePath)}`,
+    ),
+  useNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/use`, request),
+  copyNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
+    api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/copy`, request),
+  /** "Migrate everything to .agents/skills": the recap first (read-only)… */
+  skillMigrationPlan: (id: string) =>
+    api<SkillMigrationPlan>('GET', `/projects/${encodeURIComponent(id)}/repository-resources/skills/migration`),
+  /** …then the move, with the version the user chose for each conflict. It
+   *  writes to the working tree and never commits. */
+  migrateSkills: (id: string, request: SkillMigrationRequest) =>
+    api<SkillMigrationResult>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/migrate`, request),
   dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
   dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
   dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>
@@ -893,7 +1036,17 @@ export const projects = {
    * grafts a stale selector kind onto a resumed run.
    */
   auditResumable: (id: string) =>
-    api<{ id: string; kind: AuditKind; last_completed_step: number; started_at: string } | null>(
+    api<{
+      id: string;
+      kind: AuditKind;
+      /** KT-931 — the NUMBER of steps that succeeded, not a position in the
+       *  chain: a step that failed in the middle leaves later ones done. */
+      last_completed_step: number;
+      /** KT-931 — the steps a resume re-runs (failed or never run), 1-based.
+       *  Absent from a backend that predates it. */
+      steps_to_redo?: number[];
+      started_at: string;
+    } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
   /**
@@ -939,6 +1092,8 @@ export const projects = {
    * cumulative_tokens, cli_success + the optional step_warning. Empty
    * Vec for legacy runs (pre-0.8.4) or runs with no recorded steps.
    */
+  /** KT-977 — the Full audit's steps in run order, known before any run. */
+  auditSteps: () => api<AuditStepInfo[]>('GET', '/audit/steps'),
   auditRunSteps: (runId: string) =>
     api<Array<{
       audit_run_id: string;
@@ -1097,7 +1252,7 @@ export const projects = {
   /** Stream a partial re-audit for stale sections via SSE */
   partialAuditStream: async (
     id: string,
-    req: { agent: AgentType; tier?: ModelTier; steps: number[] },
+    req: { agent: AgentType; tier?: ModelTier; steps: number[]; connection_id?: string },
     handlers: {
       onStepStart: (step: number, total: number, file: string) => void;
       onChunk: (text: string, step: number) => void;
@@ -1212,9 +1367,9 @@ export const projects = {
       onStepDone: (
         step: number,
         success: boolean,
-        tokens?: number,
+        tokens?: number | null,
         durationMs?: number,
-        totalTokens?: number,
+        totalTokens?: number | null,
       ) => void;
       /**
        * 0.8.3 (#281) — live token counter during a step. Fires every
@@ -1246,7 +1401,9 @@ export const projects = {
        * — a coherent `done interrupted` still follows. */
       onWarning?: (message: string) => void;
       onValidationCreated: (discussionId: string) => void;
-      onDone: (discussionId: string | null, templateWasInstalled: boolean) => void;
+      /** `status` is `complete` or `interrupted`. An interrupted run may still
+       * carry a `discussionId` (KT-931): the validation of its successful steps. */
+      onDone: (discussionId: string | null, templateWasInstalled: boolean, status?: string) => void;
       /** TERMINAL: the stream is over after this fires — onDone is sealed
        * and never follows (no double cleanup). */
       onError: (error: string) => void;
@@ -1254,8 +1411,13 @@ export const projects = {
     signal?: AbortSignal,
   ) => {
     let finished = false;
-    const done = (discId: string | null, tmpl: boolean) => {
-      if (!finished) { finished = true; handlers.onDone(discId, tmpl); }
+    const done = (discId: string | null, tmpl: boolean, status?: string) => {
+      if (finished) return;
+      finished = true;
+      // The status is only passed when the backend sent one: callers and
+      // tests that predate it keep seeing the two-argument call.
+      if (status === undefined) handlers.onDone(discId, tmpl);
+      else handlers.onDone(discId, tmpl, status);
     };
     // Terminal error: seal `finished` so the stream-close onDone is a no-op
     // — onError owns the cleanup, a second callback would double the toasts.
@@ -1346,7 +1508,7 @@ export const projects = {
             case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
             case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
             case 'validation_created': handlers.onValidationCreated(p.discussion_id as string); break;
-            case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
+            case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false, p.status); break;
             case 'error': fail(p.error ?? 'Unknown error'); break;
           }
         },
@@ -1382,7 +1544,9 @@ export const mcps = {
   projectEnvironmentNames: (projectId: string) =>
     api<string[]>('GET', `/mcps/project-environment-names/${encodeURIComponent(projectId)}`),
   registry: (q?: string) => api<McpDefinition[]>('GET', `/mcps/registry${q ? `?q=${encodeURIComponent(q)}` : ''}`),
-  refresh: () => api<McpOverview>('POST', '/mcps/refresh'),
+  refresh: (dryRun = false) =>
+    api<McpRescanReport>('POST', `/mcps/refresh${dryRun ? '?dry_run=true' : ''}`),
+  testAll: () => api<McpTestAllResponse>('POST', '/mcps/test-all'),
   previewBundle: (request: PluginBundleSelectionRequest) =>
     api<PluginBundlePreview>('POST', '/mcps/bundles/preview', request),
   exportBundle: async (
@@ -1429,13 +1593,6 @@ export const mcps = {
    *  `updateCustomSpec` call. */
   cleanupOrphanEnv: (serverId: string, keys: string[]) =>
     api<CleanupOrphanEnvResponse>('POST', `/mcps/custom/${encodeURIComponent(serverId)}/cleanup-orphan-env`, { keys }),
-  /** 0.8.6 (#63) — Path B export. Returns the path to call directly via
-   *  `<a href="...">` for download — the route emits Content-Disposition
-   *  attachment, the browser handles the rest. Auth header is added by
-   *  the global `api()` helper, so callers should fetch + blob if they
-   *  need to thread the token; here we return the URL for a direct link. */
-  exportFileUrl: (serverId: string) =>
-    `/api/mcps/custom/${encodeURIComponent(serverId)}/export-file`,
   /** 0.8.6 (#63) — Path B import. Frontend reads the user's `.json` file
    *  via `FileReader`, parses to JSON, POSTs the parsed payload. */
   importPluginFile: (payload: CustomApiPayload) =>
@@ -1506,7 +1663,13 @@ export const discussions = {
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
   getRunning: () => api<string[]>('GET', '/discussions/running'),
-  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>>(
+  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail,
+    'active_agent_dispatches'
+    | 'active_workflow_steps'
+    | 'workflow_step_authors'
+    | 'message_targets'
+    | 'partial_response'
+  >>>(
     'GET',
     `/discussions/${id}`,
   ),
@@ -2476,7 +2639,10 @@ export const pages = {
   previewImport: (request: ArtifactImportRequest) => api<ArtifactImportPreview>('POST', '/pages/import/preview', request),
   importArtifact: (request: ArtifactImportRequest) => api<ArtifactImportResult>('POST', '/pages/import', request),
   capability: () => api<LivePagesCapability>('GET', '/pages/capability'),
-  list: () => api<LivePage[]>('GET', '/pages'),
+  list: (projectId?: string) => api<LivePage[]>(
+    'GET',
+    `/pages${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
+  ),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
   revisions: (id: string) => api<LivePageRevision[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
   workflows: (id: string) => api<LivePageWorkflowLink[]>('GET', `/pages/${encodeURIComponent(id)}/workflows`),
@@ -2772,6 +2938,16 @@ export const usage = {
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
+  /** What the official Ollama library says about the installed models (is
+   *  there an update?) and the given suggested tags (how big?). Asks the
+   *  internet through the backend: never wait on it to draw the card. The
+   *  backend caches for hours; `fresh` makes it ask again (after an update,
+   *  on Refresh). */
+  registry: (suggested: string[], fresh = false) =>
+    api<OllamaRegistryResponse>(
+      'GET',
+      `/ollama/registry?suggested=${encodeURIComponent(suggested.join(','))}${fresh ? '&fresh=true' : ''}`,
+    ),
   pull: (
     model: string,
     handlers: {
@@ -2905,12 +3081,36 @@ export interface UpsertExternalApiConnection {
   media_endpoint?: string | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
+  /** Keep a tier model the proxy just refused; otherwise the save fails with `unreachable_model`. */
+  confirm_unreachable_models?: boolean;
 }
+
+/** What one tier's model answered to a real one-token call (KT-941). */
+export interface ExternalApiTierCheck {
+  tier: 'economy' | 'default' | 'reasoning';
+  model: string;
+  ok: boolean;
+  status: 'ok' | 'not_found' | 'access_denied' | 'http_error' | 'timeout' | 'transport_error';
+  http_status?: number | null;
+  /** Generic, never the upstream body or the key. */
+  hint?: string | null;
+}
+
+/** What one listed model answered when its LiteLLM connection was tested. */
+export type ExternalApiModelCheck = Omit<ExternalApiTierCheck, 'tier' | 'hint'>;
 
 export interface ExternalApiConnectionTestResult {
   ok: boolean;
-  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
+  /** `model_error`: the connection works but a tier's model does not answer
+   * (see `tier_checks`); `ok` stays true so the pickers keep their catalogue. */
+  status: 'success' | 'model_error' | 'invalid_url' | 'credential_required' | 'auth_error' | 'billing_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
   models: string[];
+  /** One entry per tier verified by the test, for a LiteLLM connection. */
+  tier_checks?: ExternalApiTierCheck[];
+  /** LiteLLM: what each listed chat model answered to one call (KT-957). */
+  model_checks?: ExternalApiModelCheck[];
+  /** LiteLLM: the proxy route that declared each model's mode, if any. */
+  capability_source?: 'model_info' | 'model_group_info' | null;
   /** Capability-bearing union from provider-specific catalogue routes. Older
    * backends omit it; callers keep `models` as the chat-only fallback. */
   catalog?: Array<{
@@ -3039,8 +3239,17 @@ export const externalApi = {
   reveal: (id: string) =>
     api<string>('POST', `/external-api/connections/${id}/reveal`),
   remove: (id: string) => api<null>('DELETE', `/external-api/connections/${id}`),
-  test: (body: { endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[] }) =>
+  test: (body: {
+    endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[];
+    /** The model of each tier: a LiteLLM test calls each one and answers per tier. */
+    tier_models?: Array<{ tier: ExternalApiTierCheck['tier']; model: string }>;
+    /** Id under which the model sweep reports its progress (LiteLLM). */
+    progress_id?: string;
+  }) =>
     api<ExternalApiConnectionTestResult>('POST', '/external-api/connections/test', body),
+  /** How far the model sweep of the test started with `progress_id` has got. */
+  testProgress: (progressId: string) =>
+    api<{ done: number; total: number }>('GET', `/external-api/connections/test/progress/${encodeURIComponent(progressId)}`),
 };
 
 // 0.8.6 (#24) — Unified API call logs.

@@ -139,8 +139,9 @@ test.describe('Mon scénario', () => {
     const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
+    await workflows.selectKind('workflows');
     // Asserts
-    await expect(workflows.tabWorkflows).toBeVisible();
+    await expect(workflows.kindChip).toHaveAttribute('data-value', 'workflows');
   });
 });
 ```

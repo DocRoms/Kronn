@@ -45,6 +45,20 @@ pub fn sync_runtime_config(connection: &ExternalApiConnection, config: &mut AppC
     changed
 }
 
+/// The connection a legacy agent really runs on when no connection was chosen:
+/// its endpoint and tiers are this row, projected by [`sync_runtime_config`].
+pub fn legacy_connection_for_agent(
+    conn: &Connection,
+    agent_type: &AgentType,
+) -> Result<Option<ExternalApiConnection>> {
+    let (id, preset) = match agent_type {
+        AgentType::LiteLlm => (LEGACY_LITELLM_ID, ExternalApiConnectionPreset::LiteLlm),
+        AgentType::Nvidia => (LEGACY_NVIDIA_ID, ExternalApiConnectionPreset::Nvidia),
+        _ => return Ok(None),
+    };
+    Ok(get(conn, id)?.filter(|connection| connection.origin_preset == preset))
+}
+
 /// Canonical provider rows which project into the global agent configuration.
 pub fn runtime_connections(conn: &Connection) -> Result<Vec<ExternalApiConnection>> {
     let mut connections = Vec::with_capacity(2);
@@ -409,6 +423,40 @@ mod tests {
             image_model: None,
             video_model: None,
             media_endpoint: None,
+        }
+    }
+
+    #[test]
+    fn a_legacy_agent_runs_on_its_canonical_connection_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        assert!(legacy_connection_for_agent(&conn, &AgentType::LiteLlm)
+            .unwrap()
+            .is_none());
+
+        backfill_legacy_config(&conn, &default_config()).unwrap();
+        assert_eq!(
+            legacy_connection_for_agent(&conn, &AgentType::LiteLlm)
+                .unwrap()
+                .map(|connection| connection.id),
+            Some(LEGACY_LITELLM_ID.to_string())
+        );
+        assert_eq!(
+            legacy_connection_for_agent(&conn, &AgentType::Nvidia)
+                .unwrap()
+                .map(|connection| connection.id),
+            Some(LEGACY_NVIDIA_ID.to_string())
+        );
+        // A named connection is never a legacy agent's fallback.
+        insert(
+            &conn,
+            &connection("named", "named", ExternalApiConnectionPreset::LiteLlm),
+        )
+        .unwrap();
+        for agent in [AgentType::Ollama, AgentType::Custom, AgentType::ClaudeCode] {
+            assert!(legacy_connection_for_agent(&conn, &agent)
+                .unwrap()
+                .is_none());
         }
     }
 

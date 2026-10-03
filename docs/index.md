@@ -7,8 +7,12 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.14.1
+## Current release: 0.14.2
 
+- An audit on OpenCode or another ACP agent reads the versioned environment
+  templates (`.env.dist`, `.env.example`), is stopped by "Cancel" in seconds,
+  and records the tokens its steps consumed — in the Full audit and in the
+  partial one. See [auditing with an ACP agent](architecture/audit-acp-agents.md).
 - Workflows chain and scale: a `TriggerWorkflow` step launches another workflow
   with mapped variables, `concurrency_key` counts the limit per rendered key, and
   `workspace_config.base_ref` starts an isolated run from a fetched commit. See
@@ -23,6 +27,10 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - Anthropic prompt caching through LiteLLM is on by default;
   `KRONN_LITELLM_PROMPT_CACHE=0` turns it off. See
   [token economy](operations/token-economy-0.9.6.md).
+- Claude Code sessions launched by Kronn no longer load the workstation's
+  auto-memory (`MEMORY.md`); a native discussion keeps it only with
+  `KRONN_CLAUDE_AUTO_MEMORY=1`. See
+  [Claude auto-memory](operations/claude-auto-memory.md).
 - The native-files sync removes only what it wrote (`.kronn/native-files.json`),
   and boot reclaims the clean worktree of an interrupted run after
   `server.interrupted_worktree_ttl_days`. See the

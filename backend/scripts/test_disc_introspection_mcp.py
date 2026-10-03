@@ -185,6 +185,8 @@ class DiscussionQuestionReadTests(unittest.TestCase):
         self.assertNotIn("disc_question_answer", names)
         self.assertIn("kronn-question", self.mod.TOOL_MANUALS["disc_question_list"])
         self.assertIn("state=answered", self.mod.TOOL_MANUALS["disc_question_list"])
+        self.assertIn("workflow Agent step", self.mod.TOOL_MANUALS["disc_question_list"])
+        self.assertIn('resume `{"workflow_id"', self.mod.TOOL_MANUALS["disc_question_list"])
 
 
 class CurrentDiscMetaCacheTests(unittest.TestCase):
@@ -1225,6 +1227,118 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             }),
         ])
 
+    def test_the_manual_states_how_a_validation_actually_runs(self):
+        """KT-839 — validations were accepted at launch and refused at integration
+        because nothing said they run without a shell. The manual now does."""
+        manual = self.mod.TOOL_MANUALS["task_exec_prepare"]
+        for fact in (
+            "NOT through a shell",
+            "ONE binary",
+            "allowlisted",
+            "`cd`",
+            "`&&`",
+            "`VAR=value`",
+            "root of the execution's worktree",
+            "pnpm --dir frontend exec tsc",
+            "cargo test --manifest-path backend/Cargo.toml --target-dir",
+            "`invalid_validations`",
+            "`task_exec_reassign` with",
+        ):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, manual)
+        # The launch page is the same manual, so the contract cannot be missed
+        # by the agent that only reads the launch description.
+        self.assertIs(self.mod.TOOL_MANUALS["task_exec_launch"], manual)
+
+    def test_prepare_forwards_the_validations_it_is_asked_to_check(self):
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": False}})
+        worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
+        validations = [{"command": "cd frontend && npx tsc -b"}]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_prepare({
+                "task_reference": "KT-839", "worker": worker,
+                "worker_scope_intent": "generic", "validations": validations,
+            })
+        body = http.call_args.args[2]
+        self.assertEqual(body["validations"], validations)
+        schema = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_prepare"
+        )["inputSchema"]
+        self.assertIn("validations", schema["properties"])
+        self.assertNotIn("validations", schema["required"])
+
+    def test_replacing_validations_is_a_reassign_change_not_a_tool_of_its_own(self):
+        """KT-839 — every declaration is paid for on every session
+        (`mcp_surface_budget.py`), so the principal's swap of an execution's gates
+        rides `task_exec_reassign`: principal-only, reason-journaled, room and
+        evidence kept. `task_exec_review` was the wrong home (its authorization
+        admits a self-reviewing worker, and ReviewDecision v1 is a persisted
+        contract); `task_exec_prepare` is documented as mutation-free."""
+        tools = {item["name"]: item for item in self.mod.TOOLS}
+        self.assertNotIn("task_exec_update_validations", tools)
+        self.assertNotIn("task_exec_update_validations", self.mod.DISPATCH)
+        schema = tools["task_exec_reassign"]["inputSchema"]
+        self.assertIn("validations", schema["properties"])
+        # `worker` is no longer always required: one of the two is.
+        self.assertEqual(schema["required"], ["task_execution_id", "reason"])
+        self.assertNotIn("source_agent", schema["properties"])
+        self.assertNotIn("source_session_id", schema["properties"])
+        manual = self.mod.TOOL_MANUALS["task_exec_reassign"]
+        for fact in ("ONE change per call", "COMPLETE", "journaled", "Integrating", "campaign"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, manual)
+
+    def test_reassign_replaces_the_gates_with_the_derived_identity(self):
+        http = mock.MagicMock(return_value={"success": True, "data": {"changed": True}})
+        fixed = [{"command": "pnpm --dir frontend exec tsc -b --pretty false"}]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_reassign({
+                "task_execution_id": "exec-1", "validations": fixed,
+                "reason": "cd is not runnable",
+            })
+            # The empty set is a real request (drop every gate), not a missing one.
+            self.mod.call_task_exec_reassign({
+                "task_execution_id": "exec-1", "validations": [], "reason": "no gate",
+            })
+            worker = {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}
+            for refused in (
+                # one change per call: both, or neither
+                {"task_execution_id": "exec-1", "worker": worker,
+                 "validations": fixed, "reason": "r"},
+                {"task_execution_id": "exec-1", "reason": "r"},
+                # the rest of the contract
+                {"validations": fixed, "reason": "r"},
+                {"task_execution_id": "exec-1", "validations": fixed},
+                {"task_execution_id": "exec-1", "validations": "cargo test", "reason": "r"},
+            ):
+                with self.subTest(refused=refused), self.assertRaises(RuntimeError):
+                    self.mod.call_task_exec_reassign(refused)
+        identity = {"source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a"}
+        self.assertEqual(http.call_count, 2)
+        http.assert_has_calls([
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
+                **identity, "validations": fixed, "reason": "cd is not runnable",
+            }),
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
+                **identity, "validations": [], "reason": "no gate",
+            }),
+        ])
+
+    def test_stale_bridge_refuses_a_validations_swap_before_http(self):
+        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        with mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_reassign({
+                    "task_execution_id": "exec-1", "validations": [], "reason": "r",
+                })
+            self.assertIn("Reconnect", str(refused.exception))
+            http.assert_not_called()
+
     def test_status_forwards_a_bounded_wait_and_refuses_unknown_statuses(self):
         """KT-790 — `wait_for` and `timeout_secs` reach the backend, which bounds
         the wait; a misspelt status fails here rather than waiting for nothing."""
@@ -1632,8 +1746,7 @@ class WorkflowStepRoomTests(unittest.TestCase):
 
 
 class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
-    """KT-328 tranche 2 — the CLI-worker accept tool: server-derived identity and
-    a local rebind that follows the session into the child sub-discussion."""
+    """The CLI-worker accept tool derives identity while preserving the principal room."""
 
     def setUp(self):
         self.mod = _load_module()
@@ -1650,7 +1763,7 @@ class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
         self.assertNotIn("cli_session_id", props)
         self.assertNotIn("source_agent", props)
 
-    def test_accept_derives_identity_and_rebinds_to_child(self):
+    def test_accept_derives_identity_and_preserves_principal_room(self):
         self.mod._set_current_disc_id("disc-origin")
         self.mod._set_read_cursor("disc-origin", 19)
         http = mock.MagicMock(return_value={
@@ -1658,20 +1771,13 @@ class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
             "data": {
                 "child_discussion_id": "disc-child",
                 "execution": {"id": "exec-1"},
+                "worker_instructions": "Implement the bounded task.",
             },
         })
-        writes = []
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
              mock.patch.object(self.mod, "_session_id_for_caller", return_value="live-sess-a"), \
              mock.patch.object(self.mod, "_durable_session_id", return_value="sess-a"), \
-             mock.patch.object(
-                 self.mod, "_read_binding",
-                 return_value={"disc_id": "disc-origin", "resume_token": "kr-resume-x"},
-             ), \
-             mock.patch.object(
-                 self.mod, "_write_binding",
-                 side_effect=lambda *a, **k: writes.append((a, k)) or True,
-             ), \
+             mock.patch.object(self.mod, "_write_binding") as write_binding, \
              mock.patch.object(self.mod, "_http", http):
             result = self.mod.call_task_exec_accept_worker_offer({"offer_id": "offer-9"})
 
@@ -1684,20 +1790,12 @@ class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
             "source_binding_session_id": "sess-a",
         })
         self.assertEqual(result["child_discussion_id"], "disc-child")
-        self.assertEqual(result["local_rebound_to"], "disc-child")
-        # In-memory current room followed the server-side move (env-independent global).
-        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-child")
-        # Cursor seeded so the brief just posted to the child is delivered next.
-        self.assertEqual(self.mod._read_cursor("disc-child"), -1)
-        # Durable binding rewritten to the child, REUSING the existing resume credential
-        # (the moved session row keeps its resume_token_hash).
-        self.assertEqual(len(writes), 1)
-        bind_args, bind_kwargs = writes[0]
-        self.assertEqual(bind_args[0], "disc-child")
-        self.assertEqual(bind_args[1], "kr-resume-x")
-        self.assertEqual(bind_kwargs.get("last_read_sort_order"), -1)
-        self.assertEqual(bind_kwargs.get("return_disc_id"), "disc-origin")
-        self.assertEqual(bind_kwargs.get("return_read_sort_order"), 19)
+        self.assertEqual(result["worker_instructions"], "Implement the bounded task.")
+        self.assertEqual(result["local_room_preserved"], "disc-origin")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-origin")
+        self.assertEqual(self.mod._read_cursor("disc-origin"), 19)
+        self.assertIsNone(self.mod._read_cursor("disc-child"))
+        write_binding.assert_not_called()
 
     def test_accept_requires_offer_id(self):
         with mock.patch.object(self.mod, "_http") as http:
@@ -1705,6 +1803,60 @@ class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
                 self.mod.call_task_exec_accept_worker_offer({})
             self.assertIn("offer_id is required", str(empty.exception))
         http.assert_not_called()
+
+    def test_accept_then_bridge_reload_finds_the_principal_room(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binding_path = os.path.join(directory, "binding.json")
+            self.mod._BINDING_DIR = directory
+            self.mod._BINDING_PATH_CACHE["computed"] = True
+            self.mod._BINDING_PATH_CACHE["path"] = binding_path
+            self.mod._set_current_disc_id("disc-principal")
+            self.mod._write_binding(
+                "disc-principal",
+                "kr-resume-principal",
+                agent_type="Codex",
+                last_read_sort_order=23,
+            )
+            accepted = {
+                "success": True,
+                "data": {
+                    "child_discussion_id": "disc-child",
+                    "execution": {"id": "exec-1"},
+                    "worker_instructions": "Do the task.",
+                },
+            }
+            with mock.patch.object(self.mod, "_require_fresh_bridge"), \
+                 mock.patch.object(self.mod, "_task_exec_identity", return_value=("Codex", "live")), \
+                 mock.patch.object(self.mod, "_durable_session_id", return_value="cli-stable"), \
+                 mock.patch.object(self.mod, "_http", return_value=accepted):
+                self.mod.call_task_exec_accept_worker_offer({"offer_id": "offer-1"})
+
+            reloaded = _load_module()
+            reloaded._CURRENT_DISC_ID = None
+            reloaded._BINDING_DIR = directory
+            reloaded._BINDING_PATH_CACHE["computed"] = True
+            reloaded._BINDING_PATH_CACHE["path"] = binding_path
+
+            def respond(method, path, body=None):
+                if path.startswith("/api/disc/find_by_session"):
+                    return {"success": True, "data": {"disc_id": "disc-principal"}}
+                if path == "/api/discussions/peer-resume":
+                    return {"success": True, "data": {
+                        "disc_id": "disc-principal", "session_pk": 1,
+                        "resume_token": body["next_resume_token"],
+                    }}
+                if path == "/api/disc/link":
+                    return {"success": True, "data": True}
+                raise AssertionError(f"unexpected call {method} {path}")
+
+            with mock.patch.object(reloaded, "_durable_session_id", return_value="cli-stable"), \
+                 mock.patch.object(reloaded, "_agent_type_for_session", return_value="Codex"), \
+                 mock.patch.object(reloaded, "_http", side_effect=respond):
+                found = reloaded.call_disc_find_by_session({})
+
+            self.assertEqual(found["disc_id"], "disc-principal")
+            self.assertEqual(reloaded._CURRENT_DISC_ID, "disc-principal")
+            self.assertEqual(reloaded._read_cursor("disc-principal"), 23)
 
     def test_refused_offer_surfaces_opaque_reason_without_rebinding(self):
         self.mod._set_current_disc_id("disc-origin")
@@ -1731,8 +1883,7 @@ class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
 
 
 class TaskExecDeliverTests(unittest.TestCase):
-    """KT-319 tranche 2 — the worker deliver tool: server-derived identity, no local
-    move (the worker stays in the sub-discussion), opaque refusal on rejection."""
+    """The worker deliver tool derives identity and preserves the principal room."""
 
     def setUp(self):
         self.mod = _load_module()
@@ -1760,7 +1911,7 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertNotIn("source_agent", props)
 
     def test_deliver_derives_identity_and_posts_the_manifest(self):
-        self.mod._set_current_disc_id("disc-child")
+        self.mod._set_current_disc_id("disc-parent")
         http = mock.MagicMock(return_value={
             "success": True,
             "data": {
@@ -1787,8 +1938,8 @@ class TaskExecDeliverTests(unittest.TestCase):
             "source_session_id": "sess-a",
         })
         self.assertEqual(result["review_discussion_id"], "disc-parent")
-        # Deliver does NOT move the session: still in the child, no durable rebind.
-        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-child")
+        # Deliver does not move the execution-scoped worker out of its principal room.
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-parent")
         write_binding.assert_not_called()
 
     def test_spawned_worker_catalogue_is_exact_status_commit_delivery_surface(self):
@@ -3971,6 +4122,9 @@ class ClientInfoAutoDetectTests(unittest.TestCase):
             "Claude Code": "ClaudeCode",
             "codex-cli": "Codex",
             "codex": "Codex",
+            "opencode": "OpenCode",
+            "OpenCode": "OpenCode",
+            "/opt/homebrew/bin/opencode run": "OpenCode",
             "gemini-cli": "GeminiCli",
             "Kiro": "Kiro",
             "kiro-cli": "Kiro",
@@ -6612,6 +6766,15 @@ class LivePageToolTests(unittest.TestCase):
         self.assertNotIn("current_revision_id", result[0])
         self.assertNotIn("large", result[0])
 
+    def test_page_list_forwards_the_optional_project_filter(self):
+        with mock.patch.object(self.mod, "_http", return_value=self._env([])) as http:
+            result = self.mod.call_page_list({"project_id": "project/one"})
+        http.assert_called_once_with("GET", "/api/pages?project_id=project%2Fone")
+        self.assertEqual(result, [])
+
+        contract = next(tool for tool in self.mod.TOOLS if tool["name"] == "page_list")
+        self.assertIn("project_id", contract["inputSchema"]["properties"])
+
     def test_page_get_returns_detail_and_workflow_links(self):
         responses = [
             self._env({"id": "page/one", "revision": {"html": "<h1>A</h1>"}}),
@@ -7319,7 +7482,8 @@ class AuditToolsTests(unittest.TestCase):
         self.assertLess(_time.time() - t0, 4.0, "launch must not block on the audit")
         self.assertTrue(out["launched"])
         self.assertEqual(out["total_steps"], 10)
-        self.assertIn("reload", out["lifecycle_warning"])
+        self.assertIn("runs detached", out["lifecycle_warning"])
+        self.assertIn("backend restart", out["lifecycle_warning"])
 
     def test_accepted_event_confirms_launch_before_start(self):
         # Codex #7 — `start` only fires after Phase 1 (template install /
@@ -7382,8 +7546,10 @@ class AuditToolsTests(unittest.TestCase):
                                       "audit_run_id": "run-partial-7"}))
         with mock.patch.object(self.mod, "_audit_open_sse",
                                return_value=self._FakeSse(lines)):
-            self.mod.call_audit_launch(
+            out = self.mod.call_audit_launch(
                 {"project_id": "p1", "mode": "partial", "steps": [3, 8]})
+        self.assertIn("runs detached", out["lifecycle_warning"])
+        self.assertIn("backend restart", out["lifecycle_warning"])
         entry = self._wait_state("p1", {"done"})
         self.assertEqual(entry["discussion_id"], "d-partial-val")
         self.assertEqual(entry["audit_run_id"], "run-partial-7")
@@ -7675,14 +7841,23 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             self.assertEqual(self.mod._schedule_bridge_reload()["status"], "failed")
             create.assert_not_called()
 
-    def test_reload_is_deferred_while_audit_sse_is_active(self):
+    def test_reload_is_not_deferred_by_a_detached_partial_audit(self):
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
-        self.mod._AUDIT_STREAMS["project-1"] = {"state": "running"}
-        response = self.mod._bridge_stale_result(18, "task_exec_review", "stale")
-        payload = json.loads(response["result"]["content"][0]["text"])
-        self.assertEqual(payload["reload"]["status"], "deferred_active_audit")
-        self.assertFalse(payload["retry"]["allowed"])
-        self.assertIn("active audit", payload["action"])
+        self.mod._AUDIT_STREAMS["project-1"] = {"state": "running", "mode": "partial"}
+        self.assertEqual(
+            self.mod._schedule_bridge_reload()["status"],
+            "scheduled",
+            "a running partial audit must not block the bridge reload",
+        )
+
+    def test_reload_is_not_deferred_by_a_detached_full_audit(self):
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        self.mod._AUDIT_STREAMS["project-1"] = {"state": "running", "mode": "full"}
+        self.assertEqual(
+            self.mod._schedule_bridge_reload()["status"],
+            "scheduled",
+            "a running full audit must not block the bridge reload",
+        )
 
     def test_reload_handoff_restores_client_identity_without_initialize(self):
         reloaded = _load_module()
@@ -9590,7 +9765,7 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.9")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.10")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):

@@ -69,8 +69,17 @@ pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
 /// and removed on completion/cancel/error.
 #[derive(Default)]
 pub struct AuditTracker {
-    /// Currently running child PID per project (if any)
+    /// Currently running child PID per project (if any). Only a direct CLI agent
+    /// is registered here: the PID of an HTTP or ACP agent is a lifeline, not
+    /// the agent.
     pub running_pids: HashMap<String, u32>,
+    /// Cancellation of the step's agent per project, for an agent that does not
+    /// run as the process in `running_pids`: an HTTP agent lives in a task
+    /// (KT-924), an ACP agent — OpenCode and the others, Claude and Codex
+    /// through their adapters — in a session Kronn cancels and whose process it
+    /// then shuts down (KT-927). Killing the lifeline alone would leave either
+    /// reading and writing files.
+    pub agent_cancels: HashMap<String, tokio_util::sync::CancellationToken>,
     /// Projects whose audit should be cancelled
     pub cancelled: HashSet<String>,
     /// Live progress snapshot per project — empty when no audit runs.
@@ -115,8 +124,26 @@ impl AuditTracker {
                 total_tokens_so_far: None,
                 current_tool: None,
                 current_tool_call_count: None,
+                agent: None,
+                tier: None,
+                connection_id: None,
             },
         );
+    }
+
+    /// Record who runs the audit, for any client polling its progress.
+    pub fn set_auditor(
+        &mut self,
+        project_id: &str,
+        agent: crate::models::AgentType,
+        tier: crate::models::ModelTier,
+        connection_id: Option<String>,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.agent = Some(agent);
+            entry.tier = Some(tier);
+            entry.connection_id = connection_id;
+        }
     }
 
     /// 0.8.3 — update the live-chip state on every step_progress
@@ -146,6 +173,15 @@ impl AuditTracker {
                 entry.current_tool_call_count =
                     Some(entry.current_tool_call_count.unwrap_or(0) + 1);
             }
+        }
+    }
+
+    /// An HTTP agent's tool activity: it reports its last tool and running
+    /// count rather than one event per call, so both are set, not bumped.
+    pub fn set_tool_activity(&mut self, project_id: &str, tool: String, calls: u32) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.current_tool = Some(tool);
+            entry.current_tool_call_count = Some(calls);
         }
     }
 
@@ -246,6 +282,10 @@ pub struct AppState {
     /// Invocation-local discovery endpoint for isolated routers. Production
     /// leaves it unset and retains OLLAMA_HOST/Docker resolution.
     pub ollama_base_url_override: Option<Arc<str>>,
+    /// Invocation-local source of the official library's manifests (KT-930),
+    /// so a test never reaches the real registry. Production leaves it unset
+    /// and uses the process-wide one.
+    pub ollama_registry_override: Option<Arc<crate::core::ollama_registry::OllamaRegistry>>,
     /// Production-only data-directory lock. Spawned Git commits inherit a
     /// duplicate of this handle so a replacement backend waits for Git/hooks.
     pub data_dir_lock: Option<Arc<std::fs::File>>,
@@ -288,6 +328,7 @@ impl AppState {
             agent_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
             ollama_base_url_override: None,
+            ollama_registry_override: None,
             data_dir_lock: None,
             workflow_step_rooms: Arc::default(),
         }
@@ -300,6 +341,14 @@ impl AppState {
 
     pub fn with_ollama_base_url(mut self, base_url: impl Into<Arc<str>>) -> Self {
         self.ollama_base_url_override = Some(base_url.into());
+        self
+    }
+
+    pub fn with_ollama_registry(
+        mut self,
+        registry: Arc<crate::core::ollama_registry::OllamaRegistry>,
+    ) -> Self {
+        self.ollama_registry_override = Some(registry);
         self
     }
 }
@@ -915,7 +964,54 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/discover-repos",
             post(api::discover::discover_repos),
         )
+        // KT-921 — the skills each project uses that its attached ones do not
+        // tell (referenced native skills, skills Kronn published).
+        .route("/api/projects/used-skills", get(api::projects::used_skills))
         .route("/api/projects/{id}", get(api::projects::get))
+        .route(
+            "/api/projects/{id}/agent-files",
+            get(api::projects::agent_files::get).put(api::projects::agent_files::set),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources",
+            get(api::projects::repository_resources),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/content",
+            get(api::projects::used_skill_file),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/comparison",
+            get(api::projects::repository_resource_comparison),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/publish",
+            post(api::projects::publish_repository_resource),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/import",
+            post(api::projects::import_repository_resource),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/approve",
+            post(api::projects::approve_repository_resource),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/use",
+            post(api::projects::use_native_skill),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/copy",
+            post(api::projects::copy_native_skill),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/migration",
+            get(api::projects::skill_migration_plan),
+        )
+        .route(
+            "/api/projects/{id}/repository-resources/skills/migrate",
+            post(api::projects::migrate_skills),
+        )
         .route("/api/projects/{id}", delete(api::projects::delete))
         // KT-194 — what each agent actually loads in this project, and which
         // sections could leave the always-loaded tier. Read-only: the audit
@@ -982,6 +1078,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         // 0.8.3 (#288) — fleet-wide view of every running audit.
         .route("/api/audit-status", get(api::audit::audit_status_all))
+        .route("/api/audit/steps", get(api::audit::audit_steps))
         // 0.8.3 (#311) — last resumable audit run for a project. Drives
         // the "Reprendre Step N/10" button on the ProjectCard when an
         // earlier run was interrupted (rate-limit, crash, network blip).
@@ -1208,6 +1305,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
+        .route("/api/ollama/registry", get(api::ollama::registry))
         .route("/api/ollama/pull", post(api::ollama::pull))
         .route(
             "/api/ollama/context-override",
@@ -1244,6 +1342,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/external-api/connections/test",
             post(api::external_api_connections::test),
+        )
+        .route(
+            "/api/external-api/connections/test/progress/{id}",
+            get(api::external_api_connections::test_progress),
         )
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
@@ -1290,6 +1392,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
+        .route("/api/mcps/test-all", post(api::mcps::test_all_configs))
         .route(
             "/api/mcps/bundles/preview",
             post(api::plugin_portability::preview_plugin_bundle),
@@ -2332,6 +2435,31 @@ mod audit_tracker_tests {
                 "first tool in new step → counter = 1"
             );
         }
+    }
+
+    #[test]
+    fn a_running_audit_says_who_audits_and_what_an_http_agent_does() {
+        // KT-994 — any client polling the progress (a card mounted after the
+        // launch, a reloaded page) can show the agent, tier, connection and
+        // the HTTP agent's current tool.
+        let mut t = AuditTracker::default();
+        t.start_progress("p-who", 16, "full_audit");
+        let silent = serde_json::to_value(t.get_progress("p-who").unwrap()).unwrap();
+        assert!(silent.get("agent").is_none() && silent.get("connection_id").is_none());
+
+        t.set_auditor(
+            "p-who",
+            crate::models::AgentType::Custom,
+            crate::models::ModelTier::Reasoning,
+            Some("conn-openrouter".into()),
+        );
+        t.set_tool_activity("p-who", "read_file · package.json".into(), 7);
+        let shown = serde_json::to_value(t.get_progress("p-who").unwrap()).unwrap();
+        assert_eq!(shown["agent"], "Custom");
+        assert_eq!(shown["tier"], "reasoning");
+        assert_eq!(shown["connection_id"], "conn-openrouter");
+        assert_eq!(shown["current_tool"], "read_file · package.json");
+        assert_eq!(shown["current_tool_call_count"], 7);
     }
 
     #[test]

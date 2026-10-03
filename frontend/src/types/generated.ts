@@ -31,6 +31,8 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
+export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
  */
@@ -289,6 +291,11 @@ runtime_warning?: string | null,
  */
 shadowed_installs?: Array<ShadowedInstall>, };
 
+/**
+ * Where Kronn writes a project's agent files (KT-971).
+ */
+export type AgentFilesPolicy = "repo" | "outside";
+
 export type AgentProfile = { id: string, name: string, persona_name: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, is_builtin: boolean,
 /**
  * Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
@@ -356,7 +363,7 @@ export type AiFileNode = { path: string, name: string, is_dir: boolean, children
 
 export type AiSearchResult = { path: string, match_count: number, };
 
-export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, text?: string | null, idempotency_key: string, };
+export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, item_answers?: Array<DiscussionQuestionItemAnswer>, text?: string | null, idempotency_key: string, };
 
 export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection,
 /**
@@ -510,6 +517,8 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
  * report rides the stored message (UI badge), same as streaming replies.
  */
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
+
+export type ApproveProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, id: string, };
 
 export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>,
 /**
@@ -681,7 +690,16 @@ step_tokens?: number | null, total_tokens_so_far?: number | null, current_tool?:
  * files without intermediate `Usage` blocks — the symptom that
  * confused the user during the 8-min Step 8 of the Full audit).
  */
-current_tool_call_count?: number | null, };
+current_tool_call_count?: number | null,
+/**
+ * Who is auditing (KT-994): the card freezes its agent panel on this
+ * choice while the audit runs, whichever client launched it.
+ */
+agent?: AgentType, tier?: ModelTier,
+/**
+ * The named external connection, for an HTTP agent that uses one.
+ */
+connection_id?: string, };
 
 export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
 
@@ -730,16 +748,17 @@ kind: string, agent_type: string, started_at: string, ended_at?: string | null, 
  * the SSE stream ended before the executed chain completed, without an
  * explicit cancel — typically a rate-limit, claude crash, or
  * network blip. The frontend treats `Interrupted` specifically:
- * it shows a dynamic resume button for `last_completed_step + 1`
+ * it shows a dynamic resume button naming the steps still to redo
  * instead of a fresh "Lancer".
  */
 status: string,
 /**
- * 0.8.3 (#311) — last successfully completed step (1-based,
- * matches the executed step-chain indexing). 0 = no step done yet.
- * A chained Full currently completes at 16. Set on every `step_done` where
- * `validate_step_output` returns success=true. Drives
- * the resume mechanism: on resume we start at `this + 1`.
+ * 0.8.3 (#311) — how many steps of the executed chain succeeded
+ * (KT-931: a count, not the index of the last one — a step that failed
+ * in the middle leaves the ones after it done). 0 = no step done yet.
+ * A chained Full currently completes at 16. Raised on every `step_done`
+ * where `validate_step_output` returns success=true; the steps a resume
+ * re-runs come from `audit_run_steps`, not from this figure.
  */
 last_completed_step: number,
 /**
@@ -787,6 +806,13 @@ recommendations_json?: string | null, };
  */
 export type AuditRunStep = { audit_run_id: string, step_index: number, file_label: string, started_at: string, ended_at?: string | null, duration_ms?: number | null, step_tokens?: number | null, cumulative_tokens?: number | null,
 /**
+ * What the step's agent reported, parts apart (KT-927). Each is absent when
+ * the runtime did not report it — which is not zero. `step_tokens` is
+ * absent too when neither input nor output was reported: the step's cost is
+ * unknown, never 0.
+ */
+input_tokens?: number | null, output_tokens?: number | null, cache_read_tokens?: number | null, cache_write_tokens?: number | null,
+/**
  * `false` when the CLI exited non-zero OR `step_warning` fired.
  */
 cli_success: boolean, step_warning?: string | null,
@@ -794,6 +820,12 @@ cli_success: boolean, step_warning?: string | null,
  * Mirrors the `step_warning.repaired` field from #292.
  */
 step_repaired_from_template: boolean, };
+
+/**
+ * KT-977 — one step of the Full audit, known before any run: lets the UI
+ * say what a step not yet run will produce.
+ */
+export type AuditStepInfo = { index: number, target_file: string, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 
@@ -953,7 +985,12 @@ export type BudgetAssessment = { verdict: BudgetVerdict, axes: Array<BudgetAxis>
 /**
  * Why, in one sentence, for whoever reads it in a log or a tooltip.
  */
-reason: string, };
+reason: string,
+/**
+ * The traffic axis with the cache told apart from the real input. `None`
+ * when the caller had no counters to split (see `assess`).
+ */
+traffic: TrafficBreakdown | null, };
 
 /**
  * One axis of the assessment, kept separate so a report can name WHICH ceiling
@@ -1134,6 +1171,17 @@ agent_type: AgentType,
  */
 model_id: string, display_name: string,
 /**
+ * Provider-reported canonical model identity. For Claude aliases this
+ * lets Kronn relate two CLI identifiers without treating either one as
+ * an automatic substitute for the other.
+ */
+resolved_model?: string | null,
+/**
+ * Provider-supplied explanatory text, retained verbatim when discovery
+ * exposes it. `None` means the source did not report a description.
+ */
+description?: string | null,
+/**
  * Operator-set label override. When present, selectors show this
  * instead of `display_name`, even after the record is reconciled to
  * `Live` (KT-531: operator display choices survive reconciliation).
@@ -1176,7 +1224,12 @@ last_seen_at?: string | null,
 /**
  * Last time Kronn attempted to verify this identity, live or not.
  */
-last_checked_at: string, created_at: string, updated_at: string, };
+last_checked_at: string,
+/**
+ * Last time a real call to this model answered. Being listed is not
+ * being served: `None` means no call has proven it yet.
+ */
+last_answered_at?: string | null, created_at: string, updated_at: string, };
 
 /**
  * Structured, catalog-driven preflight diagnostic. Shared by discussion
@@ -1186,11 +1239,29 @@ last_checked_at: string, created_at: string, updated_at: string, };
 export type CatalogPreflightFailure = { runtime_target_id: string, agent_type: AgentType, model_id?: string | null, reason: ModelUnavailableReason, detail: string, last_checked_at: string,
 /**
  * Machine-readable recommended next step (`"configure_manual_model"`,
- * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`). The frontend
+ * `"recheck_catalog"`, `"install_cli"`, `"authenticate"`,
+ * `"choose_another_model"`). The frontend
  * maps this to the recheck/settings shortcut; it is deliberately not a
  * prose sentence so i18n stays centralized in the frontend dictionaries.
  */
-recommended_action: string, };
+recommended_action: string,
+/**
+ * Live identifier resolving to the same provider model, when discovery
+ * reported one. Refusals expose it as operator guidance; successful
+ * same-agent fallbacks use `CatalogPreflightWarning` instead.
+ */
+replacement?: string | null, };
+
+export type CatalogPreflightResolution = { requested_model: string | null, effective_model: string | null, warning?: CatalogPreflightWarning | null, };
+
+/**
+ * Non-blocking catalogue decision made immediately before a launch. The
+ * requested and effective identifiers remain distinct so execution history
+ * can explain an automatic same-agent replacement without rewriting config.
+ */
+export type CatalogPreflightWarning = { requested_model: string, effective_model: string, reason: ModelUnavailableReason, detail: string, replacement_source: CatalogReplacementSource, equivalent_tier: ModelTier, };
+
+export type CatalogReplacementSource = "resolved_model" | "equivalent_tier";
 
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
@@ -1436,9 +1507,12 @@ recorded_usd: number,
  */
 has_recorded: boolean,
 /**
- * Sum of pricing-table estimates computed here (never persisted), for
- * tokens that had no recorded cost at all. Always a genuine,
- * freshly-computed estimate — never a relabeled recorded amount.
+ * Sum of pricing estimates computed here (never persisted), for tokens
+ * that had no recorded cost at all. Always a genuine, freshly-computed
+ * estimate — never a relabeled recorded amount. Only local inference
+ * (Ollama, free whatever the split) qualifies: a bare token total cannot
+ * be priced, because the cache-read / input / output split is what the
+ * price depends on (KT-894).
  */
 estimated_usd: number,
 /**
@@ -1446,10 +1520,11 @@ estimated_usd: number,
  */
 has_estimate: boolean,
 /**
- * Token count with neither a recorded cost nor a pricing-table entry
- * (e.g. OpenCode, Nvidia, Custom, LiteLLM, or a run with no agent
- * attribution at all). Non-zero means `recorded_usd + estimated_usd`
- * is a partial total, not a complete one.
+ * Token count with neither a recorded cost nor a way to price it: every
+ * cloud agent's rows that were persisted without a cost (their detailed
+ * counters were not reported, or the served model has no confirmed rate),
+ * plus a run with no agent attribution at all. Non-zero means
+ * `recorded_usd + estimated_usd` is a partial total, not a complete one.
  */
 unknown_cost_tokens: number, };
 
@@ -1565,6 +1640,17 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * adoption of Kronn by drafting common patterns autonomously.
  */
 enabled?: boolean | null, };
+
+/**
+ * Where a plugin's outbound API credential actually comes from, computed
+ * once server-side (`registry::credential_source`) from `ApiAuthKind`.
+ * Independent of the registry's `cli` tag: Microsoft 365 uses `CliToken`
+ * (no stored env keys at all) but has no `cli` tag, so the old
+ * tag-based frontend guess mislabelled it as "credentials used by the
+ * API" (KT-821) — this field lets the badge say "no token stored"
+ * whenever the auth kind is actually `CliToken`, Fastly included.
+ */
+export type CredentialSource = "stored" | "cli_token" | "none";
 
 export type CustomApiField = { label: string, value: string, };
 
@@ -2171,6 +2257,18 @@ paid_limit: number | null, };
 
 export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispatch>,
 /**
+ * Workflow Agent steps currently attached to this room. They have no
+ * native discussion dispatch, so this separate projection keeps their
+ * activity visible without pretending they are host-launched CLIs.
+ */
+active_workflow_steps: Array<ActiveWorkflowStep>,
+/**
+ * Historical step identity keyed by the messages its session authored.
+ * Finished activities remain here so an old message never falls back to
+ * a misleading `CLI N` label after the step exits.
+ */
+workflow_step_authors: { [key in string]: WorkflowStepIdentity },
+/**
  * Durable routing intent keyed by the user-message id. Keeping it next
  * to the transcript lets the UI show what was requested even when the
  * concrete model that eventually answered differs.
@@ -2620,15 +2718,25 @@ stats: PlanningPlanStats, };
  */
 export type DiscussionPoll = { revision: string, detail: DiscussionDetail | null, };
 
-export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
+export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
-export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
+
+export type DiscussionQuestionItem = { id: string, label: string, description: string | null, };
+
+export type DiscussionQuestionItemAnswer = { item_id: string, selected_option_id: string, };
 
 export type DiscussionQuestionList = { questions: Array<DiscussionQuestion>, pending_count: number, };
 
 export type DiscussionQuestionOption = { id: string, label: string, description: string | null, };
 
+export type DiscussionQuestionResume = { workflow_id: string, variables: Record<string, string>, state: DiscussionQuestionResumeState, run_id: string | null, error: string | null, };
+
+export type DiscussionQuestionResumeState = "pending" | "launching" | "launched" | "failed";
+
 export type DiscussionQuestionState = "pending" | "answered" | "declined";
+
+export type DiscussionQuestionWorkflowStep = { active: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -2679,6 +2787,20 @@ export type DiscussionTokenCost = { disc_id: string,
  * it covers, and 0 genuinely means no in-app agent replied.
  */
 in_app_tokens: number, in_app_messages: number,
+/**
+ * `in_app_tokens` with the prompt cache told apart from the real input
+ * (KT-894): for Codex the total INCLUDES the cache reads, which were 98.6% of
+ * one 25M-token run. Covers only the replies that reported their counters —
+ * `messages` says how many — and is `None` when none did, which is unknown,
+ * not "all of it was input".
+ */
+in_app_breakdown: InAppTokenBreakdown | null,
+/**
+ * Why some in-app replies carry no cost, when they do not: a total without
+ * counters, or a served model with no confirmed rate. Empty when every reply
+ * that consumed tokens was priced.
+ */
+in_app_cost_unknown_reasons: Array<string>,
 /**
  * The CLI side: traffic the vendors reported for the sessions joined here.
  * `None` when nothing was measured — never 0, because an unmeasured session
@@ -3299,6 +3421,13 @@ imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
 
+export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
+/**
+ * Replace the Kronn copy even when it holds edits the repository does
+ * not have. Without it such an import is refused.
+ */
+overwrite_kronn_changes?: boolean, };
+
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
  */
@@ -3322,6 +3451,31 @@ export type ImportResult = { warnings: Array<string>, invalid_paths: Array<strin
  * unattached (the user picks a project later via the wizard).
  */
 export type ImportWorkflowRequest = { content: string, project_id?: string | null, };
+
+/**
+ * A discussion's in-app tokens with the cache told apart from the real input.
+ *
+ * Covers only the replies that reported their counters: `messages` says how
+ * many, so a reader can compare it with the reply count beside it instead of
+ * assuming these figures are the whole total.
+ */
+export type InAppTokenBreakdown = {
+/**
+ * Replies counted in the figures below.
+ */
+messages: number,
+/**
+ * Input that was neither served from cache nor written to it.
+ */
+input_tokens: number,
+/**
+ * Input served from the prompt cache. Reported by every reply counted.
+ */
+cache_read_tokens: number,
+/**
+ * Sum over the replies that reported a cache write only; `None` when none did.
+ */
+cache_write_tokens: number | null, output_tokens: number, };
 
 /**
  * Durable snapshot of the text already emitted by an in-flight agent.
@@ -3406,6 +3560,11 @@ export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in
 export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMarker", "config_id": string } | { "type": "ManagedByHash", "config_id": string };
 
 export type LaunchAuditRequest = { agent: AgentType,
+/**
+ * KT-980 — the named external API connection an HTTP agent uses. Required
+ * for a `Custom` agent; for LiteLLM or NVIDIA it picks one of several.
+ */
+connection_id?: string,
 /**
  * Model capability selected by the shared agent picker. Missing values
  * keep the historical audit behaviour (Reasoning).
@@ -3758,7 +3917,47 @@ host_sync: HostSyncMode, preferred_interface: PluginInterface,
  * `None` means the config still matches, or belongs to a user-managed
  * (manual/detected/imported) server for which no registry contract exists.
  */
-registry_drift?: McpConfigRegistryDrift, };
+registry_drift?: McpConfigRegistryDrift,
+/**
+ * Interfaces this plugin's server actually exposes (`registry::
+ * available_plugin_interfaces`). Empty when the server row is missing
+ * (orphaned config). The frontend reads this instead of rebuilding the
+ * list from transport/api_spec/tags itself.
+ */
+interfaces: Array<PluginInterface>,
+/**
+ * Canonical badge classification — see `PluginKind`.
+ */
+effective_kind: PluginKind,
+/**
+ * `preferred_interface` clamped to `interfaces`: falls back to the
+ * first available interface (or `Mcp`) when a registry change made the
+ * stored preference stale. What the agent will actually use.
+ */
+effective_preferred_interface: PluginInterface,
+/**
+ * See `CredentialSource`.
+ */
+credential_source: CredentialSource,
+/**
+ * Set to the pre-existing config's id when this response is the result
+ * of re-adding an identical plugin: creation merged project scope into
+ * that config instead of silently dropping the new request's label,
+ * scope and CLI-exposure choice.
+ */
+merged_into_existing?: string,
+/**
+ * KT-829 — the last persisted probe result for each access this config
+ * exposes (`"api"` / `"mcp"` / `"cli"`), so the list can show health
+ * without re-running a probe on every page load. Empty when this
+ * config was never tested.
+ */
+last_probes: Array<McpLastProbe>, };
+
+/**
+ * KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
+ */
+export type McpConfigProbeResult = { config_id: string, probe: McpProbeResponse, };
 
 export type McpConfigRegistryDrift = {
 /**
@@ -3848,6 +4047,21 @@ missing_keys: Array<string>,
  */
 reason: string, };
 
+/**
+ * One access's last recorded probe result for a config — KT-829. Persisted
+ * so the config list can show health without re-running the probe on every
+ * page load.
+ */
+export type McpLastProbe = {
+/**
+ * Matches `McpProbeCheck.id` — `"api"`, `"mcp"` or `"cli"`.
+ */
+access: string, ok: boolean, code: ProbeDiagnosticCode, summary: string,
+/**
+ * RFC3339 timestamp of the probe that produced this result.
+ */
+tested_at: string, };
+
 export type McpOverview = { servers: Array<McpServer>, configs: Array<McpConfigDisplay>,
 /**
  * Set of "slug:projectId" pairs where the context file has been customized (not default template).
@@ -3873,13 +4087,51 @@ export type McpProbeCheck = { id: string, label: string, ok: boolean,
  * path. Optional capabilities remain visible without making the whole
  * plugin appear broken.
  */
-required: boolean, detail: string, };
+required: boolean, detail: string,
+/**
+ * KT-829 — stable machine-readable classification of `detail`, so the
+ * frontend can translate it instead of showing raw English.
+ */
+code: ProbeDiagnosticCode, };
 
 /**
  * Result of a real plugin readiness probe. Checks are deliberately
  * display-safe: command stdout/stderr and credentials never cross the API.
  */
 export type McpProbeResponse = { server_id: string, ready: boolean, checks: Array<McpProbeCheck>, };
+
+/**
+ * KT-829 — typed outcome of a `POST /api/mcps/refresh` rescan, so the
+ * caller can see (and, with `dry_run`, preview) exactly what changed
+ * instead of only getting back the post-scan `McpOverview`.
+ */
+export type McpRescanReport = {
+/**
+ * Echoes the request. `true` means every count below reflects what
+ * WOULD have happened — the transaction was rolled back and nothing
+ * was written to disk or to the database.
+ */
+dry_run: boolean,
+/**
+ * Brand-new `McpConfig` rows created from a `.mcp.json` entry that
+ * matched no existing config.
+ */
+configs_created: number,
+/**
+ * Existing configs found by hash and linked to a newly-scanned project
+ * instead of being duplicated.
+ */
+configs_merged: number,
+/**
+ * Duplicate config rows removed by deduplication.
+ */
+configs_deleted: number,
+/**
+ * Projects whose `.mcp.json` (or equivalent host file) was actually
+ * rewritten. `None` for a `dry_run` — it never touches the filesystem,
+ * so this count cannot be established without side effects.
+ */
+projects_rewritten?: number, overview: McpOverview, };
 
 /**
  * An MCP server type (e.g. "GitHub", "Atlassian", "Context7").
@@ -3898,6 +4150,12 @@ export type McpServer = { id: string, name: string, description: string, transpo
 api_spec?: ApiSpec | null, };
 
 export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
+
+/**
+ * KT-829 — `POST /api/mcps/test-all` response: every visible config probed
+ * with a bounded concurrency, one result each.
+ */
+export type McpTestAllResponse = { results: Array<McpConfigProbeResult>, };
 
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
@@ -4083,6 +4341,17 @@ export type Metric = { label: string, value: string, };
 
 export type ModelAvailability = "available" | "unavailable";
 
+export type ModelCatalogAlert = { model_id: string, replacement?: string | null, references: Array<ModelCatalogReference>, };
+
+export type ModelCatalogReference = { kind: ModelCatalogReferenceKind, resource_id?: string | null,
+/**
+ * Human-facing resource and location name, for example
+ * `Release workflow · review` or `ClaudeCode · reasoning`.
+ */
+label: string, };
+
+export type ModelCatalogReferenceKind = "workflow_step" | "model_tier" | "quick_prompt";
+
 export type ModelCatalogSnapshot = { targets: Array<ModelCatalogView>, };
 
 /**
@@ -4101,7 +4370,13 @@ live_refresh_ok: boolean,
  * window, or there has never been one. The UI must never present
  * `Cached`/`Migrated` entries as a current discovery when this is true.
  */
-stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null, };
+stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string | null, last_error_reason?: ModelUnavailableReason | null, last_error_detail?: string | null,
+/**
+ * Referenced models that the latest successful catalogue no longer
+ * contains. This is a warning only: changing a reference remains an
+ * explicit operator action.
+ */
+alerts?: Array<ModelCatalogAlert>, };
 
 /**
  * Coarse, catalog-driven cost classification. Never inferred from a
@@ -4162,7 +4437,7 @@ export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierC
  * not confirm it. Shared verbatim across the catalog, preflight diagnostics
  * and audit history so the UI never has to parse a provider-specific string.
  */
-export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported";
+export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported" | "not_found" | "access_denied";
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -4363,12 +4638,25 @@ export type OllamaHealthResponse = {
 /**
  * "online", "offline", "not_installed", "unreachable"
  */
-status: string, version: string | null, endpoint: string, models_count: number,
+status: string,
+/**
+ * The server's own version, from `/api/version`. `None` when the server
+ * is not online or did not answer that probe.
+ */
+version: string | null, endpoint: string, models_count: number,
 /**
  * User-facing explanation when status != "online". Contextualized
  * for the detected environment (native, Docker, WSL).
  */
-hint: string | null, };
+hint: string | null,
+/**
+ * KT-930 — this host is a Mac on Apple Silicon AND the running Ollama is
+ * recent enough to run `-mlx` models as Kronn expects. Decided here, from
+ * the host and the server's reported version — never from the browser's
+ * user agent, which says nothing about where Ollama runs. `false` when
+ * either fact is missing or unknown.
+ */
+mlx_capable: boolean, };
 
 export type OllamaModel = { name: string, size: string, modified: string,
 /**
@@ -4397,12 +4685,20 @@ context_ceiling: number,
 context_override: number | null,
 /**
  * Why `context_ceiling` is what it is: "operator_override" |
- * "model_override" | "model_window" | "machine_ceiling" |
- * "portable_fallback". A string, not the internal enum — this crosses
+ * "model_override" | "model_window" | "model_estimate" |
+ * "machine_ceiling" | "portable_fallback". `model_estimate` is computed
+ * for this model from its weights and the cost of its cache per token;
+ * `machine_ceiling` is the coarse band of installed memory, used while
+ * nothing is known of the model. A string, not the internal enum — this crosses
  * into the API surface and a frontend has no reason to know Rust
  * variant names.
  */
 context_origin: string, };
+
+/**
+ * One installed model's freshness.
+ */
+export type OllamaModelFreshness = { name: string, status: OllamaUpdateStatus, };
 
 export type OllamaModelsResponse = { models: Array<OllamaModel>, };
 
@@ -4412,6 +4708,26 @@ export type OllamaModelsResponse = { models: Array<OllamaModel>, };
  * stages have no byte counter.
  */
 export type OllamaPullProgress = { status: string, digest: string | null, completed: number | null, total: number | null, };
+
+/**
+ * GET /api/ollama/registry — what the official library says about the
+ * installed models and the suggested tags, without downloading anything.
+ * A tag the library did not answer for is simply absent from `suggestions`
+ * and `unknown` in `models`.
+ */
+export type OllamaRegistryResponse = { models: Array<OllamaModelFreshness>, suggestions: Array<OllamaSuggestionSize>, };
+
+/**
+ * What a suggested tag weighs, from the library's manifest (the sum of its
+ * config and layer sizes), formatted like `OllamaModel::size`.
+ */
+export type OllamaSuggestionSize = { name: string, size: string, };
+
+/**
+ * KT-930 — how an installed model compares with the official Ollama library's
+ * current copy of the same tag.
+ */
+export type OllamaUpdateStatus = "up_to_date" | "update_available" | "unknown";
 
 /**
  * What happens when `TypedSchema` validation still fails after a
@@ -4502,6 +4818,11 @@ has_more_path: string, max_pages?: number | null, };
 
 export type PartialAuditRequest = { agent: AgentType,
 /**
+ * KT-980 — the named external API connection an HTTP agent uses. Required
+ * for a `Custom` agent; for LiteLLM or NVIDIA it picks one of several.
+ */
+connection_id?: string,
+/**
  * Model capability selected by the shared agent picker. Missing values
  * keep the historical partial-audit behaviour (Reasoning).
  */
@@ -4544,7 +4865,12 @@ conversation_id: string | null,
  * `@claude-cli-2` and the "CLI 2" header label, computed once here so the
  * front never re-derives (and diverges from) it.
  */
-cli_ordinal: number | null, };
+cli_ordinal: number | null,
+/**
+ * Present for a Kronn-owned workflow Agent step. The UI renders this as a
+ * discussion agent with workflow/step provenance, never as `CLI N`.
+ */
+workflow_step: WorkflowStepIdentity | null, };
 
 /**
  * One finding as the agent sees it.
@@ -4813,6 +5139,16 @@ export type PluginBundleValueDescriptor = { key: string, sensitive: boolean, exp
 export type PluginInterface = "api" | "mcp" | "cli";
 
 /**
+ * Canonical classification of a plugin's invocation surface — the badge
+ * shown on its config card, computed once server-side (`registry::
+ * effective_plugin_kind`) from `transport` + `api_spec` + the registry's
+ * `cli` tag. Mirrors the bucketing order previously duplicated in the
+ * frontend: a CLI wrapper is `Cli` even when it also exposes MCP/API,
+ * because the CLI prerequisite is what the user needs to satisfy first.
+ */
+export type PluginKind = "mcp" | "api" | "hybrid" | "cli";
+
+/**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
  * `disc_meta` and `peer-join` instead of living as an implicit convention
  * in each agent's prompt. Agents walk `poll_backoff_seconds` while the
@@ -4867,6 +5203,14 @@ export type PreviewTransformDataResponse = { value: JsonValue | null, error: str
  * instead of an opaque loop hidden behind an "active" badge.
  */
 export type PrincipalAttention = { active_executions: number, cli_executions: number, awaiting_review: number, awaiting_human: number, ready_tasks: number, actions: Array<string>, };
+
+/**
+ * KT-829 — stable diagnostic bucket for a failed (or passing) probe check,
+ * shared by the API-call probe, the MCP handshake probe and the CLI access
+ * probe. Stable across releases so the frontend can translate it instead of
+ * pattern-matching `detail` (free English text meant for logs, not i18n).
+ */
+export type ProbeDiagnosticCode = "ok" | "unauthorized" | "forbidden" | "not_found" | "invalid_header" | "unexpected_output" | "network" | "cli_missing" | "cli_version_too_old" | "cli_not_authenticated" | "other";
 
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
@@ -4936,6 +5280,16 @@ linked_repos?: Array<LinkedRepo>,
  */
 workspace?: ProjectWorkspace | null, created_at: string, updated_at: string, };
 
+export type ProjectAgentFiles = { policy: AgentFilesPolicy,
+/**
+ * Where the files are when they are outside the repository.
+ */
+outside_dir?: string,
+/**
+ * Repository files Kronn took its entries back out of during this change.
+ */
+cleaned?: Array<string>, };
+
 export type ProjectDockerAction = "start" | "stop" | "restart";
 
 export type ProjectDockerActionRequest = { action: ProjectDockerAction, service?: string | null, };
@@ -4990,7 +5344,145 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, adr_level: ResourceAdrLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean, repository_paths: Array<string>,
+/**
+ * Every path publishing this resource would write, including the
+ * shared scaffold (`kronn/INDEX.md`, `kronn/kronn.toml`, the router
+ * skill) and `docs/AGENTS.md` when its Kronn line is still missing.
+ * Empty for a repository-only resource: there is nothing to publish.
+ */
+write_preview: Array<string>, required_secrets: Array<RequiredSecretStatus>, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string,
+/**
+ * First 8 characters of the content hash of each side, so two versions
+ * can be told apart at a glance. Absent when that side has no file.
+ */
+repository_fingerprint?: string, kronn_fingerprint?: string,
+/**
+ * What this resource references (a workflow's Quick Prompts, Quick APIs,
+ * Quick Execs, sub-workflows and Artifacts; an Artifact's action blocks),
+ * in stable identities. A reference to something the project does not
+ * hold is listed too, flagged `missing`.
+ */
+uses: Array<RepositoryResourceLink>,
+/**
+ * The resources of this project that reference this one.
+ */
+used_by: Array<RepositoryResourceLink>, };
+
+export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
+
+export type ProjectRepositoryResourceLevel = "usable_without_kronn" | "kronn_required";
+
+export type ProjectRepositoryResourceMutation = { kind: ProjectRepositoryResourceKind, id: string, slug: string, status: ProjectRepositoryResourceStatus, approved: boolean, };
+
+/**
+ * Read-only projection of the skills, automations and artifacts attached to a
+ * project and their alignment with the repository's `kronn/` directory.
+ */
+export type ProjectRepositoryResources = { kronn_exists: boolean,
+/**
+ * Native skill folders found in the repository, `kronn/skills` included.
+ */
+skill_roots: Array<ProjectSkillRoot>, skills_present: Array<ProjectRepositorySkill>, skills_available: Array<ProjectRepositorySkill>, resources: Array<ProjectRepositoryResource>,
+/**
+ * Whether a publish can write into this repository right now, and why
+ * not otherwise (e.g. a `kronn` file occupying the directory slot).
+ */
+can_write_repository: boolean, can_write_repository_reason?: RepositoryWriteBlocker,
+/**
+ * Repository-relative paths Kronn wrote (per `kronn.lock`) that `git
+ * status` reports as modified or untracked — the banner's "N files
+ * changed, not committed" count.
+ */
+uncommitted_managed_paths: Array<string>, };
+
+/**
+ * Synchronization state between the repository and Kronn's database for one
+ * resource, following the same vocabulary for every kind (skills included).
+ * Exactly one is true at a time so the UI shows exactly one primary action.
+ */
+export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
+
+export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null,
+/**
+ * Always defined: a skill only in Kronn's catalog (suggested or not) is
+ * `kronn_only`, one found only in a repository folder is `repository_only`
+ * (`native_skill` when Kronn has no counterpart at all).
+ */
+status: ProjectRepositoryResourceStatus,
+/**
+ * Proposed for this repository from its detected stack, not attached to
+ * it: never an item to process, only a suggestion to attach.
+ */
+suggested: boolean,
+/**
+ * What triggered the suggestion, as the detected file name (`Dockerfile`,
+ * `Cargo.toml`…) — the UI words it in the reader's language.
+ */
+suggested_reason?: string, approval_required: boolean, approved: boolean, repository_paths: Array<string>,
+/**
+ * True when this slug is present under more than one native skill root
+ * (`.claude/skills`, `.agents/skills`…) and those copies are not
+ * byte-identical — the UI must not silently pick one.
+ */
+repository_paths_diverge: boolean, publication_path: string,
+/**
+ * Every path publishing this skill would write, `docs/AGENTS.md`
+ * included when its Kronn line is still missing.
+ */
+write_preview: Array<string>,
+/**
+ * True once "Use in Kronn" attached this native skill by path reference
+ * (read-only, tracked at the source, no `kronn.lock` entry).
+ */
+referenced: boolean, required_secrets: Array<RequiredSecretStatus>, adr_level: ResourceAdrLevel, repository_updated_at?: string, repository_updated_by?: string, kronn_updated_at?: string, aligned_at?: string,
+/**
+ * First 8 characters of the content hash of each side, so two versions
+ * can be told apart at a glance. Absent when that side has no file.
+ */
+repository_fingerprint?: string, kronn_fingerprint?: string, };
+
+export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
+
+/**
+ * The `SKILL.md` of a used skill, as the repository holds it now: masked the
+ * way every repository text is, and cut when it is larger than a sheet can
+ * carry.
+ */
+export type ProjectSkillFile = { relative_path: string, content: string, truncated: boolean, };
+
+export type ProjectSkillRoot = { path: string, skill_count: number, };
+
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
+
+/**
+ * A skill a project uses that its `default_skill_ids` do not tell: a native
+ * `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
+ * because Kronn published it into the repository. The Automation page reads
+ * these for every project at once, so nothing here renders or compares.
+ */
+export type ProjectUsedSkill = { project_id: string,
+/**
+ * The catalog skill this is, when the catalog knows its slug (a skill
+ * Kronn published from its catalog). `None`: only the repository holds it.
+ */
+skill_id?: string, slug: string, name: string,
+/**
+ * The native skill folder holding it (`.agents/skills`).
+ */
+root: string,
+/**
+ * Repository-relative path of its `SKILL.md`.
+ */
+relative_path: string,
+/**
+ * "Use in Kronn" pointed at it: read from the source on every use.
+ */
+referenced: boolean,
+/**
+ * `kronn.lock` lists it: Kronn wrote it into the repository.
+ */
+published: boolean, };
 
 /**
  * Project defaults for worktree preparation hooks. Workflow hooks override them
@@ -5125,7 +5617,13 @@ export type ProposeResult = { accepted: boolean, reason: string | null, warnings
  * Read-only quota state shown to a human in Agent settings.  Re-arming is a
  * separate human-only HTTP action; it is intentionally absent from agent tools.
  */
-export type ProviderQuotaState = { provider: AgentType, blocked: boolean, };
+export type ProviderQuotaState = { provider: AgentType, blocked: boolean,
+/**
+ * UTC instant (RFC 3339) at which the provider's own refusal said the
+ * quota resets, when it said so. Shown as "rearmable at HH:MM"; nothing
+ * re-arms automatically on it (KT-593).
+ */
+reset_at: string | null, };
 
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost: CostAggregate, };
 
@@ -5154,6 +5652,12 @@ observed_at?: string | null,
  * `<run_id>:<write_index>` afin qu'une reprise ne duplique pas les points.
  */
 dedupe_key?: string | null, key_field?: string | null, };
+
+export type PublishProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, id: string,
+/**
+ * Required when the repository side also moved since the baseline.
+ */
+overwrite_repository_changes?: boolean, };
 
 /**
  * The sole accepted input for a local Ollama pull.  The endpoint never
@@ -5419,7 +5923,131 @@ unmeasured: Array<string>,
  */
 messages_stamped: number, };
 
+/**
+ * A native `SKILL.md` found outside `kronn/` (`.claude/skills`,
+ * `.agents/skills`…), addressed by its repository-relative path.
+ */
+export type RepositoryNativeSkillRequest = { relative_path: string,
+/**
+ * "Copy into Kronn" only: replace an existing Kronn copy that differs
+ * from the repository file. Without it, that copy is never overwritten.
+ */
+overwrite_kronn_changes?: boolean, };
+
+/**
+ * What the repository and Kronn hold for one resource, and what differs,
+ * computed when someone opens its sheet rather than on every listing: the
+ * listing only says *that* the two sides differ (its `status`), never *how*,
+ * and carries no content. The Kronn side is the masked rendering a publish
+ * would write, so it holds no secret value; the repository side is the file as
+ * it stands.
+ */
+export type RepositoryResourceComparison = {
+/**
+ * Every file of the resource with its text on each side that holds it —
+ * the content itself, whether or not the two sides agree. Empty when
+ * neither side has a file.
+ */
+files: Array<RepositoryResourceFileContent>,
+/**
+ * Real unified diff of the resource's main file (the rendered HTML for
+ * an artifact). Present only for `repository_newer`, `kronn_newer` and
+ * `conflict`; `file_diffs` carries every file.
+ */
+diff?: string,
+/**
+ * One unified diff per differing file — an artifact's `artifact.yaml`
+ * and `index.html` each get their own entry.
+ */
+file_diffs: Array<RepositoryResourceFileDiff>,
+/**
+ * Field-by-field diff of the resource definition (trigger, commands,
+ * agents, models…). Populated for workflow, Quick API and Quick Exec,
+ * for the same three states as `diff`.
+ */
+field_diff: Array<RepositoryResourceFieldDiff>, };
+
+/**
+ * One differing field between the repository and Kronn definitions of a
+ * resource, addressed by a dotted path into the resource JSON (e.g.
+ * `steps.0.agent`). Either side may be absent when the field only exists on
+ * one of them.
+ */
+export type RepositoryResourceFieldDiff = { field: string, repository?: any, kronn?: any, };
+
+/**
+ * One file of a resource as each side holds it. A side without the file has
+ * no text (`None`), which is how the sheet knows a mode has nothing to show.
+ */
+export type RepositoryResourceFileContent = { path: string,
+/**
+ * The file as it stands in the repository; absent when it is not there.
+ */
+repository?: string,
+/**
+ * The masked rendering Kronn would write; absent when Kronn has none.
+ */
+kronn?: string,
+/**
+ * A side was cut at the size bound. The diff always covers the whole file.
+ */
+truncated: boolean, };
+
+/**
+ * The unified diff (repository side against Kronn side) of one file a
+ * resource is written to.
+ */
+export type RepositoryResourceFileDiff = { path: string, diff: string, };
+
+/**
+ * One edge of the reference graph between a project's resources, seen from
+ * either end.
+ */
+export type RepositoryResourceLink = { kind: ProjectRepositoryResourceKind,
+/**
+ * The linked resource's listing `id`; the id the reference points at when
+ * the target is `missing`.
+ */
+id: string,
+/**
+ * The linked resource's stable `(kind, slug)` identity. Absent when
+ * `missing`: nothing known to derive it from.
+ */
+slug?: string,
+/**
+ * Display name; the referenced id when `missing`.
+ */
+name: string,
+/**
+ * Nothing the project holds answers to this reference: no resource of
+ * this project in Kronn, none in its repository. It may still exist
+ * elsewhere (another project, the global scope), where a publish or an
+ * import would not carry it.
+ */
+missing: boolean, };
+
+/**
+ * Why Kronn cannot write into a repository right now — a code the UI
+ * translates, never a raw error message.
+ */
+export type RepositoryWriteBlocker = "kronn_path_is_file" | "repository_read_only" | "repository_unreadable";
+
 export type RepoSource = { id: string, label: string, provider: string, };
+
+/**
+ * A secret name a resource requires (`secret://NAME` in its file, listed in
+ * `kronn/kronn.toml`), with whether Kronn's encrypted store holds it: the
+ * name is a stored env key of a config this project can use. Names only —
+ * no value is ever read.
+ */
+export type RequiredSecretStatus = { name: string, configured: boolean, };
+
+/**
+ * ADR-005 portability tier. Deliberately serialized as the literal `N0` /
+ * `N1` / `N2` used throughout the ADR and `kronn/INDEX.md`, not
+ * `snake_case`, so the API value matches the vocabulary humans read.
+ */
+export type ResourceAdrLevel = "N0" | "N1" | "N2";
 
 /**
  * One timestamped response from a vendor transcript, as the bridge reports it.
@@ -6170,6 +6798,8 @@ num_ctx: number | null,
  */
 warnings: Array<string>, };
 
+export type SetProjectAgentFiles = { policy: AgentFilesPolicy, };
+
 export type SetRecoveryResponse = {
 /**
  * The off-machine copy the user must save. With it + the passphrase, the
@@ -6238,6 +6868,107 @@ external?: boolean,
 source_url?: string | null, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
+
+export type SkillMigrationAction = "move" | "duplicate";
+
+export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
+
+export type SkillMigrationBlockReason = "symlink" | "unreadable" | "reserved_slug" | "target_occupied" | "too_large";
+
+export type SkillMigrationConflict = { slug: string, target: string,
+/**
+ * The distinct contents found for this slug, each with the folders that
+ * hold it.
+ */
+versions: Array<SkillMigrationVersion>, };
+
+export type SkillMigrationMove = { slug: string,
+/**
+ * The skill folder as it is now, e.g. `.claude/skills/review`.
+ */
+source: string,
+/**
+ * Where it goes, e.g. `.agents/skills/review`.
+ */
+target: string, action: SkillMigrationAction,
+/**
+ * The skill was written by Kronn in its former format and is rewritten
+ * as a standard Agent Skill on the way.
+ */
+converted: boolean,
+/**
+ * Kronn tracks this skill in `kronn.lock`: the lock and the alignment
+ * follow it to the new location.
+ */
+kronn_managed: boolean, };
+
+/**
+ * What "Migrate everything to `.agents/skills`" would do, computed without
+ * touching the repository: one line per skill folder that moves (source →
+ * target) and one per slug whose copies differ and need the user's choice.
+ */
+export type SkillMigrationPlan = {
+/**
+ * Always `.agents/skills`.
+ */
+target_root: string, moves: Array<SkillMigrationMove>,
+/**
+ * Same slug, different contents: nothing is written for these until a
+ * version is chosen, and nothing is overwritten unless it is chosen.
+ */
+conflicts: Array<SkillMigrationConflict>,
+/**
+ * Skill folders that cannot be moved safely (a symbolic link, an
+ * unreadable file…), left exactly where they are.
+ */
+blocked: Array<SkillMigrationBlocked>, };
+
+/**
+ * The choices the user made in the recap.
+ */
+export type SkillMigrationRequest = {
+/**
+ * One per conflict the user resolved. A conflict without one is skipped:
+ * Kronn never picks a version.
+ */
+resolutions?: Array<SkillMigrationResolution>, };
+
+export type SkillMigrationResolution = { slug: string,
+/**
+ * One of the folders listed in the conflict's versions: its content is
+ * the one written to the target.
+ */
+keep: string, };
+
+/**
+ * What a migration did. Nothing is committed: the files sit in the working
+ * tree, and the uncommitted-changes banner counts them.
+ */
+export type SkillMigrationResult = { moved: Array<SkillMigrationMove>,
+/**
+ * Slugs whose conflict had no choice: untouched.
+ */
+unresolved: Array<string>,
+/**
+ * Folders left where they were because their content is not what the
+ * target now holds.
+ */
+kept: Array<string>, blocked: Array<SkillMigrationBlocked>, };
+
+export type SkillMigrationVersion = {
+/**
+ * First 8 characters of the content hash.
+ */
+fingerprint: string,
+/**
+ * The skill folders holding this content, the target included.
+ */
+paths: Array<string>,
+/**
+ * The target already holds this version: choosing it changes nothing
+ * there.
+ */
+at_target: boolean, };
 
 /**
  * One extracted `[src: …]` marker plus its mechanical verdict.
@@ -6598,7 +7329,12 @@ export type TaskExecutionAuditEvent = { id: string, action: string, from_status:
  * sourced from the orchestration aggregate; task DoD, manifests, validations
  * and telemetry are joined here so clients never reconstruct lineage from chat.
  */
-export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
+export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>,
+/**
+ * Every CLI session the worker ran, attempts and relaunches included, oldest
+ * first (KT-911). Empty for a worker with no CLI session (HTTP providers).
+ */
+worker_sessions: Array<TaskExecutionWorkerSession>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
 
 /**
  * One journaled transition (ADR §3; DoD-3).
@@ -6717,7 +7453,24 @@ export type TaskExecutionStatus = "Pending" | "Provisioning" | "Blocked" | "Work
 
 export type TaskExecutionTelemetryMode = "boundary_only" | "unavailable";
 
-export type TaskExecutionUsage = { duration_ms: number, in_app_tokens: number, in_app_messages: number, in_app_cost_usd: number | null, in_app_cost_is_partial: boolean, cli_traffic_tokens: number | null, cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured: number, cli_sessions_unmeasured: number, http: TaskExecutionHttpUsage | null, };
+export type TaskExecutionUsage = { duration_ms: number,
+/**
+ * Total reported by the agents, cache reads included for Codex.
+ */
+in_app_tokens: number, in_app_messages: number,
+/**
+ * `in_app_tokens` split into real input, cache and output — for the replies
+ * that reported those counters only (KT-894). `None` when none did.
+ */
+in_app_breakdown: InAppTokenBreakdown | null,
+/**
+ * `None` is unknown, never free.
+ */
+in_app_cost_usd: number | null, in_app_cost_is_partial: boolean,
+/**
+ * Why replies have no cost, when they do not (see `DiscussionTokenCost`).
+ */
+in_app_cost_unknown_reasons: Array<string>, cli_traffic_tokens: number | null, cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured: number, cli_sessions_unmeasured: number, http: TaskExecutionHttpUsage | null, };
 
 /**
  * One recorded validation run (ADR §6). `exit_code` IS the verdict.
@@ -6731,6 +7484,27 @@ export type TaskExecutionValidationRun = { id: string, task_execution_id: string
  * accepts by — never a raw kr-join token.
  */
 export type TaskExecutionWorkerOffer = { id: string, task_execution_id: string, attempt_no: number, target_cli_session_id: number, origin_discussion_id: string, child_discussion_id: string, status: WorkerOfferStatus, expires_at: string | null, offer_message_id: string | null, reason: string | null, accepted_at: string | null, declined_at: string | null, created_at: string, updated_at: string, };
+
+/**
+ * One CLI session of a task worker: the process one dispatch started, for one
+ * attempt. `session_id` is what the CLI reported on its init line, which is the
+ * name of its transcript (KT-911).
+ */
+export type TaskExecutionWorkerSession = {
+/**
+ * The semantic worker attempt (`0` is the first; each rework adds one).
+ */
+attempt_no: number,
+/**
+ * The dispatch that launched this process. A retried dispatch lists one
+ * session per process it started.
+ */
+dispatch_job_id: string, agent_type: string, session_id: string,
+/**
+ * `None` is unknown, never free — `cost_unknown_reason` says why. Also
+ * `None` while the session is still running.
+ */
+cost_usd: number | null, cost_unknown_reason?: string | null, started_at: string, };
 
 export type TaskWorkerCatalogue = { workers: Array<TaskWorkerCatalogueEntry>, };
 
@@ -6966,6 +7740,22 @@ export type TourDemoDiscussionResponse = { discussion_id: string, created: boole
 prompt: string, };
 
 export type TrackerSourceConfig = { "type": "GitHub", owner: string, repo: string, };
+
+/**
+ * What the `traffic_tokens` axis is made of, kept apart — KT-894.
+ *
+ * The axis deliberately counts cache reads (they are the cost of a long
+ * thread), which makes it a poor answer to "how much did this session really
+ * read?": one measured session was 98.4% cache reads. Reporting the four
+ * counters beside the axis lets a reader tell a session that streamed a huge
+ * cached transcript from one that pushed a huge amount of fresh input. A
+ * counter the vendor does not publish is `None`, never zero.
+ */
+export type TrafficBreakdown = {
+/**
+ * Input that was neither read from the cache nor written to it.
+ */
+input_tokens: number | null, cache_write_tokens: number | null, cache_read_tokens: number | null, output_tokens: number | null, };
 
 export type TransformDataConfig = {
 /**
@@ -7487,13 +8277,20 @@ export type WorkflowAgentAttempt = { id: number, role: WorkflowAgentAttemptRole,
  */
 retry: number, agent: AgentType, tier: ModelTier, connection_id: string | null,
 /**
- * Explicit model override, before resolving connection/tier defaults.
+ * Model requested at preflight after resolving any connection or tier
+ * default, before a catalogue fallback is applied.
  */
 requested_model: string | null,
 /**
  * Model resolved at the actual launch boundary. Not provider observation.
  */
 resolved_model: string | null,
+/**
+ * Non-blocking catalogue fallback applied before this attempt. Absent
+ * when the requested model was still available or catalogue state did not
+ * require a replacement.
+ */
+preflight_warning?: CatalogPreflightWarning | null,
 /**
  * Whether the transport applied that selection. None means unknown or no
  * selection; native ACP can explicitly retain its default (false).
@@ -7512,7 +8309,25 @@ cached_prompt_tokens?: number | null,
 /**
  * Prompt tokens written to the provider's prompt cache. `None` when not reported.
  */
-cache_write_prompt_tokens?: number | null, };
+cache_write_prompt_tokens?: number | null,
+/**
+ * The CLI's own session id for this attempt, as the runtime reported it on
+ * its `init` line — the name of the transcript it wrote (KT-911). `null`
+ * for a runtime with no CLI session, or when it never got as far as
+ * reporting one.
+ */
+session_id: string | null,
+/**
+ * What this attempt cost in USD, computed like a discussion reply's cost
+ * (KT-894): the agent's own figure when it gives one, else the detailed
+ * counters at the rates of the model that served it. `null` is unknown,
+ * never free — `cost_unknown_reason` then says why.
+ */
+cost_usd: number | null,
+/**
+ * Why `cost_usd` is `null`. Absent when the cost is known.
+ */
+cost_unknown_reason?: string | null, };
 
 export type WorkflowAgentAttemptRole = "Initial" | "Repair" | "Escalation" | "Review" | "Author";
 
@@ -8041,6 +8856,14 @@ multi_agent_review?: MultiAgentReviewConfig | null,
  * on every launch and every resume of the step.
  */
 room_id?: string | null, };
+
+/**
+ * Durable identity of an Agent step that joined a discussion room.
+ *
+ * This is not a host-launched CLI identity: the workflow and step own the
+ * process, while the provider only describes which runtime executes it.
+ */
+export type WorkflowStepIdentity = { run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 export type WorkflowSuggestion = { id: string, title: string, description: string, reason: string, required_mcps: Array<string>, audience: string, complexity: string, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, };
 

@@ -124,4 +124,35 @@ describe('tour anchors exist in the app', () => {
       'automation-ai',
     ]);
   });
+
+  it('points the four Automation type steps at the type chip of the sidebar (KT-916)', async () => {
+    const kinds = ['workflows', 'quickApis', 'quickPrompts', 'quickExecs'];
+    const steps = ['automation-workflow', 'automation-quick-api', 'automation-quick-prompt', 'automation-quick-exec']
+      .map(id => TOUR_STEPS.find(step => step.id === id));
+    expect(steps.map(step => step?.selector)).toEqual(kinds.map(() => '[data-tour-id="automation-filter-type"]'));
+
+    // The chip reads "All" and its list is closed at first: the step opens the
+    // list (rendered after the click, as React does), then picks its type.
+    const picked: string[] = [];
+    document.body.innerHTML = '<button data-tour-id="automation-filter-type" data-value="all" aria-expanded="false"></button>';
+    const chip = document.querySelector<HTMLElement>('[data-tour-id="automation-filter-type"]')!;
+    chip.addEventListener('click', () => {
+      chip.setAttribute('aria-expanded', 'true');
+      setTimeout(() => {
+        document.body.insertAdjacentHTML('beforeend', ['all', ...kinds]
+          .map(kind => `<button data-kind-option="${kind}"></button>`).join(''));
+        document.querySelectorAll<HTMLElement>('[data-kind-option]').forEach(option => option.addEventListener('click', () => {
+          const kind = option.getAttribute('data-kind-option')!;
+          picked.push(kind);
+          chip.setAttribute('data-value', kind);
+          chip.setAttribute('aria-expanded', 'false');
+          document.querySelectorAll('[data-kind-option]').forEach(node => node.remove());
+        }));
+      }, 0);
+    });
+
+    for (const step of steps) await step?.beforeStep?.();
+    expect(picked).toEqual(kinds);
+    document.body.innerHTML = '';
+  });
 });

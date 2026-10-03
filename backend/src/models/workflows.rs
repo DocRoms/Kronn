@@ -9,7 +9,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{AgentType, LivePageDatasetKind, LivePageWriteOperation, ModelTier, PromptVariable};
+use super::{
+    AgentType, CatalogPreflightWarning, LivePageDatasetKind, LivePageWriteOperation, ModelTier,
+    PromptVariable,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1444,10 +1447,16 @@ pub struct WorkflowAgentAttempt {
     pub agent: AgentType,
     pub tier: ModelTier,
     pub connection_id: Option<String>,
-    /// Explicit model override, before resolving connection/tier defaults.
+    /// Model requested at preflight after resolving any connection or tier
+    /// default, before a catalogue fallback is applied.
     pub requested_model: Option<String>,
     /// Model resolved at the actual launch boundary. Not provider observation.
     pub resolved_model: Option<String>,
+    /// Non-blocking catalogue fallback applied before this attempt. Absent
+    /// when the requested model was still available or catalogue state did not
+    /// require a replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_warning: Option<CatalogPreflightWarning>,
     /// Whether the transport applied that selection. None means unknown or no
     /// selection; native ACP can explicitly retain its default (false).
     pub model_applied: Option<bool>,
@@ -1465,6 +1474,21 @@ pub struct WorkflowAgentAttempt {
     /// Prompt tokens written to the provider's prompt cache. `None` when not reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_prompt_tokens: Option<u64>,
+    /// The CLI's own session id for this attempt, as the runtime reported it on
+    /// its `init` line — the name of the transcript it wrote (KT-911). `null`
+    /// for a runtime with no CLI session, or when it never got as far as
+    /// reporting one.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// What this attempt cost in USD, computed like a discussion reply's cost
+    /// (KT-894): the agent's own figure when it gives one, else the detailed
+    /// counters at the rates of the model that served it. `null` is unknown,
+    /// never free — `cost_unknown_reason` then says why.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Why `cost_usd` is `null`. Absent when the cost is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_unknown_reason: Option<String>,
 }
 
 impl WorkflowAgentProvenance {

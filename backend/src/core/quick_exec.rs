@@ -58,6 +58,9 @@ pub const ALLOWED_BINARIES: &[&str] = &[
     "git", "gh",  // Token accounting.
     "rtk", // Probes.
     "echo", "true", "false", "sleep",
+    // KT-829 — plugin CLI access probes (`registry::cli_access_probe`).
+    // Presence/version/auth checks only, never a mutating subcommand.
+    "fastly", "glab",
 ];
 
 /// Names that are refused even if they appear in the allowlist.
@@ -293,6 +296,102 @@ fn check_binary(binary: &str, allowlist: &[&str]) -> Result<(), Rejection> {
         )));
     }
     Ok(())
+}
+
+/// Check a persisted one-line command (an execution's validation) BEFORE it is
+/// accepted, against the very rules its later run applies.
+///
+/// The line is run by splitting on whitespace and handing the pieces to
+/// [`validate`]: there is no shell, no quoting and no expansion. A command
+/// written for a shell — `cd frontend && npx tsc`, `FOO=1 cargo test`,
+/// `cargo test | tee out` — is therefore not "run differently", it is refused at
+/// integration, after the worker was launched, reviewed and approved. This is
+/// the same decision made at the moment the command is written instead.
+///
+/// The working directory is not part of the check: a validation always starts at
+/// the root of the execution's worktree.
+pub fn check_command_line(command: &str) -> Result<(), Rejection> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let Some(&binary) = words.first() else {
+        return Err(Rejection("the command is empty".into()));
+    };
+    let form = |reason: String| {
+        Rejection(format!(
+            "{reason}. A validation is ONE binary from [{}] followed by literal arguments, run \
+             WITHOUT a shell from the root of the worktree: no `cd`, `&&`, `||`, `|`, `;`, \
+             redirection, `$(…)` or `VAR=value` prefix, and no quoting (words are split on \
+             whitespace). Target a subdirectory with the tool's own option — \
+             `pnpm --dir frontend exec tsc -b --pretty false` instead of \
+             `cd frontend && npx tsc -b`, `cargo test --manifest-path backend/Cargo.toml \
+             --target-dir <dir>` instead of `cd backend && CARGO_TARGET_DIR=<dir> cargo test`",
+            ALLOWED_BINARIES.join(", ")
+        ))
+    };
+    if is_env_assignment(binary) {
+        return Err(form(format!(
+            "`{binary}` is an environment assignment, which needs a shell; the command would \
+             start with it as its binary"
+        )));
+    }
+    check_binary(binary, ALLOWED_BINARIES).map_err(|rejection| form(rejection.0))?;
+    if let Some((word, syntax)) = words
+        .iter()
+        .find_map(|word| shell_syntax(word).map(|syntax| (*word, syntax)))
+    {
+        return Err(form(format!(
+            "`{word}` contains {syntax}, which only a shell interprets — here it would reach \
+             `{binary}` as a literal argument"
+        )));
+    }
+    Ok(())
+}
+
+/// `NAME=value` where a binary is expected: the shell prefix for an environment
+/// variable, which a literal argv cannot express.
+fn is_env_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Name the shell syntax a whitespace-separated word carries, if it clearly does.
+///
+/// Deliberately narrow: only spellings that have no reason to reach a binary as
+/// an argument. A lone `&` or a `<` inside `--format=a<b` is left alone, so a
+/// legitimate literal is never refused.
+fn shell_syntax(word: &str) -> Option<&'static str> {
+    if word.contains("&&") {
+        return Some("the operator `&&`");
+    }
+    if word.contains("||") {
+        return Some("the operator `||`");
+    }
+    if word.contains('|') {
+        return Some("a pipe `|`");
+    }
+    if word.contains(';') {
+        return Some("a command separator `;`");
+    }
+    if word.contains('`') || word.contains("$(") {
+        return Some("a command substitution");
+    }
+    if word == "&" {
+        return Some("the background operator `&`");
+    }
+    // `>`, `>>`, `<`, `2>&1`, `>out.txt`: a redirection is a word that OPENS with
+    // one, after an optional file descriptor.
+    if word
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .starts_with(['>', '<'])
+    {
+        return Some("a redirection");
+    }
+    None
 }
 
 /// Whether the extracted lists can be treated as exhaustive.

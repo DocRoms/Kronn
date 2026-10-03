@@ -34,6 +34,7 @@ const cli = (id: number, agent_type: string, cli_ordinal: number | null = null):
   resume_since: null,
   model: null,
   conversation_id: null,
+  workflow_step: null,
 });
 
 const labels = {
@@ -98,6 +99,30 @@ describe('typed composer targets', () => {
         trigger: '@claude-cli',
         label: 'CLI',
         target: expect.objectContaining({ kind: 'cli', cli_session_id: 66 }),
+      }),
+    ]));
+  });
+
+  it('never exposes a Kronn-owned workflow step as an addressable CLI', () => {
+    const step = {
+      ...cli(90, 'ClaudeCode', null),
+      role: 'agent',
+      wake_mode: 'native_dispatch' as const,
+      workflow_step: {
+        run_id: 'run-1',
+        workflow_id: 'workflow-1',
+        workflow_name: 'Implementation',
+        step_key: 'orchestrate',
+        step_name: 'Orchestrate',
+      },
+    };
+    const mentions = composerMentions('ClaudeCode', ['ClaudeCode'], [step], labels);
+
+    expect(mentions.some(mention => mention.trigger.includes('-cli'))).toBe(false);
+    expect(mentions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        trigger: '@claude',
+        label: 'agent de discussion',
       }),
     ]));
   });

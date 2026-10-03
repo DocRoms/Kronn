@@ -29,6 +29,12 @@ struct AgentOutput {
     /// `None`: the runtime reported no usage for this run.
     tokens_used: Option<u64>,
     prompt_cache: runner::PromptCacheUsage,
+    /// The usage `tokens_used` came from, parts kept apart: an attempt's cost is
+    /// computed from these, never from the total (KT-894). `None` when the
+    /// runtime reported only a total, or nothing.
+    reported_usage: Option<runner::ReportedUsage>,
+    /// The cost the agent itself reported, when it gives one.
+    reported_cost_usd: Option<f64>,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
 }
@@ -78,7 +84,7 @@ pub(crate) fn step_model_override(
 }
 
 /// Build the full agent-ready prompt for a step: template render +
-/// `extra_context` append + output-format addendum + triage addendum.
+/// output-format addendum + triage addendum.
 /// Does NOT append the signal-protocol instructions — those depend on
 /// runtime `on_result` rules and are still added by [`execute_step`]
 /// after this helper returns.
@@ -91,22 +97,15 @@ pub(crate) fn step_model_override(
 pub(crate) fn build_step_prompt(
     step: &WorkflowStep,
     ctx: &TemplateContext,
-    extra_context: &str,
 ) -> Result<String, String> {
     let mut prompt = ctx
         .render_strict(&step.prompt_template)
         .map_err(|e| format!("Template render error: {}", e))?;
 
-    // 0.8.3 — audit-pipeline symmetry: append the pre-computed
-    // linked_repos + Kronn-projects-universe blocks to every Agent
-    // step's prompt. Empty when the workflow has no project binding
-    // or the project has no companions registered. Inserted BEFORE
-    // the output_format / triage / signal addenda so those still
-    // anchor the END of the prompt (LLMs follow trailing instructions
-    // more reliably than leading ones).
-    if !extra_context.is_empty() {
-        prompt.push_str(extra_context);
-    }
+    // KT-926 — nothing about the user's other Kronn projects is appended here:
+    // the prompt goes to the model provider. The output_format / triage /
+    // signal addenda below anchor the END of the prompt (LLMs follow trailing
+    // instructions more reliably than leading ones).
 
     // Auto-inject structured output format instructions when output_format
     // is `Structured` or `TypedSchema`. The TypedSchema variant adds the
@@ -140,19 +139,12 @@ pub(crate) fn build_step_prompt(
 ///
 /// - `project_path`: original project path for MCP context resolution
 /// - `work_dir`: agent's working directory (may be a worktree)
-/// - `extra_context`: pre-formatted companion-repo + Kronn-projects-
-///   universe blocks (linked_repos + universe). Computed ONCE at run
-///   start by [`crate::workflows::runner::execute_run`] and passed in
-///   here so every Agent step in the run shares the same audit-pipeline
-///   symmetric context without re-querying the DB. Pass `""` for runs
-///   without a project binding (Notify-only / ApiCall-only).
 /// - `progress_tx`: if Some, partial output text is streamed as it arrives
 ///
-/// 0.8.3 — 8 args (was 7) after adding `extra_context` for cross-repo
-/// companion injection. Bundling them into a struct would force every
-/// caller (runner, test-step endpoint, api/workflows/test-step) to
-/// build the struct vs. passing positional args inline, with no
-/// real readability win at the call site. Allow the lint locally.
+/// Bundling the arguments into a struct would force every caller (runner,
+/// test-step endpoint, api/workflows/test-step) to build the struct vs.
+/// passing positional args inline, with no real readability win at the call
+/// site. Allow the lint locally.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_step(
     step: &WorkflowStep,
@@ -161,7 +153,6 @@ pub async fn execute_step(
     tokens_config: &TokensConfig,
     full_access: bool,
     ctx: &TemplateContext,
-    extra_context: &str,
     progress_tx: Option<ProgressSender>,
     activity: Option<&AgentActivitySink>,
     // 2026-06-12 (run-9 finding) — the user's [agents.model_tiers] overrides
@@ -175,12 +166,18 @@ pub async fn execute_step(
     catalog_db: Option<&crate::db::Database>,
     // KT-793 — the step's room capability; only its own agent attempts carry it.
     room: Option<&runner::WorkflowStepBridgeContext>,
+    // ADR-005 slice 1 (KT-847) — `Some(WorkflowRun.id)` pins the
+    // skills/directives/profiles every agent spawn in this call resolves,
+    // so a later step of the SAME run isn't affected by an edit or
+    // deletion made mid-run (see `RunSnapshotCache`). `None` for ad-hoc,
+    // non-persisted invocations (e.g. the workflow "Test step" preview).
+    run_id: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
 
-    // Build prompt (template render + extra_context + output-format
-    // addendum + triage addendum). Errors map to a Failed StepOutcome.
-    let mut prompt = match build_step_prompt(step, ctx, extra_context) {
+    // Build prompt (template render + output-format addendum + triage
+    // addendum). Errors map to a Failed StepOutcome.
+    let mut prompt = match build_step_prompt(step, ctx) {
         Ok(p) => p,
         Err(e) => {
             return StepOutcome {
@@ -306,38 +303,28 @@ pub async fn execute_step(
             };
         }
     };
-    let runtime_target_id = resolved_connection
-        .as_ref()
-        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
-    let tier = step
-        .agent_settings
-        .as_ref()
-        .and_then(|settings| settings.tier)
-        .unwrap_or_default();
     let model_override = step_model_override(step, resolved_connection.as_ref());
 
     // Authoritative check immediately before the first possible provider
     // dispatch. Initial workflow-wide validation remains in the runner, but
-    // availability can change while earlier steps execute.
-    if let Some(database) = catalog_db {
-        if let Some(failure) = crate::core::model_catalog::preflight_check(
-            database,
-            runtime_target_id.as_deref(),
-            step.agent.clone(),
-            tier,
-            model_override.as_deref(),
-            model_tiers,
-        )
-        .await
-        {
+    // availability can change while earlier steps execute. The returned
+    // effective model is the only value allowed to reach the transport.
+    let preflight = match preflight_workflow_launch(
+        catalog_db,
+        step,
+        resolved_connection.as_ref(),
+        model_override.as_deref(),
+        model_tiers,
+    )
+    .await
+    {
+        Ok(resolution) => resolution,
+        Err(error) => {
             return StepOutcome {
                 result: StepResult {
                     step_name: step.name.clone(),
                     status: RunStatus::Failed,
-                    output: format!(
-                        "preflight_failed:{}",
-                        serde_json::to_string(&failure).unwrap_or_default()
-                    ),
+                    output: error.to_string(),
                     tokens_used: Some(0),
                     duration_ms: start.elapsed().as_millis() as u64,
                     started_at: None,
@@ -345,7 +332,7 @@ pub async fn execute_step(
                     envelope_detected: None,
                     step_kind: Some("preflight_failed".into()),
                     step_agent: Some(step.agent.clone()),
-                    step_model: failure.model_id,
+                    step_model: model_override,
                     step_api_plugin_slug: None,
                     step_api_endpoint_path: None,
                     is_rollback: false,
@@ -359,7 +346,10 @@ pub async fn execute_step(
                 condition_action: None,
             };
         }
-    }
+    };
+    let requested_model = preflight.requested_model;
+    let effective_model = preflight.effective_model;
+    let preflight_warning = preflight.warning;
 
     // Resolve the step's named external connection once, outside the retry
     // loop. Without this a step pointed at a `Custom` connection failed every
@@ -404,11 +394,14 @@ pub async fn execute_step(
             progress_tx.as_ref(),
             activity,
             external_http.as_ref(),
-            model_override.as_deref(),
+            requested_model.as_deref(),
+            effective_model.as_deref(),
+            preflight_warning.as_ref(),
             &mut provenance,
             WorkflowAgentAttemptRole::Initial,
             attempt + 1,
             room,
+            run_id,
         )
         .await
         {
@@ -471,7 +464,7 @@ pub async fn execute_step(
                         );
                         let mut final_validation_error: Option<String> = validation_error.clone();
                         let mut repair_valid = false;
-                        if let Err(error) = preflight_workflow_launch(
+                        let repair_preflight = match preflight_workflow_launch(
                             catalog_db,
                             step,
                             resolved_connection.as_ref(),
@@ -480,14 +473,17 @@ pub async fn execute_step(
                         )
                         .await
                         {
-                            tracing::warn!(
-                                "Step '{}': repair preflight failed: {}",
-                                step.name,
-                                error
-                            );
-                            last_error = error.to_string();
-                            continue;
-                        }
+                            Ok(resolution) => resolution,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "Step '{}': repair preflight failed: {}",
+                                    step.name,
+                                    error
+                                );
+                                last_error = error.to_string();
+                                continue;
+                            }
+                        };
                         let repair_res = run_agent_with_timeout(
                             step,
                             project_path,
@@ -502,11 +498,14 @@ pub async fn execute_step(
                             None,
                             activity,
                             external_http.as_ref(),
-                            model_override.as_deref(),
+                            repair_preflight.requested_model.as_deref(),
+                            repair_preflight.effective_model.as_deref(),
+                            repair_preflight.warning.as_ref(),
                             &mut provenance,
                             WorkflowAgentAttemptRole::Repair,
                             attempt + 1,
                             room,
+                            run_id,
                         )
                         .await;
                         if let Err(ref e) = repair_res {
@@ -574,7 +573,7 @@ pub async fn execute_step(
                             );
                             let escalated = escalation_step(step);
                             let escalated_model = step_model_override(&escalated, None);
-                            if let Err(error) = preflight_workflow_launch(
+                            let escalation_preflight = match preflight_workflow_launch(
                                 catalog_db,
                                 &escalated,
                                 None,
@@ -583,14 +582,17 @@ pub async fn execute_step(
                             )
                             .await
                             {
-                                tracing::warn!(
-                                    target: "kronn::ollama::escalation",
-                                    step = %step.name,
-                                    error = %error,
-                                    "escalation catalog preflight refused dispatch"
-                                );
-                                continue;
-                            }
+                                Ok(resolution) => resolution,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: "kronn::ollama::escalation",
+                                        step = %step.name,
+                                        error = %error,
+                                        "escalation catalog preflight refused dispatch"
+                                    );
+                                    continue;
+                                }
+                            };
                             let esc_res = run_agent_with_timeout(
                                 &escalated,
                                 project_path,
@@ -605,11 +607,14 @@ pub async fn execute_step(
                                 None,
                                 activity,
                                 None,
-                                escalated_model.as_deref(),
+                                escalation_preflight.requested_model.as_deref(),
+                                escalation_preflight.effective_model.as_deref(),
+                                escalation_preflight.warning.as_ref(),
                                 &mut provenance,
                                 WorkflowAgentAttemptRole::Escalation,
                                 attempt + 1,
                                 room,
+                                run_id,
                             )
                             .await;
                             if let Err(ref e) = esc_res {
@@ -719,6 +724,7 @@ pub async fn execute_step(
                         catalog_db,
                         &mut provenance,
                         attempt + 1,
+                        run_id,
                     ).await {
                         Ok((converged, debate_tokens, debate_tool_calls, selected_attempt)) => {
                             total_tokens = add_tokens(total_tokens, debate_tokens);
@@ -1045,9 +1051,22 @@ async fn preflight_workflow_launch(
     connection: Option<&ExternalApiConnection>,
     effective_model: Option<&str>,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
-) -> Result<()> {
+) -> Result<CatalogPreflightResolution> {
     let Some(database) = catalog_db else {
-        return Ok(());
+        let model = runner::effective_model_flag(
+            effective_model,
+            &step.agent,
+            step.agent_settings
+                .as_ref()
+                .and_then(|settings| settings.tier)
+                .unwrap_or_default(),
+            model_tiers,
+        );
+        return Ok(CatalogPreflightResolution {
+            requested_model: model.clone(),
+            effective_model: model,
+            warning: None,
+        });
     };
     let runtime_target_id = connection
         .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
@@ -1056,7 +1075,7 @@ async fn preflight_workflow_launch(
         .as_ref()
         .and_then(|settings| settings.tier)
         .unwrap_or_default();
-    if let Some(failure) = crate::core::model_catalog::preflight_check(
+    crate::core::model_catalog::preflight_resolve(
         database,
         runtime_target_id.as_deref(),
         step.agent.clone(),
@@ -1065,13 +1084,12 @@ async fn preflight_workflow_launch(
         model_tiers,
     )
     .await
-    {
-        anyhow::bail!(
+    .map_err(|failure| {
+        anyhow::anyhow!(
             "model_catalog_preflight_failed:{}",
             serde_json::to_string(&failure).unwrap_or_default()
-        );
-    }
-    Ok(())
+        )
+    })
 }
 
 /// Run an agent with optional stall timeout.
@@ -1094,11 +1112,15 @@ async fn run_agent_with_timeout(
     progress_tx: Option<&ProgressSender>,
     activity: Option<&AgentActivitySink>,
     external_http: Option<&runner::ExternalHttpRuntime>,
+    requested_model: Option<&str>,
     effective_model: Option<&str>,
+    preflight_warning: Option<&CatalogPreflightWarning>,
     provenance: &mut WorkflowAgentProvenance,
     role: WorkflowAgentAttemptRole,
     retry: u32,
     room: Option<&runner::WorkflowStepBridgeContext>,
+    // See `execute_step`'s `run_id` doc — forwarded unchanged.
+    run_id: Option<&str>,
 ) -> Result<AgentOutput> {
     let started_at = chrono::Utc::now();
     let started = Instant::now();
@@ -1140,6 +1162,10 @@ async fn run_agent_with_timeout(
             // value for the initial HTTP request too instead of the discussion
             // Settings budget or a transport-only constant.
             http_request_timeout: Some(stall_timeout),
+            // KT-932 — the same delay, but measured against the model's real
+            // progress (bytes, ACP frames) and ending with the generation
+            // cancelled on the model server, not just the step abandoned.
+            idle_timeout: Some(stall_timeout),
             ollama_format: ollama_format.as_ref(),
             // Explicit per-step model (from the wizard's model picker) — now
             // actually consumed at run time, not just stamped for display.
@@ -1157,6 +1183,7 @@ async fn run_agent_with_timeout(
             // shared by every OpenAI-compatible connection, so without this the
             // runner refuses the spawn outright.
             external_http,
+            run_snapshot_id: run_id,
             tools: native_tools,
             // The bridge's discussion is the room the capability names.
             discussion_id: room.map(|room| room.discussion_id.as_str()),
@@ -1185,6 +1212,12 @@ async fn run_agent_with_timeout(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
     let id = provenance.attempts.len() as u32 + 1;
+    let (cost_usd, cost_unknown_reason) = attempt_cost(
+        &step.agent,
+        &runtime.observed_models,
+        runtime.resolved_model.as_deref().or(requested_model),
+        &result,
+    );
     provenance.attempts.push(WorkflowAgentAttempt {
         id,
         role,
@@ -1199,11 +1232,9 @@ async fn run_agent_with_timeout(
             .agent_settings
             .as_ref()
             .and_then(|settings| settings.connection_id.clone()),
-        requested_model: step
-            .agent_settings
-            .as_ref()
-            .and_then(|settings| settings.model.clone()),
+        requested_model: requested_model.map(str::to_string),
         resolved_model: runtime.resolved_model,
+        preflight_warning: preflight_warning.cloned(),
         model_applied: runtime.model_applied,
         observed_models: runtime.observed_models,
         format_fallback: runtime.format_fallback,
@@ -1218,11 +1249,83 @@ async fn run_agent_with_timeout(
             .as_ref()
             .ok()
             .and_then(|output| output.prompt_cache.cache_write_prompt_tokens),
+        session_id: runtime.session_id,
+        cost_usd,
+        cost_unknown_reason,
     });
     result.map(|mut output: AgentOutput| {
         output.attempt_id = id;
         output
     })
+}
+
+/// What one finished attempt cost, or why that is unknown — priced exactly like
+/// a discussion reply (`core::pricing::price_reply`, KT-894): the agent's own
+/// figure when it reports one, else the detailed counters at the rates of the
+/// model that served it. Unknown is `None` plus a reason, never `0.0`.
+///
+/// The serving model is the one the provider reported when it reported exactly
+/// one; with none reported the resolved (else requested) model stands in, as it
+/// does for a reply. Several reported models leave one aggregate usage that no
+/// single rate prices.
+fn attempt_cost(
+    agent: &AgentType,
+    observed_models: &[String],
+    fallback_model: Option<&str>,
+    result: &Result<AgentOutput>,
+) -> (Option<f64>, Option<String>) {
+    let Ok(output) = result else {
+        return (
+            None,
+            Some("the attempt failed before the runtime reported its usage".into()),
+        );
+    };
+    let tokens_used = output.tokens_used.unwrap_or(0);
+    if tokens_used == 0 && output.reported_cost_usd.is_none() {
+        return (
+            None,
+            Some("the runtime reported no usage for this attempt".into()),
+        );
+    }
+    let model =
+        match observed_models {
+            [] => fallback_model,
+            [only] => Some(only.as_str()),
+            _ => return (
+                None,
+                Some(
+                    "several models served the attempt, so its aggregate usage cannot be priced"
+                        .into(),
+                ),
+            ),
+        };
+    let agent_label = serde_json::to_string(agent)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    let counters = output.reported_usage.and_then(|usage| {
+        crate::core::pricing::TokenCounters::from_agent_report(
+            &agent_label,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.prompt_cache.cached_prompt_tokens,
+            usage.prompt_cache.cache_write_prompt_tokens,
+        )
+    });
+    let priced = crate::core::pricing::price_reply(
+        &agent_label,
+        model,
+        tokens_used,
+        output.reported_cost_usd,
+        counters,
+    );
+    let reason = match priced.cost_usd {
+        Some(_) => None,
+        None => priced
+            .cost_unknown
+            .map(|reason| reason.reason().to_string()),
+    };
+    (priced.cost_usd, reason)
 }
 
 /// 2026-06-10 — format a useful error when an agent process fails with an
@@ -1265,9 +1368,12 @@ async fn drive_agent_to_output(
     step_name: &str,
 ) -> Result<AgentOutput> {
     let mut output = String::new();
+    let mut text_blocks = runner::TextBlockJoiner::default();
     let is_stream_json = process.output_mode() == OutputMode::StreamJson;
     let mut stream_json_tokens: u64 = 0;
     let mut stream_json_cache = runner::PromptCacheUsage::default();
+    let mut stream_json_usage: Option<runner::ReportedUsage> = None;
+    let mut stream_json_cost: Option<f64> = None;
     let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
     // Tool-call accumulator (see run_agent_with_timeout's doc): Claude Code's
     // stream-json emits tool input as partial JSON deltas; we buffer them and
@@ -1284,6 +1390,7 @@ async fn drive_agent_to_output(
                 if is_stream_json {
                     match runner::parse_claude_stream_line(&line) {
                         StreamJsonEvent::Text(text) => {
+                            let text = text_blocks.join(text);
                             output.push_str(&text);
                             if let Some(tx) = progress_tx {
                                 let _ = tx.send(text).await;
@@ -1292,11 +1399,19 @@ async fn drive_agent_to_output(
                         StreamJsonEvent::Usage {
                             input_tokens,
                             output_tokens,
+                            cost_usd,
                             prompt_cache,
-                            ..
                         } => {
                             stream_json_tokens = input_tokens + output_tokens;
                             stream_json_cache = prompt_cache;
+                            stream_json_usage = Some(runner::ReportedUsage {
+                                input_tokens,
+                                output_tokens,
+                                prompt_cache,
+                            });
+                            if let Some(cost) = cost_usd {
+                                stream_json_cost = Some(cost);
+                            }
                         }
                         StreamJsonEvent::TerminalError(failure) => {
                             stream_json_tokens = stream_json_tokens
@@ -1319,6 +1434,7 @@ async fn drive_agent_to_output(
                             current_tool_input.push_str(&partial);
                         }
                         StreamJsonEvent::ToolEnd => {
+                            text_blocks.block_ended();
                             // Closes the `🔧 ToolName` line streamed at
                             // ToolStart with the tool's most informative
                             // input field (cf. format_tool_input_suffix).
@@ -1431,6 +1547,11 @@ async fn drive_agent_to_output(
     } else {
         process.reported_prompt_cache()
     };
+    let reported_usage = if stream_json_tokens > 0 {
+        stream_json_usage
+    } else {
+        process.reported_usage_counters()
+    };
     let tokens_used = if stream_json_tokens > 0 {
         Some(stream_json_tokens)
     } else if let Some(reported) = process.reported_token_usage() {
@@ -1457,6 +1578,8 @@ async fn drive_agent_to_output(
         text: output,
         tokens_used,
         prompt_cache,
+        reported_usage,
+        reported_cost_usd: stream_json_cost,
         native_tool_calls,
         runtime_notices: stderr_lines
             .into_iter()
@@ -1532,6 +1655,8 @@ async fn run_multi_agent_debate(
     catalog_db: Option<&crate::db::Database>,
     provenance: &mut WorkflowAgentProvenance,
     retry: u32,
+    // See `execute_step`'s `run_id` doc — forwarded unchanged.
+    run_id: Option<&str>,
 ) -> Result<(String, Option<u64>, Vec<NativeToolCallLog>, Option<u32>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
@@ -1599,7 +1724,7 @@ async fn run_multi_agent_debate(
         let reviewer_connection = reviewer_shares_the_step_connection
             .then_some(author_connection)
             .flatten();
-        preflight_workflow_launch(
+        let reviewer_preflight = preflight_workflow_launch(
             catalog_db,
             &reviewer_step,
             reviewer_connection,
@@ -1626,11 +1751,14 @@ async fn run_multi_agent_debate(
             reviewer_shares_the_step_connection
                 .then_some(external_http)
                 .flatten(),
-            reviewer_model.as_deref(),
+            reviewer_preflight.requested_model.as_deref(),
+            reviewer_preflight.effective_model.as_deref(),
+            reviewer_preflight.warning.as_ref(),
             provenance,
             WorkflowAgentAttemptRole::Review,
             retry,
             None,
+            run_id,
         )
         .await?;
         tokens = add_tokens(tokens, rev.tokens_used);
@@ -1668,7 +1796,7 @@ async fn run_multi_agent_debate(
              You are the PLAN AUTHOR ({author:?}). Address the reviewer's critique above: revise your plan/output accordingly. Re-emit your COMPLETE updated output in the SAME format you used originally. If you have addressed everything and now agree the result is ready, additionally end with a line containing exactly [CONSENSUS: APPROVED].{addendum}",
             transcript = transcript, author = step.agent, addendum = envelope_addendum
         );
-        preflight_workflow_launch(
+        let author_preflight = preflight_workflow_launch(
             catalog_db,
             &author_step,
             author_connection,
@@ -1690,11 +1818,14 @@ async fn run_multi_agent_debate(
             progress_tx,
             activity,
             external_http,
-            author_model,
+            author_preflight.requested_model.as_deref(),
+            author_preflight.effective_model.as_deref(),
+            author_preflight.warning.as_ref(),
             provenance,
             WorkflowAgentAttemptRole::Author,
             retry,
             None,
+            run_id,
         )
         .await?;
         tokens = add_tokens(tokens, auth.tokens_used);
@@ -2156,11 +2287,9 @@ mod tests {
     // ── build_step_prompt — 0.8.3 (TD-265) ──────────────────────────────
     //
     // The prompt-assembly path was extracted from execute_step so we can
-    // unit-test the behavior independently from the agent spawn. These
-    // tests lock in the wiring between extra_context (linked_repos +
-    // universe block injected by the runner) and the final prompt the
-    // agent sees. A regression here would silently drop the cross-repo
-    // evidence the entire 0.8.3 release is built around.
+    // unit-test the behavior independently from the agent spawn. KT-926: the
+    // step prompt is the rendered template plus the addenda below and nothing
+    // about the user's other Kronn projects.
 
     #[test]
     fn a_reviewer_on_the_same_agent_speaks_to_the_same_endpoint() {
@@ -2258,16 +2387,15 @@ mod tests {
     }
 
     #[test]
-    fn build_step_prompt_returns_rendered_template_when_extra_context_is_empty() {
-        // No project = no companion-repo context. The prompt is just
-        // the rendered template; callers must not see any synthetic
-        // "## Linked repositories" header injected.
+    fn build_step_prompt_returns_the_rendered_template_and_nothing_else() {
+        // A free-text step is just its rendered template: no synthetic
+        // "## Linked repositories" / "## Other Kronn projects" header.
         let step = make_step("Hello world");
         let ctx = TemplateContext::new();
-        let prompt = build_step_prompt(&step, &ctx, "").expect("must render");
+        let prompt = build_step_prompt(&step, &ctx).expect("must render");
         assert_eq!(
             prompt, "Hello world",
-            "empty extra_context must not leak any header into the prompt"
+            "the prompt must not carry anything the template did not say"
         );
     }
 
@@ -2277,7 +2405,7 @@ mod tests {
         let mut ctx = TemplateContext::new();
         ctx.set_issue("Correct title", "Body", "7", "https://example/7", &[]);
 
-        let error = build_step_prompt(&step, &ctx, "")
+        let error = build_step_prompt(&step, &ctx)
             .expect_err("strict runtime rendering must stop before agent startup");
 
         assert!(error.contains("issue.titel"));
@@ -2285,60 +2413,26 @@ mod tests {
     }
 
     #[test]
-    fn build_step_prompt_appends_extra_context_after_render() {
-        // The runner pre-computes `## Linked repositories ...` + the
-        // `## Other Kronn projects ...` block ONCE and passes them as
-        // extra_context. The helper appends them VERBATIM after the
-        // template render — that's the entire wiring the cross-repo
-        // evidence pattern depends on.
-        let step = make_step("Do the thing.");
-        let ctx = TemplateContext::new();
-        let extra = "\n\n## Linked repositories (companion repos)\n- **front_africanews** — `/r/front_africanews`\n";
-        let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
-        assert!(
-            prompt.starts_with("Do the thing."),
-            "rendered template must lead the prompt"
-        );
-        assert!(
-            prompt.contains("## Linked repositories (companion repos)"),
-            "extra_context header must be present in final prompt — wiring regression"
-        );
-        assert!(
-            prompt.contains("front_africanews"),
-            "concrete companion entries must reach the prompt"
-        );
-        // Order matters: extra_context must come AFTER the rendered
-        // template (so the trailing addenda below — output_format /
-        // triage — anchor the END of the prompt).
-        let user_idx = prompt.find("Do the thing.").unwrap();
-        let extra_idx = prompt.find("## Linked repositories").unwrap();
-        assert!(
-            user_idx < extra_idx,
-            "extra_context must be appended AFTER the rendered template, not prepended"
-        );
-    }
-
-    #[test]
     fn build_step_prompt_keeps_addenda_anchored_at_the_end() {
         // When the step has a TypedSchema output_format AND a triage
-        // description, both addenda must trail the prompt — even when
-        // extra_context is also present. LLMs follow trailing
-        // instructions more reliably than leading ones, so the order
-        // is load-bearing: template → extra_context → output_format
-        // addendum → triage addendum.
+        // description, both addenda must trail the prompt. LLMs follow
+        // trailing instructions more reliably than leading ones, so the order
+        // is load-bearing: template → output_format addendum → triage
+        // addendum.
         let mut step = make_step("Triage this ticket");
         step.description = Some("[TRIAGE] feasibility audit".into());
         step.output_format = crate::workflows::triage::triage_output_format();
         let ctx = TemplateContext::new();
-        let extra = "\n\n## Linked repositories\n- ref\n";
-        let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
+        let prompt = build_step_prompt(&step, &ctx).expect("must render");
         let template_idx = prompt.find("Triage this ticket").unwrap();
-        let extra_idx = prompt.find("## Linked repositories").unwrap();
         let triage_idx = prompt
             .find("TRIAGE MODE")
             .expect("triage addendum must be appended");
-        assert!(template_idx < extra_idx && extra_idx < triage_idx,
-            "order must be: template → extra_context → triage addendum; got idx {template_idx}/{extra_idx}/{triage_idx}");
+        assert_eq!(template_idx, 0, "the rendered template leads the prompt");
+        assert!(
+            template_idx < triage_idx,
+            "order must be: template → triage addendum; got idx {template_idx}/{triage_idx}"
+        );
     }
 
     // ── fail_fast_on_unresolved ──────────────────────────────────────────
@@ -2878,6 +2972,10 @@ mod drive_agent_to_output_tests {
 mod provenance_tests;
 
 #[cfg(test)]
+#[path = "steps_attempt_session_test.rs"]
+mod attempt_session_tests;
+
+#[cfg(test)]
 mod http_native_tool_step_tests {
     use super::*;
     use crate::agents::tools::{ToolCall, ToolExecutor, ToolOutcome};
@@ -2979,6 +3077,8 @@ mod http_native_tool_step_tests {
                 &[crate::db::model_catalog::DiscoveredModel {
                     model_id: model.clone(),
                     display_name: model,
+                    resolved_model: None,
+                    description: None,
                     capabilities,
                     reasoning_modes: Vec::new(),
                     default_reasoning_mode: None,
@@ -3026,7 +3126,6 @@ mod http_native_tool_step_tests {
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3035,6 +3134,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3083,7 +3183,6 @@ mod http_native_tool_step_tests {
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3092,6 +3191,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3108,7 +3208,10 @@ mod http_native_tool_step_tests {
             provenance.attempts[0].resolved_model.as_deref(),
             Some("model-b")
         );
-        assert!(provenance.attempts[0].requested_model.is_none());
+        assert_eq!(
+            provenance.attempts[0].requested_model.as_deref(),
+            Some("model-b")
+        );
         assert!(
             provenance.attempts[0].observed_models.is_empty(),
             "provider did not report a model"
@@ -3117,6 +3220,122 @@ mod http_native_tool_step_tests {
         let requests = provider_b.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert!(String::from_utf8_lossy(&requests[0].body).contains("\"model\":\"model-b\""));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disappeared_model_dispatches_same_target_replacement_and_records_both_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = dir.path().join("argv.txt");
+        let fixture_body = [
+            format!(
+                "cat >/dev/null\nprintf '%s\\n' \"$*\" > '{}'\n",
+                argv.display()
+            ),
+            r#"
+printf '%s\n' '{"type":"assistant","message":{"model":"provider/canonical","content":[]}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"replacement used"}}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":2}}'
+"#
+            .to_owned(),
+        ]
+        .concat();
+        let fixture = crate::acp::test_support::write_fixture_script(dir.path(), &fixture_body);
+        let project = dir.path().to_string_lossy().into_owned();
+        let work_dir = runner::resolve_agent_work_dir(Some(&project), &project).unwrap();
+        let _route = runner::test_acp_routes::route(
+            &work_dir,
+            Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                fixture.to_string_lossy(),
+                Some("current-alias".into()),
+                false,
+            )),
+        );
+
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
+        db.with_conn(move |conn| {
+            let retired = crate::db::model_catalog::DiscoveredModel {
+                model_id: "retired-alias".into(),
+                display_name: "Retired alias".into(),
+                resolved_model: Some("provider/canonical".into()),
+                description: None,
+                capabilities: vec!["chat".into()],
+                reasoning_modes: Vec::new(),
+                default_reasoning_mode: None,
+            };
+            let current = crate::db::model_catalog::DiscoveredModel {
+                model_id: "current-alias".into(),
+                display_name: "Current alias".into(),
+                resolved_model: Some("provider/canonical".into()),
+                description: None,
+                capabilities: vec!["chat".into()],
+                reasoning_modes: Vec::new(),
+                default_reasoning_mode: None,
+            };
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[retired, current.clone()],
+            )?;
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[current],
+            )
+        })
+        .await
+        .unwrap();
+        let step = WorkflowStep {
+            name: "fallback".into(),
+            step_type: StepType::Agent,
+            agent: AgentType::ClaudeCode,
+            prompt_template: "Use the selected model".into(),
+            agent_settings: Some(AgentSettings {
+                model: Some("retired-alias".into()),
+                tier: Some(ModelTier::Reasoning),
+                reasoning_effort: None,
+                max_tokens: None,
+                connection_id: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let outcome = execute_step(
+            &step,
+            &project,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&db),
+            None,
+            Some("test-run"),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("replacement used"));
+        let attempt = &outcome.result.agent_provenance.as_ref().unwrap().attempts[0];
+        assert_eq!(attempt.requested_model.as_deref(), Some("retired-alias"));
+        assert_eq!(attempt.resolved_model.as_deref(), Some("current-alias"));
+        let warning = attempt
+            .preflight_warning
+            .as_ref()
+            .expect("the automatic replacement must be visible in provenance");
+        assert_eq!(warning.requested_model, "retired-alias");
+        assert_eq!(warning.effective_model, "current-alias");
+        assert_eq!(warning.reason, ModelUnavailableReason::Disappeared);
+        let args = std::fs::read_to_string(argv).unwrap();
+        assert!(args.contains("--model current-alias"), "argv: {args}");
+        assert!(!args.contains("retired-alias"), "argv: {args}");
     }
 
     #[tokio::test]
@@ -3137,7 +3356,6 @@ mod http_native_tool_step_tests {
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3146,6 +3364,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3189,7 +3408,6 @@ mod http_native_tool_step_tests {
             &empty_tokens(),
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3198,6 +3416,7 @@ mod http_native_tool_step_tests {
             None,
             Some(&db),
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3267,7 +3486,6 @@ mod http_native_tool_step_tests {
             &tokens,
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3279,6 +3497,7 @@ mod http_native_tool_step_tests {
             Some(tools),
             None,
             None,
+            Some("test-run"),
         )
         .await;
 
@@ -3361,7 +3580,6 @@ mod http_native_tool_step_tests {
             &tokens,
             false,
             &TemplateContext::new(),
-            "",
             None,
             None,
             None,
@@ -3370,6 +3588,7 @@ mod http_native_tool_step_tests {
             Some(tools),
             None,
             None,
+            Some("test-run"),
         )
         .await;
         match previous_host {

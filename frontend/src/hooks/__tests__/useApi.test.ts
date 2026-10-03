@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { useApi } from '../useApi';
+import { reportBackendRecovered } from '../../lib/backendReachability';
 
 describe('useApi', () => {
   it('fetches data on mount', async () => {
@@ -143,5 +144,30 @@ describe('useApi', () => {
 
     // Should only have the second (latest) result
     expect(result.current.data).toBe('second');
+  });
+
+  it('retries a load that failed during a backend restart once it answers', async () => {
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(['project']);
+    const { result } = renderHook(() => useApi(fetcher, []));
+    await waitFor(() => expect(result.current.error).toBe('Failed to fetch'));
+
+    act(() => reportBackendRecovered());
+
+    await waitFor(() => expect(result.current.data).toEqual(['project']));
+    expect(result.current.error).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refetch a load that succeeded when the backend recovers', async () => {
+    const fetcher = vi.fn().mockResolvedValue(['project']);
+    const { result } = renderHook(() => useApi(fetcher, []));
+    await waitFor(() => expect(result.current.hasLoaded).toBe(true));
+
+    act(() => reportBackendRecovered());
+
+    await act(async () => {});
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 });

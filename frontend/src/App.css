@@ -1,4 +1,4 @@
-/* App — root-level screens (loading, API error) */
+/* App — root-level screens (loading, slow start) */
 
 .app-fullscreen {
   display: flex;
@@ -9,32 +9,7 @@
   gap: 16px;
 }
 
-/* ── API error screen ────────────────────────────────── */
-.app-error-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: rgba(var(--kr-error-rgb), 0.1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 24px;
-}
-
-.app-error-title {
-  color: var(--kr-error);
-  font-size: 15px;
-  font-weight: 600;
-  font-family: var(--kr-font-mono);
-}
-
-.app-error-desc {
-  color: var(--kr-text-muted);
-  font-size: var(--kr-fs-base);
-  text-align: center;
-  max-width: 320px;
-}
-
+/* ── Retry under a slow start ───────────────────────── */
 .app-retry-btn {
   margin-top: 8px;
   padding: 8px 20px;
@@ -69,6 +44,13 @@
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-md);
   font-family: var(--kr-font-mono);
+}
+
+.app-loading-note {
+  max-width: 360px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-base);
+  text-align: center;
 }
 
 /* ── Auto-update banner (UpdateBanner.tsx) ──────────────────────────
@@ -127,9 +109,9 @@
 }
 
 /* ── Backend health indicator (BackendStatus.tsx) ────────────────────
- * Hidden while the backend answers /api/health. Surfaces as a red
- * pill below the UpdateBanner area when /api/health fails — zero
- * noise on the happy path. */
+ * Hidden while the backend answers /api/health. A restart is the usual
+ * reason it stops answering, so the pill reads as "reconnecting", not as a
+ * failure. */
 .kronn-backend-status {
   position: fixed;
   top: 48px; /* sits below the UpdateBanner pill */
@@ -142,19 +124,24 @@
   border-radius: 999px;
   font-size: var(--kr-fs-xs);
   font-weight: 500;
-  background: rgba(var(--kr-error-rgb), 0.12);
-  color: var(--kr-error);
-  border: 1px solid rgba(var(--kr-error-rgb), 0.30);
+  background: rgba(var(--kr-warning-rgb), 0.12);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.30);
   box-shadow: var(--kr-shadow-sm);
   backdrop-filter: blur(4px);
 }
 
-.kronn-backend-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--kr-error);
-  animation: kronn-backend-pulse 1.4s ease-in-out infinite;
+.kronn-backend-status-spinner {
+  flex-shrink: 0;
+  animation: kronn-backend-spin 1s linear infinite;
+}
+
+@keyframes kronn-backend-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kronn-backend-status-spinner { animation: none; }
 }
 
 .kronn-backend-status-text {
@@ -162,7 +149,15 @@
   white-space: nowrap;
 }
 
-@keyframes kronn-backend-pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.4; }
+
+/* LoadingState inside the page area, after start-up. */
+.kronn-loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 40vh;
+  padding: var(--kr-sp-6);
+  text-align: center;
 }
