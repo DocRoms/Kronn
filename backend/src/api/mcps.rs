@@ -455,7 +455,13 @@ async fn probe_cli(server: &McpServer, roots: &[PathBuf], required: bool) -> Mcp
     if result.code == ProbeDiagnosticCode::Ok {
         passed_probe("cli", "Authenticated CLI", required, &result.detail)
     } else {
-        failed_probe("cli", "Authenticated CLI", required, result.code, &result.detail)
+        failed_probe(
+            "cli",
+            "Authenticated CLI",
+            required,
+            result.code,
+            &result.detail,
+        )
     }
 }
 
@@ -650,7 +656,6 @@ async fn probe_mcp_streamable(url: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 /// POST /api/mcps/configs — create a new MCP config
 /// server_id can be an existing DB server ID or a registry ID (auto-creates server)
@@ -1673,7 +1678,10 @@ pub async fn refresh(
                     .into_iter()
                     .filter(|project| {
                         matches!(
-                            project.mcp_sync_report.as_ref().map(|report| &report.status),
+                            project
+                                .mcp_sync_report
+                                .as_ref()
+                                .map(|report| &report.status),
                             Some(ProjectMcpSyncStatus::Written)
                         )
                     })
@@ -1736,7 +1744,9 @@ const TEST_ALL_CONCURRENCY: usize = 4;
 /// POST /api/mcps/test-all — probe every visible config, per access, with a
 /// bounded concurrency. Persists the same way a single `probe_config` call
 /// does, so the list view reflects this run immediately afterwards.
-pub async fn test_all_configs(State(state): State<AppState>) -> Json<ApiResponse<McpTestAllResponse>> {
+pub async fn test_all_configs(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<McpTestAllResponse>> {
     let secret = match state.config.read().await.encryption_secret.clone() {
         Some(secret) => secret,
         None => return Json(ApiResponse::err("No encryption secret configured")),
@@ -3008,10 +3018,7 @@ mod tests {
                 .expect("seed config");
         }
 
-        let deleted = database
-            .with_conn(dedup_configs)
-            .await
-            .expect("dedup");
+        let deleted = database.with_conn(dedup_configs).await.expect("dedup");
         assert_eq!(deleted, 2, "two of the three identical configs must go");
 
         let remaining = database

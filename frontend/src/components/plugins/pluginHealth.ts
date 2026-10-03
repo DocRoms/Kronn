@@ -93,6 +93,13 @@ export function visibleToPluginProject(config: McpConfigDisplay, projectId: stri
   return config.is_global || config.project_ids.includes(projectId);
 }
 
+/** Reaches the user's local CLIs: synced to their host config, or a CLI
+ *  plugin itself. Shared by the "Local sync" filter and the project summary
+ *  so the two can never count differently. */
+export function isAvailableLocally(config: McpConfigDisplay): boolean {
+  return config.host_sync !== 'None' || config.interfaces.includes('cli');
+}
+
 export function latestPluginTest(config: McpConfigDisplay): string | null {
   return config.last_probes.reduce<string | null>((latest, probe) => (
     !latest || probe.tested_at > latest ? probe.tested_at : latest

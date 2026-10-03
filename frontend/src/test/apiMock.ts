@@ -215,6 +215,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         skills_available: [],
         resources: [],
       }),
+      usedSkills: resolve([]),
       linkedReposCandidates: resolve([]),
       setLinkedRepos: resolve(true),
       dockerStatus: resolve({

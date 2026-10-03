@@ -1,16 +1,18 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import fr from '../../lib/i18n/locales/fr';
-import { listing, resource, skill } from './repositoryResourceFixtures';
+import { link, listing, resource, skill } from './repositoryResourceFixtures';
 
 // vitest blanks CSS modules (`css: false`), so read the stylesheets as text.
 const stylesheet = (name: string) => readFileSync(join(import.meta.dirname, '..', name), 'utf-8');
 const panelCss = stylesheet('ProjectRepositoryResourcesPanel.css');
 const sheetsCss = stylesheet('RepositoryResourceSheets.css');
+const foldCss = stylesheet('FilterFold.css');
 
 const repositoryResources = vi.hoisted(() => vi.fn());
+const repositoryResourceComparison = vi.hoisted(() => vi.fn());
 const publishRepositoryResource = vi.hoisted(() => vi.fn());
 const importRepositoryResource = vi.hoisted(() => vi.fn());
 const approveRepositoryResource = vi.hoisted(() => vi.fn());
@@ -23,6 +25,7 @@ const quickExecsDelete = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/api', () => ({
   projects: {
     repositoryResources,
+    repositoryResourceComparison,
     publishRepositoryResource,
     importRepositoryResource,
     approveRepositoryResource,
@@ -62,8 +65,10 @@ async function show(data = listing(), props: Partial<Parameters<typeof ProjectRe
 
 describe('ProjectRepositoryResourcesPanel', () => {
   beforeEach(() => {
-    [repositoryResources, publishRepositoryResource, importRepositoryResource, approveRepositoryResource,
-      useNativeSkill, copyNativeSkill, setDefaultSkills, quickExecsList, quickExecsDelete].forEach(mock => mock.mockReset());
+    [repositoryResources, repositoryResourceComparison, publishRepositoryResource, importRepositoryResource,
+      approveRepositoryResource, useNativeSkill, copyNativeSkill, setDefaultSkills, quickExecsList,
+      quickExecsDelete].forEach(mock => mock.mockReset());
+    repositoryResourceComparison.mockResolvedValue({ files: [], file_diffs: [], field_diff: [] });
     publishRepositoryResource.mockResolvedValue({});
     importRepositoryResource.mockResolvedValue({});
     localStorage.removeItem('kronn:projectRepositoryResourcesTab');
@@ -419,17 +424,29 @@ describe('ProjectRepositoryResourcesPanel', () => {
         repository_paths: ['kronn/workflows/nightly.yaml'],
         repository_updated_at: '2026-09-01T10:00:00Z', repository_updated_by: 'Ada',
         kronn_updated_at: '2026-09-02T08:00:00Z',
-        diff: '--- repository\n+++ Kronn\n@@ -1,2 +1,2 @@\n name: nightly\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n',
-        file_diffs: [{ path: 'kronn/workflows/nightly.yaml', diff: '--- repository\n+++ Kronn\n@@ -1,2 +1,2 @@\n name: nightly\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n' }],
-        field_diff: [{ field: 'trigger.schedule', repository: '0 3 * * *', kronn: '0 4 * * *' }],
       })],
+    });
+    const NIGHTLY_DIFF = '--- repository\n+++ Kronn\n@@ -1,2 +1,2 @@\n name: nightly\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n';
+    const nightlyComparison = () => ({
+      files: [{
+        path: 'kronn/workflows/nightly.yaml',
+        repository: 'name: nightly\ncron: 0 3 * * *\n',
+        kronn: 'name: nightly\ncron: 0 4 * * *\n',
+        truncated: false,
+      }],
+      diff: NIGHTLY_DIFF,
+      file_diffs: [{ path: 'kronn/workflows/nightly.yaml', diff: NIGHTLY_DIFF }],
+      field_diff: [{ field: 'trigger.schedule', repository: '0 3 * * *', kronn: '0 4 * * *' }],
     });
 
     async function openCompare(data = conflict()) {
+      repositoryResourceComparison.mockResolvedValue(nightlyComparison());
       await show(data);
       openTab('automation');
       fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
-      return within(await screen.findByRole('dialog'));
+      const dialog = within(await screen.findByRole('dialog'));
+      await waitFor(() => expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument());
+      return dialog;
     }
 
     it('shows both sides, what differs by field, then the text, and closes on Escape', async () => {
@@ -446,6 +463,78 @@ describe('ProjectRepositoryResourcesPanel', () => {
 
       fireEvent.keyDown(document.body, { key: 'Escape' });
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('asks for the differences only when the sheet opens, once, for that resource', async () => {
+      repositoryResourceComparison.mockResolvedValue(nightlyComparison());
+      await show(conflict());
+      openTab('automation');
+      expect(repositoryResourceComparison).not.toHaveBeenCalled();
+
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+      await screen.findByRole('dialog');
+      await waitFor(() => expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument());
+
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(1);
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'workflow', 'wf-1');
+    });
+
+    it('shows a loading state, and holds both "keep" buttons, until the differences arrive', async () => {
+      let resolve: (value: ReturnType<typeof nightlyComparison>) => void = () => {};
+      repositoryResourceComparison.mockReturnValue(new Promise(done => { resolve = done; }));
+      await show(conflict());
+      openTab('automation');
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(screen.getByTestId('repository-compare-loading')).toBeInTheDocument();
+      expect(dialog.getByText(`${R}compare.loading`)).toBeInTheDocument();
+      expect(dialog.queryByText('-cron: 0 3 * * *')).not.toBeInTheDocument();
+      expect(dialog.queryByText(`${R}compare.noDiff`)).not.toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepRepository` })).toBeDisabled();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepKronn` })).toBeDisabled();
+
+      resolve(nightlyComparison());
+      expect(await dialog.findByText('-cron: 0 3 * * *')).toBeInTheDocument();
+      expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepRepository` })).toBeEnabled();
+      expect(dialog.getByRole('button', { name: `${R}compare.keepKronn` })).toBeEnabled();
+    });
+
+    it('says when the differences could not be loaded and tries again on request', async () => {
+      repositoryResourceComparison.mockRejectedValueOnce(new Error('boom'));
+      repositoryResourceComparison.mockResolvedValueOnce(nightlyComparison());
+      await show(conflict());
+      openTab('automation');
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(await dialog.findByRole('alert')).toHaveTextContent(`${R}compare.loadFailed`);
+      expect(dialog.queryByText(`${R}compare.noDiff`)).not.toBeInTheDocument();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}compare.retry` }));
+      expect(await dialog.findByText('-cron: 0 3 * * *')).toBeInTheDocument();
+      expect(dialog.queryByRole('alert')).not.toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks for the content of a row whose two sides agree, and has no diff to offer', async () => {
+      const same = 'name: same\n';
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: 'kronn/prompts/same.md', repository: same, kronn: same, truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
+      await show(listing({ resources: [resource({ id: 'ok', name: 'Same', kind: 'quick_prompt', status: 'up_to_date' })] }));
+      openTab('automation');
+      expect(repositoryResourceComparison).not.toHaveBeenCalled();
+
+      fireEvent.click(rowOf('Same'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(await dialog.findByText(`${R}compare.noDiff`)).toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(1);
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'quick_prompt', 'ok');
     });
 
     it('keeping the repository overwrites Kronn and says so beforehand', async () => {
@@ -1208,8 +1297,296 @@ describe('ProjectRepositoryResourcesPanel', () => {
     });
   });
 
+  describe('the content of a resource in its sheet', () => {
+    const SKILL_FILE = '.agents/skills/block-migration/SKILL.md';
+    const SKILL_TEXT = '---\nname: block-migration\ndescription: Migrate a block.\n---\n\n# Migrate a block\n\nMove the markup first.\n';
+    const installed = () => listing({
+      skills_present: [skill({
+        id: 'block-migration', name: 'Block migration', status: 'up_to_date',
+        repository_paths: [SKILL_FILE], repository_updated_at: '2026-09-01T10:00:00Z',
+      })],
+    });
+    const sameOnBothSides = () => ({
+      files: [{ path: SKILL_FILE, repository: SKILL_TEXT, kronn: SKILL_TEXT, truncated: false }],
+      file_diffs: [],
+      field_diff: [],
+    });
+    const openInstalled = () => (
+      fireEvent.click(within(rowOf('Block migration')).getByRole('button', { name: `${R}action.view` }))
+    );
+
+    it('shows the installed skill itself under its details, read from Kronn since both sides agree', async () => {
+      repositoryResourceComparison.mockResolvedValue(sameOnBothSides());
+      await show(installed());
+
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(await dialog.findByRole('heading', { name: 'Migrate a block' })).toBeInTheDocument();
+      expect(dialog.getByText(SKILL_FILE, { selector: '.rr-diff-path' })).toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toHaveAttribute('aria-pressed', 'true');
+      expect(dialog.getByRole('button', { name: `${R}content.mode.diff` })).toBeDisabled();
+      // The details it already showed are still there, above the content.
+      expect(dialog.getByTestId('fingerprint-repository')).toBeInTheDocument();
+      const details = dialog.getByRole('region', { name: `${R}columns.repository` });
+      const content = dialog.getByTestId('resource-content');
+      expect(details.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'skill', 'block-migration');
+    });
+
+    it('reads a skill as source on request, and keeps the source across the modes', async () => {
+      repositoryResourceComparison.mockResolvedValue(sameOnBothSides());
+      await show(installed());
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+      await dialog.findByTestId('content-rendered');
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}content.source` }));
+      expect(dialog.getByTestId('content-source')).toHaveTextContent('description: Migrate a block.');
+      fireEvent.click(dialog.getByRole('button', { name: `${R}content.mode.repository` }));
+      expect(dialog.getByTestId('content-source')).toHaveTextContent('# Migrate a block');
+    });
+
+    it('loads the content when the sheet opens, once, and never with the listing', async () => {
+      repositoryResourceComparison.mockResolvedValue(sameOnBothSides());
+      await show(installed());
+      expect(repositoryResourceComparison).not.toHaveBeenCalled();
+      expect(JSON.stringify(await repositoryResources.mock.results[0].value)).not.toContain('Move the markup first');
+
+      openInstalled();
+      await screen.findByRole('dialog');
+      await waitFor(() => expect(screen.getByTestId('resource-content')).toBeInTheDocument());
+
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits behind a loading state, then shows the content and the modes', async () => {
+      let resolve: (value: ReturnType<typeof sameOnBothSides>) => void = () => {};
+      repositoryResourceComparison.mockReturnValue(new Promise(done => { resolve = done; }));
+      await show(installed());
+
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(screen.getByTestId('repository-compare-loading')).toBeInTheDocument();
+      expect(dialog.getByText(`${R}compare.loading`)).toBeInTheDocument();
+      expect(dialog.queryByTestId('resource-content')).not.toBeInTheDocument();
+
+      resolve(sameOnBothSides());
+      expect(await dialog.findByTestId('resource-content')).toBeInTheDocument();
+      expect(screen.queryByTestId('repository-compare-loading')).not.toBeInTheDocument();
+    });
+
+    it('says when the content could not be loaded and loads it again on "Try again"', async () => {
+      repositoryResourceComparison.mockRejectedValueOnce(new Error('boom'));
+      repositoryResourceComparison.mockResolvedValueOnce(sameOnBothSides());
+      await show(installed());
+
+      openInstalled();
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(await dialog.findByRole('alert')).toHaveTextContent(`${R}compare.loadFailed`);
+      expect(dialog.queryByTestId('resource-content')).not.toBeInTheDocument();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}compare.retry` }));
+      expect(await dialog.findByRole('heading', { name: 'Migrate a block' })).toBeInTheDocument();
+      expect(dialog.queryByRole('alert')).not.toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenCalledTimes(2);
+    });
+
+    it('opens a conflict on the diff, and the repository side stays one click away', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{
+          path: 'kronn/workflows/nightly.yaml', repository: 'cron: 0 3 * * *\n', kronn: 'cron: 0 4 * * *\n', truncated: false,
+        }],
+        file_diffs: [{ path: 'kronn/workflows/nightly.yaml', diff: '@@ -1 +1 @@\n-cron: 0 3 * * *\n+cron: 0 4 * * *\n' }],
+        field_diff: [],
+      });
+      await show(listing({
+        resources: [resource({ id: 'wf-1', name: 'Nightly', slug: 'nightly', kind: 'workflow', status: 'conflict' })],
+      }));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly'), 'compare'));
+      const dialog = within(await screen.findByRole('dialog'));
+      expect(await dialog.findByText('-cron: 0 3 * * *')).toBeInTheDocument();
+      expect(dialog.getByRole('button', { name: `${R}content.mode.diff` })).toHaveAttribute('aria-pressed', 'true');
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}content.mode.repository` }));
+      expect(dialog.getByTestId('content-source')).toHaveTextContent('cron: 0 3 * * *');
+      expect(dialog.getByRole('button', { name: `${R}compare.keepKronn` })).toBeInTheDocument();
+    });
+
+    it('says which side is newer beside the diff, from the state the listing already carries', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: SKILL_FILE, repository: 'new text\n', kronn: 'old text\n', truncated: false }],
+        file_diffs: [{ path: SKILL_FILE, diff: '@@ -1 +1 @@\n-old text\n+new text\n' }],
+        field_diff: [],
+      });
+      await show(listing({
+        skills_present: [skill({
+          id: 'block-migration', name: 'Block migration', status: 'repository_newer',
+          repository_paths: [SKILL_FILE], repository_updated_at: '2026-09-02T10:00:00Z', kronn_updated_at: '2026-09-01T10:00:00Z',
+        })],
+      }));
+
+      fireEvent.click(rowOf('Block migration'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(await dialog.findByTestId('content-newer')).toHaveTextContent(`${R}content.newer.repository`);
+    });
+
+    it('opens an attached skill that only Kronn holds, with the repository mode off and why', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: '.agents/skills/custom-review/SKILL.md', kronn: '# Review\n', truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
+      await show(listing({
+        skills_present: [skill({ id: 'custom-review', name: 'Review', provenance: 'kronn', status: 'kronn_only' })],
+      }));
+
+      fireEvent.click(rowOf('Review'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      const repository = await dialog.findByRole('button', { name: `${R}content.mode.repository` });
+      expect(repository).toBeDisabled();
+      expect(repository.closest('span')).toHaveAttribute('title', `${R}content.disabled.absent_repository`);
+      expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('asks for the content of a skill found in a repository folder, which Kronn does not hold', async () => {
+      repositoryResourceComparison.mockResolvedValue({
+        files: [{ path: '.claude/skills/lint/SKILL.md', repository: '# Lint\n', truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
+      await show(listing({
+        skills_present: [skill({
+          id: 'repository:lint', name: 'Lint', provenance: 'repository', status: 'native_skill',
+          repository_paths: ['.claude/skills/lint/SKILL.md'],
+        })],
+      }));
+
+      fireEvent.click(rowOf('Lint'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      expect(await dialog.findByRole('button', { name: `${R}content.mode.repository` })).toHaveAttribute('aria-pressed', 'true');
+      expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'skill', 'repository:lint');
+      expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toBeDisabled();
+    });
+
+    describe('a skill the Kronn catalog provides and this project does not have', () => {
+      const CATALOG_TEXT = '---\nname: rust\ndescription: Write idiomatic Rust.\n---\n\n# Idiomatic Rust\n\nPrefer iterators.\n';
+      const fromKronnOnly = (id: string) => ({
+        files: [{ path: `.agents/skills/${id}/SKILL.md`, kronn: CATALOG_TEXT, truncated: false }],
+        file_diffs: [],
+        field_diff: [],
+      });
+      const withCatalogSkills = () => listing({
+        skills_present: [skill({ id: 'kept', name: 'Kept', status: 'up_to_date', repository_paths: ['.agents/skills/kept/SKILL.md'] })],
+        skills_available: [
+          skill({ id: 'rust', name: 'Rust', provenance: 'kronn', status: 'kronn_only', is_builtin: true }),
+          skill({ id: 'custom-review', name: 'House review', provenance: 'kronn', status: 'kronn_only' }),
+        ],
+      });
+
+      it.each([
+        ['a built-in one', 'Rust', 'rust'],
+        ['one written by the user', 'House review', 'custom-review'],
+      ])('opens %s in the sheet: the SKILL.md rendered, Kronn selected, the repository mode off and why', async (_kind, name, id) => {
+        repositoryResourceComparison.mockResolvedValue(fromKronnOnly(id));
+        await show(withCatalogSkills());
+        openCatalog();
+        expect(repositoryResourceComparison).not.toHaveBeenCalled();
+
+        fireEvent.click(rowOf(name));
+        const dialog = within(await screen.findByRole('dialog'));
+
+        expect(await dialog.findByRole('heading', { name: 'Idiomatic Rust' })).toBeInTheDocument();
+        expect(repositoryResourceComparison).toHaveBeenCalledWith('project-1', 'skill', id);
+        const repository = dialog.getByRole('button', { name: `${R}content.mode.repository` });
+        expect(repository).toBeDisabled();
+        expect(repository.closest('span')).toHaveAttribute('title', `${R}content.disabled.absent_repository`);
+        expect(dialog.getByRole('button', { name: `${R}content.mode.kronn` })).toHaveAttribute('aria-pressed', 'true');
+        expect(dialog.getByRole('button', { name: `${R}content.mode.diff` })).toBeDisabled();
+        // Read as source on request, like any skill.
+        fireEvent.click(dialog.getByRole('button', { name: `${R}content.source` }));
+        expect(dialog.getByTestId('content-source')).toHaveTextContent('description: Write idiomatic Rust.');
+      });
+
+      it('opens from the name, the row menu and the row itself, not only from one of them', async () => {
+        repositoryResourceComparison.mockResolvedValue(fromKronnOnly('rust'));
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(within(rowOf('Rust')).getByRole('button', { name: 'Rust' }));
+        expect(await screen.findByRole('dialog')).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+        fireEvent.click(within(rowOf('Rust')).getByRole('button', { name: `${R}moreActions:Rust` }));
+        fireEvent.click(screen.getByRole('menuitem', { name: `${R}action.view` }));
+        expect(await screen.findByRole('dialog')).toBeInTheDocument();
+      });
+
+      it('keeps "Attach to the project" in the sheet and runs it as from the row', async () => {
+        repositoryResourceComparison.mockResolvedValue(fromKronnOnly('rust'));
+        setDefaultSkills.mockResolvedValue(true);
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(rowOf('Rust'));
+        const sheet = within(await screen.findByRole('dialog'));
+        await sheet.findByTestId('resource-content');
+        fireEvent.click(sheet.getByRole('button', { name: `${R}action.attach` }));
+
+        const confirm = within(await screen.findByRole('dialog'));
+        expect(confirm.getByText(`${R}effect.attach:Rust`)).toBeInTheDocument();
+        fireEvent.click(confirm.getByRole('button', { name: `${R}action.attach` }));
+        await waitFor(() => expect(setDefaultSkills).toHaveBeenCalledWith('project-1', ['kept', 'rust']));
+      });
+
+      it('still attaches from the row without opening the sheet', async () => {
+        setDefaultSkills.mockResolvedValue(true);
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(actionIn(rowOf('Rust'), 'attach'));
+
+        expect(await screen.findByText(`${R}effect.attach:Rust`)).toBeInTheDocument();
+        expect(repositoryResourceComparison).not.toHaveBeenCalled();
+      });
+
+      it('says when its content could not be loaded and tries again', async () => {
+        repositoryResourceComparison.mockRejectedValueOnce(new Error('boom'));
+        repositoryResourceComparison.mockResolvedValueOnce(fromKronnOnly('rust'));
+        await show(withCatalogSkills());
+        openCatalog();
+
+        fireEvent.click(rowOf('Rust'));
+        const dialog = within(await screen.findByRole('dialog'));
+        expect(await dialog.findByRole('alert')).toHaveTextContent(`${R}compare.loadFailed`);
+        fireEvent.click(dialog.getByRole('button', { name: `${R}compare.retry` }));
+
+        expect(await dialog.findByRole('heading', { name: 'Idiomatic Rust' })).toBeInTheDocument();
+      });
+    });
+
+    it('puts the mode picker across the full width of the sheet at 400 px, and the sheet full screen', () => {
+      const rules = sheetsCss.slice(sheetsCss.indexOf('@media (max-width: 640px)'));
+      expect(rules).toMatch(/\.rr-modal[^{]*\{[^}]*width: 100%; height: 100%/);
+      expect(rules).toMatch(/\.rr-content-modes \{[^}]*display: grid; grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+      expect(rules).toMatch(/\.rr-content-mode \.rr-chip[^{]*\{[^}]*width: 100%/);
+      expect(rules).toMatch(/\.rr-modal \.rr-chip[^}]*min-height: 44px/);
+    });
+
+    it('lets the pointer reach the reason behind a disabled mode', () => {
+      expect(sheetsCss).toMatch(/\.rr-content-mode \.rr-chip:disabled \{[^}]*pointer-events: none/);
+    });
+  });
+
   describe('fingerprints on the sheets', () => {
     it('shows the eight-character fingerprint of both sides when comparing', async () => {
+      repositoryResourceComparison.mockResolvedValue({ file_diffs: [], field_diff: [] });
       await show(listing({
         resources: [resource({
           id: 'wf-1', name: 'Nightly', slug: 'nightly', kind: 'workflow', status: 'conflict',
@@ -1273,6 +1650,125 @@ describe('ProjectRepositoryResourcesPanel', () => {
     });
   });
 
+  describe('type filter of the Automation sub-tab (KT-904)', () => {
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    const library = listing({
+      resources: [
+        resource({ id: 'k', name: 'Only Kronn', kind: 'quick_prompt', status: 'kronn_only', repository_paths: ['kronn/prompts/only-kronn.md'] }),
+        resource({ id: 'ok', name: 'Same', kind: 'quick_prompt', status: 'up_to_date', repository_paths: ['kronn/prompts/same.md'] }),
+        resource({ id: 'cf', name: 'Two Versions', kind: 'quick_api', status: 'conflict' }),
+        resource({ id: 'repository:quick_exec:r', name: 'Only Repo', kind: 'quick_exec', status: 'repository_only', repository_paths: ['kronn/quick-execs/only-repo.yaml'] }),
+        resource({ id: 'ap', name: 'Needs Approval', kind: 'quick_exec', status: 'approval_required' }),
+        resource({ id: 'rn', name: 'Repo Newer', kind: 'workflow', status: 'repository_newer' }),
+        resource({ id: 'kn', name: 'Kronn Newer', kind: 'workflow', status: 'kronn_newer' }),
+      ],
+    });
+    const typeGroup = () => screen.getByRole('group', { name: `${R}types` });
+    const typeChip = (type: string) => within(typeGroup()).getByRole('button', { name: named(`type.${type}`) });
+    const locationChip = (option: string) => screen.getByRole('button', { name: named(`filter.${option}`) });
+    const count = (chip: HTMLElement) => Number(chip.querySelector('span')?.textContent);
+    const shown = () => ['Only Kronn', 'Same', 'Two Versions', 'Only Repo', 'Needs Approval', 'Repo Newer', 'Kronn Newer']
+      .filter(name => screen.queryByRole('button', { name }));
+
+    it('offers All / QP / QA / QE / Workflow with their counts on the Automation sub-tab only', async () => {
+      await show(library);
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+      openTab('automation');
+
+      const chips = within(typeGroup()).getAllByRole('button');
+      expect(chips.map(chip => chip.dataset.typeFilter)).toEqual(['all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow']);
+      expect(chips.map(count)).toEqual([7, 2, 1, 2, 2]);
+      expect(chips[0]).toHaveAttribute('aria-pressed', 'true');
+      // A short label with the full name on hover, in the same chip as the rest of the tab.
+      expect(chips[1]).toHaveClass('rr-chip');
+      expect(chips[1]).toHaveAttribute('title', `${R}kind.quick_prompt`);
+
+      openTab('artifacts');
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+    });
+
+    it('narrows the list to the chosen type and back', async () => {
+      await show(library);
+      openTab('automation');
+
+      fireEvent.click(typeChip('quick_prompt'));
+      expect(typeChip('quick_prompt')).toHaveAttribute('aria-pressed', 'true');
+      expect(shown()).toEqual(['Only Kronn', 'Same']);
+      expect(document.querySelector('[data-resource-kind="workflow"]')).toBeNull();
+      expect(document.querySelector('[data-resource-kind="quick_prompt"]')).toBeInTheDocument();
+
+      fireEvent.click(typeChip('workflow'));
+      expect(shown()).toEqual(['Repo Newer', 'Kronn Newer']);
+
+      fireEvent.click(typeChip('all'));
+      expect(shown()).toHaveLength(7);
+    });
+
+    it('stacks with the location filter and the search, each chip counting what the others leave', async () => {
+      await show(library);
+      openTab('automation');
+
+      fireEvent.click(typeChip('quick_exec'));
+      expect(shown()).toEqual(['Only Repo', 'Needs Approval']);
+      // Location chips now count within the QE only: two in all, one in the repository only, one in both.
+      expect(['all', 'repository', 'kronn', 'both'].map(option => count(locationChip(option)))).toEqual([2, 1, 0, 1]);
+
+      fireEvent.click(locationChip('repository'));
+      expect(shown()).toEqual(['Only Repo']);
+      // Type chips count within the repository-only rows: one QE, nothing else.
+      expect(['all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow'].map(type => count(typeChip(type)))).toEqual([1, 0, 0, 1, 0]);
+
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'no such thing' } });
+      expect(shown()).toEqual([]);
+      expect(screen.getByText(`${R}emptyFiltered`)).toBeInTheDocument();
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'only-repo' } });
+      expect(shown()).toEqual(['Only Repo']);
+
+      // Lifting the location filter keeps the type and the search in force.
+      fireEvent.click(locationChip('all'));
+      expect(shown()).toEqual(['Only Repo']);
+      fireEvent.click(typeChip('all'));
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: '' } });
+      expect(shown()).toHaveLength(7);
+    });
+
+    it('starts each tab with every type again', async () => {
+      await show(library);
+      openTab('automation');
+      fireEvent.click(typeChip('workflow'));
+      openTab('skills');
+      openTab('automation');
+      expect(typeChip('all')).toHaveAttribute('aria-pressed', 'true');
+      expect(shown()).toHaveLength(7);
+    });
+
+    it('folds the type and location chips behind "Filtres (n)" at 400 px, next to a search that stays', async () => {
+      vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+      await show(library);
+      openTab('automation');
+
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+      expect(screen.queryByRole('group', { name: `${R}filters` })).toBeNull();
+      expect(screen.getByRole('searchbox')).toBeInTheDocument();
+      const fold = screen.getByRole('button', { name: 'collection.filters' });
+      expect(fold).toHaveAttribute('aria-expanded', 'false');
+
+      fireEvent.click(fold);
+      expect(fold).toHaveAttribute('aria-expanded', 'true');
+      fireEvent.click(typeChip('quick_prompt'));
+      fireEvent.click(locationChip('kronn'));
+      expect(shown()).toEqual(['Only Kronn']);
+      expect(screen.getByRole('button', { name: 'collection.filters (2)' })).toBe(fold);
+
+      fireEvent.keyDown(fold, { key: 'Escape' });
+      expect(fold).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('group', { name: `${R}types` })).toBeNull();
+      // Folded, the filters still apply.
+      expect(shown()).toEqual(['Only Kronn']);
+    });
+  });
+
   describe('400 px layout', () => {
     const mobile = (css: string) => css.slice(css.indexOf('@media (max-width: 640px)'));
 
@@ -1299,10 +1795,328 @@ describe('ProjectRepositoryResourcesPanel', () => {
       expect(rules).toMatch(/\.rr-modal \.rr-button[^}]*min-height: 44px/);
     });
 
+    it('folds its filters into a full-width, 44 px button instead of stretching the toolbar', () => {
+      expect(foldCss).toMatch(/\.kr-filter-fold-toggle \{[^}]*width: 100%[^}]*min-height: 44px/);
+      expect(foldCss).toMatch(/\.kr-filter-fold \{[^}]*width: 100%[^}]*min-width: 0/);
+      expect(foldCss).toMatch(/\.kr-filter-fold-label \{[^}]*text-overflow: ellipsis/);
+    });
+
     it('uses design tokens only', () => {
-      for (const css of [panelCss, sheetsCss]) {
+      for (const css of [panelCss, sheetsCss, foldCss]) {
         expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(|var\(--(?!kr-)/);
       }
+    });
+  });
+
+  describe('linked resources', () => {
+    const ghost = { id: 'ghost', name: 'ghost', kind: 'quick_exec' as const };
+    /** Nightly triage uses Review, Fetch, Board and a Quick Exec that no longer exists. */
+    const linked = (status: 'kronn_only' | 'repository_only' = 'kronn_only') => {
+      const idOf = (kind: string, id: string) => (status === 'repository_only' ? `repository:${kind}:${id}` : id);
+      const make = (kind: 'quick_prompt' | 'quick_api' | 'artifact', id: string, name: string) => (
+        resource({ id: idOf(kind, id), name, slug: id, kind, status })
+      );
+      const review = make('quick_prompt', 'review', 'Review');
+      const fetch = make('quick_api', 'fetch', 'Fetch');
+      const board = make('artifact', 'board', 'Board');
+      const nightly = resource({
+        id: idOf('workflow', 'nightly-triage'), name: 'Nightly triage', slug: 'nightly-triage', kind: 'workflow', status,
+        uses: [link(review), link(fetch), link(board), link(ghost, true)],
+      });
+      const usedByNightly = [link(nightly)];
+      return listing({
+        resources: [
+          nightly,
+          { ...review, used_by: usedByNightly },
+          { ...fetch, used_by: usedByNightly },
+          { ...board, used_by: usedByNightly },
+        ],
+      });
+    };
+    const tick = (name: string) => fireEvent.click(screen.getByRole('checkbox', { name: `${R}include:${name}` }));
+    const ticked = (name: string) => expect(screen.getByRole('checkbox', { name: `${R}include:${name}` })).toBeChecked();
+    const badge = (row: HTMLElement, text: string) => within(row).getByText(text).closest('.rr-links-badge');
+
+    it('shows a discreet count of linked items on the row, and warns when a reference leads nowhere', async () => {
+      await show(linked());
+      openTab('automation');
+
+      const nightly = badge(rowOf('Nightly triage'), `${R}links.count.other:4`);
+      expect(nightly).toHaveAttribute('data-missing', 'true');
+      expect(nightly).toHaveAttribute('title', `${R}links.summary:4|0`);
+      const review = badge(rowOf('Review'), `${R}links.count.one`);
+      expect(review).not.toHaveAttribute('data-missing');
+      expect(review).toHaveAttribute('title', `${R}links.summary:0|1`);
+    });
+
+    it('shows no count on a resource nothing is linked to', async () => {
+      await show(listing({ resources: [resource({ id: 'solo', name: 'Solo', kind: 'quick_prompt', status: 'kronn_only' })] }));
+      openTab('automation');
+
+      expect(within(rowOf('Solo')).queryByText(/links\.count/)).not.toBeInTheDocument();
+    });
+
+    it('lists "Uses" and "Used by" in the sheet, opens a linked resource on click and marks a missing one', async () => {
+      await show(linked());
+      openTab('automation');
+
+      fireEvent.click(within(rowOf('Nightly triage')).getByRole('button', { name: 'Nightly triage' }));
+      const sheet = within(await screen.findByTestId('resource-links'));
+      const listOf = (scope: typeof sheet, side: string) => within(
+        scope.getByRole('heading', { name: new RegExp(`${R}links\\.${side}`) }).parentElement as HTMLElement,
+      );
+      const uses = listOf(sheet, 'uses');
+      expect(uses.getAllByRole('listitem')).toHaveLength(4);
+      ['Review', 'Fetch', 'Board'].forEach(name => expect(uses.getByRole('button', { name })).toBeInTheDocument());
+      expect(uses.queryByRole('button', { name: 'ghost' })).not.toBeInTheDocument();
+      expect(uses.getByText('ghost')).toBeInTheDocument();
+      expect(uses.getByText(`${R}links.missing`)).toBeInTheDocument();
+      expect(listOf(sheet, 'usedBy').getByText(`${R}links.none`)).toBeInTheDocument();
+
+      fireEvent.click(uses.getByRole('button', { name: 'Review' }));
+      expect(await screen.findByRole('dialog', { name: 'Review' })).toBeInTheDocument();
+      const reviewUsedBy = listOf(within(screen.getByTestId('resource-links')), 'usedBy');
+
+      fireEvent.click(reviewUsedBy.getByRole('button', { name: 'Nightly triage' }));
+      expect(await screen.findByRole('dialog', { name: 'Nightly triage' })).toBeInTheDocument();
+    });
+
+    it('shows the links while the differences load, and loads those of the resource a link opens', async () => {
+      const review = resource({ id: 'qp-review', name: 'Review', slug: 'review', kind: 'quick_prompt', status: 'conflict' });
+      const nightly = resource({
+        id: 'wf-1', name: 'Nightly triage', slug: 'nightly-triage', kind: 'workflow', status: 'conflict', uses: [link(review)],
+      });
+      let resolveNightly: (value: unknown) => void = () => {};
+      repositoryResourceComparison.mockReturnValueOnce(new Promise(done => { resolveNightly = done; }));
+      repositoryResourceComparison.mockResolvedValueOnce({
+        file_diffs: [], field_diff: [{ field: 'prompt_template', repository: 'old prompt', kronn: 'new prompt' }],
+      });
+      await show(listing({ resources: [nightly, { ...review, used_by: [link(nightly)] }] }));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly triage'), 'compare'));
+      const links = within(await screen.findByTestId('resource-links'));
+      expect(screen.getByTestId('repository-compare-loading')).toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenLastCalledWith('project-1', 'workflow', 'wf-1');
+
+      fireEvent.click(links.getByRole('button', { name: 'Review' }));
+      expect(await screen.findByText('prompt_template')).toBeInTheDocument();
+      expect(repositoryResourceComparison).toHaveBeenLastCalledWith('project-1', 'quick_prompt', 'qp-review');
+
+      // The answer the first sheet was still waiting for must not land on this one.
+      await act(async () => {
+        resolveNightly({ file_diffs: [], field_diff: [{ field: 'trigger.schedule', repository: 'a', kronn: 'b' }] });
+      });
+      expect(screen.queryByText('trigger.schedule')).not.toBeInTheDocument();
+      expect(screen.getByText('prompt_template')).toBeInTheDocument();
+    });
+
+    it('ticks everything a workflow needs when it is ticked, and says how many came along', async () => {
+      await show(linked());
+      openTab('automation');
+
+      tick('Nightly triage');
+
+      expect(screen.getByTestId('link-note')).toHaveTextContent(`${R}links.added.other:3`);
+      ticked('Nightly triage');
+      ticked('Review');
+      ticked('Fetch');
+      expect(screen.getByRole('button', { name: `${R}publishSelected:4` })).toBeInTheDocument();
+      openTab('artifacts');
+      ticked('Board');
+    });
+
+    it('refuses to untick what a ticked workflow still needs and names the workflow', async () => {
+      await show(linked());
+      openTab('automation');
+      tick('Nightly triage');
+
+      tick('Review');
+
+      ticked('Review');
+      expect(screen.getByTestId('link-note')).toHaveAttribute('data-tone', 'warning');
+      expect(screen.getByTestId('link-note')).toHaveTextContent(
+        `${R}links.blocked:Review|${R}links.requiredBy:Nightly triage`,
+      );
+      expect(screen.getByRole('button', { name: `${R}publishSelected:4` })).toBeInTheDocument();
+
+      // Once the workflow is unticked, its dependencies are free again.
+      tick('Nightly triage');
+      tick('Review');
+      expect(screen.getByRole('checkbox', { name: `${R}include:Review` })).not.toBeChecked();
+      expect(screen.getByRole('button', { name: `${R}publishSelected:2` })).toBeInTheDocument();
+    });
+
+    it('writes the ticked group together: the workflow and everything it needs', async () => {
+      await show(linked());
+      openTab('automation');
+      tick('Nightly triage');
+
+      fireEvent.click(screen.getByRole('button', { name: `${R}publishSelected:4` }));
+      const dialog = within(await screen.findByRole('dialog'));
+      fireEvent.click(dialog.getByRole('button', { name: `${R}publishSelected:4` }));
+
+      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(4));
+      const written = publishRepositoryResource.mock.calls.map(([, request]) => `${request.kind}:${request.id}`).sort();
+      expect(written).toEqual(['artifact:board', 'quick_api:fetch', 'quick_prompt:review', 'workflow:nightly-triage']);
+    });
+
+    it('announces the dependencies of a single write and includes them by default', async () => {
+      await show(linked());
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly triage'), 'publish'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      const announced = within(dialog.getByTestId('transfer-linked'));
+      expect(announced.getByText(`${R}links.transfer.introRepository:Nightly triage|3`)).toBeInTheDocument();
+      ['Review', 'Fetch', 'Board'].forEach(name => expect(announced.getByText(name)).toBeInTheDocument());
+      expect(announced.getByRole('checkbox', { name: `${R}links.transfer.include:3` })).toBeChecked();
+      expect(announced.queryByRole('alert')).not.toBeInTheDocument();
+      expect(announced.getByText(`${R}links.transfer.missing:1|ghost`)).toBeInTheDocument();
+      expect(dialog.getByText(`${R}effect.linkedIncluded:3`)).toBeInTheDocument();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}action.publish` }));
+      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(4));
+      const written = publishRepositoryResource.mock.calls.map(([, request]) => request.id);
+      expect(written.at(-1)).toBe('nightly-triage');
+      expect(written.slice(0, 3).sort()).toEqual(['board', 'fetch', 'review']);
+    });
+
+    it('lets a single write continue without them, warning that it will only partly work', async () => {
+      await show(linked());
+      openTab('automation');
+      fireEvent.click(actionIn(rowOf('Nightly triage'), 'publish'));
+      const dialog = within(await screen.findByRole('dialog'));
+
+      fireEvent.click(dialog.getByRole('checkbox', { name: `${R}links.transfer.include:3` }));
+
+      expect(dialog.getByRole('alert')).toHaveTextContent(`${R}links.transfer.partial:Nightly triage`);
+      expect(dialog.queryByText(`${R}effect.linkedIncluded:3`)).not.toBeInTheDocument();
+      fireEvent.click(dialog.getByRole('button', { name: `${R}action.publish` }));
+      await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(1));
+      expect(publishRepositoryResource).toHaveBeenCalledWith('project-1', {
+        kind: 'workflow', id: 'nightly-triage', overwrite_repository_changes: false,
+      });
+    });
+
+    it('announces the dependencies of a single load into Kronn and loads them first by default', async () => {
+      await show(linked('repository_only'));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Nightly triage'), 'import'));
+      const dialog = within(await screen.findByRole('dialog'));
+      const announced = within(dialog.getByTestId('transfer-linked'));
+      expect(announced.getByText(`${R}links.transfer.introKronn:Nightly triage|3`)).toBeInTheDocument();
+      expect(announced.getByRole('checkbox', { name: `${R}links.transfer.include:3` })).toBeChecked();
+
+      fireEvent.click(dialog.getByRole('button', { name: `${R}action.import` }));
+      await waitFor(() => expect(importRepositoryResource).toHaveBeenCalledTimes(4));
+      const loaded = importRepositoryResource.mock.calls.map(([, request]) => request.slug);
+      expect(loaded.at(-1)).toBe('nightly-triage');
+      expect(loaded.slice(0, 3).sort()).toEqual(['board', 'fetch', 'review']);
+      expect(publishRepositoryResource).not.toHaveBeenCalled();
+    });
+
+    it('announces nothing for a resource with no dependencies', async () => {
+      await show(listing({ resources: [resource({ id: 'solo', name: 'Solo', kind: 'quick_prompt', status: 'kronn_only' })] }));
+      openTab('automation');
+
+      fireEvent.click(actionIn(rowOf('Solo'), 'publish'));
+      const dialog = await screen.findByRole('dialog');
+
+      expect(within(dialog).queryByTestId('transfer-linked')).not.toBeInTheDocument();
+    });
+
+    describe('Tout aligner', () => {
+      const late = () => {
+        const child = resource({ id: 'q', name: 'Child prompt', slug: 'child', kind: 'quick_prompt', status: 'kronn_newer' });
+        const parent = resource({ id: 'w', name: 'Parent flow', slug: 'parent', kind: 'workflow', status: 'kronn_newer', uses: [link(child)] });
+        const remote = resource({ id: 'r', name: 'Remote prompt', slug: 'remote', kind: 'quick_prompt', status: 'repository_newer' });
+        return listing({ resources: [parent, { ...child, used_by: [link(parent)] }, remote] });
+      };
+      const openAlign = async (data: ReturnType<typeof listing>) => {
+        await show(data);
+        openTab('automation');
+        fireEvent.click(screen.getByTestId('align-all'));
+        return within(await screen.findByRole('dialog'));
+      };
+      const line = (dialog: ReturnType<typeof within>, name: RegExp) => dialog.getByRole('checkbox', { name });
+
+      it('keeps a line ticked while a ticked line needs it, and says who', async () => {
+        const dialog = await openAlign(late());
+
+        fireEvent.click(line(dialog, /Child prompt/));
+
+        expect(line(dialog, /Child prompt/)).toBeChecked();
+        expect(dialog.getByTestId('align-link-note')).toHaveAttribute('data-tone', 'warning');
+        expect(dialog.getByTestId('align-link-note')).toHaveTextContent(
+          `${R}links.blocked:Child prompt|${R}links.requiredBy:Parent flow`,
+        );
+        expect(dialog.getByRole('button', { name: `${R}align.confirm:3` })).toBeInTheDocument();
+      });
+
+      it('ticks what a line needs when it is ticked back, and moves the whole group', async () => {
+        const dialog = await openAlign(late());
+        fireEvent.click(line(dialog, /Parent flow/));
+        fireEvent.click(line(dialog, /Child prompt/));
+        expect(line(dialog, /Parent flow/)).not.toBeChecked();
+        expect(line(dialog, /Child prompt/)).not.toBeChecked();
+        expect(dialog.getByRole('button', { name: `${R}align.confirm:1` })).toBeInTheDocument();
+
+        fireEvent.click(line(dialog, /Parent flow/));
+
+        expect(line(dialog, /Child prompt/)).toBeChecked();
+        expect(dialog.getByTestId('align-link-note')).toHaveTextContent(`${R}links.added.one`);
+        fireEvent.click(dialog.getByRole('button', { name: `${R}align.confirm:3` }));
+        await waitFor(() => expect(publishRepositoryResource).toHaveBeenCalledTimes(2));
+        expect(importRepositoryResource).toHaveBeenCalledWith('project-1', { kind: 'quick_prompt', slug: 'remote', overwrite_kronn_changes: false });
+        expect(publishRepositoryResource.mock.calls.map(([, request]) => request.id).sort()).toEqual(['q', 'w']);
+      });
+
+      it('unticks two lines that need each other together', async () => {
+        const first = resource({ id: 'a', name: 'Alpha flow', slug: 'alpha', kind: 'workflow', status: 'kronn_newer' });
+        const second = resource({ id: 'b', name: 'Beta flow', slug: 'beta', kind: 'workflow', status: 'kronn_newer' });
+        const dialog = await openAlign(listing({
+          resources: [
+            { ...first, uses: [link(second)], used_by: [link(second)] },
+            { ...second, uses: [link(first)], used_by: [link(first)] },
+          ],
+        }));
+
+        fireEvent.click(line(dialog, /Beta flow/));
+
+        expect(line(dialog, /Alpha flow/)).not.toBeChecked();
+        expect(line(dialog, /Beta flow/)).not.toBeChecked();
+        expect(dialog.getByTestId('align-link-note')).toHaveTextContent(`${R}links.removed.one`);
+
+        fireEvent.click(line(dialog, /Alpha flow/));
+        expect(line(dialog, /Beta flow/)).toBeChecked();
+      });
+    });
+
+    describe('a loop between two resources', () => {
+      it('ticks both when one is ticked and unticks both together', async () => {
+        const first = resource({ id: 'a', name: 'Alpha flow', slug: 'alpha', kind: 'workflow', status: 'kronn_only' });
+        const second = resource({ id: 'b', name: 'Beta flow', slug: 'beta', kind: 'workflow', status: 'kronn_only' });
+        await show(listing({
+          resources: [
+            { ...first, uses: [link(second)], used_by: [link(second)] },
+            { ...second, uses: [link(first)], used_by: [link(first)] },
+          ],
+        }));
+        openTab('automation');
+
+        tick('Alpha flow');
+        ticked('Alpha flow');
+        ticked('Beta flow');
+        expect(screen.getByRole('button', { name: `${R}publishSelected:2` })).toBeInTheDocument();
+
+        tick('Beta flow');
+        expect(screen.getByRole('checkbox', { name: `${R}include:Alpha flow` })).not.toBeChecked();
+        expect(screen.getByRole('checkbox', { name: `${R}include:Beta flow` })).not.toBeChecked();
+        expect(screen.getByTestId('link-note')).toHaveTextContent(`${R}links.removed.one`);
+      });
     });
   });
 });

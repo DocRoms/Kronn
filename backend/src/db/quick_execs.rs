@@ -55,6 +55,16 @@ pub fn list_quick_execs(conn: &Connection) -> Result<Vec<QuickExec>> {
     Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
+/// `list_quick_execs` for one project, in the same order: the rows of the
+/// other projects are neither read nor parsed.
+pub fn list_quick_execs_for_project(conn: &Connection, project_id: &str) -> Result<Vec<QuickExec>> {
+    let sql =
+        format!("SELECT {COLUMNS} FROM quick_execs WHERE project_id = ?1 ORDER BY updated_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![project_id], row_to_quick_exec)?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
 pub fn get_quick_exec(conn: &Connection, id: &str) -> Result<Option<QuickExec>> {
     let sql = format!("SELECT {COLUMNS} FROM quick_execs WHERE id = ?1");
     Ok(conn.query_row(&sql, [id], row_to_quick_exec).ok())

@@ -4,8 +4,7 @@ import type {
   ProjectRepositoryResourceStatus,
   ProjectRepositoryResources,
   ProjectRepositorySkill,
-  RepositoryResourceFieldDiff,
-  RepositoryResourceFileDiff,
+  RepositoryResourceLink,
   RequiredSecretStatus,
 } from '../types/generated';
 import type { ProjectRepositoryResourcesTab } from './projectRepositoryResourcesTab';
@@ -29,6 +28,18 @@ export type PrimaryAction =
   | 'approve'
   | 'attach'
   | 'view';
+
+/** One end of a reference between two resources. `key` is the row key of the
+ *  linked resource; a `missing` link names nothing the project holds, so no
+ *  row answers to its key. */
+export interface RowLink {
+  key: string;
+  kind: ProjectRepositoryResourceKind;
+  id: string;
+  slug?: string;
+  name: string;
+  missing: boolean;
+}
 
 export interface ResourceRow {
   key: string;
@@ -64,14 +75,15 @@ export interface ResourceRow {
   approved: boolean;
   requiredSecrets: RequiredSecretStatus[];
   writePreview: string[];
-  diff?: string;
-  fileDiffs: RepositoryResourceFileDiff[];
-  fieldDiff: RepositoryResourceFieldDiff[];
   repositoryUpdatedAt?: string;
   repositoryUpdatedBy?: string;
   kronnUpdatedAt?: string;
   alignedAt?: string;
   level?: ProjectRepositoryResource['level'];
+  /** What this resource references, missing references included. */
+  uses: RowLink[];
+  /** The project's resources that reference this one. */
+  usedBy: RowLink[];
 }
 
 export interface RepositoryRows {
@@ -89,6 +101,15 @@ export const EXECUTABLE_KINDS: ProjectRepositoryResourceKind[] = [
 ];
 
 export const resourceKey = (kind: ProjectRepositoryResourceKind, id: string) => `${kind}:${id}`;
+
+const rowLink = (link: RepositoryResourceLink): RowLink => ({
+  key: resourceKey(link.kind, link.id),
+  kind: link.kind,
+  id: link.id,
+  slug: link.slug,
+  name: link.name,
+  missing: link.missing,
+});
 
 /** Label of the folder a repository path lives in: `kronn/` or `.claude`… */
 export function originLabel(path: string): string {
@@ -167,9 +188,6 @@ function resourceRow(resource: ProjectRepositoryResource): ResourceRow {
     approved: resource.approved,
     requiredSecrets: resource.required_secrets ?? [],
     writePreview: resource.write_preview ?? [],
-    diff: resource.diff,
-    fileDiffs: resource.file_diffs ?? [],
-    fieldDiff: resource.field_diff ?? [],
     repositoryUpdatedAt: resource.repository_updated_at,
     repositoryUpdatedBy: resource.repository_updated_by,
     kronnUpdatedAt: resource.kronn_updated_at,
@@ -177,6 +195,8 @@ function resourceRow(resource: ProjectRepositoryResource): ResourceRow {
     repositoryFingerprint: resource.repository_fingerprint,
     kronnFingerprint: resource.kronn_fingerprint,
     level: resource.level,
+    uses: (resource.uses ?? []).map(rowLink),
+    usedBy: (resource.used_by ?? []).map(rowLink),
   };
 }
 
@@ -226,9 +246,6 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
     approved: skill.approved,
     requiredSecrets: skill.required_secrets ?? [],
     writePreview: skill.write_preview ?? [],
-    diff: skill.diff,
-    fileDiffs: skill.file_diffs ?? [],
-    fieldDiff: [],
     repositoryUpdatedAt: skill.repository_updated_at,
     repositoryUpdatedBy: skill.repository_updated_by,
     kronnUpdatedAt: skill.kronn_updated_at,
@@ -236,6 +253,8 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
     repositoryFingerprint: skill.repository_fingerprint,
     kronnFingerprint: skill.kronn_fingerprint,
     level: 'usable_without_kronn',
+    uses: [],
+    usedBy: [],
   };
 }
 
@@ -315,6 +334,16 @@ export const attentionCount = (data: ProjectRepositoryResources): number => (
 
 export function matchesPresence(row: ResourceRow, filter: PresenceFilter): boolean {
   return filter === 'all' || row.presence === filter;
+}
+
+/** The automation kinds a type chip can pick, in the order of the chips. */
+export type AutomationTypeFilter = 'all' | 'quick_prompt' | 'quick_api' | 'quick_exec' | 'workflow';
+export const AUTOMATION_TYPE_FILTERS: AutomationTypeFilter[] = [
+  'all', 'quick_prompt', 'quick_api', 'quick_exec', 'workflow',
+];
+
+export function matchesAutomationType(row: ResourceRow, filter: AutomationTypeFilter): boolean {
+  return filter === 'all' || row.kind === filter;
 }
 
 export function matchesQuery(row: ResourceRow, query: string): boolean {

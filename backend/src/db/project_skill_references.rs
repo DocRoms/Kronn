@@ -70,6 +70,17 @@ pub fn list_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Skill
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Every project's references, for a page that reads all projects at once.
+pub fn list_all(conn: &Connection) -> Result<Vec<SkillReference>> {
+    let mut statement = conn.prepare(
+        "SELECT project_id, slug, relative_path, name, created_at
+           FROM project_skill_references
+          ORDER BY project_id, slug",
+    )?;
+    let rows = statement.query_map([], map_reference)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

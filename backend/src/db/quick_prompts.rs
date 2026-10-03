@@ -79,6 +79,24 @@ pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
     Ok(items)
 }
 
+/// `list_quick_prompts` for one project, in the same order: the rows of the
+/// other projects are neither read nor parsed.
+pub fn list_quick_prompts_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<Vec<QuickPrompt>> {
+    let sql = format!(
+        "SELECT {} FROM quick_prompts WHERE project_id = ?1 ORDER BY updated_at DESC",
+        SELECT_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let items = stmt
+        .query_map(params![project_id], |row| Ok(row_to_quick_prompt(row)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(items)
+}
+
 pub fn get_quick_prompt(conn: &Connection, id: &str) -> Result<Option<QuickPrompt>> {
     let sql = format!("SELECT {} FROM quick_prompts WHERE id = ?1", SELECT_COLUMNS);
     let mut stmt = conn.prepare(&sql)?;

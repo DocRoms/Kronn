@@ -13,10 +13,17 @@ import type {
   Project,
   ApproveProjectRepositoryResourceRequest,
   ImportProjectRepositoryResourceRequest,
+  ProjectRepositoryResourceKind,
   ProjectRepositoryResourceMutation,
   ProjectRepositoryResources,
+  ProjectSkillFile,
+  ProjectUsedSkill,
   PublishProjectRepositoryResourceRequest,
   RepositoryNativeSkillRequest,
+  SkillMigrationPlan,
+  SkillMigrationRequest,
+  SkillMigrationResult,
+  RepositoryResourceComparison,
   ProjectDockerAction,
   ProjectDockerLogs,
   ProjectDockerRunningSummary,
@@ -901,16 +908,41 @@ export const projects = {
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
   repositoryResources: (id: string) =>
     api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
+  /** The diffs behind one listed resource, built when its Compare sheet opens:
+   *  the listing itself only says that the two sides differ. */
+  repositoryResourceComparison: (id: string, kind: ProjectRepositoryResourceKind, resourceId: string) =>
+    api<RepositoryResourceComparison>(
+      'GET',
+      `/projects/${encodeURIComponent(id)}/repository-resources/comparison?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(resourceId)}`,
+    ),
   publishRepositoryResource: (id: string, request: PublishProjectRepositoryResourceRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/publish`, request),
   importRepositoryResource: (id: string, request: ImportProjectRepositoryResourceRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/import`, request),
   approveRepositoryResource: (id: string, request: ApproveProjectRepositoryResourceRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/approve`, request),
+  /** Every project's used skills that `default_skill_ids` do not tell — the
+   *  native skills "Use in Kronn" pointed at and the ones Kronn published —
+   *  for the Automation page's Skills type. */
+  usedSkills: () => api<ProjectUsedSkill[]>('GET', '/projects/used-skills'),
+  /** The `SKILL.md` of one of those, read from the repository when its sheet
+   *  opens. */
+  usedSkillFile: (id: string, relativePath: string) =>
+    api<ProjectSkillFile>(
+      'GET',
+      `/projects/${encodeURIComponent(id)}/repository-resources/skills/content?relative_path=${encodeURIComponent(relativePath)}`,
+    ),
   useNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/use`, request),
   copyNativeSkill: (id: string, request: RepositoryNativeSkillRequest) =>
     api<ProjectRepositoryResourceMutation>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/copy`, request),
+  /** "Migrate everything to .agents/skills": the recap first (read-only)… */
+  skillMigrationPlan: (id: string) =>
+    api<SkillMigrationPlan>('GET', `/projects/${encodeURIComponent(id)}/repository-resources/skills/migration`),
+  /** …then the move, with the version the user chose for each conflict. It
+   *  writes to the working tree and never commits. */
+  migrateSkills: (id: string, request: SkillMigrationRequest) =>
+    api<SkillMigrationResult>('POST', `/projects/${encodeURIComponent(id)}/repository-resources/skills/migrate`, request),
   dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
   dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
   dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>
@@ -3006,7 +3038,7 @@ export interface UpsertExternalApiConnection {
 
 export interface ExternalApiConnectionTestResult {
   ok: boolean;
-  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
+  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'billing_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
   models: string[];
   /** Capability-bearing union from provider-specific catalogue routes. Older
    * backends omit it; callers keep `models` as the chat-only fallback. */

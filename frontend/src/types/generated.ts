@@ -5249,24 +5249,7 @@ export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: stri
 
 export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
 
-export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, adr_level: ResourceAdrLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean,
-/**
- * Real unified diff of the resource's main file (the rendered HTML for
- * an artifact). Present only for `repository_newer`, `kronn_newer` and
- * `conflict`; `file_diffs` carries every file.
- */
-diff?: string,
-/**
- * One unified diff per differing file — an artifact's `artifact.yaml`
- * and `index.html` each get their own entry.
- */
-file_diffs: Array<RepositoryResourceFileDiff>,
-/**
- * Field-by-field diff of the resource definition (trigger, commands,
- * agents, models…). Populated for workflow, Quick API and Quick Exec,
- * for the same three states as `diff`.
- */
-field_diff: Array<RepositoryResourceFieldDiff>, repository_paths: Array<string>,
+export type ProjectRepositoryResource = { id: string, name: string, slug: string, kind: ProjectRepositoryResourceKind, level: ProjectRepositoryResourceLevel, adr_level: ResourceAdrLevel, status: ProjectRepositoryResourceStatus, approval_required: boolean, approved: boolean, repository_paths: Array<string>,
 /**
  * Every path publishing this resource would write, including the
  * shared scaffold (`kronn/INDEX.md`, `kronn/kronn.toml`, the router
@@ -5278,7 +5261,18 @@ write_preview: Array<string>, required_secrets: Array<RequiredSecretStatus>, rep
  * First 8 characters of the content hash of each side, so two versions
  * can be told apart at a glance. Absent when that side has no file.
  */
-repository_fingerprint?: string, kronn_fingerprint?: string, };
+repository_fingerprint?: string, kronn_fingerprint?: string,
+/**
+ * What this resource references (a workflow's Quick Prompts, Quick APIs,
+ * Quick Execs, sub-workflows and Artifacts; an Artifact's action blocks),
+ * in stable identities. A reference to something the project does not
+ * hold is listed too, flagged `missing`.
+ */
+uses: Array<RepositoryResourceLink>,
+/**
+ * The resources of this project that reference this one.
+ */
+used_by: Array<RepositoryResourceLink>, };
 
 export type ProjectRepositoryResourceKind = "skill" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "artifact";
 
@@ -5330,11 +5324,7 @@ suggested: boolean,
  * What triggered the suggestion, as the detected file name (`Dockerfile`,
  * `Cargo.toml`…) — the UI words it in the reader's language.
  */
-suggested_reason?: string, approval_required: boolean, approved: boolean, diff?: string,
-/**
- * One unified diff per differing file, for the same states as `diff`.
- */
-file_diffs: Array<RepositoryResourceFileDiff>, repository_paths: Array<string>,
+suggested_reason?: string, approval_required: boolean, approved: boolean, repository_paths: Array<string>,
 /**
  * True when this slug is present under more than one native skill root
  * (`.claude/skills`, `.agents/skills`…) and those copies are not
@@ -5359,9 +5349,45 @@ repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
+/**
+ * The `SKILL.md` of a used skill, as the repository holds it now: masked the
+ * way every repository text is, and cut when it is larger than a sheet can
+ * carry.
+ */
+export type ProjectSkillFile = { relative_path: string, content: string, truncated: boolean, };
+
 export type ProjectSkillRoot = { path: string, skill_count: number, };
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost: CostAggregate, };
+
+/**
+ * A skill a project uses that its `default_skill_ids` do not tell: a native
+ * `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
+ * because Kronn published it into the repository. The Automation page reads
+ * these for every project at once, so nothing here renders or compares.
+ */
+export type ProjectUsedSkill = { project_id: string,
+/**
+ * The catalog skill this is, when the catalog knows its slug (a skill
+ * Kronn published from its catalog). `None`: only the repository holds it.
+ */
+skill_id?: string, slug: string, name: string,
+/**
+ * The native skill folder holding it (`.agents/skills`).
+ */
+root: string,
+/**
+ * Repository-relative path of its `SKILL.md`.
+ */
+relative_path: string,
+/**
+ * "Use in Kronn" pointed at it: read from the source on every use.
+ */
+referenced: boolean,
+/**
+ * `kronn.lock` lists it: Kronn wrote it into the repository.
+ */
+published: boolean, };
 
 /**
  * Project defaults for worktree preparation hooks. Workflow hooks override them
@@ -5814,6 +5840,39 @@ export type RepositoryNativeSkillRequest = { relative_path: string,
 overwrite_kronn_changes?: boolean, };
 
 /**
+ * What the repository and Kronn hold for one resource, and what differs,
+ * computed when someone opens its sheet rather than on every listing: the
+ * listing only says *that* the two sides differ (its `status`), never *how*,
+ * and carries no content. The Kronn side is the masked rendering a publish
+ * would write, so it holds no secret value; the repository side is the file as
+ * it stands.
+ */
+export type RepositoryResourceComparison = {
+/**
+ * Every file of the resource with its text on each side that holds it —
+ * the content itself, whether or not the two sides agree. Empty when
+ * neither side has a file.
+ */
+files: Array<RepositoryResourceFileContent>,
+/**
+ * Real unified diff of the resource's main file (the rendered HTML for
+ * an artifact). Present only for `repository_newer`, `kronn_newer` and
+ * `conflict`; `file_diffs` carries every file.
+ */
+diff?: string,
+/**
+ * One unified diff per differing file — an artifact's `artifact.yaml`
+ * and `index.html` each get their own entry.
+ */
+file_diffs: Array<RepositoryResourceFileDiff>,
+/**
+ * Field-by-field diff of the resource definition (trigger, commands,
+ * agents, models…). Populated for workflow, Quick API and Quick Exec,
+ * for the same three states as `diff`.
+ */
+field_diff: Array<RepositoryResourceFieldDiff>, };
+
+/**
  * One differing field between the repository and Kronn definitions of a
  * resource, addressed by a dotted path into the resource JSON (e.g.
  * `steps.0.agent`). Either side may be absent when the field only exists on
@@ -5822,10 +5881,55 @@ overwrite_kronn_changes?: boolean, };
 export type RepositoryResourceFieldDiff = { field: string, repository?: any, kronn?: any, };
 
 /**
+ * One file of a resource as each side holds it. A side without the file has
+ * no text (`None`), which is how the sheet knows a mode has nothing to show.
+ */
+export type RepositoryResourceFileContent = { path: string,
+/**
+ * The file as it stands in the repository; absent when it is not there.
+ */
+repository?: string,
+/**
+ * The masked rendering Kronn would write; absent when Kronn has none.
+ */
+kronn?: string,
+/**
+ * A side was cut at the size bound. The diff always covers the whole file.
+ */
+truncated: boolean, };
+
+/**
  * The unified diff (repository side against Kronn side) of one file a
  * resource is written to.
  */
 export type RepositoryResourceFileDiff = { path: string, diff: string, };
+
+/**
+ * One edge of the reference graph between a project's resources, seen from
+ * either end.
+ */
+export type RepositoryResourceLink = { kind: ProjectRepositoryResourceKind,
+/**
+ * The linked resource's listing `id`; the id the reference points at when
+ * the target is `missing`.
+ */
+id: string,
+/**
+ * The linked resource's stable `(kind, slug)` identity. Absent when
+ * `missing`: nothing known to derive it from.
+ */
+slug?: string,
+/**
+ * Display name; the referenced id when `missing`.
+ */
+name: string,
+/**
+ * Nothing the project holds answers to this reference: no resource of
+ * this project in Kronn, none in its repository. It may still exist
+ * elsewhere (another project, the global scope), where a publish or an
+ * import would not carry it.
+ */
+missing: boolean, };
 
 /**
  * Why Kronn cannot write into a repository right now — a code the UI
@@ -6668,6 +6772,107 @@ source_url?: string | null, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
 
+export type SkillMigrationAction = "move" | "duplicate";
+
+export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
+
+export type SkillMigrationBlockReason = "symlink" | "unreadable" | "reserved_slug" | "target_occupied" | "too_large";
+
+export type SkillMigrationConflict = { slug: string, target: string,
+/**
+ * The distinct contents found for this slug, each with the folders that
+ * hold it.
+ */
+versions: Array<SkillMigrationVersion>, };
+
+export type SkillMigrationMove = { slug: string,
+/**
+ * The skill folder as it is now, e.g. `.claude/skills/review`.
+ */
+source: string,
+/**
+ * Where it goes, e.g. `.agents/skills/review`.
+ */
+target: string, action: SkillMigrationAction,
+/**
+ * The skill was written by Kronn in its former format and is rewritten
+ * as a standard Agent Skill on the way.
+ */
+converted: boolean,
+/**
+ * Kronn tracks this skill in `kronn.lock`: the lock and the alignment
+ * follow it to the new location.
+ */
+kronn_managed: boolean, };
+
+/**
+ * What "Migrate everything to `.agents/skills`" would do, computed without
+ * touching the repository: one line per skill folder that moves (source →
+ * target) and one per slug whose copies differ and need the user's choice.
+ */
+export type SkillMigrationPlan = {
+/**
+ * Always `.agents/skills`.
+ */
+target_root: string, moves: Array<SkillMigrationMove>,
+/**
+ * Same slug, different contents: nothing is written for these until a
+ * version is chosen, and nothing is overwritten unless it is chosen.
+ */
+conflicts: Array<SkillMigrationConflict>,
+/**
+ * Skill folders that cannot be moved safely (a symbolic link, an
+ * unreadable file…), left exactly where they are.
+ */
+blocked: Array<SkillMigrationBlocked>, };
+
+/**
+ * The choices the user made in the recap.
+ */
+export type SkillMigrationRequest = {
+/**
+ * One per conflict the user resolved. A conflict without one is skipped:
+ * Kronn never picks a version.
+ */
+resolutions?: Array<SkillMigrationResolution>, };
+
+export type SkillMigrationResolution = { slug: string,
+/**
+ * One of the folders listed in the conflict's versions: its content is
+ * the one written to the target.
+ */
+keep: string, };
+
+/**
+ * What a migration did. Nothing is committed: the files sit in the working
+ * tree, and the uncommitted-changes banner counts them.
+ */
+export type SkillMigrationResult = { moved: Array<SkillMigrationMove>,
+/**
+ * Slugs whose conflict had no choice: untouched.
+ */
+unresolved: Array<string>,
+/**
+ * Folders left where they were because their content is not what the
+ * target now holds.
+ */
+kept: Array<string>, blocked: Array<SkillMigrationBlocked>, };
+
+export type SkillMigrationVersion = {
+/**
+ * First 8 characters of the content hash.
+ */
+fingerprint: string,
+/**
+ * The skill folders holding this content, the target included.
+ */
+paths: Array<string>,
+/**
+ * The target already holds this version: choosing it changes nothing
+ * there.
+ */
+at_target: boolean, };
+
 /**
  * One extracted `[src: …]` marker plus its mechanical verdict.
  */
@@ -7027,7 +7232,12 @@ export type TaskExecutionAuditEvent = { id: string, action: string, from_status:
  * sourced from the orchestration aggregate; task DoD, manifests, validations
  * and telemetry are joined here so clients never reconstruct lineage from chat.
  */
-export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
+export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>,
+/**
+ * Every CLI session the worker ran, attempts and relaunches included, oldest
+ * first (KT-911). Empty for a worker with no CLI session (HTTP providers).
+ */
+worker_sessions: Array<TaskExecutionWorkerSession>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
 
 /**
  * One journaled transition (ADR §3; DoD-3).
@@ -7177,6 +7387,27 @@ export type TaskExecutionValidationRun = { id: string, task_execution_id: string
  * accepts by — never a raw kr-join token.
  */
 export type TaskExecutionWorkerOffer = { id: string, task_execution_id: string, attempt_no: number, target_cli_session_id: number, origin_discussion_id: string, child_discussion_id: string, status: WorkerOfferStatus, expires_at: string | null, offer_message_id: string | null, reason: string | null, accepted_at: string | null, declined_at: string | null, created_at: string, updated_at: string, };
+
+/**
+ * One CLI session of a task worker: the process one dispatch started, for one
+ * attempt. `session_id` is what the CLI reported on its init line, which is the
+ * name of its transcript (KT-911).
+ */
+export type TaskExecutionWorkerSession = {
+/**
+ * The semantic worker attempt (`0` is the first; each rework adds one).
+ */
+attempt_no: number,
+/**
+ * The dispatch that launched this process. A retried dispatch lists one
+ * session per process it started.
+ */
+dispatch_job_id: string, agent_type: string, session_id: string,
+/**
+ * `None` is unknown, never free — `cost_unknown_reason` says why. Also
+ * `None` while the session is still running.
+ */
+cost_usd: number | null, cost_unknown_reason?: string | null, started_at: string, };
 
 export type TaskWorkerCatalogue = { workers: Array<TaskWorkerCatalogueEntry>, };
 
@@ -7981,7 +8212,25 @@ cached_prompt_tokens?: number | null,
 /**
  * Prompt tokens written to the provider's prompt cache. `None` when not reported.
  */
-cache_write_prompt_tokens?: number | null, };
+cache_write_prompt_tokens?: number | null,
+/**
+ * The CLI's own session id for this attempt, as the runtime reported it on
+ * its `init` line — the name of the transcript it wrote (KT-911). `null`
+ * for a runtime with no CLI session, or when it never got as far as
+ * reporting one.
+ */
+session_id: string | null,
+/**
+ * What this attempt cost in USD, computed like a discussion reply's cost
+ * (KT-894): the agent's own figure when it gives one, else the detailed
+ * counters at the rates of the model that served it. `null` is unknown,
+ * never free — `cost_unknown_reason` then says why.
+ */
+cost_usd: number | null,
+/**
+ * Why `cost_usd` is `null`. Absent when the cost is known.
+ */
+cost_unknown_reason?: string | null, };
 
 export type WorkflowAgentAttemptRole = "Initial" | "Repair" | "Escalation" | "Review" | "Author";
 

@@ -1735,6 +1735,92 @@ pub fn record_worker_served_model(
     Ok(affected > 0)
 }
 
+/// What a worker session cost, as the priced reply says (KT-894): a figure, or
+/// the reason there is none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerSessionCost {
+    pub usd: Option<f64>,
+    pub unknown_reason: Option<String>,
+}
+
+/// Record a CLI session the worker started, and optionally what it cost. Only
+/// the execution's current dispatch may write, so a stale run cannot add a
+/// session to a reassigned worker (same rule as the served model). Idempotent
+/// per (dispatch, session): the poll that names the session and the end of the
+/// turn that prices it may land in either order, and neither erases the other.
+/// Returns whether the session belongs to the execution's current dispatch.
+pub fn record_worker_cli_session(
+    conn: &Connection,
+    execution_id: &str,
+    dispatch_job_id: &str,
+    agent_type: &str,
+    session_id: &str,
+    cost: Option<&WorkerSessionCost>,
+) -> Result<bool> {
+    in_savepoint(conn, |conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO task_execution_worker_sessions \
+                 (dispatch_job_id, session_id, task_execution_id, attempt_no, agent_type, created_at) \
+             SELECT ?2, ?4, id, attempt_no, ?3, ?5 FROM task_executions \
+              WHERE id = ?1 AND dispatch_job_id = ?2",
+            params![
+                execution_id,
+                dispatch_job_id,
+                agent_type,
+                session_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        if let Some(cost) = cost {
+            conn.execute(
+                "UPDATE task_execution_worker_sessions \
+                    SET cost_usd = ?4, cost_unknown_reason = ?5 \
+                  WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND session_id = ?3",
+                params![
+                    execution_id,
+                    dispatch_job_id,
+                    session_id,
+                    cost.usd,
+                    cost.unknown_reason
+                ],
+            )?;
+        }
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_execution_worker_sessions \
+              WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND session_id = ?3)",
+            params![execution_id, dispatch_job_id, session_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    })
+}
+
+/// Every CLI session the execution's workers ran, oldest first.
+pub fn list_worker_cli_sessions(
+    conn: &Connection,
+    execution_id: &str,
+) -> Result<Vec<crate::models::TaskExecutionWorkerSession>> {
+    let mut statement = conn.prepare(
+        "SELECT attempt_no, dispatch_job_id, agent_type, session_id, cost_usd, \
+                cost_unknown_reason, created_at \
+           FROM task_execution_worker_sessions \
+          WHERE task_execution_id = ?1 \
+          ORDER BY created_at, rowid",
+    )?;
+    let rows = statement.query_map([execution_id], |row| {
+        Ok(crate::models::TaskExecutionWorkerSession {
+            attempt_no: row.get::<_, i64>(0)?.max(0) as u32,
+            dispatch_job_id: row.get(1)?,
+            agent_type: row.get(2)?,
+            session_id: row.get(3)?,
+            cost_usd: row.get(4)?,
+            cost_unknown_reason: row.get(5)?,
+            started_at: parse_dt(row.get(6)?),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn get_worker_served_model(conn: &Connection, execution_id: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(
@@ -3056,6 +3142,126 @@ pub enum ReviewCheckpointOutcome {
     ExecutionRaced,
 }
 
+/// Hand an execution back to its worker for `next_attempt`, in the caller's
+/// transaction. A CLI worker gets a fresh control offer and the execution parks
+/// `Blocked` (`awaiting_worker_acceptance`) until it re-accepts; a native worker
+/// gets the dispatch its findings message already owns and the execution goes
+/// back to `Working`. A reviewer's `request_changes` and an integration
+/// send-back both re-activate the worker through this one path, so neither can
+/// leave a `ChangesRequested` row that nobody works.
+///
+/// The caller has already moved the execution to `ChangesRequested` and bumped
+/// its attempt. `Ok(false)` means the row moved beneath the caller: roll back.
+fn reactivate_worker(
+    tx: &Connection,
+    exec_id: &str,
+    actor: &OrchestrationActor,
+    next_attempt: u32,
+    reactivation: Option<&ReworkReoffer<'_>>,
+    native_dispatch: Option<&NativeReworkDispatch<'_>>,
+    native_jobs: &[crate::db::agent_dispatch::AgentDispatchJob],
+) -> Result<bool> {
+    use TaskExecutionStatus::*;
+    if let Some(re) = reactivation {
+        // Cancel-first (DoD-9): no live offer of this execution may survive, so the
+        // re-offer can only `Opened` — never `SessionCommittedElsewhere` onto itself.
+        crate::db::worker_offers::cancel_live_offers_for_execution(tx, exec_id)?;
+        // Open the re-offer with the pre-minted id the control message already embeds,
+        // targeting the exact worker session. Its owning principal room receives the
+        // control turn while the child remains the execution's task/evidence room.
+        let new_offer = crate::db::worker_offers::NewWorkerOffer {
+            id: Some(re.offer_id),
+            task_execution_id: exec_id,
+            attempt_no: re.new_attempt_no,
+            target_cli_session_id: re.target_cli_session_id,
+            origin_discussion_id: re.origin_discussion_id,
+            child_discussion_id: re.child_discussion_id,
+            expires_at: None,
+            offer_message_id: None,
+            reason: None,
+        };
+        let (reason, code) = match crate::db::worker_offers::open_worker_offer(tx, &new_offer)? {
+            crate::db::worker_offers::OpenOutcome::Opened(offer) => {
+                if offer.offer_message_id.is_none() {
+                    let targets = [re.control_target.clone()];
+                    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+                        tx,
+                        re.origin_discussion_id,
+                        re.control_message,
+                        &targets,
+                        &[],
+                        None,
+                    )?;
+                    crate::db::worker_offers::set_offer_message(
+                        tx,
+                        &offer.id,
+                        &re.control_message.id,
+                    )?;
+                }
+                (
+                    "awaiting_worker_acceptance".to_string(),
+                    BlockedReasonCode::AwaitingWorkerAcceptance,
+                )
+            }
+            // Defensive: cancel-first rules out a self-clash, so this only fires if
+            // the session is committed to ANOTHER execution — park with the naming
+            // code so a human can re-offer / pick a native worker.
+            crate::db::worker_offers::OpenOutcome::SessionCommittedElsewhere { blocking } => (
+                format!(
+                    "worker session already committed to execution {} (attempt {}) — \
+                         re-offer or choose a native worker",
+                    blocking.task_execution_id, blocking.attempt_no
+                ),
+                BlockedReasonCode::WorkerSessionCommittedElsewhere,
+            ),
+        };
+        // Re-enter the provisioning handshake, THEN park Blocked — the EXACT mirror of
+        // the initial handshake (`ChangesRequested → Provisioning → Blocked`). This
+        // makes `blocked_from = Provisioning` (already in the frozen-127 CHECK domain),
+        // so the re-accept resumes through Provisioning with no new schema.
+        if !transition_execution(
+            tx,
+            exec_id,
+            Provisioning,
+            actor,
+            serde_json::json!({ "phase": "rework_reprovision", "attempt": re.new_attempt_no }),
+        )? {
+            return Ok(false);
+        }
+        // Provisioning → Blocked(reason, code). The worker re-accepts the control offer to
+        // resume (that accept routes to commit_cli_rework_checkpoint). The acceptance
+        // window is a VISIBLE, coded Blocked — never a silent wait.
+        if !block_execution(tx, exec_id, actor, &reason, Some(code))? {
+            return Ok(false);
+        }
+    } else if let Some(native) = native_dispatch {
+        let [job] = native_jobs else {
+            bail!(
+                "native rework checkpoint expected exactly one dispatch, got {}",
+                native_jobs.len()
+            );
+        };
+        if job.id != native.job_id {
+            bail!("native rework dispatch resolved to a stale dedupe job");
+        }
+        attach_execution_dispatch(tx, exec_id, &job.id)?;
+        if !transition_execution(
+            tx,
+            exec_id,
+            Working,
+            actor,
+            serde_json::json!({
+                "phase": "native_rework",
+                "attempt": next_attempt,
+                "dispatch_job_id": job.id,
+            }),
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// The final atomic checkpoint of a principal review (KT-319 tranche 3a). In ONE SQLite
 /// transaction it (1) upserts the validated ReviewDecision for `(exec, attempt)` (idempotent),
 /// then (2) for approve flips `AwaitingReview → Approved`; for request_changes bumps
@@ -3294,115 +3500,403 @@ pub fn commit_review_checkpoint(
                 params![input.exec_id, Utc::now().to_rfc3339()],
             )?;
 
-            // (2e) Re-activate the CLI worker for the next attempt (DoD-9), atomically with the
+            // (2e) Re-activate the worker for the next attempt (DoD-9), atomically with the
             // decision above — a crash re-runs the whole request_changes cleanly (nothing was
-            // AwaitingReview-committed). Native workers take the atomic branch below instead.
-            if let Some(re) = input.reactivation.as_ref() {
-                // Cancel-first (DoD-9): no live offer of this execution may survive, so the
-                // re-offer can only `Opened` — never `SessionCommittedElsewhere` onto itself.
-                crate::db::worker_offers::cancel_live_offers_for_execution(&tx, input.exec_id)?;
-                // Open the re-offer with the pre-minted id the control message already embeds,
-                // targeting the exact worker session. Its owning principal room receives the
-                // control turn while the child remains the execution's task/evidence room.
-                let new_offer = crate::db::worker_offers::NewWorkerOffer {
-                    id: Some(re.offer_id),
-                    task_execution_id: input.exec_id,
-                    attempt_no: re.new_attempt_no,
-                    target_cli_session_id: re.target_cli_session_id,
-                    origin_discussion_id: re.origin_discussion_id,
-                    child_discussion_id: re.child_discussion_id,
-                    expires_at: None,
-                    offer_message_id: None,
-                    reason: None,
-                };
-                let (reason, code) = match crate::db::worker_offers::open_worker_offer(
-                    &tx, &new_offer,
-                )? {
-                    crate::db::worker_offers::OpenOutcome::Opened(offer) => {
-                        if offer.offer_message_id.is_none() {
-                            let targets = [re.control_target.clone()];
-                            crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
-                                    &tx,
-                                    re.origin_discussion_id,
-                                    re.control_message,
-                                    &targets,
-                                    &[],
-                                    None,
-                                )?;
-                            crate::db::worker_offers::set_offer_message(
-                                &tx,
-                                &offer.id,
-                                &re.control_message.id,
-                            )?;
-                        }
-                        (
-                            "awaiting_worker_acceptance".to_string(),
-                            BlockedReasonCode::AwaitingWorkerAcceptance,
-                        )
-                    }
-                    // Defensive: cancel-first rules out a self-clash, so this only fires if
-                    // the session is committed to ANOTHER execution — park with the naming
-                    // code so a human can re-offer / pick a native worker.
-                    crate::db::worker_offers::OpenOutcome::SessionCommittedElsewhere {
-                        blocking,
-                    } => (
-                        format!(
-                            "worker session already committed to execution {} (attempt {}) — \
-                                 re-offer or choose a native worker",
-                            blocking.task_execution_id, blocking.attempt_no
-                        ),
-                        BlockedReasonCode::WorkerSessionCommittedElsewhere,
-                    ),
-                };
-                // Re-enter the provisioning handshake, THEN park Blocked — the EXACT mirror of
-                // the initial handshake (`ChangesRequested → Provisioning → Blocked`). This
-                // makes `blocked_from = Provisioning` (already in the frozen-127 CHECK domain),
-                // so the re-accept resumes through Provisioning with no new schema.
-                if !transition_execution(
-                    &tx,
-                    input.exec_id,
-                    Provisioning,
-                    input.actor,
-                    serde_json::json!({ "phase": "rework_reprovision", "attempt": re.new_attempt_no }),
-                )? {
-                    return Ok(ReviewCheckpointOutcome::ExecutionRaced);
-                }
-                // Provisioning → Blocked(reason, code). The worker re-accepts the control offer to
-                // resume (that accept routes to commit_cli_rework_checkpoint). The acceptance
-                // window is a VISIBLE, coded Blocked — never a silent wait.
-                if !block_execution(&tx, input.exec_id, input.actor, &reason, Some(code))? {
-                    return Ok(ReviewCheckpointOutcome::ExecutionRaced);
-                }
-            } else if let Some(native) = input.native_dispatch.as_ref() {
-                let [job] = &native_jobs[..] else {
-                    bail!(
-                        "native rework checkpoint expected exactly one dispatch, got {}",
-                        native_jobs.len()
-                    );
-                };
-                if job.id != native.job_id {
-                    bail!("native rework dispatch resolved to a stale dedupe job");
-                }
-                attach_execution_dispatch(&tx, input.exec_id, &job.id)?;
-                if !transition_execution(
-                    &tx,
-                    input.exec_id,
-                    Working,
-                    input.actor,
-                    serde_json::json!({
-                        "phase": "native_rework",
-                        "attempt": input.attempt_no + 1,
-                        "dispatch_job_id": job.id,
-                    }),
-                )? {
-                    return Ok(ReviewCheckpointOutcome::ExecutionRaced);
-                }
+            // AwaitingReview-committed).
+            if !reactivate_worker(
+                &tx,
+                input.exec_id,
+                input.actor,
+                input.attempt_no + 1,
+                input.reactivation.as_ref(),
+                input.native_dispatch.as_ref(),
+                &native_jobs,
+            )? {
+                return Ok(ReviewCheckpointOutcome::ExecutionRaced);
             }
 
             tx.commit()?;
             Ok(ReviewCheckpointOutcome::ChangesRequested)
         }
     }
+}
+
+/// An approved delivery the integration handed back (KT-862): a merge conflict or
+/// a red validation on the candidate. The caller builds every message so the whole
+/// hand-back — status, attempt, worker brief, re-activation and principal notice —
+/// commits in ONE transaction: no half-sent rework can leave a `ChangesRequested`
+/// row nobody works and nobody knows about.
+pub struct IntegrationRework<'a> {
+    pub exec_id: &'a str,
+    /// The attempt the execution is on; the rework opens the next one.
+    pub from_attempt: u32,
+    /// One line naming the cause. Journaled, and quoted on both cards.
+    pub reason: &'a str,
+    /// The worktree HEAD the worker is sent back with. A later re-validation is
+    /// only "the same candidate" while the worktree still points here.
+    pub head_sha: Option<&'a str>,
+    /// The worker's task room and the message that hands it the failure.
+    pub child_discussion_id: &'a str,
+    pub worker_message: &'a DiscussionMessage,
+    pub worker_target: &'a MessageTarget,
+    /// The notice for the principal room. It is addressed to the principal that
+    /// approved (the pinned session, else the room's agent).
+    pub principal_message: &'a DiscussionMessage,
+    pub reactivation: Option<ReworkReoffer<'a>>,
+    pub native_dispatch: Option<NativeReworkDispatch<'a>>,
+    pub actor: &'a OrchestrationActor,
+}
+
+/// The verdict of [`commit_integration_rework`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum IntegrationReworkOutcome {
+    /// Committed: the execution is on its next attempt, the worker was re-activated
+    /// with the failure and the principal room was told.
+    Reworked,
+    /// The row moved beneath the caller (another integration or a cancel won); the
+    /// commit rolled back and nothing was sent.
+    ExecutionRaced,
+}
+
+/// Journal action of an integration send-back. The re-validation guard reads it
+/// back to prove the execution really was sent back, and by which worktree HEAD.
+pub const INTEGRATION_REWORKED: &str = "integration_reworked";
+
+/// Send an approved delivery back to its worker (KT-862). One transaction:
+/// `Integrating`/`Validating → ChangesRequested`, the attempt bump, the journal
+/// event, the failure handed to the worker in its room, the worker re-activated
+/// (CLI re-offer or native dispatch — the same handshake a reviewer's
+/// `request_changes` uses) and a notice addressed to the principal that approved.
+/// The branch, the worktree and the task are untouched.
+pub fn commit_integration_rework(
+    conn: &Connection,
+    input: &IntegrationRework,
+) -> Result<IntegrationReworkOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let Some(execution) = get_task_execution(&tx, input.exec_id)? else {
+        return Ok(IntegrationReworkOutcome::ExecutionRaced);
+    };
+    if execution.attempt_no != input.from_attempt {
+        return Ok(IntegrationReworkOutcome::ExecutionRaced);
+    }
+    let next_attempt = input.from_attempt + 1;
+    if !transition_execution(
+        &tx,
+        input.exec_id,
+        TaskExecutionStatus::ChangesRequested,
+        input.actor,
+        serde_json::json!({
+            "reason": input.reason,
+            "from_attempt": input.from_attempt,
+            "to_attempt": next_attempt,
+        }),
+    )? {
+        return Ok(IntegrationReworkOutcome::ExecutionRaced);
+    }
+    // An approved attempt already owns both a delivery/review row and the
+    // deterministic `orch-review-request:<exec>:<attempt>` message. Reusing that
+    // attempt after a candidate conflict or failed validation makes the next
+    // otherwise-valid delivery collide with the old message primary key. An
+    // integration rework is a distinct worker attempt, just like an explicit
+    // request_changes review, so advance it in the same durable checkpoint.
+    tx.execute(
+        "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 WHERE id = ?1",
+        params![input.exec_id, Utc::now().to_rfc3339()],
+    )?;
+
+    let task_number: Option<i64> = tx
+        .query_row(
+            "SELECT task_number FROM planning_tasks WHERE id = ?1",
+            [&execution.task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let reference = task_number.map(|n| format!("KT-{n}")).unwrap_or_default();
+    let principal = crate::db::discussions::get_discussion(&tx, &execution.parent_discussion_id)?;
+    let principal_target = match &principal {
+        Some(discussion) => Some(principal_notice_target(
+            &tx,
+            input.exec_id,
+            discussion.agent.clone(),
+        )?),
+        None => None,
+    };
+    record_execution_event(
+        &tx,
+        input.exec_id,
+        INTEGRATION_REWORKED,
+        None,
+        None,
+        input.actor,
+        serde_json::json!({
+            "reason": input.reason,
+            "head_sha": input.head_sha,
+            "from_attempt": input.from_attempt,
+            "to_attempt": next_attempt,
+            "principal_discussion_id": execution.parent_discussion_id,
+            "principal_target": principal_target,
+        }),
+    )?;
+
+    // The failure, handed to the worker in its own room (the CLI worker reads this
+    // very message as its instructions when it re-accepts).
+    let worker_targets = [input.worker_target.clone()];
+    let native_specs = input.native_dispatch.as_ref().map(|native| {
+        let agent_override = match input.worker_target.kind {
+            MessageTargetKind::Agent => Some(&input.worker_target.agent_type),
+            _ => None,
+        };
+        [crate::db::discussions::UserDispatchSpec {
+            job_id: native.job_id,
+            agent_override,
+            dedupe_key: Some(native.dedupe_key),
+        }]
+    });
+    let (_sort_order, native_jobs) =
+        crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+            &tx,
+            input.child_discussion_id,
+            input.worker_message,
+            &worker_targets,
+            native_specs
+                .as_ref()
+                .map(|specs| specs.as_slice())
+                .unwrap_or(&[]),
+            None,
+        )?;
+    let reason_line: String = input.reason.chars().take(300).collect();
+    crate::db::discussion_important::publish_steering_card(
+        &tx,
+        input.child_discussion_id,
+        &input.worker_message.id,
+        crate::db::discussion_important::SteeringCard {
+            category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
+            dedup_key: &format!("orch.integration.rework.{}.{next_attempt}", input.exec_id),
+            title: &format!("{reference} — renvoyé par l'intégration"),
+            highlight: &format!(
+                "La livraison approuvée n'a pas passé l'intégration : {reason_line}"
+            ),
+            impact: "La livraison n'est pas intégrée ; le worktree et la sous-discussion \
+                     restent ouverts pour la correction.",
+            action_required: crate::db::discussion_important::ImportantAction::owed(
+                "Corriger dans ce worktree, puis re-livrer via `task_exec_deliver`",
+                "Worker",
+            ),
+            references: crate::db::discussion_important::ImportantReferences {
+                task_ref: (!reference.is_empty()).then(|| reference.clone()),
+                execution_id: Some(input.exec_id.to_string()),
+                ..Default::default()
+            },
+        },
+        &input.worker_message.timestamp.to_rfc3339(),
+    )?;
+
+    // The notice for the principal that approved: a rework it did not ask for is
+    // exactly what it must not learn by polling.
+    if let Some(target) = principal_target.as_ref() {
+        crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+            &tx,
+            &execution.parent_discussion_id,
+            input.principal_message,
+            std::slice::from_ref(target),
+            &[],
+            None,
+        )?;
+        crate::db::discussion_important::publish_steering_card(
+            &tx,
+            &execution.parent_discussion_id,
+            &input.principal_message.id,
+            crate::db::discussion_important::SteeringCard {
+                category: crate::db::discussion_important::ImportantCategory::BlockingAlert,
+                dedup_key: &format!("orch.integration.reworked.{}.{next_attempt}", input.exec_id),
+                title: &format!("{reference} — intégration renvoyée au worker"),
+                highlight: &format!(
+                    "{reference} est approuvée mais l'intégration l'a renvoyée au worker : \
+                     {reason_line}"
+                ),
+                impact: "La branche cible n'avance pas ; le worker est relancé avec la sortie \
+                         de l'échec.",
+                action_required: crate::db::discussion_important::ImportantAction::owed(
+                    "Attendre la re-livraison ; si l'échec ne vient pas de la livraison, \
+                     relancer les mêmes validations avec `task_exec_resume`",
+                    "Principal",
+                ),
+                references: crate::db::discussion_important::ImportantReferences {
+                    task_ref: (!reference.is_empty()).then(|| reference.clone()),
+                    execution_id: Some(input.exec_id.to_string()),
+                    ..Default::default()
+                },
+            },
+            &input.principal_message.timestamp.to_rfc3339(),
+        )?;
+    }
+
+    if !reactivate_worker(
+        &tx,
+        input.exec_id,
+        input.actor,
+        next_attempt,
+        input.reactivation.as_ref(),
+        input.native_dispatch.as_ref(),
+        &native_jobs,
+    )? {
+        return Ok(IntegrationReworkOutcome::ExecutionRaced);
+    }
+    tx.commit()?;
+    Ok(IntegrationReworkOutcome::Reworked)
+}
+
+/// An approval the principal can take back after an integration send-back
+/// (KT-862): the failure was recorded against a delivery the principal approved,
+/// and nothing has replaced that delivery since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestorableApproval {
+    /// The attempt whose delivery was approved.
+    pub approved_attempt: u32,
+    /// Why the integration sent it back.
+    pub reason: String,
+    /// The worktree HEAD the worker was sent back with. Re-validating is only
+    /// "the same candidate" while the worktree still points here.
+    pub head_sha: Option<String>,
+}
+
+/// Is `execution` an integration send-back whose approved delivery is intact?
+///
+/// Three facts, all read from durable rows: the latest send-back is the one the
+/// execution is still on, no delivery exists for the current attempt (the worker
+/// has not answered the rework), and the latest delivery is the one the principal
+/// approved. Only then may the approval come back without a new delivery.
+pub fn restorable_approval(
+    conn: &Connection,
+    execution: &TaskExecution,
+) -> Result<Option<RestorableApproval>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![execution.id, INTEGRATION_REWORKED],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(latest) = latest else {
+        return Ok(None);
+    };
+    let sent_back: serde_json::Value = serde_json::from_str(&latest)?;
+    if sent_back["to_attempt"].as_u64() != Some(u64::from(execution.attempt_no)) {
+        return Ok(None);
+    }
+    if crate::db::worker_deliveries::get_delivery(conn, &execution.id, execution.attempt_no)?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let deliveries = crate::db::worker_deliveries::list_deliveries(conn, &execution.id)?;
+    let reviews = crate::db::worker_reviews::list_reviews(conn, &execution.id)?;
+    let (Some(delivery), Some(review)) = (deliveries.last(), reviews.last()) else {
+        return Ok(None);
+    };
+    if delivery.attempt_no != review.attempt_no
+        || review.decision != "approve"
+        || delivery.attempt_no >= execution.attempt_no
+    {
+        return Ok(None);
+    }
+    Ok(Some(RestorableApproval {
+        approved_attempt: delivery.attempt_no,
+        reason: sent_back["reason"].as_str().unwrap_or_default().to_string(),
+        head_sha: sent_back["head_sha"].as_str().map(str::to_string),
+    }))
+}
+
+/// The verdict of [`reopen_approval_after_rework`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReopenOutcome {
+    /// The execution is `Approved` again, its worker stood down.
+    Reopened {
+        from: TaskExecutionStatus,
+        approval: RestorableApproval,
+    },
+    /// Not an integration send-back with an intact approved delivery (the worker
+    /// has already re-delivered, or the execution was never sent back).
+    NotRestorable,
+    /// The row moved beneath the caller; nothing changed.
+    ExecutionRaced,
+}
+
+/// Take an integration send-back back (KT-862): the principal established that
+/// the failure did not come from the delivery, so the approved delivery goes
+/// through the integration again on the same candidate, without a new delivery.
+///
+/// In one savepoint: the re-activated worker is stood down (its dispatch and any
+/// live control offer cancelled), the execution returns to `Approved` through the
+/// guarded transitions and the decision is journaled. The attempt is NOT
+/// rewound: attempts stay monotonic, so a later send-back cannot collide with the
+/// attempt-scoped messages and dispatch keys of the first one.
+pub fn reopen_approval_after_rework(
+    conn: &Connection,
+    exec_id: &str,
+    actor: &OrchestrationActor,
+) -> Result<ReopenOutcome> {
+    use TaskExecutionStatus::*;
+    in_savepoint(conn, |conn| {
+        let Some(execution) = get_task_execution(conn, exec_id)? else {
+            return Ok(ReopenOutcome::ExecutionRaced);
+        };
+        // A Provisioning-origin hold (a CLI worker that has not re-accepted) first
+        // resumes to its origin: `Blocked` never jumps straight to `Approved`.
+        let path: &[TaskExecutionStatus] = match execution.status {
+            Working | Provisioning => &[Approved],
+            Blocked if execution.blocked_from_status == Some(Provisioning) => {
+                &[Provisioning, Approved]
+            }
+            ChangesRequested => &[Working, Approved],
+            _ => return Ok(ReopenOutcome::NotRestorable),
+        };
+        let Some(approval) = restorable_approval(conn, &execution)? else {
+            return Ok(ReopenOutcome::NotRestorable);
+        };
+        if let (Some(child), Some(job)) = (
+            execution.sub_discussion_id.as_deref(),
+            execution.dispatch_job_id.as_deref(),
+        ) {
+            crate::db::agent_dispatch::cancel_for_discussion_by_id(conn, child, job)?;
+        }
+        crate::db::worker_offers::cancel_live_offers_for_execution(conn, exec_id)?;
+        for step in path {
+            if !transition_execution(
+                conn,
+                exec_id,
+                *step,
+                actor,
+                serde_json::json!({
+                    "phase": "integration_revalidation",
+                    "attempt": execution.attempt_no,
+                }),
+            )? {
+                // Roll the stood-down worker back too: nothing half-reopened.
+                bail!("execution moved while its approval was being restored");
+            }
+        }
+        record_execution_event(
+            conn,
+            exec_id,
+            "integration_revalidation",
+            None,
+            None,
+            actor,
+            serde_json::json!({
+                "from": execution.status.as_str(),
+                "attempt": execution.attempt_no,
+                "approved_attempt": approval.approved_attempt,
+                "reason": approval.reason,
+            }),
+        )?;
+        Ok(ReopenOutcome::Reopened {
+            from: execution.status,
+            approval,
+        })
+    })
 }
 
 /// The interrogeable review obligation (KT-319 DoD-3): every execution AWAITING a review
@@ -3512,6 +4006,20 @@ pub fn transition_execution(
     }
     if to == Done {
         assert_execution_can_finish(conn, exec_id)?;
+    }
+    // `Approved` from a worker-owned state exists only to take back an integration
+    // send-back (KT-862). Keep the proof in the shared primitive, like `Done`'s, so
+    // no other caller can approve an execution nobody reviewed.
+    if to == Approved && matches!(from, Working | Provisioning) {
+        let execution = get_task_execution(conn, exec_id)?
+            .ok_or_else(|| anyhow::anyhow!("task execution not found"))?;
+        if restorable_approval(conn, &execution)?.is_none() {
+            bail!(
+                "execution cannot return to Approved from {}: it is not an integration \
+                 send-back that kept its approved delivery",
+                from.as_str()
+            );
+        }
     }
 
     // Checkpoint-aware resume guard (ADR §3). A resume out of a Blocked/Interrupted
@@ -4432,6 +4940,113 @@ pub fn reanchor_execution_worker_scope(
             actor,
             changes,
         )
+    })
+}
+
+const VALIDATIONS_REPLACED: &str = "validations_replaced";
+
+/// What replacing an execution's validations did. `previous` is what the run
+/// carried until now, so the caller can show the swap without reading the journal.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ValidationsReplacement {
+    pub previous: Vec<ValidationSpec>,
+    pub validations: Vec<ValidationSpec>,
+    /// `false` when the requested set equals the current one: nothing was
+    /// written, and no journal entry pretends otherwise.
+    pub changed: bool,
+}
+
+/// Replace the mechanical gates an existing execution will be integrated with,
+/// without relaunching it, and journal the swap with the actor and the reason.
+///
+/// Refused when the swap would be unsafe or meaningless:
+///   • a terminal execution — its history is closed;
+///   • `Integrating` / `Validating` / `Applying` — the integration saga read the
+///     run's gates when it started, so a swap now would not be the set it runs;
+///   • a campaign run — its gates are the campaign's policy, shared by every
+///     execution of that run, not this execution's to change.
+///
+/// Earlier validation results stay where they are: they are evidence about the
+/// commands that were once required, and `assert_execution_can_finish` only asks
+/// for a pass of each CURRENT gate on the exact candidate. The caller has
+/// already held `validations` to the launch boundary's rules.
+pub fn replace_execution_validations(
+    conn: &Connection,
+    exec_id: &str,
+    validations: &[ValidationSpec],
+    actor: &OrchestrationActor,
+    reason: &str,
+) -> Result<ValidationsReplacement> {
+    in_savepoint(conn, |conn| {
+        let execution = get_task_execution(conn, exec_id)?
+            .ok_or_else(|| anyhow::anyhow!("execution not found or caller is not its principal"))?;
+        if execution.status.is_terminal() {
+            bail!(
+                "execution is {}: its validations can no longer change",
+                execution.status.as_str()
+            );
+        }
+        if matches!(
+            execution.status,
+            TaskExecutionStatus::Integrating
+                | TaskExecutionStatus::Validating
+                | TaskExecutionStatus::Applying
+        ) {
+            bail!(
+                "execution is {}: an integration is running with the validations it started with; \
+                 retry once it settles",
+                execution.status.as_str()
+            );
+        }
+        let run = get_orchestration_run(conn, &execution.orchestration_run_id)?
+            .ok_or_else(|| anyhow::anyhow!("orchestration run not found"))?;
+        if run.kind != OrchestrationRunKind::SingleTask {
+            bail!(
+                "execution belongs to campaign run {}: its validations are the campaign's policy, \
+                 shared by every execution of the run",
+                run.id
+            );
+        }
+        let previous = run.validations;
+        let same = |left: &[ValidationSpec], right: &[ValidationSpec]| {
+            serde_json::to_value(left).ok() == serde_json::to_value(right).ok()
+        };
+        if same(&previous, validations) {
+            return Ok(ValidationsReplacement {
+                previous,
+                validations: validations.to_vec(),
+                changed: false,
+            });
+        }
+        let now = Utc::now().to_rfc3339();
+        let updated = conn.execute(
+            "UPDATE orchestration_runs SET validation_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run.id, serde_json::to_string(validations)?, now],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "run vanished before its validations were replaced"
+        );
+        record_execution_event(
+            conn,
+            exec_id,
+            VALIDATIONS_REPLACED,
+            // Not a transition: the status is unchanged, and a from/to pair
+            // would read as one to anything scanning the journal for moves.
+            None,
+            None,
+            actor,
+            serde_json::json!({
+                "previous": previous,
+                "validations": validations,
+                "reason": reason,
+            }),
+        )?;
+        Ok(ValidationsReplacement {
+            previous,
+            validations: validations.to_vec(),
+            changed: true,
+        })
     })
 }
 

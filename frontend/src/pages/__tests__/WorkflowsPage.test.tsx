@@ -44,6 +44,10 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  projects: {
+    usedSkills: vi.fn().mockResolvedValue([]),
+    usedSkillFile: vi.fn(),
+  },
   profiles: {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn(),
@@ -121,6 +125,9 @@ vi.mock('../../lib/api', () => ({
   // WorkflowWizard loads the MCP overview at mount (ApiCall plugin picker).
   mcps: {
     overview: vi.fn().mockResolvedValue({ servers: [], configs: [], customized_contexts: [], incompatibilities: [] }),
+    // Opening a Quick Prompt from the sidebar (KT-916 Récents tests) mounts QuickPromptForm, which reads
+    // the project's environment names.
+    projectEnvironmentNames: vi.fn().mockResolvedValue([]),
     registry: vi.fn().mockResolvedValue([]),
   },
   // 0.8.10 — WorkflowWizard fetches installed Ollama models at mount for the
@@ -185,6 +192,8 @@ afterEach(() => {
   sessionStorage.removeItem('kronn:postQpImproved');
   localStorage.removeItem('kronn:automationNavigation');
   localStorage.removeItem('kronn:automationCollapsedSections');
+  localStorage.removeItem('kronn:automationGroupBy');
+  localStorage.removeItem('kronn:automationLastOpened');
 });
 
 const wrap = async (ui: React.ReactElement) => {
@@ -204,6 +213,24 @@ const openAutomationActions = () => {
 const chooseAutomationAction = (name: string) => {
   const dialog = openAutomationActions();
   fireEvent.click(within(dialog).getByRole('button', { name }));
+};
+
+/** The type chip of the sidebar (KT-916): it reads the chosen type
+ *  (`data-value`, "Tout" by default) and opens the list of types. */
+const automationTypeChip = () => screen.getByRole('button', { name: /^Type d’automatisation : / });
+
+/** The list of types, opened from the chip on demand. */
+const automationTypeList = () => {
+  if (!screen.queryByRole('listbox', { name: 'Filtre par type d’automatisation' })) {
+    fireEvent.click(automationTypeChip());
+  }
+  return screen.getByRole('listbox', { name: 'Filtre par type d’automatisation' });
+};
+
+/** Picks a type by the label of its row, e.g. `/Quick Prompts \(1\)/`. */
+const chooseAutomationType = async (label: RegExp | string) => {
+  const option = within(automationTypeList()).getByRole('option', { name: label });
+  await act(async () => { fireEvent.click(option); });
 };
 
 describe('WorkflowsPage', () => {
@@ -285,7 +312,7 @@ describe('WorkflowsPage', () => {
     expect(screen.getByRole('heading', { name: 'Nouveau prompt' })).toBeInTheDocument();
   });
 
-  it('uses one searchable sidebar ordered Workflow → API → Prompt → Exec', async () => {
+  it('puts the search, "Group by" and the filter chips in the sidebar under the title, and no bar above the list', async () => {
     const alpha = {
       id: 'wf-alpha', name: 'Alpha report', project_id: 'p-alpha', project_name: 'Alpha',
       trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
@@ -307,55 +334,62 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[{ id: 'p-alpha', name: 'Alpha' } as never]} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    const kinds = within(sidebar).getAllByRole('button').filter(button => button.dataset.tourId?.startsWith('automation-kind-'));
-    expect(kinds.map(button => button.dataset.tourId)).toEqual([
-      'automation-kind-workflow',
-      'automation-kind-quick-api',
-      'automation-kind-quick-prompt',
-      'automation-kind-quick-exec',
-    ]);
-    const projectsSection = sidebar.querySelector('.disc-sidebar-projects') as HTMLElement;
-    expect(within(projectsSection).getByRole('button', { name: /Sans projet/ })).toBeInTheDocument();
-    expect(within(projectsSection).getByRole('button', { name: /^Alpha 1$/ })).toBeInTheDocument();
+    // Top to bottom: title row, search, "Group by" and the chips, then the list.
+    const titlebar = sidebar.querySelector('.collection-shell-titlebar') as HTMLElement;
+    const header = sidebar.querySelector('.collection-shell-header') as HTMLElement;
+    const controls = sidebar.querySelector('.automation-controls') as HTMLElement;
+    expect(titlebar.nextElementSibling).toBe(header);
+    expect(header.nextElementSibling).toBe(controls);
+    expect(controls.nextElementSibling).toBe(sidebar.querySelector('.automation-sidebar-items'));
+    const search = within(header).getByRole('textbox', { name: 'Rechercher une automatisation…' });
+    expect(search).toHaveAttribute('aria-keyshortcuts', '/');
+    // The search is alone on its row, full width: no Filter / Sort icon beside it.
+    expect(within(header).queryByRole('button', { name: 'Filtrer les automatisations' })).toBeNull();
+    expect(within(header).queryByRole('button', { name: 'Trier les automatisations' })).toBeNull();
+    expect(within(header).queryAllByRole('button')).toHaveLength(0);
 
-    fireEvent.change(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' }), {
-      target: { value: 'Alpha' },
-    });
+    // The panel of three selects (KT-912) and the separate Sort button are gone.
+    expect(sidebar.querySelector('select, #automation-filter-options, #automation-sort-options')).toBeNull();
+    expect(within(sidebar).queryAllByRole('combobox')).toHaveLength(0);
+    expect(within(controls).getByRole('group', { name: 'Grouper par' })).toBeInTheDocument();
+    expect(controls.querySelector('.automation-chips')).toHaveAttribute('data-tour-id', 'automation-filters');
+
+    // Nothing is left above the list: the main column is the viewer only.
+    expect(screen.queryByRole('search', { name: 'Filtres des automatisations' })).toBeNull();
+    expect(document.querySelector('.automation-filterbar, .automation-main')).toBeNull();
+    expect(document.querySelector('.automation-page')?.children).toHaveLength(2);
+    expect(document.querySelector('.automation-page > .automation-viewer')).not.toBeNull();
+    // Grouped by type at first.
+    expect(within(sidebar).getByRole('button', { name: 'Workflows 2' })).toBeInTheDocument();
+
+    fireEvent.change(search, { target: { value: 'Alpha' } });
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
     expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
 
+    // `/` reaches the search from anywhere on the page, and from the sidebar.
+    (document.activeElement as HTMLElement | null)?.blur();
     fireEvent.keyDown(window, { key: '/' });
-    expect(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' })).toHaveFocus();
+    expect(search).toHaveFocus();
+    const alphaRow = within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' });
+    alphaRow.focus();
+    fireEvent.keyDown(alphaRow, { key: '/' });
+    expect(search).toHaveFocus();
 
-    const projectFilterButton = within(sidebar).getByRole('button', { name: 'Filtrer les automatisations par projet' });
-    expect(projectFilterButton).toHaveClass('collection-shell-search-action-icon');
-    expect(projectFilterButton.querySelector('span')).toBeNull();
-    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');
-    expect(projectFilterButton).not.toHaveAttribute('aria-controls');
-    expect(within(sidebar).queryByRole('combobox', { name: 'Filtrer les automatisations par projet' })).toBeNull();
+    // The project is a removable chip, cumulating with the search.
+    fireEvent.click(within(controls).getByRole('button', { name: 'Filtrer les automatisations par projet' }));
+    fireEvent.click(within(controls).getByRole('option', { name: 'Alpha (1)' }));
+    expect(within(controls).getByRole('button', { name: 'Alpha' })).toBeInTheDocument();
+    expect(within(controls).getByRole('button', { name: 'Effacer les filtres' })).toBeInTheDocument();
 
-    fireEvent.click(projectFilterButton);
-    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'true');
-    expect(projectFilterButton).toHaveAttribute('aria-controls', 'automation-project-filter-options');
-    const projectFilter = within(sidebar).getByRole('combobox', { name: 'Filtrer les automatisations par projet' });
-    expect(projectFilter.closest('.collection-shell-search-options')).toHaveAttribute(
-      'id',
-      'automation-project-filter-options',
-    );
-    fireEvent.change(projectFilter, {
-      target: { value: 'p-alpha' },
-    });
-    expect(projectFilterButton).toHaveAttribute('data-active', 'true');
-    expect(projectFilterButton.querySelector('strong')).toBeNull();
-
-    fireEvent.keyDown(projectFilter, { key: 'Escape' });
-    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');
-    expect(projectFilterButton).toHaveFocus();
-    expect(within(sidebar).queryByRole('combobox', { name: 'Filtrer les automatisations par projet' })).toBeNull();
-
-    fireEvent.click(within(sidebar).getByRole('button', { name: 'Effacer la recherche' }));
+    fireEvent.click(within(header).getByRole('button', { name: 'Effacer la recherche' }));
+    expect(search).toHaveValue('');
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
     expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
+
+    fireEvent.click(within(controls).getByRole('button', { name: 'Effacer les filtres' }));
+    expect(within(controls).queryByRole('button', { name: 'Alpha' })).toBeNull();
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir Beta report' })).toBeInTheDocument();
+    expect(within(controls).queryByRole('button', { name: 'Effacer les filtres' })).toBeNull();
 
     await act(async () => {
       fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' }));
@@ -366,6 +400,398 @@ describe('WorkflowsPage', () => {
     expect(detailPane.querySelector('.wf-detail-header')).toHaveClass('collection-detail-header');
     expect(document.querySelector('.automation-page-header')).toBeNull();
 
+  });
+
+  describe('sidebar filters and grouping (KT-916)', () => {
+    const summary = (id: string, name: string, over: Partial<WorkflowSummary> = {}): WorkflowSummary => ({
+      id, name, project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+      ...over,
+    } as WorkflowSummary);
+    const promptOf = (id: string, name: string, over: Partial<QuickPrompt> = {}): QuickPrompt => ({
+      id, pinned: false, name, icon: '💬', description: '', prompt_template: name, variables: [],
+      agent: 'ClaudeCode', project_id: null, skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default',
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      ...over,
+    });
+    const execOf = (id: string, name: string): QuickExec => ({
+      id, name, icon: '⌘', description: '', pinned: false, project_id: null, command: 'aws', args: [],
+      timeout_secs: 30, output_format: 'json', variables: [],
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    } as QuickExec);
+
+    /** Mounts a library of five automations: two workflows (one pinned, one
+     *  disabled), two Quick Prompts (one pinned, one in a project) and a Quick Exec. */
+    async function showLibrary() {
+      mockWorkflowsApi.list.mockResolvedValueOnce([
+        summary('wf-alpha', 'Alpha flow', { project_id: 'p-alpha', project_name: 'Alpha', pinned: true }),
+        summary('wf-beta', 'Beta flow', { enabled: false }),
+      ]);
+      vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([
+        promptOf('qp-gamma', 'Gamma prompt', { pinned: true }),
+        promptOf('qp-alpha', 'Alpha prompt', { project_id: 'p-alpha' }),
+      ]);
+      vi.mocked(quickExecsApi.list).mockResolvedValueOnce([execOf('qe-delta', 'Delta exec')]);
+      await wrap(
+        <WorkflowsPage
+          projects={[{ id: 'p-alpha', name: 'Alpha' } as never]}
+          installedAgentTypes={['ClaudeCode']}
+          agentAccess={fullConfig}
+        />,
+      );
+      const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+      const controls = sidebar.querySelector('.automation-controls') as HTMLElement;
+      return {
+        sidebar,
+        controls,
+        search: within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' }),
+        toggle: (name: string) => within(controls).getByRole('button', { name }),
+        /** The "Effacer les filtres" of the chips (the empty list has its own). */
+        clear: () => within(controls).queryByRole('button', { name: 'Effacer les filtres' }),
+        groupBy: (name: string) => within(within(controls).getByRole('group', { name: 'Grouper par' })).getByRole('button', { name }),
+        typeOptions: () => within(automationTypeList()).getAllByRole('option').map(option => option.getAttribute('aria-label')),
+      };
+    }
+    // The open buttons of the list, in the order they are listed.
+    const rows = (sidebar: HTMLElement) => within(sidebar.querySelector('.automation-sidebar-items') as HTMLElement)
+      .queryAllByRole('button', { name: /^Ouvrir / })
+      .map(button => button.getAttribute('aria-label'));
+    const groupHeaders = (sidebar: HTMLElement) => Array.from(sidebar.querySelectorAll('.automation-group-header'))
+      .map(header => header.getAttribute('aria-label'));
+
+    it('groups by type at first, with a dot and a count per group, then by project, then flat', async () => {
+      const { sidebar, groupBy } = await showLibrary();
+      expect(groupBy('Type')).toHaveAttribute('aria-pressed', 'true');
+      expect(groupHeaders(sidebar)).toEqual(['Workflows 2', 'Quick Prompts 2', 'Quick Execs (CLI) 1']);
+      expect(sidebar.querySelector('.automation-group-dot[data-kind="workflows"]')).not.toBeNull();
+      expect(sidebar.querySelector('.automation-group-dot[data-kind="quickPrompts"]')).not.toBeNull();
+      expect(rows(sidebar)).toEqual([
+        'Ouvrir Alpha flow', 'Ouvrir Beta flow', 'Ouvrir Gamma prompt', 'Ouvrir Alpha prompt', 'Ouvrir Delta exec',
+      ]);
+      // A row says the rest of what it is; the group already says its type.
+      expect(within(sidebar.querySelector('[data-group="kind:workflows"]') as HTMLElement).getAllByText(/^Manuel · 1 step$/)).toHaveLength(2);
+
+      fireEvent.click(groupBy('Projet'));
+      expect(groupBy('Projet')).toHaveAttribute('aria-pressed', 'true');
+      expect(groupHeaders(sidebar)).toEqual(['Alpha 2', 'Sans projet 3']);
+      const alphaGroup = sidebar.querySelector('[data-group="project:p-alpha"]') as HTMLElement;
+      expect(within(alphaGroup).getAllByRole('button', { name: /^Ouvrir / }).map(button => button.getAttribute('aria-label')))
+        .toEqual(['Ouvrir Alpha flow', 'Ouvrir Alpha prompt']);
+      // Out of a type group the row names its type.
+      expect(within(alphaGroup).getByText('Workflows · Manuel · 1 step')).toBeInTheDocument();
+
+      fireEvent.click(groupBy('Aucun'));
+      expect(sidebar.querySelector('.automation-group-header')).toBeNull();
+      expect(rows(sidebar)).toHaveLength(5);
+    });
+
+    it('remembers the grouping between visits, and starts on Type when nothing is remembered', async () => {
+      const { groupBy } = await showLibrary();
+      expect(localStorage.getItem('kronn:automationGroupBy')).toBeNull();
+      fireEvent.click(groupBy('Projet'));
+      expect(localStorage.getItem('kronn:automationGroupBy')).toBe('project');
+      cleanup();
+
+      await wrap(<WorkflowsPage projects={[]} />);
+      const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+      const segmented = within(sidebar).getByRole('group', { name: 'Grouper par' });
+      expect(within(segmented).getByRole('button', { name: 'Projet' })).toHaveAttribute('aria-pressed', 'true');
+      expect(within(segmented).getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'false');
+      localStorage.removeItem('kronn:automationGroupBy');
+      cleanup();
+
+      await wrap(<WorkflowsPage projects={[]} />);
+      expect(within(within(screen.getByRole('complementary', { name: 'Automatisation' })).getByRole('group', { name: 'Grouper par' }))
+        .getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('falls back to Type when the remembered grouping is unreadable', async () => {
+      localStorage.setItem('kronn:automationGroupBy', 'folders');
+      await wrap(<WorkflowsPage projects={[]} />);
+      const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+      expect(within(within(sidebar).getByRole('group', { name: 'Grouper par' })).getByRole('button', { name: 'Type' }))
+        .toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('folds a group from its header, which a search or a selection lifts', async () => {
+      const { sidebar, search } = await showLibrary();
+      const workflows = within(sidebar).getByRole('button', { name: 'Workflows 2' });
+      expect(workflows).toHaveAttribute('aria-expanded', 'true');
+      fireEvent.click(workflows);
+      expect(workflows).toHaveAttribute('aria-expanded', 'false');
+      expect(rows(sidebar)).toEqual(['Ouvrir Gamma prompt', 'Ouvrir Alpha prompt', 'Ouvrir Delta exec']);
+      expect(JSON.parse(localStorage.getItem('kronn:automationCollapsedSections') ?? '[]')).toEqual(['kind:workflows']);
+
+      // A search looks inside every group.
+      fireEvent.change(search, { target: { value: 'flow' } });
+      expect(within(sidebar).getByRole('button', { name: 'Workflows 2' })).toHaveAttribute('aria-expanded', 'true');
+      expect(rows(sidebar)).toEqual(['Ouvrir Alpha flow', 'Ouvrir Beta flow']);
+      fireEvent.change(search, { target: { value: '' } });
+      expect(within(sidebar).getByRole('button', { name: 'Workflows 2' })).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    // KT-921 — "Je ne peux pas plier la première catégorie (Workflows)": the
+    // first group holds the automation that is open, and used to be forced
+    // open for that reason.
+    it('folds and unfolds the first group too — the one holding the open automation — by type and by project', async () => {
+      mockWorkflowsApi.get.mockResolvedValueOnce({
+        id: 'wf-alpha', name: 'Alpha flow', project_id: 'p-alpha', trigger: { type: 'Manual' },
+        steps: [], actions: [], safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+        workspace_config: null, concurrency_limit: null, enabled: true, pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } as Workflow);
+      const { sidebar, groupBy } = await showLibrary();
+      await act(async () => {
+        fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha flow' }));
+      });
+      await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-alpha'));
+      expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+
+      const foldsAndUnfolds = (header: HTMLElement, hidden: string[]) => {
+        expect(header).toHaveAttribute('aria-expanded', 'true');
+        fireEvent.click(header);
+        expect(header).toHaveAttribute('aria-expanded', 'false');
+        for (const row of hidden) expect(rows(sidebar)).not.toContain(row);
+        // The automation stays open in the main column while its row is folded away.
+        expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+        fireEvent.click(header);
+        expect(header).toHaveAttribute('aria-expanded', 'true');
+        for (const row of hidden) expect(rows(sidebar)).toContain(row);
+      };
+
+      // By type: the first group is Workflows, and it holds the open workflow.
+      expect(groupHeaders(sidebar)[0]).toBe('Workflows 2');
+      foldsAndUnfolds(within(sidebar).getByRole('button', { name: 'Workflows 2' }), ['Ouvrir Alpha flow', 'Ouvrir Beta flow']);
+
+      // By project: the first group is Alpha, which holds it too.
+      fireEvent.click(groupBy('Projet'));
+      expect(groupHeaders(sidebar)[0]).toBe('Alpha 2');
+      foldsAndUnfolds(within(sidebar).getByRole('button', { name: 'Alpha 2' }), ['Ouvrir Alpha flow', 'Ouvrir Alpha prompt']);
+
+      // Flat: there is no group, hence no header to fold — and no row is lost.
+      fireEvent.click(groupBy('Aucun'));
+      expect(sidebar.querySelector('.automation-group-header')).toBeNull();
+      expect(rows(sidebar)).toHaveLength(5);
+    });
+
+    it('counts each type in the type list, "Tout" first, and narrows the list to the chosen one', async () => {
+      const { sidebar, typeOptions } = await showLibrary();
+      expect(automationTypeChip()).toHaveTextContent('Tout');
+      expect(automationTypeChip()).toHaveAttribute('data-value', 'all');
+      expect(typeOptions()).toEqual([
+        'Tout (5)', 'Workflows (2)', 'Quick Prompts (2)', 'Quick APIs (0)', 'Quick Execs (CLI) (1)', 'Skills (0)',
+      ]);
+
+      await chooseAutomationType('Quick Prompts (2)');
+      expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts');
+      expect(automationTypeChip()).toHaveTextContent('Quick Prompts');
+      expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Gamma prompt', 'Ouvrir Alpha prompt']));
+
+      // "Tout" lifts the filter; the counts did not move with it.
+      expect(within(automationTypeList()).getByRole('option', { name: 'Tout (5)' })).toBeInTheDocument();
+      await chooseAutomationType('Tout (5)');
+      expect(automationTypeChip()).toHaveAttribute('data-value', 'all');
+      expect(rows(sidebar)).toContain('Ouvrir Beta flow');
+    });
+
+    it('stacks pinned, type, project and search, each count reading what the others leave', async () => {
+      const { sidebar, controls, search, toggle, clear, typeOptions } = await showLibrary();
+      expect(clear()).toBeNull();
+
+      // Épinglés: the two pinned ones.
+      fireEvent.click(toggle('Épinglés'));
+      expect(toggle('Épinglés')).toHaveAttribute('aria-pressed', 'true');
+      expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Alpha flow', 'Ouvrir Gamma prompt']));
+      // The type counts now read within the pinned ones only.
+      expect(typeOptions()).toEqual([
+        'Tout (2)', 'Workflows (1)', 'Quick Prompts (1)', 'Quick APIs (0)', 'Quick Execs (CLI) (0)', 'Skills (0)',
+      ]);
+
+      // + type: only the pinned workflow is left.
+      await chooseAutomationType('Workflows (1)');
+      expect(rows(sidebar)).toEqual(['Ouvrir Alpha flow']);
+
+      // + search that matches nothing of it.
+      fireEvent.change(search, { target: { value: 'gamma' } });
+      expect(rows(sidebar)).toEqual([]);
+      expect(within(sidebar).getByText('Aucune automatisation ne correspond à ces filtres.')).toBeInTheDocument();
+      // The empty list offers the way out as well.
+      expect(within(sidebar.querySelector('.disc-empty') as HTMLElement).getByRole('button', { name: 'Effacer les filtres' })).toBeInTheDocument();
+
+      // Clearing the filters leaves the search in force.
+      fireEvent.click(clear() as HTMLElement);
+      expect(rows(sidebar)).toEqual(['Ouvrir Gamma prompt']);
+      expect(search).toHaveValue('gamma');
+      expect(automationTypeChip()).toHaveAttribute('data-value', 'all');
+      expect(toggle('Épinglés')).toHaveAttribute('aria-pressed', 'false');
+      expect(clear()).toBeNull();
+      expect(controls.querySelector('.automation-chip[data-active="true"]')).toBeNull();
+    });
+
+    it('filters by project, without project or one project, and clears from the empty list', async () => {
+      const { sidebar, controls, clear, toggle } = await showLibrary();
+      fireEvent.click(toggle('Filtrer les automatisations par projet'));
+      expect(within(within(controls).getByRole('listbox', { name: 'Filtrer les automatisations par projet' }))
+        .getAllByRole('option').map(option => option.getAttribute('aria-label')))
+        .toEqual(['Sans projet (3)', 'Alpha (2)']);
+
+      fireEvent.click(within(controls).getByRole('option', { name: 'Alpha (2)' }));
+      expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Alpha flow', 'Ouvrir Alpha prompt']));
+      // The chip names the project; its name reopens the list to change it.
+      fireEvent.click(toggle('Alpha'));
+      fireEvent.click(within(controls).getByRole('option', { name: 'Sans projet (3)' }));
+      expect(new Set(rows(sidebar))).toEqual(new Set(['Ouvrir Beta flow', 'Ouvrir Gamma prompt', 'Ouvrir Delta exec']));
+
+      // + a type with no automation left in that project: the empty list clears it.
+      await chooseAutomationType('Quick APIs (0)');
+      expect(rows(sidebar)).toEqual([]);
+      fireEvent.click(within(sidebar.querySelector('.disc-empty') as HTMLElement).getByRole('button', { name: 'Effacer les filtres' }));
+      expect(within(controls).getByRole('button', { name: 'Filtrer les automatisations par projet' })).toBeInTheDocument();
+      expect(automationTypeChip()).toHaveAttribute('data-value', 'all');
+      expect(rows(sidebar)).toHaveLength(5);
+      expect(clear()).toBeNull();
+    });
+
+    it('removes the project filter with the cross of its chip', async () => {
+      const { sidebar, controls, toggle } = await showLibrary();
+      fireEvent.click(toggle('Filtrer les automatisations par projet'));
+      fireEvent.click(within(controls).getByRole('option', { name: 'Alpha (2)' }));
+      expect(rows(sidebar)).toHaveLength(2);
+      fireEvent.click(toggle('Retirer le filtre projet Alpha'));
+      expect(rows(sidebar)).toHaveLength(5);
+      expect(within(controls).getByRole('button', { name: 'Filtrer les automatisations par projet' })).toBeInTheDocument();
+    });
+
+    it('keeps only the active workflows with "Actifs", the always-on Quick items staying', async () => {
+      const { sidebar, toggle } = await showLibrary();
+      fireEvent.click(toggle('Actifs'));
+      expect(toggle('Actifs')).toHaveAttribute('aria-pressed', 'true');
+      expect(rows(sidebar)).not.toContain('Ouvrir Beta flow');
+      expect(rows(sidebar)).toHaveLength(4);
+      fireEvent.click(toggle('Actifs'));
+      expect(rows(sidebar)).toHaveLength(5);
+    });
+
+    it('sets the order from the ⋯ menu, favorites staying on top', async () => {
+      const { sidebar, groupBy } = await showLibrary();
+      // Flat, so the whole order can be read at once.
+      fireEvent.click(groupBy('Aucun'));
+      expect(rows(sidebar)).toEqual([
+        'Ouvrir Alpha flow', 'Ouvrir Gamma prompt', 'Ouvrir Alpha prompt', 'Ouvrir Beta flow', 'Ouvrir Delta exec',
+      ]);
+      // There is no Sort button in the sidebar any more.
+      expect(within(sidebar).queryByRole('button', { name: 'Trier les automatisations' })).toBeNull();
+
+      fireEvent.click(screen.getByLabelText('Autres actions'));
+      const menu = screen.getByRole('menu', { name: 'Autres actions' });
+      expect(within(menu).getAllByRole('menuitemradio').map(item => item.textContent))
+        .toEqual(['Nom', 'Dernière modification', 'Dernière ouverture']);
+      expect(within(menu).getByRole('menuitemradio', { name: 'Nom' })).toHaveAttribute('aria-checked', 'true');
+      expect(within(menu).getByRole('menuitem', { name: /Sélection multiple/ })).toBeInTheDocument();
+      fireEvent.click(within(menu).getByRole('menuitemcheckbox', { name: 'Inverser l’ordre' }));
+      expect(screen.queryByRole('menu', { name: 'Autres actions' })).toBeNull();
+      expect(rows(sidebar)).toEqual([
+        'Ouvrir Gamma prompt', 'Ouvrir Alpha flow', 'Ouvrir Delta exec', 'Ouvrir Beta flow', 'Ouvrir Alpha prompt',
+      ]);
+
+      fireEvent.click(screen.getByLabelText('Autres actions'));
+      fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'Rétablir l’ordre par défaut' }));
+      expect(rows(sidebar)[0]).toBe('Ouvrir Alpha flow');
+      expect(rows(sidebar)[4]).toBe('Ouvrir Delta exec');
+    });
+
+    it('lists what was opened, latest first, from the Récents chip, and sorts by last opening', async () => {
+      const { sidebar, groupBy, toggle, clear } = await showLibrary();
+      fireEvent.click(groupBy('Aucun'));
+      expect(localStorage.getItem('kronn:automationLastOpened')).toBeNull();
+
+      // Nothing opened yet: Récents shows nothing, and offers the way out.
+      fireEvent.click(toggle('Récents'));
+      expect(rows(sidebar)).toEqual([]);
+      fireEvent.click(toggle('Récents'));
+      expect(rows(sidebar)).toHaveLength(5);
+
+      await act(async () => { fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Delta exec' })); });
+      await act(async () => { fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha prompt' })); });
+      expect(Object.keys(JSON.parse(localStorage.getItem('kronn:automationLastOpened') ?? '{}')).sort())
+        .toEqual(['quickExecs:qe-delta', 'quickPrompts:qp-alpha']);
+
+      fireEvent.click(toggle('Récents'));
+      expect(toggle('Récents')).toHaveAttribute('aria-pressed', 'true');
+      expect(clear()).not.toBeNull();
+      expect(rows(sidebar)).toEqual(['Ouvrir Alpha prompt', 'Ouvrir Delta exec']);
+
+      // Opening the older one again brings it back to the top.
+      await act(async () => { fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Delta exec' })); });
+      expect(rows(sidebar)).toEqual(['Ouvrir Delta exec', 'Ouvrir Alpha prompt']);
+
+      // Out of Récents, "Dernière ouverture" orders the whole list the same way.
+      fireEvent.click(toggle('Récents'));
+      fireEvent.click(screen.getByLabelText('Autres actions'));
+      fireEvent.click(screen.getByRole('menuitemradio', { name: 'Dernière ouverture' }));
+      // Favorites stay on top; then what was opened, latest first; then the rest by name.
+      expect(rows(sidebar)).toEqual([
+        'Ouvrir Alpha flow', 'Ouvrir Gamma prompt', 'Ouvrir Delta exec', 'Ouvrir Alpha prompt', 'Ouvrir Beta flow',
+      ]);
+    });
+
+    it('combines Récents with the other chips and the search', async () => {
+      const { sidebar, search, groupBy, toggle } = await showLibrary();
+      fireEvent.click(groupBy('Aucun'));
+      await act(async () => { fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Delta exec' })); });
+      await act(async () => { fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Gamma prompt' })); });
+      fireEvent.click(toggle('Récents'));
+      expect(rows(sidebar)).toEqual(['Ouvrir Gamma prompt', 'Ouvrir Delta exec']);
+      fireEvent.click(toggle('Épinglés'));
+      expect(rows(sidebar)).toEqual(['Ouvrir Gamma prompt']);
+      fireEvent.click(toggle('Épinglés'));
+      fireEvent.change(search, { target: { value: 'delta' } });
+      expect(rows(sidebar)).toEqual(['Ouvrir Delta exec']);
+    });
+
+    it('still selects several rows and deletes them from a filtered sidebar', async () => {
+      mockWorkflowsApi.delete.mockClear();
+      mockWorkflowsApi.delete.mockResolvedValue(undefined);
+      vi.stubGlobal('confirm', vi.fn(() => true));
+      const { toggle } = await showLibrary();
+      await chooseAutomationType('Workflows (2)');
+      fireEvent.click(toggle('Épinglés'));
+
+      await act(async () => { fireEvent.click(screen.getByLabelText('Autres actions')); });
+      await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: /Sélection multiple/ })); });
+      const boxes = screen.getAllByRole('checkbox');
+      expect(boxes).toHaveLength(1);
+      await act(async () => { fireEvent.click(boxes[0]); });
+      await act(async () => { fireEvent.click(screen.getByLabelText('Supprimer la sélection')); });
+      expect(mockWorkflowsApi.delete).toHaveBeenCalledTimes(1);
+      expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-alpha');
+    });
+
+    it('lists a group in full while selecting several rows, even a folded one', async () => {
+      const { sidebar } = await showLibrary();
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Workflows 2' }));
+      expect(rows(sidebar)).toHaveLength(3);
+      await act(async () => { fireEvent.click(screen.getByLabelText('Autres actions')); });
+      await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: /Sélection multiple/ })); });
+      expect(within(sidebar).getAllByRole('checkbox')).toHaveLength(5);
+    });
+
+    it('keeps the drawer at 400 px in one column: full-width "Group by", chips that wrap, no select', async () => {
+      vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+      const { sidebar, controls, search } = await showLibrary();
+
+      expect(sidebar).toHaveAttribute('data-mobile', 'true');
+      expect(search).toBeInTheDocument();
+      // Nothing to overflow: no chip row of the shell, no select, one block of controls.
+      expect(sidebar.querySelector('.collection-shell-filter')).toBeNull();
+      expect(sidebar.querySelector('select')).toBeNull();
+      expect(controls.querySelectorAll('.automation-groupby > .automation-segmented > button')).toHaveLength(3);
+      expect(controls.querySelectorAll('.automation-chips > .automation-chip').length).toBeGreaterThanOrEqual(5);
+      // The type list opens inside the drawer, over the width of the controls.
+      fireEvent.click(automationTypeChip());
+      expect(controls.querySelector('.automation-chip-menu')).not.toBeNull();
+    });
   });
 
   it('keeps arrow-key navigation on grouped Automation rows rendered by CollectionShell', async () => {
@@ -401,8 +827,9 @@ describe('WorkflowsPage', () => {
 
     await wrap(<WorkflowsPage projects={[]} />);
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    expect(sidebar.querySelector('[data-tour-id="automation-kind-quick-exec"]'))
-      .toHaveTextContent('Quick Execs (CLI)');
+    fireEvent.click(within(sidebar).getByRole('button', { name: /^Type d’automatisation : / }));
+    expect(within(sidebar).getByRole('option', { name: 'Quick Execs (CLI) (1)' })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
     await act(async () => {
       fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir CloudWatch errors' }));
     });
@@ -425,39 +852,57 @@ describe('WorkflowsPage', () => {
     expect(screen.getByDisplayValue('CloudWatch errors')).toBeInTheDocument();
   });
 
-  it('restores the selected automation and collapsed sidebar sections', async () => {
+  it('restores the selected automation and the folded sidebar groups', async () => {
     const quickExec = {
-      id: 'qe-persisted', name: 'Persistent CLI', icon: '⌘', description: 'Persists navigation',
+      id: 'qe-persisted', name: 'Shared CLI', icon: '⌘', description: 'Persists navigation',
       pinned: false,
       project_id: null, command: 'aws', args: ['sts', 'get-caller-identity'], timeout_secs: 30,
       output_format: 'json', variables: [],
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     } as QuickExec;
+    const workflow = {
+      id: 'wf-shared', name: 'Shared flow', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    } as WorkflowSummary;
     vi.mocked(quickExecsApi.list)
       .mockResolvedValueOnce([quickExec])
       .mockResolvedValueOnce([quickExec]);
+    mockWorkflowsApi.list
+      .mockResolvedValueOnce([workflow])
+      .mockResolvedValueOnce([workflow]);
 
     const first = await wrap(<WorkflowsPage projects={[]} />);
     const firstSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    fireEvent.click(within(firstSidebar).getByRole('button', { name: 'Ouvrir Persistent CLI' }));
-    expect(await screen.findByRole('heading', { name: 'Persistent CLI' })).toBeInTheDocument();
+    fireEvent.click(within(firstSidebar).getByRole('button', { name: 'Ouvrir Shared CLI' }));
+    expect(await screen.findByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
 
-    const projectsSection = within(firstSidebar).getByRole('button', { name: /Projets/ });
-    fireEvent.click(projectsSection);
-    expect(projectsSection).toHaveAttribute('aria-expanded', 'false');
+    // The group of the open automation folds like any other (KT-921): the
+    // automation itself stays open in the main column.
+    const execsGroup = within(firstSidebar).getByRole('button', { name: 'Quick Execs (CLI) 1' });
+    fireEvent.click(execsGroup);
+    expect(execsGroup).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
+    const workflowsGroup = within(firstSidebar).getByRole('button', { name: 'Workflows 1' });
+    fireEvent.click(workflowsGroup);
+    expect(workflowsGroup).toHaveAttribute('aria-expanded', 'false');
 
-    const search = within(firstSidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' });
-    fireEvent.change(search, { target: { value: 'Persistent' } });
-    expect(projectsSection).toHaveAttribute('aria-expanded', 'true');
+    const search = screen.getByRole('textbox', { name: 'Rechercher une automatisation…' });
+    fireEvent.change(search, { target: { value: 'Shared' } });
+    expect(workflowsGroup).toHaveAttribute('aria-expanded', 'true');
+    expect(execsGroup).toHaveAttribute('aria-expanded', 'true');
     fireEvent.change(search, { target: { value: '' } });
-    expect(projectsSection).toHaveAttribute('aria-expanded', 'false');
+    expect(workflowsGroup).toHaveAttribute('aria-expanded', 'false');
+    expect(execsGroup).toHaveAttribute('aria-expanded', 'false');
     first.unmount();
 
     await wrap(<WorkflowsPage projects={[]} />);
     const restoredSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    expect(within(restoredSidebar).getByRole('button', { name: /Projets/ }))
+    expect(within(restoredSidebar).getByRole('button', { name: 'Workflows 1' }))
       .toHaveAttribute('aria-expanded', 'false');
-    expect(await screen.findByRole('heading', { name: 'Persistent CLI' })).toBeInTheDocument();
+    expect(within(restoredSidebar).getByRole('button', { name: 'Quick Execs (CLI) 1' }))
+      .toHaveAttribute('aria-expanded', 'false');
+    expect(await screen.findByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
   });
 
   it('drops a persisted automation selection when its resource no longer exists', async () => {
@@ -540,7 +985,7 @@ describe('WorkflowsPage', () => {
 
     await wrap(<WorkflowsPage projects={[]} />);
 
-    expect(screen.getByRole('button', { name: /Quick Prompts/ })).toHaveAttribute('data-active', 'true');
+    expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts');
     expect(sessionStorage.getItem('kronn:postQpImproved')).toBeNull();
   });
 
@@ -597,9 +1042,10 @@ describe('WorkflowsPage', () => {
     expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
 
     // The layout should use column direction on mobile (flex-direction: column)
-    // Just verify no crash and content is accessible
-    const body = document.body.textContent!;
-    expect(body).toContain('Workflows');
+    // Just verify no crash and content is accessible: the filters live in the
+    // sidebar, whose type chip lists the Workflows.
+    expect(screen.getByRole('textbox', { name: 'Rechercher une automatisation…' })).toBeDefined();
+    expect(within(automationTypeList()).getByRole('option', { name: /^Workflows/ })).toBeDefined();
 
     // Restore default matchMedia
     Object.defineProperty(window, 'matchMedia', {
@@ -702,15 +1148,20 @@ describe('WorkflowsPage', () => {
       />
     );
 
-    // The pinned workflow appears in sidebar Favorites + Projects and in the
-    // unchanged viewer's Favorites + project group. The ordinary workflow
-    // appears in sidebar Recents + Projects and the viewer's project group.
-    expect(screen.getAllByText('Favoris')).toHaveLength(2);
-    expect(screen.getAllByText('Pinned WF')).toHaveLength(4);
-    expect(screen.getAllByText('Regular WF')).toHaveLength(3);
+    // The sidebar lists each workflow once (KT-916: no Favorites or Recent
+    // section repeating it). The unchanged viewer keeps its cross-project
+    // Favoris group: the pinned workflow is there and in its project group,
+    // the ordinary one only in its project group.
+    expect(screen.getAllByText('Favoris')).toHaveLength(1);
+    expect(screen.getAllByText('Pinned WF')).toHaveLength(3);
+    expect(screen.getAllByText('Regular WF')).toHaveLength(2);
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    expect(within(sidebar).getAllByText('Pinned WF')).toHaveLength(1);
+    expect(within(sidebar).getByRole('button', { name: 'Retirer des favoris · Pinned WF' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(sidebar).getByRole('button', { name: 'Ajouter aux favoris · Regular WF' })).toHaveAttribute('aria-pressed', 'false');
   });
 
-  it('keeps workflow favorites rendered in the unified sidebar while a detail is selected', async () => {
+  it('keeps the pinned workflow, starred and highlighted, in the sidebar while its detail is selected', async () => {
     localStorage.setItem('kronn:automationNavigation', JSON.stringify({
       tab: 'workflows',
       resourceId: 'wf-pin',
@@ -732,12 +1183,13 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[]} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    expect(within(sidebar).getByRole('button', { name: 'Favoris 1' })).toHaveClass('collection-favorites-header');
-    expect(within(sidebar).getAllByRole('button', { name: 'Ouvrir Pinned detail' })).toHaveLength(2);
+    const row = within(sidebar).getByRole('button', { name: 'Ouvrir Pinned detail' });
+    expect(row.closest('.disc-item')).toHaveAttribute('data-active', 'true');
+    expect(within(sidebar).getByRole('button', { name: 'Retirer des favoris · Pinned detail' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
   });
 
-  it('groups pinned Quick API, Prompt and Exec resources and toggles them with one API shape', async () => {
+  it('lists pinned Quick API, Prompt and Exec resources from the Épinglés chip and toggles them with one API shape', async () => {
     const quickPrompt: QuickPrompt = {
       id: 'qp-favorite', name: 'Prompt favori', icon: '✍️', prompt_template: 'Résume',
       variables: [], agent: 'Codex', project_id: null, skill_ids: [], profile_ids: [],
@@ -764,13 +1216,18 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['Codex']} agentAccess={fullConfig} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    const favorites = sidebar.querySelector('.disc-sidebar-favorites') as HTMLElement;
-    expect(within(favorites).getByRole('button', { name: 'Favoris 3' })).toHaveClass('collection-favorites-header');
-    expect(within(favorites).getByRole('button', { name: 'Ouvrir API favorite' })).toBeInTheDocument();
-    expect(within(favorites).getByRole('button', { name: 'Ouvrir Prompt favori' })).toBeInTheDocument();
-    expect(within(favorites).getByRole('button', { name: 'Ouvrir Exec favori' })).toBeInTheDocument();
+    // One group per type, each pinned resource starred in its row.
+    expect(Array.from(sidebar.querySelectorAll('.automation-group-header')).map(header => header.getAttribute('aria-label')))
+      .toEqual(['Quick Prompts 1', 'Quick APIs 1', 'Quick Execs (CLI) 1']);
+    const pinned = within(sidebar).getByRole('button', { name: 'Épinglés' });
+    fireEvent.click(pinned);
+    expect(pinned).toHaveAttribute('aria-pressed', 'true');
+    // All three are pinned: the chip keeps them all.
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir API favorite' })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir Prompt favori' })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir Exec favori' })).toBeInTheDocument();
 
-    fireEvent.click(within(favorites).getByRole('button', {
+    fireEvent.click(within(sidebar).getByRole('button', {
       name: 'Retirer des favoris · Prompt favori',
     }));
     await waitFor(() => expect(quickPromptsApi.setPinned).toHaveBeenCalledWith('qp-favorite', false));
@@ -836,7 +1293,7 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    await waitFor(() => expect(screen.getAllByText('Ticket → PR')).toHaveLength(3));
+    await waitFor(() => expect(screen.getAllByText('Ticket → PR')).toHaveLength(2));
     // i18n: 'wf.needsConfig' = '{0} à configurer' → "3 à configurer"
     expect(screen.getByText('3 à configurer')).toBeDefined();
   });
@@ -859,7 +1316,7 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    await waitFor(() => expect(screen.getAllByText('Clean WF')).toHaveLength(3));
+    await waitFor(() => expect(screen.getAllByText('Clean WF')).toHaveLength(2));
     expect(screen.queryByText(/à configurer/)).toBeNull();
   });
 
@@ -1292,8 +1749,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Quick Prompts/ }));
-    expect(screen.getByRole('button', { name: /Quick Prompts/ })).toHaveAttribute('data-active', 'true');
+    await chooseAutomationType(/Quick Prompts/);
+    expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts');
 
     await act(async () => {
       page.rerender(
@@ -1313,7 +1770,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
     expect(mockWorkflowsApi.getRun).toHaveBeenCalledWith('wf-lab', 'run-from-page');
     await waitFor(() => expect(onInitialSelectionConsumed).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole('button', { name: /Workflows/ })).toHaveAttribute('data-active', 'true');
+    expect(automationTypeChip()).toHaveAttribute('data-value', 'workflows');
     expect(screen.getByText('Éditer')).toBeInTheDocument();
   });
 
@@ -1702,9 +2159,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         agentAccess={fullConfig}
       />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
-    });
+    await chooseAutomationType(/Quick Prompts \(1\)/);
 
     const card = container.querySelector('[data-qp-id="qp-release-notes"]');
     expect(card).toHaveAttribute('data-kind', 'prompt');
@@ -1746,9 +2201,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         agentAccess={fullConfig}
       />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(2\)/ }));
-    });
+    await chooseAutomationType(/Quick Prompts \(2\)/);
 
     fireEvent.change(screen.getByLabelText('Filtrer les Quick Prompts par agent'), {
       target: { value: 'Codex' },
@@ -1788,9 +2241,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         agentAccess={fullConfig}
       />,
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
-    });
+    await chooseAutomationType(/Quick Prompts \(1\)/);
 
     const trigger = screen.getByRole('button', {
       name: /Changer l'agent ou le mode IA du QP « Review release »/,
@@ -1851,9 +2302,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         onNavigateDiscussion={onNavigateDiscussion}
       />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(0\)/ }));
-    });
+    await chooseAutomationType(/Quick APIs \(0\)/);
 
     const actionDialog = openAutomationActions();
     expect(within(actionDialog).getByRole('button', { name: 'Importer' })).toHaveAttribute(
@@ -1919,7 +2368,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([qp]);
 
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />);
-    fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
+    await chooseAutomationType(/Quick Prompts \(1\)/);
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir Selected prompt' }));
 
     const actionDialog = openAutomationActions();
@@ -2063,9 +2512,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     const { container } = await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(3\)/ }));
-    });
+    await chooseAutomationType(/Quick APIs \(3\)/);
     fireEvent.change(screen.getByLabelText('Trier les Quick APIs'), {
       target: { value: 'endpoint' },
     });

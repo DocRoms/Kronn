@@ -80,7 +80,15 @@ pub async fn probe(
         }
     }
 
-    match run_step(declared.binary, declared.auth_check_args, &cwd, roots, cancel).await {
+    match run_step(
+        declared.binary,
+        declared.auth_check_args,
+        &cwd,
+        roots,
+        cancel,
+    )
+    .await
+    {
         Ok(result) if result.status.is_success() => CliAccessResult {
             code: ProbeDiagnosticCode::Ok,
             detail: format!(
@@ -129,7 +137,10 @@ async fn run_step(
         .await
         .map_err(|error| format!("`{binary}` could not be spawned: {error}"))?;
     if matches!(result.status, QuickExecStatus::Rejected) {
-        return Err(format!("`{binary}` could not be spawned: {}", result.summary));
+        return Err(format!(
+            "`{binary}` could not be spawned: {}",
+            result.summary
+        ));
     }
     Ok(result)
 }

@@ -1,13 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     Json,
 };
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::resource_links::{
+    definition_references, link_resources, ResourceKey, ResourceReferences,
+};
 use crate::models::{
     ApiErrorCode, ApiResponse, ApproveProjectRepositoryResourceRequest, ArtifactBundlePage,
     CreateLivePageDataset, ImportProjectRepositoryResourceRequest, LivePage, LivePageRevision,
@@ -15,11 +18,13 @@ use crate::models::{
     ProjectRepositoryResourceMutation, ProjectRepositoryResourceStatus, ProjectRepositoryResources,
     ProjectRepositorySkill, ProjectRepositorySkillProvenance,
     PublishProjectRepositoryResourceRequest, QuickApi, QuickExec, QuickPrompt,
-    RepositoryNativeSkillRequest, RepositoryResourceFileDiff, ResourceAdrLevel, Skill,
-    UpdateLivePageRequest, Workflow,
+    RepositoryNativeSkillRequest, RepositoryResourceComparison, RepositoryResourceFileContent,
+    RepositoryResourceFileDiff, ResourceAdrLevel, Skill, UpdateLivePageRequest, Workflow,
 };
 use crate::AppState;
 
+/// Where skills are looked for. `kronn/skills` is where Kronn used to write
+/// them: it is still read (and offered for migration), never written.
 const PROJECT_SKILL_ROOTS: &[&str] = &[
     "kronn/skills",
     ".claude/skills",
@@ -53,63 +58,206 @@ struct RepositorySkillSeed {
     repository_paths: Vec<String>,
 }
 
-struct ResourceSeed {
-    id: String,
-    name: String,
-    slug: Option<String>,
-    kind: ProjectRepositoryResourceKind,
+/// A Kronn-side resource as it was read from the database, typed once and
+/// ready to be rendered. Reading and rendering are kept apart on purpose:
+/// rendering masks every string of the resource and needs no connection, so a
+/// caller can read under the database lock and render outside it.
+pub(super) enum LoadedResource {
+    Skill(Skill),
+    Workflow(Workflow),
+    QuickPrompt(QuickPrompt),
+    QuickApi(QuickApi),
+    QuickExec(QuickExec),
+    /// The page as a bundle carries it, with the date of the page itself.
+    Artifact {
+        page: ArtifactBundlePage,
+        updated_at: DateTime<Utc>,
+    },
 }
 
-fn render_database_resource(
+impl LoadedResource {
+    /// The resource as Kronn would write it under `slug`. A skill carries no
+    /// date of its own: `skill_updated_at` stands in for one.
+    pub(super) fn render(
+        &self,
+        slug: &str,
+        skill_updated_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<crate::core::repository_resources::RenderedRepositoryResource> {
+        use crate::core::repository_resources as render;
+        match self {
+            Self::Skill(skill) => {
+                render::render_skill(skill, skill_updated_at.unwrap_or_else(Utc::now), slug)
+            }
+            Self::Workflow(workflow) => render::render_workflow(workflow, slug),
+            Self::QuickPrompt(prompt) => render::render_quick_prompt(prompt, slug),
+            Self::QuickApi(api) => render::render_quick_api(api, slug),
+            Self::QuickExec(exec) => render::render_quick_exec(exec, slug),
+            Self::Artifact { page, updated_at } => render::render_artifact(page, *updated_at, slug),
+        }
+        .map_err(anyhow::Error::msg)
+    }
+}
+
+/// A resource of a project, as the listing and the warm-up see it before it is
+/// placed against the repository.
+pub(super) struct ResourceSeed {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) slug: Option<String>,
+    pub(super) kind: ProjectRepositoryResourceKind,
+    /// What the seed was read as: rendering it reads nothing again.
+    pub(super) loaded: LoadedResource,
+}
+
+impl ResourceSeed {
+    fn workflow(item: Workflow) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::Workflow,
+            loaded: LoadedResource::Workflow(item),
+        }
+    }
+
+    fn quick_prompt(item: QuickPrompt) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::QuickPrompt,
+            loaded: LoadedResource::QuickPrompt(item),
+        }
+    }
+
+    fn quick_api(item: QuickApi) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::QuickApi,
+            loaded: LoadedResource::QuickApi(item),
+        }
+    }
+
+    fn quick_exec(item: QuickExec) -> Self {
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            slug: None,
+            kind: ProjectRepositoryResourceKind::QuickExec,
+            loaded: LoadedResource::QuickExec(item),
+        }
+    }
+
+    /// The seed of a page: its bundle is read here, the heaviest read of the
+    /// five kinds (the revision and every dataset with its points).
+    pub(super) fn artifact(conn: &rusqlite::Connection, page: LivePage) -> anyhow::Result<Self> {
+        let bundle = crate::api::artifact_portability::export_page(conn, &page.id)?;
+        Ok(Self {
+            id: page.id,
+            name: page.title,
+            slug: Some(page.slug),
+            kind: ProjectRepositoryResourceKind::Artifact,
+            loaded: LoadedResource::Artifact {
+                page: bundle,
+                updated_at: page.updated_at,
+            },
+        })
+    }
+}
+
+/// The workflows, Quick Prompts, Quick APIs and Quick Execs of a project, each
+/// read once and in that order. Only the rows of this project are read.
+pub(super) fn typed_seeds(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> anyhow::Result<Vec<ResourceSeed>> {
+    let mut seeds = Vec::new();
+    seeds.extend(
+        crate::db::workflows::list_workflows_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::workflow),
+    );
+    seeds.extend(
+        crate::db::quick_prompts::list_quick_prompts_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::quick_prompt),
+    );
+    seeds.extend(
+        crate::db::quick_apis::list_quick_apis_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::quick_api),
+    );
+    seeds.extend(
+        crate::db::quick_execs::list_quick_execs_for_project(conn, project_id)?
+            .into_iter()
+            .map(ResourceSeed::quick_exec),
+    );
+    Ok(seeds)
+}
+
+/// Every Kronn-side resource of a project, read once: the typed ones, then the
+/// Artifacts.
+fn project_seeds(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> anyhow::Result<Vec<ResourceSeed>> {
+    let mut seeds = typed_seeds(conn, project_id)?;
+    for page in crate::db::live_pages::list_live_pages_for_project(conn, project_id)? {
+        seeds.push(ResourceSeed::artifact(conn, page)?);
+    }
+    Ok(seeds)
+}
+
+/// Reads a resource by kind and id.
+pub(super) fn load_database_resource(
+    conn: &rusqlite::Connection,
+    kind: ProjectRepositoryResourceKind,
+    id: &str,
+) -> anyhow::Result<LoadedResource> {
+    Ok(match kind {
+        ProjectRepositoryResourceKind::Skill => LoadedResource::Skill(
+            crate::core::skills::get_skill(id)
+                .ok_or_else(|| anyhow::anyhow!("Skill not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::Workflow => LoadedResource::Workflow(
+            crate::db::workflows::get_workflow(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Workflow not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::QuickPrompt => LoadedResource::QuickPrompt(
+            crate::db::quick_prompts::get_quick_prompt(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::QuickApi => LoadedResource::QuickApi(
+            crate::db::quick_apis::get_quick_api(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick API not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::QuickExec => LoadedResource::QuickExec(
+            crate::db::quick_execs::get_quick_exec(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Quick Exec not found: {id}"))?,
+        ),
+        ProjectRepositoryResourceKind::Artifact => {
+            // Only the page's own date is needed from the row: the bundle
+            // read below carries the revision and the datasets.
+            let page = crate::db::live_pages::get_live_page_summary(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Artifact not found: {id}"))?;
+            LoadedResource::Artifact {
+                page: crate::api::artifact_portability::export_page(conn, id)?,
+                updated_at: page.updated_at,
+            }
+        }
+    })
+}
+
+pub(super) fn render_database_resource(
     conn: &rusqlite::Connection,
     kind: ProjectRepositoryResourceKind,
     id: &str,
     slug: &str,
     skill_updated_at: Option<DateTime<Utc>>,
 ) -> anyhow::Result<crate::core::repository_resources::RenderedRepositoryResource> {
-    let rendered = match kind {
-        ProjectRepositoryResourceKind::Skill => {
-            let skill = crate::core::skills::get_skill(id)
-                .ok_or_else(|| anyhow::anyhow!("Skill not found: {id}"))?;
-            crate::core::repository_resources::render_skill(
-                &skill,
-                skill_updated_at.unwrap_or_else(Utc::now),
-                slug,
-            )
-        }
-        ProjectRepositoryResourceKind::Workflow => {
-            let workflow = crate::db::workflows::get_workflow(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Workflow not found: {id}"))?;
-            crate::core::repository_resources::render_workflow(&workflow, slug)
-        }
-        ProjectRepositoryResourceKind::QuickPrompt => {
-            let prompt = crate::db::quick_prompts::get_quick_prompt(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found: {id}"))?;
-            crate::core::repository_resources::render_quick_prompt(&prompt, slug)
-        }
-        ProjectRepositoryResourceKind::QuickApi => {
-            let api = crate::db::quick_apis::get_quick_api(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Quick API not found: {id}"))?;
-            crate::core::repository_resources::render_quick_api(&api, slug)
-        }
-        ProjectRepositoryResourceKind::QuickExec => {
-            let exec = crate::db::quick_execs::get_quick_exec(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Quick Exec not found: {id}"))?;
-            crate::core::repository_resources::render_quick_exec(&exec, slug)
-        }
-        ProjectRepositoryResourceKind::Artifact => {
-            let detail = crate::db::live_pages::get_live_page(conn, id)?
-                .ok_or_else(|| anyhow::anyhow!("Artifact not found: {id}"))?;
-            let artifact = crate::api::artifact_portability::export_page(conn, id)?;
-            crate::core::repository_resources::render_artifact(
-                &artifact,
-                detail.page.updated_at,
-                slug,
-            )
-        }
-    }
-    .map_err(anyhow::Error::msg)?;
-    Ok(rendered)
+    load_database_resource(conn, kind, id)?.render(slug, skill_updated_at)
 }
 
 fn lock_entry(
@@ -139,7 +287,7 @@ fn lock_entry(
 }
 
 impl ProjectRepositoryResourceKind {
-    fn identity_kind(self) -> &'static str {
+    pub(super) fn identity_kind(self) -> &'static str {
         match self {
             Self::Skill => "skill",
             Self::Workflow => "workflow",
@@ -163,7 +311,7 @@ impl ProjectRepositoryResourceKind {
 
     fn paths(self, slug: &str) -> Vec<String> {
         match self {
-            Self::Skill => vec![format!("kronn/skills/{slug}/SKILL.md")],
+            Self::Skill => vec![crate::core::repository_resources::skill_path(slug)],
             Self::Workflow => vec![format!("kronn/workflows/{slug}.yaml")],
             Self::QuickPrompt => vec![format!("kronn/prompts/{slug}.md")],
             Self::QuickApi => vec![format!("kronn/quick-apis/{slug}.yaml")],
@@ -176,7 +324,7 @@ impl ProjectRepositoryResourceKind {
     }
 }
 
-fn parse_identity_time(value: &str) -> Option<DateTime<Utc>> {
+pub(super) fn parse_identity_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .ok()
@@ -212,18 +360,28 @@ fn write_preview_paths(side_effects: &[String], own_paths: &[String]) -> Vec<Str
     preview
 }
 
+/// What the listing shows of one resource's alignment. It says *that* the two
+/// sides differ (`status`), never *how*: the diffs are built by
+/// `resource_comparison` when someone opens the Compare sheet.
 struct AlignmentView {
     status: ProjectRepositoryResourceStatus,
+    /// The state of the content alone, before an approval request takes over
+    /// `status`: what decides whether there is anything to compare.
+    sync_status: ProjectRepositoryResourceStatus,
     approval_required: bool,
     approved: bool,
-    diff: Option<String>,
-    file_diffs: Vec<RepositoryResourceFileDiff>,
-    field_diff: Vec<crate::models::RepositoryResourceFieldDiff>,
     kronn_updated_at: Option<DateTime<Utc>>,
     aligned_at: Option<DateTime<Utc>>,
     required_secret_names: Vec<String>,
     repository_fingerprint: Option<String>,
     kronn_fingerprint: Option<String>,
+}
+
+/// What one read of a resource's files in the repository leaves for the rest of
+/// the listing: the hash of the files and the level their definition declares.
+struct RepositoryRead {
+    hash: String,
+    adr_level: ResourceAdrLevel,
 }
 
 /// Kinds Kronn can execute: the only ones an imported definition must be
@@ -238,14 +396,75 @@ fn kind_needs_approval(kind: ProjectRepositoryResourceKind) -> bool {
     )
 }
 
-fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
+pub(super) fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
     let path = root.join(relative);
     crate::core::fs_guard::assert_contained_no_symlink(root, &path).ok()?;
     std::fs::read(path).ok()
 }
 
+/// What the sheet carries of one side of one file: a longer text is cut here
+/// and flagged, so a large artifact cannot turn the answer into megabytes. The
+/// diff is built from the whole file, whatever is cut.
+const MAX_CONTENT_BYTES: usize = 512 * 1024;
+
+/// The text of one side of one file as the answer carries it: masked first,
+/// whichever side it comes from, then cut — so a secret straddling the cut is
+/// never half shown.
+pub(super) fn side_text(bytes: &[u8]) -> (String, bool) {
+    let text = crate::core::repository_resources::masked_text(bytes);
+    if text.len() <= MAX_CONTENT_BYTES {
+        return (text.as_str().to_string(), false);
+    }
+    let mut end = MAX_CONTENT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+/// Every file a resource has on either side, with its text on each, both masked
+/// the same way: the repository's as it stands in the file, Kronn's as the
+/// rendering a publish would write. A file neither side holds is left out;
+/// `first` (the main file) comes first, the rest in path order.
+fn resource_file_contents(
+    root: &Path,
+    repository_paths: &[String],
+    kronn_files: &BTreeMap<String, Vec<u8>>,
+    first: Option<&String>,
+) -> Vec<RepositoryResourceFileContent> {
+    let paths: BTreeSet<&String> = repository_paths.iter().chain(kronn_files.keys()).collect();
+    let mut ordered: Vec<&String> = paths.into_iter().collect();
+    ordered.sort_by_key(|path| Some(*path) != first);
+    ordered
+        .into_iter()
+        .filter_map(|path| {
+            let repository = read_repository_file(root, path);
+            let kronn = kronn_files.get(path);
+            if repository.is_none() && kronn.is_none() {
+                return None;
+            }
+            let (repository, repository_cut) = repository
+                .as_deref()
+                .map(side_text)
+                .map_or((None, false), |(text, cut)| (Some(text), cut));
+            let (kronn, kronn_cut) = kronn
+                .map(Vec::as_slice)
+                .map(side_text)
+                .map_or((None, false), |(text, cut)| (Some(text), cut));
+            Some(RepositoryResourceFileContent {
+                path: path.clone(),
+                repository,
+                kronn,
+                truncated: repository_cut || kronn_cut,
+            })
+        })
+        .collect()
+}
+
 /// One unified diff per file the resource is written to, repository side
 /// against Kronn side; a file present on one side only diffs against nothing.
+/// Both sides are the masked texts, so the diff shows no more than the files'
+/// contents do and a secret held by both never reads as a difference.
 fn resource_file_diffs(
     root: &Path,
     entry: &crate::core::repository_resources::RepositoryLockResource,
@@ -261,8 +480,10 @@ fn resource_file_diffs(
                 .get(path)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            let diff =
-                crate::core::repository_resources::unified_diff(&repository_bytes, kronn_bytes);
+            let diff = crate::core::repository_resources::unified_diff(
+                crate::core::repository_resources::masked_text(&repository_bytes).as_bytes(),
+                crate::core::repository_resources::masked_text(kronn_bytes).as_bytes(),
+            );
             (!diff.is_empty()).then(|| RepositoryResourceFileDiff {
                 path: path.clone(),
                 diff,
@@ -288,6 +509,131 @@ fn primary_diff_path(
     }
 }
 
+/// Both sides of one resource: the text of every file on each side and, when
+/// the two differ, a unified diff per file and, for the kinds that have one, a
+/// field-by-field diff of the definition. Only the states where the two sides
+/// differ have a diff to show. Built on demand — it reads the repository files
+/// and diffs the masked Kronn rendering, work the listing never does.
+fn resource_comparison(
+    root: &Path,
+    entry: &crate::core::repository_resources::RepositoryLockResource,
+    rendered: &crate::core::repository_resources::RenderedRepositoryResource,
+    sync_status: ProjectRepositoryResourceStatus,
+) -> RepositoryResourceComparison {
+    let files = resource_file_contents(
+        root,
+        &entry.paths,
+        &rendered.files,
+        primary_diff_path(entry),
+    );
+    let needs_diff = matches!(
+        sync_status,
+        ProjectRepositoryResourceStatus::RepositoryNewer
+            | ProjectRepositoryResourceStatus::KronnNewer
+            | ProjectRepositoryResourceStatus::Conflict
+    );
+    if !needs_diff {
+        return RepositoryResourceComparison {
+            files,
+            ..RepositoryResourceComparison::default()
+        };
+    }
+    let file_diffs = resource_file_diffs(root, entry, rendered);
+    let diff = primary_diff_path(entry)
+        .and_then(|path| file_diffs.iter().find(|item| &item.path == path))
+        .or_else(|| file_diffs.first())
+        .map(|item| item.diff.clone());
+    let field_diff = if matches!(
+        entry.kind,
+        ProjectRepositoryResourceKind::Workflow
+            | ProjectRepositoryResourceKind::QuickApi
+            | ProjectRepositoryResourceKind::QuickExec
+    ) {
+        crate::core::repository_resources::read_resource(root, entry)
+            .ok()
+            .map(|(document, _)| {
+                let mut fields = crate::core::repository_resources::field_diff(
+                    &document.resource,
+                    &rendered.document.resource,
+                );
+                // The repository's values are as someone typed them: masked
+                // like the file texts above. Kronn's are masked by the rendering.
+                for field in &mut fields {
+                    if let Some(value) = field.repository.as_mut() {
+                        crate::core::repository_resources::mask_value_strings(value);
+                    }
+                }
+                fields
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    RepositoryResourceComparison {
+        files,
+        diff,
+        file_diffs,
+        field_diff,
+    }
+}
+
+/// The comparison of a skill whose repository copy is still under
+/// `kronn/skills`: that copy as the standard file a migration would write
+/// against the Kronn rendering, so the diff shows real differences and not the
+/// change of file format. The repository text is that same standard file.
+fn legacy_skill_comparison(
+    root: &Path,
+    slug: &str,
+    legacy_path: &str,
+    rendered: &crate::core::repository_resources::RenderedRepositoryResource,
+    sync_status: ProjectRepositoryResourceStatus,
+) -> RepositoryResourceComparison {
+    let path = crate::core::repository_resources::skill_path(slug);
+    let repository =
+        crate::core::repository_resources::legacy_skill_as_standard(root, slug, legacy_path)
+            .unwrap_or_default();
+    let kronn = rendered
+        .files
+        .get(&path)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let (repository_text, repository_cut) = side_text(&repository);
+    let (kronn_text, kronn_cut) = side_text(kronn);
+    let files = vec![RepositoryResourceFileContent {
+        path: path.clone(),
+        repository: (!repository.is_empty()).then_some(repository_text),
+        kronn: (!kronn.is_empty()).then_some(kronn_text),
+        truncated: repository_cut || kronn_cut,
+    }];
+    if !matches!(
+        sync_status,
+        ProjectRepositoryResourceStatus::RepositoryNewer
+            | ProjectRepositoryResourceStatus::KronnNewer
+            | ProjectRepositoryResourceStatus::Conflict
+    ) {
+        return RepositoryResourceComparison {
+            files,
+            ..RepositoryResourceComparison::default()
+        };
+    }
+    let diff = crate::core::repository_resources::unified_diff(
+        crate::core::repository_resources::masked_text(&repository).as_bytes(),
+        crate::core::repository_resources::masked_text(kronn).as_bytes(),
+    );
+    if diff.is_empty() {
+        return RepositoryResourceComparison {
+            files,
+            ..RepositoryResourceComparison::default()
+        };
+    }
+    RepositoryResourceComparison {
+        files,
+        diff: Some(diff.clone()),
+        file_diffs: vec![RepositoryResourceFileDiff { path, diff }],
+        field_diff: Vec::new(),
+    }
+}
+
 fn alignment_status(
     conn: &rusqlite::Connection,
     root: &Path,
@@ -296,7 +642,25 @@ fn alignment_status(
     alignment: Option<&crate::db::repository_resources::ResourceAlignment>,
 ) -> anyhow::Result<AlignmentView> {
     let repository = crate::core::repository_resources::read_resource(root, entry).ok();
-    let repository_hash = repository.as_ref().map(|(_, hash)| hash.as_str());
+    alignment_view(
+        conn,
+        entry,
+        rendered,
+        alignment,
+        repository.as_ref().map(|(_, hash)| hash.as_str()),
+    )
+}
+
+/// `alignment_status` for a caller that has read the repository's side already:
+/// `repository_hash` is the hash of the resource's files there, `None` when
+/// they are missing or unreadable.
+fn alignment_view(
+    conn: &rusqlite::Connection,
+    entry: &crate::core::repository_resources::RepositoryLockResource,
+    rendered: &crate::core::repository_resources::RenderedRepositoryResource,
+    alignment: Option<&crate::db::repository_resources::ResourceAlignment>,
+    repository_hash: Option<&str>,
+) -> anyhow::Result<AlignmentView> {
     let sync_status = match alignment {
         // Never aligned yet both sides exist: with no baseline neither can
         // be called newer, so equal content is in sync and anything else is
@@ -341,41 +705,6 @@ fn alignment_status(
         sync_status
     };
 
-    let needs_diff = matches!(
-        sync_status,
-        ProjectRepositoryResourceStatus::RepositoryNewer
-            | ProjectRepositoryResourceStatus::KronnNewer
-            | ProjectRepositoryResourceStatus::Conflict
-    );
-    let repository_document = repository.as_ref().map(|(document, _)| document);
-    let file_diffs = if needs_diff {
-        resource_file_diffs(root, entry, rendered)
-    } else {
-        Vec::new()
-    };
-    let diff = primary_diff_path(entry)
-        .and_then(|path| file_diffs.iter().find(|item| &item.path == path))
-        .or_else(|| file_diffs.first())
-        .map(|item| item.diff.clone());
-    let field_diff = if needs_diff
-        && matches!(
-            entry.kind,
-            ProjectRepositoryResourceKind::Workflow
-                | ProjectRepositoryResourceKind::QuickApi
-                | ProjectRepositoryResourceKind::QuickExec
-        ) {
-        repository_document
-            .map(|document| {
-                crate::core::repository_resources::field_diff(
-                    &document.resource,
-                    &rendered.document.resource,
-                )
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
     let required_secret_names = if entry.required_secrets.is_empty() {
         rendered.required_secrets.clone()
     } else {
@@ -384,11 +713,9 @@ fn alignment_status(
 
     Ok(AlignmentView {
         status,
+        sync_status,
         approval_required,
         approved,
-        diff,
-        file_diffs,
-        field_diff,
         kronn_updated_at: Some(rendered.document.updated_at),
         aligned_at: alignment.and_then(|alignment| parse_identity_time(&alignment.aligned_at)),
         required_secret_names,
@@ -600,9 +927,8 @@ fn project_skills(
         );
         let is_linked = linked.contains(skill.id.as_str());
         handled.insert(skill.id.clone());
-        let publication_path = format!(
-            "kronn/skills/{}/SKILL.md",
-            crate::core::native_files::slug(&skill.id)
+        let publication_path = crate::core::repository_resources::skill_path(
+            &crate::core::native_files::slug(&skill.id),
         );
         let repository_paths = repository
             .as_ref()
@@ -659,7 +985,7 @@ fn project_skills(
             skill_id,
             copy_origins.get(skill_id).map(String::as_str),
         );
-        let publication_path = format!("kronn/skills/{slug}/SKILL.md");
+        let publication_path = crate::core::repository_resources::skill_path(&slug);
         let is_native = repository.is_some();
         let name = repository
             .as_ref()
@@ -711,7 +1037,7 @@ fn project_skills(
             ProjectRepositorySkillProvenance::Repository,
             ProjectRepositoryResourceStatus::NativeSkill,
             seed.repository_paths,
-            format!("kronn/skills/{slug}/SKILL.md"),
+            crate::core::repository_resources::skill_path(&slug),
         ));
     }
 
@@ -760,8 +1086,6 @@ fn skill_entry(
         suggested_reason: identity.suggested_reason,
         approval_required: false,
         approved: false,
-        diff: None,
-        file_diffs: Vec::new(),
         repository_paths,
         repository_paths_diverge: facts.diverge,
         publication_path,
@@ -777,6 +1101,119 @@ fn skill_entry(
     }
 }
 
+/// A skill attached to the project that `kronn.lock` also lists: rendered from
+/// the catalog and set against the repository file, exactly as the listing
+/// and the Compare sheet both need it.
+struct AlignedSkill {
+    rendered: crate::core::repository_resources::RenderedRepositoryResource,
+    view: AlignmentView,
+}
+
+fn align_skill(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    project_key: &str,
+    skill_id: &str,
+    slug: &str,
+    entry: &crate::core::repository_resources::RepositoryLockResource,
+) -> anyhow::Result<AlignedSkill> {
+    // A skill still under `kronn/skills` was aligned in the former file format,
+    // so its baseline says nothing about today's rendering: it reads as never
+    // aligned, its repository side compared as the standard file a migration to
+    // `.agents/skills` would write.
+    let alignment = if entry
+        .paths
+        .iter()
+        .any(|path| crate::core::repository_resources::is_legacy_skill_path(path))
+    {
+        None
+    } else {
+        crate::db::repository_resources::find_alignment(conn, project_key, "skill", slug)?
+    };
+    // A skill carries no date of its own: pin the rendering to the baseline's,
+    // or to the repository file's when never aligned, so identical content
+    // hashes identically.
+    let timestamp = alignment
+        .as_ref()
+        .and_then(|alignment| parse_identity_time(&alignment.aligned_at))
+        .or_else(|| {
+            crate::core::repository_resources::read_resource(root, entry)
+                .ok()
+                .map(|(document, _)| document.updated_at)
+        });
+    let rendered = render_database_resource(
+        conn,
+        ProjectRepositoryResourceKind::Skill,
+        skill_id,
+        slug,
+        timestamp,
+    )?;
+    let view = alignment_status(conn, root, entry, &rendered, alignment.as_ref())?;
+    Ok(AlignedSkill { rendered, view })
+}
+
+/// A Kronn-side automation or artifact placed against `kronn.lock` and the
+/// baseline of its last alignment.
+struct ResolvedResource {
+    slug: String,
+    rendered: crate::core::repository_resources::RenderedRepositoryResource,
+    alignment: Option<crate::db::repository_resources::ResourceAlignment>,
+    entry: crate::core::repository_resources::RepositoryLockResource,
+}
+
+/// The slug a resource is written under: the one its identity holds, else the
+/// one its seed brings, else one made from its name.
+pub(super) fn resource_slug(
+    conn: &rusqlite::Connection,
+    project_key: &str,
+    seed: &ResourceSeed,
+) -> anyhow::Result<String> {
+    let identity = crate::db::resource_identities::find_by_target(
+        conn,
+        project_key,
+        seed.kind.identity_kind(),
+        &seed.id,
+    )?;
+    let generated_slug = || {
+        let slug = crate::core::repository_resources::ascii_slug(&seed.name);
+        if slug.is_empty() {
+            let id_prefix: String = seed.id.chars().take(8).collect();
+            format!("resource-{id_prefix}")
+        } else {
+            slug
+        }
+    };
+    Ok(identity
+        .as_ref()
+        .map(|item| item.slug.clone())
+        .or_else(|| seed.slug.clone())
+        .unwrap_or_else(generated_slug))
+}
+
+fn resolve_resource(
+    conn: &rusqlite::Connection,
+    project_key: &str,
+    lock: Option<&crate::core::repository_resources::RepositoryLock>,
+    seed: &ResourceSeed,
+) -> anyhow::Result<ResolvedResource> {
+    let slug = resource_slug(conn, project_key, seed)?;
+    let repository_paths = seed.kind.paths(&slug);
+    let rendered = seed.loaded.render(&slug, None)?;
+    let alignment = crate::db::repository_resources::find_alignment(
+        conn,
+        project_key,
+        seed.kind.identity_kind(),
+        &slug,
+    )?;
+    let entry = lock_entry(lock, seed.kind, &slug, &seed.name, &repository_paths);
+    Ok(ResolvedResource {
+        slug,
+        rendered,
+        alignment,
+        entry,
+    })
+}
+
 /// GET /api/projects/:id/repository-resources
 pub async fn repository_resources(
     State(state): State<AppState>,
@@ -789,61 +1226,9 @@ pub async fn repository_resources(
                 return Ok(None);
             };
             let project_key = crate::db::resource_identities::project_key(conn, Some(&project_id))?;
-            let mut seeds = Vec::new();
-            seeds.extend(
-                crate::db::workflows::list_workflows(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::Workflow,
-                    }),
-            );
-            seeds.extend(
-                crate::db::quick_prompts::list_quick_prompts(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::QuickPrompt,
-                    }),
-            );
-            seeds.extend(
-                crate::db::quick_apis::list_quick_apis(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::QuickApi,
-                    }),
-            );
-            seeds.extend(
-                crate::db::quick_execs::list_quick_execs(conn)?
-                    .into_iter()
-                    .filter(|item| item.project_id.as_deref() == Some(project_id.as_str()))
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.name,
-                        slug: None,
-                        kind: ProjectRepositoryResourceKind::QuickExec,
-                    }),
-            );
-            seeds.extend(
-                crate::db::live_pages::list_live_pages_for_project(conn, &project_id)?
-                    .into_iter()
-                    .map(|item| ResourceSeed {
-                        id: item.id,
-                        name: item.title,
-                        slug: Some(item.slug),
-                        kind: ProjectRepositoryResourceKind::Artifact,
-                    }),
-            );
+            // Each resource is read once, here, and rendered from what was
+            // read: the rows of the other projects are not touched at all.
+            let seeds = project_seeds(conn, &project_id)?;
 
             let root = PathBuf::from(&project.path);
             let side_effects = crate::core::repository_resources::publish_side_effect_paths(&root);
@@ -897,36 +1282,11 @@ pub async fn repository_resources(
                         );
                     continue;
                 }
-                let alignment = crate::db::repository_resources::find_alignment(
-                    conn,
-                    &project_key,
-                    "skill",
-                    &skill.slug,
-                )?;
-                // A skill carries no date of its own: pin the rendering to the
-                // baseline's, or to the repository file's when never aligned,
-                // so identical content hashes identically.
-                let timestamp = alignment
-                    .as_ref()
-                    .and_then(|alignment| parse_identity_time(&alignment.aligned_at))
-                    .or_else(|| {
-                        crate::core::repository_resources::read_resource(&root, entry)
-                            .ok()
-                            .map(|(document, _)| document.updated_at)
-                    });
-                let rendered = render_database_resource(
-                    conn,
-                    ProjectRepositoryResourceKind::Skill,
-                    &skill.id,
-                    &skill.slug,
-                    timestamp,
-                )?;
-                let view = alignment_status(conn, &root, entry, &rendered, alignment.as_ref())?;
+                let AlignedSkill { view, .. } =
+                    align_skill(conn, &root, &project_key, &skill.id, &skill.slug, entry)?;
                 skill.status = view.status;
                 skill.approval_required = view.approval_required;
                 skill.approved = view.approved;
-                skill.diff = view.diff;
-                skill.file_diffs = view.file_diffs;
                 skill.required_secrets =
                     crate::core::repository_resources::required_secret_statuses(
                         &view.required_secret_names,
@@ -942,44 +1302,84 @@ pub async fn repository_resources(
                 skill.repository_fingerprint = view.repository_fingerprint;
                 skill.kronn_fingerprint = view.kronn_fingerprint;
             }
+            // The repository side of every non-skill entry, read once: the id
+            // its file was written under and what its definition points at. What
+            // the rest of the listing needs of the same files (their hash, the
+            // level the definition declares) is kept from this read, in the
+            // order of the lock's entries, instead of reading them again.
+            let mut repository_side: HashMap<ResourceKey, ResourceReferences> = HashMap::new();
+            let mut repository_reads: Vec<Option<RepositoryRead>> = Vec::new();
+            for entry in lock.iter().flat_map(|lock| lock.resources.iter()) {
+                let read = if entry.kind == ProjectRepositoryResourceKind::Skill {
+                    None
+                } else {
+                    crate::core::repository_resources::read_resource(&root, entry).ok()
+                };
+                let Some((document, hash)) = read else {
+                    repository_reads.push(None);
+                    continue;
+                };
+                repository_reads.push(Some(RepositoryRead {
+                    hash,
+                    adr_level: crate::core::repository_resources::resource_adr_level(&document),
+                }));
+                repository_side.insert(
+                    (entry.kind.identity_kind(), entry.slug.clone()),
+                    ResourceReferences {
+                        aliases: document
+                            .resource
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .into_iter()
+                            .collect(),
+                        references: definition_references(entry.kind, &document.resource),
+                    },
+                );
+            }
+            let mut link_sources: HashMap<ResourceKey, ResourceReferences> = HashMap::new();
             let mut resources = Vec::with_capacity(seeds.len());
             for seed in seeds {
-                let identity = crate::db::resource_identities::find_by_target(
-                    conn,
-                    &project_key,
-                    seed.kind.identity_kind(),
-                    &seed.id,
-                )?;
-                let generated_slug = || {
-                    let slug = crate::core::repository_resources::ascii_slug(&seed.name);
-                    if slug.is_empty() {
-                        let id_prefix: String = seed.id.chars().take(8).collect();
-                        format!("resource-{id_prefix}")
-                    } else {
-                        slug
-                    }
-                };
-                let slug = identity
-                    .as_ref()
-                    .map(|item| item.slug.clone())
-                    .or(seed.slug)
-                    .unwrap_or_else(generated_slug);
-                let repository_paths = seed.kind.paths(&slug);
-                let rendered = render_database_resource(conn, seed.kind, &seed.id, &slug, None)?;
-                let alignment = crate::db::repository_resources::find_alignment(
-                    conn,
-                    &project_key,
-                    seed.kind.identity_kind(),
-                    &slug,
-                )?;
-                let entry = lock_entry(
-                    lock.as_ref(),
+                let ResolvedResource {
+                    slug,
+                    rendered,
+                    alignment,
+                    entry,
+                } = resolve_resource(conn, &project_key, lock.as_ref(), &seed)?;
+                let mut link_source = repository_side
+                    .get(&(seed.kind.identity_kind(), slug.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                link_source.references.extend(definition_references(
                     seed.kind,
-                    &slug,
-                    &seed.name,
-                    &repository_paths,
-                );
-                let view = alignment_status(conn, &root, &entry, &rendered, alignment.as_ref())?;
+                    &rendered.document.resource,
+                ));
+                // A workflow names its Artifact by id or by slug.
+                link_source.aliases.extend(seed.slug.clone());
+                if seed.kind == ProjectRepositoryResourceKind::Artifact {
+                    link_source.aliases.push(slug.clone());
+                }
+                link_sources.insert((seed.kind.identity_kind(), seed.id.clone()), link_source);
+                // An entry the lock lists was read above; one it does not list
+                // is the conventional path of a resource never published, which
+                // may still hold a file.
+                let listed_at = lock.as_ref().and_then(|lock| {
+                    lock.resources
+                        .iter()
+                        .position(|item| item.kind == seed.kind && item.slug == slug)
+                });
+                let view = match listed_at {
+                    Some(index) => alignment_view(
+                        conn,
+                        &entry,
+                        &rendered,
+                        alignment.as_ref(),
+                        repository_reads[index]
+                            .as_ref()
+                            .map(|read| read.hash.as_str()),
+                    )?,
+                    None => alignment_status(conn, &root, &entry, &rendered, alignment.as_ref())?,
+                };
                 let (repository_updated_at, repository_updated_by) = primary_diff_path(&entry)
                     .map(|path| dates.updated_at(path))
                     .unwrap_or((None, None));
@@ -996,9 +1396,6 @@ pub async fn repository_resources(
                     status: view.status,
                     approval_required: view.approval_required,
                     approved: view.approved,
-                    diff: view.diff,
-                    file_diffs: view.file_diffs,
-                    field_diff: view.field_diff,
                     repository_paths: entry.paths,
                     write_preview,
                     required_secrets: crate::core::repository_resources::required_secret_statuses(
@@ -1011,6 +1408,8 @@ pub async fn repository_resources(
                     aligned_at: view.aligned_at,
                     repository_fingerprint: view.repository_fingerprint,
                     kronn_fingerprint: view.kronn_fingerprint,
+                    uses: Vec::new(),
+                    used_by: Vec::new(),
                 });
             }
             if let Some(lock) = lock.as_ref() {
@@ -1018,7 +1417,7 @@ pub async fn repository_resources(
                     .iter()
                     .map(|resource| (resource.kind.identity_kind(), resource.slug.clone()))
                     .collect();
-                for entry in &lock.resources {
+                for (index, entry) in lock.resources.iter().enumerate() {
                     if entry.kind == ProjectRepositoryResourceKind::Skill
                         || listed.contains(&(entry.kind.identity_kind(), entry.slug.clone()))
                     {
@@ -1027,29 +1426,29 @@ pub async fn repository_resources(
                     let (repository_updated_at, repository_updated_by) = primary_diff_path(entry)
                         .map(|path| dates.updated_at(path))
                         .unwrap_or((None, None));
-                    let repository_file =
-                        crate::core::repository_resources::read_resource(&root, entry);
+                    let repository_file = repository_reads[index].as_ref();
                     let repository_fingerprint = repository_file
-                        .as_ref()
-                        .ok()
-                        .map(|(_, hash)| crate::core::repository_resources::fingerprint(hash));
+                        .map(|read| crate::core::repository_resources::fingerprint(&read.hash));
+                    let id = format!("repository:{}:{}", entry.kind.identity_kind(), entry.slug);
+                    link_sources.insert(
+                        (entry.kind.identity_kind(), id.clone()),
+                        repository_side
+                            .get(&(entry.kind.identity_kind(), entry.slug.clone()))
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
                     resources.push(ProjectRepositoryResource {
-                        id: format!("repository:{}:{}", entry.kind.identity_kind(), entry.slug),
+                        id,
                         name: entry.name.clone(),
                         slug: entry.slug.clone(),
                         kind: entry.kind,
                         level: entry.kind.level(),
                         adr_level: repository_file
-                            .map(|(document, _)| {
-                                crate::core::repository_resources::resource_adr_level(&document)
-                            })
-                            .unwrap_or_else(|_| parse_adr_level(&entry.level)),
+                            .map(|read| read.adr_level)
+                            .unwrap_or_else(|| parse_adr_level(&entry.level)),
                         status: ProjectRepositoryResourceStatus::RepositoryOnly,
                         approval_required: false,
                         approved: false,
-                        diff: None,
-                        file_diffs: Vec::new(),
-                        field_diff: Vec::new(),
                         write_preview: Vec::new(),
                         required_secrets:
                             crate::core::repository_resources::required_secret_statuses(
@@ -1063,18 +1462,20 @@ pub async fn repository_resources(
                         aligned_at: None,
                         repository_fingerprint,
                         kronn_fingerprint: None,
+                        uses: Vec::new(),
+                        used_by: Vec::new(),
                     });
                 }
             }
             resources.sort_by_key(|resource| resource.name.to_lowercase());
+            link_resources(&mut resources, &link_sources);
             let (can_write_repository, can_write_repository_reason) =
                 crate::core::repository_resources::can_write_repository(&root);
-            let uncommitted_managed_paths = lock
-                .as_ref()
-                .map(|lock| {
-                    crate::core::repository_resources::uncommitted_managed_paths(&root, lock)
-                })
-                .unwrap_or_default();
+            let uncommitted_managed_paths =
+                crate::core::repository_resources::uncommitted_managed_paths(
+                    &root,
+                    &lock.clone().unwrap_or_default(),
+                );
             Ok(Some(ProjectRepositoryResources {
                 kronn_exists: root.join("kronn").is_dir(),
                 skill_roots: discover_skill_roots(&root),
@@ -1101,13 +1502,258 @@ pub async fn repository_resources(
     }
 }
 
+/// Which resource the Compare sheet is opened on.
+#[derive(Debug, serde::Deserialize)]
+pub struct RepositoryComparisonQuery {
+    pub kind: ProjectRepositoryResourceKind,
+    /// The id the listing gave it: a skill's, or the Kronn resource's.
+    pub id: String,
+}
+
+/// The Kronn-side resource `kind`/`id` of this project, as the listing seeds
+/// it. `None` when it does not exist, or belongs to another project.
+fn seed_of(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    kind: ProjectRepositoryResourceKind,
+    id: &str,
+) -> anyhow::Result<Option<ResourceSeed>> {
+    let ours = |owner: Option<&str>| owner == Some(project_id);
+    Ok(match kind {
+        ProjectRepositoryResourceKind::Skill => None,
+        ProjectRepositoryResourceKind::Workflow => crate::db::workflows::get_workflow(conn, id)?
+            .filter(|item| ours(item.project_id.as_deref()))
+            .map(ResourceSeed::workflow),
+        ProjectRepositoryResourceKind::QuickPrompt => {
+            crate::db::quick_prompts::get_quick_prompt(conn, id)?
+                .filter(|item| ours(item.project_id.as_deref()))
+                .map(ResourceSeed::quick_prompt)
+        }
+        ProjectRepositoryResourceKind::QuickApi => crate::db::quick_apis::get_quick_api(conn, id)?
+            .filter(|item| ours(item.project_id.as_deref()))
+            .map(ResourceSeed::quick_api),
+        ProjectRepositoryResourceKind::QuickExec => {
+            crate::db::quick_execs::get_quick_exec(conn, id)?
+                .filter(|item| ours(item.project_id.as_deref()))
+                .map(ResourceSeed::quick_exec)
+        }
+        ProjectRepositoryResourceKind::Artifact => {
+            match crate::db::live_pages::get_live_page_summary(conn, id)?
+                .filter(|page| ours(page.project_id.as_deref()))
+            {
+                Some(page) => Some(ResourceSeed::artifact(conn, page)?),
+                None => None,
+            }
+        }
+    })
+}
+
+/// The files a resource has in the repository only, each with its text.
+fn repository_only_comparison(root: &Path, paths: &[String]) -> RepositoryResourceComparison {
+    RepositoryResourceComparison {
+        files: resource_file_contents(root, paths, &BTreeMap::new(), paths.first()),
+        ..RepositoryResourceComparison::default()
+    }
+}
+
+/// Both sides of one skill row, read the way the listing reads it: a skill
+/// `kronn.lock` lists is aligned against its baseline; one attached to the
+/// project is compared with the file at its publication path; one only found in
+/// a native folder is that folder's files and nothing in Kronn; one the catalog
+/// alone holds is Kronn's rendering and nothing in the repository.
+fn skill_comparison(
+    conn: &rusqlite::Connection,
+    project: &crate::models::Project,
+    root: &Path,
+    project_key: &str,
+    lock: Option<&crate::core::repository_resources::RepositoryLock>,
+    skill_id: &str,
+) -> anyhow::Result<RepositoryResourceComparison> {
+    let lock_entry_of = |slug: &str| {
+        lock.and_then(|lock| {
+            lock.resources.iter().find(|entry| {
+                entry.kind == ProjectRepositoryResourceKind::Skill && entry.slug == slug
+            })
+        })
+    };
+    if let Some(slug) = skill_id.strip_prefix("repository:") {
+        // A skill found in a native folder that the catalog does not know.
+        let mut paths = discover_repository_skills(root)
+            .remove(slug)
+            .map(|seed| seed.repository_paths)
+            .unwrap_or_default();
+        if let Some(entry) = lock_entry_of(slug) {
+            paths = merge_paths(&paths, &entry.paths);
+        }
+        return Ok(repository_only_comparison(root, &paths));
+    }
+    let slug = crate::core::native_files::slug(skill_id);
+    let publication_path = crate::core::repository_resources::skill_path(&slug);
+    let Some(skill) = crate::core::skills::get_skill(skill_id) else {
+        // Attached once, gone from the catalog since: only the file is left.
+        return Ok(repository_only_comparison(
+            root,
+            std::slice::from_ref(&publication_path),
+        ));
+    };
+    if let Some(entry) = lock_entry_of(&slug) {
+        let AlignedSkill { rendered, view } =
+            align_skill(conn, root, project_key, skill_id, &slug, entry)?;
+        if let Some(legacy) = entry
+            .paths
+            .iter()
+            .find(|path| crate::core::repository_resources::is_legacy_skill_path(path))
+        {
+            return Ok(legacy_skill_comparison(
+                root,
+                &slug,
+                legacy,
+                &rendered,
+                view.sync_status,
+            ));
+        }
+        return Ok(resource_comparison(
+            root,
+            entry,
+            &rendered,
+            view.sync_status,
+        ));
+    }
+    let linked = project.default_skill_ids.iter().any(|id| id == skill_id);
+    if !linked {
+        let copy_origins = native_copy_origins(conn, project_key, &project.default_skill_ids)?;
+        if let Some(seed) = take_repository_skill(
+            &mut discover_repository_skills(root),
+            skill_id,
+            copy_origins.get(skill_id).map(String::as_str),
+        ) {
+            return Ok(repository_only_comparison(root, &seed.repository_paths));
+        }
+    }
+    // The text does not depend on the date, so a fixed one keeps the memoized
+    // rendering shared between opens.
+    let rendered = render_database_resource(
+        conn,
+        ProjectRepositoryResourceKind::Skill,
+        skill_id,
+        &slug,
+        Some(
+            crate::core::skills::custom_skill_modified_at(skill_id)
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+        ),
+    )?;
+    let entry = lock_entry(
+        None,
+        ProjectRepositoryResourceKind::Skill,
+        &slug,
+        &skill.name,
+        std::slice::from_ref(&publication_path),
+    );
+    let status = if linked {
+        attached_skill_status(root, &publication_path)
+    } else {
+        ProjectRepositoryResourceStatus::KronnOnly
+    };
+    Ok(resource_comparison(root, &entry, &rendered, status))
+}
+
+/// GET /api/projects/:id/repository-resources/comparison?kind=…&id=…
+///
+/// Both sides of one row of the listing, built when its sheet opens: the text
+/// of each file on each side that holds it and, where the two differ, the
+/// diffs. Both sides are masked: the Kronn side comes from the rendering a
+/// publish would write, and every text of the answer — the repository's files
+/// too, which may hold a secret typed in by hand — goes through the same
+/// masking before it is cut, diffed or sent. A resource with only one side
+/// carries that side's text and no diff; one with both in sync carries the same
+/// text twice and no diff.
+pub async fn repository_resource_comparison(
+    State(state): State<AppState>,
+    AxumPath(project_id): AxumPath<String>,
+    Query(query): Query<RepositoryComparisonQuery>,
+) -> Json<ApiResponse<RepositoryResourceComparison>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| {
+            let Some(project) = crate::db::projects::get_project(conn, &project_id)? else {
+                return Ok(None);
+            };
+            let project_key = crate::db::resource_identities::project_key(conn, Some(&project_id))?;
+            let root = PathBuf::from(&project.path);
+            let lock =
+                crate::core::repository_resources::load_lock(&root).map_err(anyhow::Error::msg)?;
+            if query.kind == ProjectRepositoryResourceKind::Skill {
+                return skill_comparison(
+                    conn,
+                    &project,
+                    &root,
+                    &project_key,
+                    lock.as_ref(),
+                    &query.id,
+                )
+                .map(Some);
+            }
+            let Some(seed) = seed_of(conn, &project_id, query.kind, &query.id)? else {
+                // A repository-only row (`repository:kind:slug`) has no Kronn
+                // side: its files are all there is. Anything else is unknown
+                // to this project.
+                let Some((kind, slug)) = query
+                    .id
+                    .strip_prefix("repository:")
+                    .and_then(|rest| rest.split_once(':'))
+                else {
+                    return Ok(None);
+                };
+                let entry = lock.as_ref().and_then(|lock| {
+                    lock.resources.iter().find(|entry| {
+                        entry.kind == query.kind
+                            && entry.slug == slug
+                            && entry.kind.identity_kind() == kind
+                    })
+                });
+                return Ok(Some(
+                    entry.map_or_else(RepositoryResourceComparison::default, |entry| {
+                        repository_only_comparison(&root, &entry.paths)
+                    }),
+                ));
+            };
+            let resolved = resolve_resource(conn, &project_key, lock.as_ref(), &seed)?;
+            let view = alignment_status(
+                conn,
+                &root,
+                &resolved.entry,
+                &resolved.rendered,
+                resolved.alignment.as_ref(),
+            )?;
+            Ok(Some(resource_comparison(
+                &root,
+                &resolved.entry,
+                &resolved.rendered,
+                view.sync_status,
+            )))
+        })
+        .await;
+
+    match result {
+        Ok(Some(comparison)) => Json(ApiResponse::ok(comparison)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Project or resource not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to compare the repository resource: {error}"),
+        )),
+    }
+}
+
 fn imported_artifact(
     conn: &rusqlite::Connection,
     document: &crate::core::repository_resources::RepositoryDocument,
     project_id: &str,
     existing_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let exported: ArtifactBundlePage = serde_json::from_value(document.resource.clone())?;
+    let exported: ArtifactBundlePage = serde::Deserialize::deserialize(&document.resource)?;
     let page_id = existing_id
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1241,7 +1887,7 @@ fn import_document(
     let now = document.updated_at;
     let target_id = match document.kind {
         ProjectRepositoryResourceKind::Skill => {
-            let skill: Skill = serde_json::from_value(document.resource.clone())?;
+            let skill: Skill = serde::Deserialize::deserialize(&document.resource)?;
             let target_id = match existing_id.as_deref() {
                 Some(id) if id.starts_with("custom-") => crate::core::skills::update_custom_skill(
                     id,
@@ -1275,7 +1921,7 @@ fn import_document(
             target_id
         }
         ProjectRepositoryResourceKind::Workflow => {
-            let mut resource: Workflow = serde_json::from_value(document.resource.clone())?;
+            let mut resource: Workflow = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1309,7 +1955,7 @@ fn import_document(
             resource.id
         }
         ProjectRepositoryResourceKind::QuickPrompt => {
-            let mut resource: QuickPrompt = serde_json::from_value(document.resource.clone())?;
+            let mut resource: QuickPrompt = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1324,7 +1970,7 @@ fn import_document(
             resource.id
         }
         ProjectRepositoryResourceKind::QuickApi => {
-            let mut resource: QuickApi = serde_json::from_value(document.resource.clone())?;
+            let mut resource: QuickApi = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1340,7 +1986,7 @@ fn import_document(
             resource.id
         }
         ProjectRepositoryResourceKind::QuickExec => {
-            let mut resource: QuickExec = serde_json::from_value(document.resource.clone())?;
+            let mut resource: QuickExec = serde::Deserialize::deserialize(&document.resource)?;
             resource.id = existing_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1654,8 +2300,9 @@ fn native_copy_origins(
 }
 
 /// Whether `relative_path` is `<skill root>/<slug>/SKILL.md` for one of the
-/// project's native skill roots — not `kronn/skills`, which Kronn manages, and
-/// not the router skill Kronn itself writes under `.agents/skills/kronn`.
+/// project's native skill roots — not `kronn/skills`, the former Kronn location
+/// that is migrated rather than referenced, and not the router skill Kronn
+/// itself writes under `.agents/skills/kronn`.
 fn native_skill_relative_path_ok(relative_path: &str) -> bool {
     PROJECT_SKILL_ROOTS
         .iter()
@@ -1741,7 +2388,7 @@ pub async fn use_native_skill(
 ///
 /// "Copy into Kronn": a managed copy. Creates a catalog skill from the native
 /// file and attaches it to the project — a Kronn-side write only. The
-/// repository is untouched: publishing the copy into `kronn/skills/` stays a
+/// repository is untouched: publishing the copy into `.agents/skills/` stays a
 /// separate, previewed action. Copying again replaces an edited Kronn copy
 /// only when the request says so.
 pub async fn copy_native_skill(
@@ -1835,6 +2482,7 @@ pub async fn copy_native_skill(
 
 #[cfg(test)]
 mod tests {
+    use super::super::skill_migration::{migrate_skills, skill_migration_plan};
     use super::*;
 
     #[test]
@@ -1956,7 +2604,9 @@ mod tests {
             parse_identity_time(&timestamp.to_rfc3339())
         );
         assert!(
-            up_to_date.diff.is_none(),
+            resource_comparison(root.path(), &entry, &rendered, up_to_date.sync_status)
+                .diff
+                .is_none(),
             "nothing to compare when both sides agree"
         );
 
@@ -1969,7 +2619,12 @@ mod tests {
             repository_newer.status,
             ProjectRepositoryResourceStatus::RepositoryNewer
         );
-        assert!(repository_newer.diff.unwrap().contains("--- repository"));
+        assert!(
+            resource_comparison(root.path(), &entry, &rendered, repository_newer.sync_status)
+                .diff
+                .unwrap()
+                .contains("--- repository")
+        );
 
         std::fs::write(&path, original).unwrap();
         let mut changed = base;
@@ -1982,13 +2637,22 @@ mod tests {
             kronn_newer.status,
             ProjectRepositoryResourceStatus::KronnNewer
         );
-        assert!(kronn_newer.diff.is_some());
+        assert!(
+            resource_comparison(root.path(), &entry, &changed, kronn_newer.sync_status)
+                .diff
+                .is_some()
+        );
 
         std::fs::write(&path, b"repository edit").unwrap();
         let view =
             alignment_status(&conn, root.path(), &entry, &changed, Some(&alignment)).unwrap();
         assert_eq!(view.status, ProjectRepositoryResourceStatus::Conflict);
-        assert!(view.diff.unwrap().contains("--- repository"));
+        assert!(
+            resource_comparison(root.path(), &entry, &changed, view.sync_status)
+                .diff
+                .unwrap()
+                .contains("--- repository")
+        );
     }
 
     #[test]
@@ -2149,16 +2813,19 @@ mod tests {
             ProjectRepositoryResourceStatus::Conflict,
             "with no baseline neither side can be called newer"
         );
-        assert!(both.diff.is_some());
+        let comparison = resource_comparison(root.path(), &entry, &edited, both.sync_status);
+        assert!(comparison.diff.is_some());
         assert!(
-            both.field_diff
+            comparison
+                .field_diff
                 .iter()
                 .any(|item| item.field == "description"),
             "{:?}",
-            both.field_diff
+            comparison.field_diff
         );
         assert!(
-            both.field_diff
+            comparison
+                .field_diff
                 .iter()
                 .all(|item| item.field != "updated_at"),
             "instance-local fields are not a difference"
@@ -2233,7 +2900,7 @@ mod tests {
         };
         let mut rendered =
             crate::core::repository_resources::render_quick_exec(&exec, "health").unwrap();
-        rendered.files = BTreeMap::from([
+        rendered.files = std::sync::Arc::new(BTreeMap::from([
             (
                 "kronn/artifacts/health/artifact.yaml".to_string(),
                 b"same\n".to_vec(),
@@ -2242,7 +2909,7 @@ mod tests {
                 "kronn/artifacts/health/index.html".to_string(),
                 b"<p>new</p>\n".to_vec(),
             ),
-        ]);
+        ]));
         let entry = crate::core::repository_resources::RepositoryLockResource {
             kind: ProjectRepositoryResourceKind::Artifact,
             slug: "health".into(),
@@ -2578,6 +3245,179 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
         }
+    }
+
+    fn sample_prompt_json(id: &str, name: &str, project_id: &str) -> QuickPrompt {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "icon": "zap", "prompt_template": "Review {{diff}}",
+            "variables": [], "agent": "ClaudeCode", "project_id": project_id,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn sample_workflow_json(
+        id: &str,
+        name: &str,
+        project_id: &str,
+        steps: serde_json::Value,
+    ) -> Workflow {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "project_id": project_id,
+            "trigger": {"type": "Manual"}, "steps": steps, "actions": [],
+            "safety": {}, "workspace_config": null, "concurrency_limit": null,
+            "enabled": false,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn listing_exposes_uses_and_used_by_including_missing_references_and_loops() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_execs::insert_quick_exec(conn, &sample_exec("project-1"))?;
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt_json("qp-1", "Review", "project-1"),
+                )?;
+                crate::db::workflows::insert_workflow(
+                    conn,
+                    &sample_workflow_json(
+                        "wf-1",
+                        "Nightly triage",
+                        "project-1",
+                        serde_json::json!([
+                            {"name": "ask", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-1"},
+                            {"name": "lint", "step_type": {"type": "CollectApiData"},
+                             "collect_api_data": {"sources": [{"alias": "lint", "quick_exec_id": "qe-1"}]}},
+                            {"name": "gone", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-gone"},
+                            {"name": "child", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-2"}
+                        ]),
+                    ),
+                )?;
+                crate::db::workflows::insert_workflow(
+                    conn,
+                    &sample_workflow_json(
+                        "wf-2",
+                        "Child",
+                        "project-1",
+                        serde_json::json!([
+                            {"name": "back", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-1"}
+                        ]),
+                    ),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let listing = list_resources(&state, &project_id).await;
+        let find = |id: &str| listing.resources.iter().find(|item| item.id == id).unwrap();
+
+        let nightly = find("wf-1");
+        let uses: Vec<(&str, bool)> = nightly
+            .uses
+            .iter()
+            .map(|link| (link.id.as_str(), link.missing))
+            .collect();
+        assert_eq!(
+            uses,
+            vec![
+                ("wf-2", false),
+                ("qe-1", false),
+                ("qp-1", false),
+                ("qp-gone", true)
+            ],
+            "present links by name, then the missing one"
+        );
+        let child = &nightly.uses[0];
+        assert_eq!(child.kind, ProjectRepositoryResourceKind::Workflow);
+        assert_eq!(child.slug.as_deref(), Some("child"));
+        assert_eq!(child.name, "Child");
+        let gone = nightly.uses.last().unwrap();
+        assert_eq!(gone.kind, ProjectRepositoryResourceKind::QuickPrompt);
+        assert!(gone.slug.is_none(), "nothing to derive a stable slug from");
+
+        for leaf in ["qp-1", "qe-1"] {
+            assert!(find(leaf).uses.is_empty());
+            let used_by: Vec<&str> = find(leaf)
+                .used_by
+                .iter()
+                .map(|link| link.id.as_str())
+                .collect();
+            assert_eq!(used_by, vec!["wf-1"]);
+            assert_eq!(
+                find(leaf).used_by[0].slug.as_deref(),
+                Some("nightly-triage")
+            );
+        }
+        // The loop is visible from both sides and neither end vanishes.
+        let child = find("wf-2");
+        assert_eq!(child.uses.len(), 1);
+        assert_eq!(child.uses[0].id, "wf-1");
+        assert_eq!(child.used_by.len(), 1);
+        assert_eq!(child.used_by[0].id, "wf-1");
+        assert_eq!(nightly.used_by.len(), 1);
+        assert_eq!(nightly.used_by[0].id, "wf-2");
+    }
+
+    #[tokio::test]
+    async fn listing_resolves_definitions_written_on_another_machine_through_their_files() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        // Published elsewhere: the workflow file names the Quick Prompt by the
+        // id it had on that machine, and nothing of it is in Kronn's database.
+        let prompt = sample_prompt_json("foreign-qp", "Review", "elsewhere");
+        let workflow = sample_workflow_json(
+            "foreign-wf",
+            "Nightly triage",
+            "elsewhere",
+            serde_json::json!([
+                {"name": "ask", "step_type": {"type": "Agent"}, "quick_prompt_id": "foreign-qp"},
+                {"name": "lost", "step_type": {"type": "Agent"}, "quick_prompt_id": "never-published"}
+            ]),
+        );
+        for rendered in [
+            crate::core::repository_resources::render_quick_prompt(&prompt, "review").unwrap(),
+            crate::core::repository_resources::render_workflow(&workflow, "nightly-triage")
+                .unwrap(),
+        ] {
+            crate::core::repository_resources::publish(root.path(), "repo", rendered, false)
+                .unwrap();
+        }
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+
+        let listing = list_resources(&state, &project_id).await;
+        let find = |slug: &str| {
+            listing
+                .resources
+                .iter()
+                .find(|item| item.slug == slug)
+                .unwrap()
+        };
+        assert_eq!(
+            find("nightly-triage").status,
+            ProjectRepositoryResourceStatus::RepositoryOnly
+        );
+        let uses = &find("nightly-triage").uses;
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses[0].id, "repository:quick_prompt:review");
+        assert_eq!(uses[0].slug.as_deref(), Some("review"));
+        assert!(!uses[0].missing);
+        assert_eq!(uses[1].id, "never-published");
+        assert!(uses[1].missing);
+        assert_eq!(find("review").used_by.len(), 1);
+        assert_eq!(
+            find("review").used_by[0].slug.as_deref(),
+            Some("nightly-triage")
+        );
     }
 
     #[tokio::test]
@@ -2987,6 +3827,29 @@ mod tests {
             .unwrap();
     }
 
+    /// Reads every file under `root`. The very first read of files just written
+    /// costs the filesystem (0.5 to 2 s for a couple of MB in a sandbox), not
+    /// the listing: it is timed apart so the listing's own numbers are readable.
+    fn read_every_file(root: &Path) {
+        let started = std::time::Instant::now();
+        let mut bytes = 0;
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    bytes += std::fs::read(path).map_or(0, |content| content.len());
+                }
+            }
+        }
+        eprintln!(
+            "LISTING_SPEED first raw read of the files ({bytes} bytes): {:?}",
+            started.elapsed()
+        );
+    }
+
     /// `cargo test --lib listing_speed -- --ignored --nocapture`: a stand-in for
     /// a large repository with many automations (79) and a few skills.
     #[tokio::test]
@@ -3064,6 +3927,7 @@ mod tests {
             .args(["commit", "-q", "-m", "publish"])
             .status()
             .unwrap();
+        read_every_file(root.path());
         let mut runs = Vec::new();
         for _ in 0..3 {
             let started = std::time::Instant::now();
@@ -3075,5 +3939,2210 @@ mod tests {
                 .all(|item| item.status == ProjectRepositoryResourceStatus::UpToDate));
         }
         eprintln!("LISTING_SPEED all-published runs={runs:?}");
+    }
+
+    fn sample_prompt(project_id: &str, id: &str, template: &str) -> QuickPrompt {
+        let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        QuickPrompt {
+            id: id.into(),
+            name: format!("Prompt {id}"),
+            icon: "terminal".into(),
+            prompt_template: template.into(),
+            variables: Vec::new(),
+            agent: crate::models::AgentType::ClaudeCode,
+            connection_id: None,
+            project_id: Some(project_id.into()),
+            skill_ids: Vec::new(),
+            profile_ids: Vec::new(),
+            directive_ids: Vec::new(),
+            tier: crate::models::ModelTier::default(),
+            agent_settings: None,
+            description: String::new(),
+            pinned: false,
+            created_at: timestamp,
+            updated_at: timestamp,
+        }
+    }
+
+    /// A project holding one resource of each kind Kronn holds, all with fixed
+    /// content and dates, so its listing reads the same on every run.
+    async fn seed_one_of_each_kind(state: &crate::AppState, project_id: &str) {
+        seed_one_of_each_kind_tagged(state, project_id, "").await;
+    }
+
+    /// [`seed_one_of_each_kind`] with `tag` added to the text of each resource,
+    /// for a test that needs content no other test renders (the render memo is
+    /// shared by the whole process). An empty tag changes nothing.
+    async fn seed_one_of_each_kind_tagged(state: &crate::AppState, project_id: &str, tag: &str) {
+        let project_id = project_id.to_string();
+        let tag = tag.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+                let mut prompt = sample_prompt(
+                    &project_id,
+                    "qp-1",
+                    &format!("Review {{{{diff}}}} password=hunter2-golden{tag}"),
+                );
+                prompt.name = "Review prompt".into();
+                crate::db::quick_prompts::insert_quick_prompt(conn, &prompt)?;
+
+                let mut exec = sample_exec(&project_id);
+                exec.args = vec![
+                    "check".into(),
+                    format!("--token=golden-exec-token-123456{tag}"),
+                ];
+                crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+
+                let api: QuickApi = serde_json::from_value(serde_json::json!({
+                    "id": "qa-1", "name": "Traffic", "icon": "api", "description": "",
+                    "project_id": project_id, "api_plugin_slug": "api-traffic",
+                    "api_config_id": "config-1", "api_endpoint_path": format!("/live{tag}"),
+                    "api_method": "GET",
+                    "api_headers": {"Authorization": "Bearer sk-live-1234567890abcdefghij", "Accept": "application/json"},
+                    "api_query": {"page": "2", "api_key": "golden-api-key-123456"},
+                    "variables": [], "profile_ids": [], "directive_ids": [], "pinned": false,
+                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:10Z"
+                }))
+                .unwrap();
+                crate::db::quick_apis::insert_quick_api(conn, &api)?;
+
+                let workflow = sample_workflow_json(
+                    "wf-1",
+                    "Nightly",
+                    &project_id,
+                    serde_json::json!([
+                        {
+                            "id": "00000000-0000-4000-8000-000000000001",
+                            "name": "ask", "step_type": {"type": "Agent"},
+                            "quick_prompt_id": "qp-1",
+                            "prompt_template": format!("Summarize password=hunter2-golden{tag}")
+                        },
+                        {
+                            "id": "00000000-0000-4000-8000-000000000002",
+                            "name": "fetch", "step_type": {"type": "ApiCall"},
+                            "quick_api_id": "qa-1",
+                            "api_headers": {"Authorization": "Bearer sk-live-1234567890abcdefghij"}
+                        },
+                        {
+                            "id": "00000000-0000-4000-8000-000000000003",
+                            "name": "collect", "step_type": {"type": "CollectApiData"},
+                            "collect_api_data": {"sources": [{"alias": "lint", "quick_exec_id": "qe-1"}]}
+                        },
+                        {
+                            "id": "00000000-0000-4000-8000-000000000004",
+                            "name": "again", "step_type": {"type": "SubWorkflow"},
+                            "sub_workflow_id": "wf-1"
+                        }
+                    ]),
+                );
+                crate::db::workflows::insert_workflow(conn, &workflow)?;
+
+                let page = LivePage {
+                    id: "page-1".into(),
+                    project_id: Some(project_id.clone()),
+                    title: "Dashboard".into(),
+                    slug: "dashboard".into(),
+                    current_revision_id: "rev-1".into(),
+                    data_revision: 0,
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                    last_published_at: None,
+                    pinned: false,
+                    archived: false,
+                };
+                let revision = LivePageRevision {
+                    id: "rev-1".into(),
+                    page_id: "page-1".into(),
+                    revision: 1,
+                    html: format!("<h1>Dashboard</h1><p>password=hunter2-golden</p>{tag}"),
+                    created_by_agent: Some("agent".into()),
+                    created_at: timestamp,
+                };
+                crate::db::live_pages::create_live_page(conn, &page, &revision, &[], None)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .expect("seed one of each kind");
+    }
+
+    /// The listing of a project with one resource of each kind, byte for byte
+    /// (KT-915: the listing stopped copying the JSON values it renders). Read
+    /// twice — the second time from the memo — it must not change either, and
+    /// must hold no secret value.
+    #[tokio::test]
+    async fn the_listing_of_one_resource_of_each_kind_is_byte_for_byte_what_it_was() {
+        // Captured from the code before KT-915, on the same content.
+        const GOLDEN: &str = "62b08785722790d9a69aaabe1a0c4455e0f9b163a43ea4b8bd3a8e3102dad2b5";
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_one_of_each_kind(&state, "project-1").await;
+
+        let first = list_resources(&state, "project-1").await;
+        let second = list_resources(&state, "project-1").await;
+        let workflow = first
+            .resources
+            .iter()
+            .find(|item| item.kind == ProjectRepositoryResourceKind::Workflow)
+            .expect("the workflow is listed");
+        assert_eq!(
+            workflow.uses.len(),
+            3,
+            "the workflow's references are part of what is compared: {:?}",
+            workflow.uses
+        );
+        let first = serde_json::to_string(&first.resources).unwrap();
+        let second = serde_json::to_string(&second.resources).unwrap();
+        assert_eq!(first, second, "served from memory it reads the same");
+        for secret in [
+            "hunter2-golden",
+            "golden-exec-token-123456",
+            "golden-api-key-123456",
+            "sk-live-1234567890abcdefghij",
+        ] {
+            assert!(!first.contains(secret), "{secret} leaked into the listing");
+        }
+        let digest = crate::core::repository_resources::sha256(first.as_bytes());
+        assert_eq!(
+            digest, GOLDEN,
+            "the listing no longer reads the same bytes: {first}"
+        );
+    }
+
+    // ── KT-915: the render memo is warmed in the background ─────────────────
+
+    use super::super::resource_prewarm::{self, Progress, Timings};
+    use tokio_util::sync::CancellationToken;
+
+    /// Whether the render memo already holds this resource under `slug`.
+    fn is_memoized(loaded: &LoadedResource, slug: &str) -> bool {
+        use crate::core::repository_resources::render_is_memoized as memoized;
+        fn json<T: serde::Serialize>(value: &T) -> serde_json::Value {
+            serde_json::to_value(value).unwrap()
+        }
+        match loaded {
+            LoadedResource::Workflow(workflow) => {
+                // Rendered as a definition, never as an activation state.
+                let mut source = json(workflow);
+                source["enabled"] = serde_json::Value::Bool(false);
+                memoized(
+                    ProjectRepositoryResourceKind::Workflow,
+                    slug,
+                    workflow.updated_at,
+                    &source,
+                )
+            }
+            LoadedResource::QuickPrompt(prompt) => memoized(
+                ProjectRepositoryResourceKind::QuickPrompt,
+                slug,
+                prompt.updated_at,
+                &json(prompt),
+            ),
+            LoadedResource::QuickApi(api) => memoized(
+                ProjectRepositoryResourceKind::QuickApi,
+                slug,
+                api.updated_at,
+                &json(api),
+            ),
+            LoadedResource::QuickExec(exec) => memoized(
+                ProjectRepositoryResourceKind::QuickExec,
+                slug,
+                exec.updated_at,
+                &json(exec),
+            ),
+            LoadedResource::Artifact { page, updated_at } => memoized(
+                ProjectRepositoryResourceKind::Artifact,
+                slug,
+                *updated_at,
+                &json(page),
+            ),
+            LoadedResource::Skill(_) => unreachable!("skills are not warmed"),
+        }
+    }
+
+    /// What the warm-up plans for a project, with the slugs the listing uses.
+    async fn planned_resources(
+        state: &crate::AppState,
+        project_id: &str,
+    ) -> Vec<(LoadedResource, String)> {
+        let project_id = project_id.to_string();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                let project_key =
+                    crate::db::resource_identities::project_key(conn, Some(&project_id))?;
+                let mut planned = Vec::new();
+                for seed in project_seeds(conn, &project_id)? {
+                    let slug = resource_slug(conn, &project_key, &seed)?;
+                    planned.push((seed.loaded, slug));
+                }
+                Ok(planned)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// `count` Quick Prompts of about 24 KB with a credential assignment on
+    /// most lines, so masking them is slow enough to observe. `nonce` keeps
+    /// their text to this test.
+    async fn seed_heavy_prompts(state: &crate::AppState, count: usize, nonce: &str) {
+        let nonce = nonce.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                for index in 0..count {
+                    let mut body = format!("# heavy prompt {index} {nonce}\n");
+                    while body.len() < 24 * 1024 {
+                        body.push_str(&format!(
+                            "Send Authorization: Bearer ${{TOKEN_{index}}} and keep password=${{DB_{index}}} out of the log ({nonce})\n"
+                        ));
+                    }
+                    crate::db::quick_prompts::insert_quick_prompt(
+                        conn,
+                        &sample_prompt("project-1", &format!("heavy-{index}"), &body),
+                    )?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("gave up waiting for {what}");
+    }
+
+    fn fast_timings() -> Timings {
+        Timings {
+            startup: std::time::Duration::ZERO,
+            // Wide enough that a busy machine stalling between two edits of
+            // a burst does not split it.
+            debounce: std::time::Duration::from_millis(500),
+            max_debounce: std::time::Duration::from_secs(5),
+            breath: std::time::Duration::ZERO,
+        }
+    }
+
+    async fn edit_prompt(state: &crate::AppState, template: String) {
+        state
+            .db
+            .with_conn(move |conn| {
+                let mut prompt = crate::db::quick_prompts::get_quick_prompt(conn, "watched")?
+                    .expect("the watched prompt exists");
+                prompt.prompt_template = template;
+                crate::db::quick_prompts::update_quick_prompt(conn, &prompt)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn state_with_watched_prompt(nonce: &str) -> (crate::AppState, tempfile::TempDir) {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let template = format!("Watched prompt, first version ({nonce})");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt("project-1", "watched", &template),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        (state, root)
+    }
+
+    /// The warm-up renders what the listing will ask for, under the same slugs
+    /// and from the same content: afterwards, the render memo holds all of it.
+    #[tokio::test]
+    async fn warming_a_project_renders_what_its_listing_will_ask_for() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let tag = format!(" warm-probe-{}", Uuid::new_v4());
+        seed_one_of_each_kind_tagged(&state, "project-1", &tag).await;
+
+        let planned = planned_resources(&state, "project-1").await;
+        assert_eq!(planned.len(), 5, "one of each kind the listing renders");
+        for (loaded, slug) in &planned {
+            assert!(!is_memoized(loaded, slug), "{slug} is not rendered yet");
+        }
+
+        let progress = Progress::default();
+        let warmed = resource_prewarm::warm_project(
+            &state.db,
+            "project-1",
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &progress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(warmed, 5);
+        for (loaded, slug) in &planned {
+            assert!(
+                is_memoized(loaded, slug),
+                "{slug} is rendered ahead of time"
+            );
+        }
+
+        // The listing is then served from memory, and shows no secret value.
+        let hits = crate::core::repository_resources::render_memo_stats().hits;
+        let listing = list_resources(&state, "project-1").await;
+        assert!(
+            crate::core::repository_resources::render_memo_stats().hits >= hits + 5,
+            "every resource of the listing came from the warmed memo"
+        );
+        let listed = serde_json::to_string(&listing.resources).unwrap();
+        for secret in [
+            "hunter2-golden",
+            "golden-exec-token-123456",
+            "golden-api-key-123456",
+        ] {
+            assert!(!listed.contains(secret), "{secret} leaked into the listing");
+        }
+    }
+
+    /// Rendering is done off the database: while the warm-up masks its
+    /// resources, a request finds the read connection free.
+    #[tokio::test]
+    async fn warming_leaves_the_database_free_for_a_request_while_it_renders() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_heavy_prompts(&state, 150, &Uuid::new_v4().to_string()).await;
+
+        let progress = std::sync::Arc::new(Progress::default());
+        let warm = tokio::spawn({
+            let (db, progress) = (state.db.clone(), progress.clone());
+            async move {
+                resource_prewarm::warm_project(
+                    &db,
+                    "project-1",
+                    &CancellationToken::new(),
+                    std::time::Duration::from_millis(1),
+                    &progress,
+                )
+                .await
+            }
+        });
+        wait_until("the warm-up to be rendering", || {
+            progress.rendered.load(std::sync::atomic::Ordering::Acquire) >= 3
+        })
+        .await;
+        assert!(!warm.is_finished(), "the run is still going");
+
+        // A request now: it is served, and the warm-up is not done yet.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.db.with_read_conn(|_| Ok(())),
+        )
+        .await
+        .expect("a request is not made to wait for the warm-up")
+        .unwrap();
+        assert!(
+            !warm.is_finished(),
+            "the request was served while the warm-up was still rendering"
+        );
+        assert_eq!(warm.await.unwrap().unwrap(), 150);
+    }
+
+    #[tokio::test]
+    async fn the_warm_up_never_delays_the_start_and_stops_at_shutdown() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_heavy_prompts(&state, 150, &Uuid::new_v4().to_string()).await;
+
+        // Started, it returns at once whatever it waits for; stopped before
+        // its first run, it renders nothing.
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let started = std::time::Instant::now();
+        let waiting = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            Timings {
+                startup: std::time::Duration::from_secs(3600),
+                ..fast_timings()
+            },
+            progress.clone(),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+        assert_eq!(
+            progress.rendered.load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+
+        // Stopped in the middle of a run, it leaves the rest alone.
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let running = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            Timings {
+                breath: std::time::Duration::from_millis(1),
+                ..fast_timings()
+            },
+            progress.clone(),
+        );
+        wait_until("the run to start", || {
+            progress.rendered.load(std::sync::atomic::Ordering::Acquire) >= 3
+        })
+        .await;
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), running)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+        assert!(progress.rendered.load(std::sync::atomic::Ordering::Acquire) < 150);
+    }
+
+    /// The memo is bounded (48 MiB): the warm-up stops rather than push out
+    /// what it has computed.
+    #[tokio::test]
+    async fn the_warm_up_stops_when_the_render_memo_is_full() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        seed_one_of_each_kind_tagged(&state, "project-1", &format!(" full-{}", Uuid::new_v4()))
+            .await;
+
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let room_for_two = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+        let warmed = resource_prewarm::warm_project_while(
+            &state.db,
+            "project-1",
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &Progress::default(),
+            &room_for_two,
+        )
+        .await
+        .unwrap();
+        assert_eq!(warmed, 2, "no more once the memo says it is full");
+
+        let nothing = resource_prewarm::warm_project_while(
+            &state.db,
+            "project-1",
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &Progress::default(),
+            &|| false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(nothing, 0);
+    }
+
+    /// After the start and after an edit, the memo holds the current content;
+    /// a burst of edits is one run, not one per edit.
+    #[tokio::test]
+    async fn the_warm_up_runs_after_the_start_and_after_an_edit_once_per_burst() {
+        let (state, _root) = state_with_watched_prompt(&Uuid::new_v4().to_string()).await;
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let passes = || progress.passes.load(std::sync::atomic::Ordering::Acquire);
+        let warm_up = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            fast_timings(),
+            progress.clone(),
+        );
+
+        // After the start: what the database held is rendered.
+        wait_until("the first run", || passes() >= 1).await;
+        let planned = planned_resources(&state, "project-1").await;
+        assert!(is_memoized(&planned[0].0, &planned[0].1));
+
+        // After an edit: the new content is, once the writes have stopped.
+        let nonce = Uuid::new_v4();
+        for version in 0..5 {
+            edit_prompt(&state, format!("Watched prompt, edit {version} ({nonce})")).await;
+        }
+        wait_until("the run after the edits", || passes() >= 2).await;
+        let planned = planned_resources(&state, "project-1").await;
+        assert!(
+            matches!(&planned[0].0, LoadedResource::QuickPrompt(prompt) if prompt.prompt_template.contains("edit 4")),
+            "the database holds the last edit"
+        );
+        assert!(
+            is_memoized(&planned[0].0, &planned[0].1),
+            "and the memo holds it too"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert_eq!(passes(), 2, "five edits in a burst made one run");
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), warm_up)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+    }
+
+    /// A workflow writing all day cannot keep the resources cold: the run
+    /// waits for the writes to stop, but not for ever.
+    #[tokio::test]
+    async fn a_steady_stream_of_edits_cannot_postpone_the_warm_up_for_ever() {
+        let (state, _root) = state_with_watched_prompt(&Uuid::new_v4().to_string()).await;
+        let shutdown = CancellationToken::new();
+        let progress = std::sync::Arc::new(Progress::default());
+        let warm_up = resource_prewarm::spawn_with(
+            state.db.clone(),
+            shutdown.clone(),
+            Timings {
+                debounce: std::time::Duration::from_millis(400),
+                max_debounce: std::time::Duration::from_secs(1),
+                ..fast_timings()
+            },
+            progress.clone(),
+        );
+        wait_until("the first run", || {
+            progress.passes.load(std::sync::atomic::Ordering::Acquire) >= 1
+        })
+        .await;
+
+        // An edit every 60 ms, never quiet for the 400 ms the debounce wants.
+        let started = std::time::Instant::now();
+        let mut ran_during_the_stream = false;
+        while started.elapsed() < std::time::Duration::from_millis(2500) {
+            edit_prompt(
+                &state,
+                format!("Watched prompt, stream {:?}", started.elapsed()),
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            if progress.passes.load(std::sync::atomic::Ordering::Acquire) >= 2 {
+                ran_during_the_stream = true;
+                break;
+            }
+        }
+        assert!(
+            ran_during_the_stream,
+            "a run happened while the edits kept coming"
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), warm_up)
+            .await
+            .expect("stops at shutdown")
+            .unwrap();
+    }
+
+    async fn compare(
+        state: &crate::AppState,
+        project_id: &str,
+        kind: ProjectRepositoryResourceKind,
+        id: &str,
+    ) -> Json<ApiResponse<RepositoryResourceComparison>> {
+        repository_resource_comparison(
+            State(state.clone()),
+            AxumPath(project_id.to_string()),
+            Query(RepositoryComparisonQuery {
+                kind,
+                id: id.to_string(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn diffs_are_built_on_demand_and_no_secret_value_reaches_the_listing_or_the_comparison() {
+        const EXEC_SECRET: &str = "leak-probe-exec-secret";
+        const PROMPT_SECRET: &str = "leak-probe-prompt-secret";
+        const VENDOR_KEY: &str = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let mut exec = sample_exec("project-1");
+                exec.args = vec!["--token".into(), EXEC_SECRET.into()];
+                crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt(
+                        "project-1",
+                        "qp-1",
+                        &format!("Call it with password={PROMPT_SECRET} and the key {VENDOR_KEY}."),
+                    ),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        for (kind, id) in [
+            (ProjectRepositoryResourceKind::QuickExec, "qe-1"),
+            (ProjectRepositoryResourceKind::QuickPrompt, "qp-1"),
+        ] {
+            let published = publish_repository_resource(
+                State(state.clone()),
+                AxumPath(project_id.clone()),
+                Json(PublishProjectRepositoryResourceRequest {
+                    kind,
+                    id: id.into(),
+                    overwrite_repository_changes: false,
+                }),
+            )
+            .await;
+            assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        }
+
+        // Both sides agree: nothing to compare, and the listing says so.
+        let aligned = list_resources(&state, &project_id).await;
+        assert!(aligned
+            .resources
+            .iter()
+            .all(|item| item.status == ProjectRepositoryResourceStatus::UpToDate));
+        let nothing = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickExec,
+            "qe-1",
+        )
+        .await
+        .0
+        .data
+        .expect("comparison");
+        assert!(nothing.diff.is_none() && nothing.file_diffs.is_empty());
+
+        // The repository moves on both resources, Kronn on the exec only.
+        let exec_path = root.path().join("kronn/quick-execs/lint.yaml");
+        let edited = std::fs::read_to_string(&exec_path)
+            .unwrap()
+            .replace("\"timeout_secs\": 30", "\"timeout_secs\": 45");
+        std::fs::write(&exec_path, edited).unwrap();
+        let prompt_path = root.path().join("kronn/prompts/prompt-qp-1.md");
+        let mut edited = std::fs::read_to_string(&prompt_path).unwrap();
+        edited.push_str("\nEdited in Git.\n");
+        std::fs::write(&prompt_path, edited).unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE quick_execs SET description = 'Edited in Kronn' WHERE id = 'qe-1'",
+                    [],
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let listing = list_resources(&state, &project_id).await;
+        let by_kind = |kind| {
+            listing
+                .resources
+                .iter()
+                .find(|item| item.kind == kind)
+                .unwrap()
+        };
+        assert_eq!(
+            by_kind(ProjectRepositoryResourceKind::QuickExec).status,
+            ProjectRepositoryResourceStatus::Conflict
+        );
+        assert_eq!(
+            by_kind(ProjectRepositoryResourceKind::QuickPrompt).status,
+            ProjectRepositoryResourceStatus::RepositoryNewer
+        );
+
+        // The listing says that the sides differ, never how.
+        let listed = serde_json::to_value(&listing).unwrap();
+        for resource in listed["resources"].as_array().unwrap() {
+            for key in ["diff", "file_diffs", "field_diff"] {
+                assert!(resource.get(key).is_none(), "{key} is not in the listing");
+            }
+        }
+        let listed = listed.to_string();
+        for secret in [EXEC_SECRET, PROMPT_SECRET, VENDOR_KEY] {
+            assert!(!listed.contains(secret), "{secret} leaked into the listing");
+        }
+
+        // Listing again masks nothing again: every resource is served from
+        // the memo (other tests may add hits, never remove them).
+        let hits_before = crate::core::repository_resources::render_memo_stats().hits;
+        list_resources(&state, &project_id).await;
+        assert!(
+            crate::core::repository_resources::render_memo_stats().hits >= hits_before + 2,
+            "a second read of an unchanged project reuses the masked renderings"
+        );
+
+        // The comparison shows both diffs, from the same masked rendering.
+        let exec = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickExec,
+            "qe-1",
+        )
+        .await
+        .0
+        .data
+        .expect("comparison");
+        assert!(exec.diff.as_deref().unwrap().contains("--- repository"));
+        assert!(exec
+            .field_diff
+            .iter()
+            .any(|item| item.field == "description"));
+        let prompt = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickPrompt,
+            "qp-1",
+        )
+        .await
+        .0
+        .data
+        .expect("comparison");
+        assert!(prompt.diff.as_deref().unwrap().contains("Edited in Git."));
+        assert!(
+            prompt
+                .diff
+                .as_deref()
+                .unwrap()
+                .contains("secret://KRONN_QUICKPROMPT_"),
+            "the secret shows as its reference"
+        );
+        for comparison in [&exec, &prompt] {
+            let shown = serde_json::to_string(comparison).unwrap();
+            for secret in [EXEC_SECRET, PROMPT_SECRET, VENDOR_KEY] {
+                assert!(
+                    !shown.contains(secret),
+                    "{secret} leaked into the comparison"
+                );
+            }
+        }
+
+        // What does not exist for this project is not compared.
+        let unknown = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickExec,
+            "qe-unknown",
+        )
+        .await;
+        assert!(unknown.0.data.is_none());
+        let repository_only = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickExec,
+            "repository:quick_exec:elsewhere",
+        )
+        .await
+        .0
+        .data
+        .expect("a repository-only row has an empty comparison");
+        assert!(repository_only.diff.is_none() && repository_only.field_diff.is_empty());
+    }
+
+    fn file_of<'a>(
+        comparison: &'a RepositoryResourceComparison,
+        path: &str,
+    ) -> &'a RepositoryResourceFileContent {
+        comparison
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("no {path} in {:?}", comparison.files))
+    }
+
+    #[tokio::test]
+    async fn the_comparison_carries_the_masked_text_of_each_side_whatever_the_state() {
+        const PROMPT_SECRET: &str = "leak-probe-content-secret";
+        const VENDOR_KEY: &str = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt(
+                        "project-1",
+                        "qp-1",
+                        &format!("Use password={PROMPT_SECRET} and the key {VENDOR_KEY}."),
+                    ),
+                )
+            })
+            .await
+            .unwrap();
+        let path = "kronn/prompts/prompt-qp-1.md";
+        let compare_prompt = || {
+            compare(
+                &state,
+                &project_id,
+                ProjectRepositoryResourceKind::QuickPrompt,
+                "qp-1",
+            )
+        };
+
+        // Kronn only: its text, masked, and no diff to build.
+        let kronn_only = compare_prompt().await.0.data.expect("comparison");
+        let file = file_of(&kronn_only, path);
+        assert!(file.repository.is_none());
+        assert!(file.kronn.as_deref().unwrap().contains("Use password="));
+        assert!(kronn_only.diff.is_none() && kronn_only.file_diffs.is_empty());
+
+        // In sync: the same text on both sides, still no diff.
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(PublishProjectRepositoryResourceRequest {
+                kind: ProjectRepositoryResourceKind::QuickPrompt,
+                id: "qp-1".into(),
+                overwrite_repository_changes: false,
+            }),
+        )
+        .await;
+        assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        let in_sync = compare_prompt().await.0.data.expect("comparison");
+        let file = file_of(&in_sync, path);
+        assert!(file.repository.is_some() && file.repository == file.kronn);
+        assert!(in_sync.diff.is_none() && in_sync.file_diffs.is_empty());
+
+        // Two versions: both texts, told apart, and the diff beside them.
+        let repository_file = root.path().join(path);
+        let mut edited = std::fs::read_to_string(&repository_file).unwrap();
+        edited.push_str("\nEdited in Git.\n");
+        std::fs::write(&repository_file, edited).unwrap();
+        let differing = compare_prompt().await.0.data.expect("comparison");
+        let file = file_of(&differing, path);
+        assert!(file
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+        assert!(!file.kronn.as_deref().unwrap().contains("Edited in Git."));
+        assert!(differing.diff.is_some());
+
+        // Nothing in any of the three answers holds a secret value.
+        for comparison in [&kronn_only, &in_sync, &differing] {
+            let shown = serde_json::to_string(comparison).unwrap();
+            for secret in [PROMPT_SECRET, VENDOR_KEY] {
+                assert!(!shown.contains(secret), "{secret} leaked into the content");
+            }
+            assert!(shown.contains("secret://KRONN_QUICKPROMPT_"));
+        }
+
+        // The prompt leaves Kronn: the repository copy is all that is left.
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("DELETE FROM quick_prompts WHERE id = 'qp-1'", [])?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        let listing = list_resources(&state, &project_id).await;
+        let orphan = listing
+            .resources
+            .iter()
+            .find(|item| item.status == ProjectRepositoryResourceStatus::RepositoryOnly)
+            .expect("the published file is now repository only");
+        let repository_only = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickPrompt,
+            &orphan.id,
+        )
+        .await
+        .0
+        .data
+        .expect("comparison");
+        let file = file_of(&repository_only, path);
+        assert!(file
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+        assert!(file.kronn.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_secret_typed_into_a_repository_file_reaches_neither_its_text_nor_a_diff() {
+        const TYPED_PASSWORD: &str = "leak-probe-typed-by-hand";
+        const TYPED_KEY: &str = "sk-zyxwvutsrqponmlkjihgfedcba9876543210";
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_execs::insert_quick_exec(conn, &sample_exec("project-1"))?;
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt("project-1", "qp-1", "Review the change."),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        attach_skills(&state, &project_id, &["rust"]).await;
+        for (kind, id) in [
+            (ProjectRepositoryResourceKind::QuickExec, "qe-1"),
+            (ProjectRepositoryResourceKind::QuickPrompt, "qp-1"),
+            (ProjectRepositoryResourceKind::Skill, "rust"),
+        ] {
+            let published = publish_repository_resource(
+                State(state.clone()),
+                AxumPath(project_id.clone()),
+                Json(PublishProjectRepositoryResourceRequest {
+                    kind,
+                    id: id.into(),
+                    overwrite_repository_changes: false,
+                }),
+            )
+            .await;
+            assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        }
+
+        // Someone types a secret into each file in Git; Kronn's side has none.
+        let append = |relative: &str, text: String| {
+            let path = root.path().join(relative);
+            let mut content = std::fs::read_to_string(&path).unwrap();
+            content.push_str(&text);
+            std::fs::write(path, content).unwrap();
+        };
+        append(
+            "kronn/prompts/prompt-qp-1.md",
+            format!("\nDeploy with password={TYPED_PASSWORD} and the key {TYPED_KEY}.\n"),
+        );
+        append(
+            ".agents/skills/rust/SKILL.md",
+            format!("\nLog in with the key {TYPED_KEY}.\n"),
+        );
+        let exec_path = root.path().join("kronn/quick-execs/lint.yaml");
+        let edited = std::fs::read_to_string(&exec_path).unwrap().replace(
+            "\"description\": \"\"",
+            &format!("\"description\": \"run with api_key={TYPED_PASSWORD}\""),
+        );
+        assert!(edited.contains(TYPED_PASSWORD), "the exec file holds it");
+        std::fs::write(&exec_path, edited).unwrap();
+
+        let cases = [
+            (
+                ProjectRepositoryResourceKind::QuickPrompt,
+                "qp-1",
+                "kronn/prompts/prompt-qp-1.md",
+            ),
+            (
+                ProjectRepositoryResourceKind::Skill,
+                "rust",
+                ".agents/skills/rust/SKILL.md",
+            ),
+            (
+                ProjectRepositoryResourceKind::QuickExec,
+                "qe-1",
+                "kronn/quick-execs/lint.yaml",
+            ),
+        ];
+        for (kind, id, path) in cases {
+            let comparison = compare(&state, &project_id, kind, id)
+                .await
+                .0
+                .data
+                .expect("comparison");
+            let shown = serde_json::to_string(&comparison).unwrap();
+            for secret in [TYPED_PASSWORD, TYPED_KEY] {
+                assert!(
+                    !shown.contains(secret),
+                    "{secret} from the repository file leaked into the {id} comparison"
+                );
+            }
+            // The repository text is there, with the secret masked out of it…
+            let repository = file_of(&comparison, path).repository.as_deref().unwrap();
+            assert!(repository.contains("***REDACTED***"), "{id}: {repository}");
+            // …and the diff shows the masked line, not the secret.
+            let diff = comparison.diff.as_deref().expect("the sides now differ");
+            assert!(diff.contains("***REDACTED***"), "{id}: {diff}");
+        }
+        let exec = compare(
+            &state,
+            &project_id,
+            ProjectRepositoryResourceKind::QuickExec,
+            "qe-1",
+        )
+        .await
+        .0
+        .data
+        .expect("comparison");
+        let description = exec
+            .field_diff
+            .iter()
+            .find(|item| item.field == "description")
+            .expect("the description differs");
+        assert!(description
+            .repository
+            .as_ref()
+            .and_then(|value| value.as_str())
+            .is_some_and(|text| text.contains("api_key=***REDACTED***")));
+    }
+
+    #[tokio::test]
+    async fn a_skill_shows_the_side_or_sides_that_hold_it() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        let skill_compare = |id: &'static str| {
+            compare(
+                &state,
+                &project_id,
+                ProjectRepositoryResourceKind::Skill,
+                id,
+            )
+        };
+        let standard = ".agents/skills/rust/SKILL.md";
+
+        // A catalog skill the project does not use: Kronn's text, nothing in the repository.
+        let catalog = skill_compare("rust").await.0.data.expect("comparison");
+        let file = file_of(&catalog, standard);
+        assert!(file.repository.is_none());
+        assert!(file
+            .kronn
+            .as_deref()
+            .unwrap()
+            .starts_with("---\nname: rust\n"));
+
+        // A skill found in a native folder, unknown to the catalog: that text only.
+        write_native_skill(
+            root.path(),
+            ".claude/skills",
+            "review",
+            "Review",
+            "Version A.",
+        );
+        write_native_skill(
+            root.path(),
+            ".agents/skills",
+            "review",
+            "Review",
+            "Version B.",
+        );
+        let native = skill_compare("repository:review")
+            .await
+            .0
+            .data
+            .expect("comparison");
+        assert_eq!(
+            native.files.len(),
+            2,
+            "every copy is listed under its own path"
+        );
+        assert!(file_of(&native, ".claude/skills/review/SKILL.md")
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Version A."));
+        assert!(native.files.iter().all(|file| file.kronn.is_none()));
+
+        // Attached and published: the same text twice, then two versions with their diff.
+        attach_skills(&state, &project_id, &["rust"]).await;
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            publish_request("rust"),
+        )
+        .await;
+        assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        let in_sync = skill_compare("rust").await.0.data.expect("comparison");
+        let file = file_of(&in_sync, standard);
+        assert!(file.repository.is_some() && file.repository == file.kronn);
+        assert!(in_sync.diff.is_none());
+        let path = root.path().join(standard);
+        let mut edited = std::fs::read_to_string(&path).unwrap();
+        edited.push_str("\nEdited in Git.\n");
+        std::fs::write(&path, edited).unwrap();
+        let differing = skill_compare("rust").await.0.data.expect("comparison");
+        let file = file_of(&differing, standard);
+        assert!(file
+            .repository
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+        assert!(!file.kronn.as_deref().unwrap().contains("Edited in Git."));
+        assert!(differing
+            .diff
+            .as_deref()
+            .unwrap()
+            .contains("Edited in Git."));
+    }
+
+    #[test]
+    fn a_side_longer_than_the_bound_is_cut_on_a_character_and_flagged() {
+        let (text, cut) = side_text("short".as_bytes());
+        assert_eq!((text.as_str(), cut), ("short", false));
+        let (text, cut) = side_text(&vec![b'a'; MAX_CONTENT_BYTES + 10]);
+        assert_eq!((text.len(), cut), (MAX_CONTENT_BYTES, true));
+        // Two-byte characters straddling the bound never split.
+        let (text, cut) = side_text("é".repeat(MAX_CONTENT_BYTES).as_bytes());
+        assert!(cut && text.len() <= MAX_CONTENT_BYTES && text.chars().all(|c| c == 'é'));
+    }
+
+    /// Renders the resources of `project_id` ahead of its first listing, as the
+    /// backend does after it starts, and says how long that took.
+    async fn time_the_warm_up(state: &crate::AppState, project_id: &str) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        resource_prewarm::warm_project(
+            &state.db,
+            project_id,
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            &Progress::default(),
+        )
+        .await
+        .unwrap();
+        started.elapsed()
+    }
+
+    /// 60 prompts of about 8 KB and 20 Quick Execs, all Kronn-side (nothing
+    /// published, so no diff to build): the listing of the first read, then of
+    /// the reads that follow. With `warm_up`, the resources are rendered ahead
+    /// of that first read, the way the backend does after it starts; the two
+    /// runs hold different text, so neither is served by the other's memo.
+    async fn time_listing_of_large_automations(
+        label: &'static str,
+        sentences: &'static [&'static str],
+        warm_up: bool,
+    ) {
+        isolate_config_dir();
+        let run = if warm_up { "warmed" } else { "cold" };
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                for index in 0..60 {
+                    let mut template = format!("# {label} {run} automation {index}\n\n");
+                    let mut turn = index;
+                    while template.len() < 8 * 1024 {
+                        template.push_str(sentences[turn % sentences.len()]);
+                        template.push_str(&format!(" (step {turn})\n"));
+                        turn += 1;
+                    }
+                    crate::db::quick_prompts::insert_quick_prompt(
+                        conn,
+                        &sample_prompt("project-1", &format!("qp-{index}"), &template),
+                    )?;
+                }
+                for index in 0..20 {
+                    let mut exec = sample_exec("project-1");
+                    exec.id = format!("qe-{index}");
+                    exec.name = format!("Automation exec {index} {run}");
+                    crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let warmed_in = if warm_up {
+            Some(time_the_warm_up(&state, &project_id).await)
+        } else {
+            None
+        };
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let listing = list_resources(&state, &project_id).await;
+            runs.push(started.elapsed());
+            assert_eq!(listing.resources.len(), 80);
+        }
+        match warmed_in {
+            None => eprintln!("LISTING_SPEED {label}, first (cold) then repeated: {runs:?}"),
+            Some(took) => eprintln!(
+                "LISTING_SPEED {label}, first after the warm-up (which took {took:?}) then repeated: {runs:?}"
+            ),
+        }
+    }
+
+    /// `cargo test --lib listing_speed_with_many_large -- --ignored --nocapture`:
+    /// a project with many automations holding long prompts, the shape that made
+    /// the listing take seconds because every read masked all of them again.
+    /// The second flavour is the worst case for the masking: a credential
+    /// assignment on most lines, so no pattern is turned away cheaply.
+    #[tokio::test]
+    #[ignore = "timing measurement, run on demand"]
+    async fn listing_speed_with_many_large_automations() {
+        const PROSE: &[&str] = &[
+            "Review the mapping between the shipping token budget and the pin of each dependency.",
+            "Keep the answer short: list the files touched, then the tests run, then what is left.",
+            "The password policy lives in the security page; use a connection, never paste credentials.",
+            "Open https://example.com/docs/guide and compare it with the notes: key: value, one per line.",
+            "Explain the trade-off first, then propose the smallest change; wait for approval before writing.",
+            "Return JSON with the fields status, summary and next_steps; no prose outside the object.",
+        ];
+        const CREDENTIALS: &[&str] = &[
+            "Export API_KEY=${SERVICE_KEY} before the run; the token: ${DEPLOY_TOKEN} comes from the vault.",
+            "Send Authorization: Bearer ${GITHUB_TOKEN} in the header and never log password=${DB_PASSWORD}.",
+            "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com/v1/items and keep the reply short.",
+            "Connect with postgres://app:${DB_PASSWORD}@db.internal/app, then list the tables that changed.",
+            "Explain the trade-off first, then propose the smallest change; wait for approval before writing.",
+            "Return JSON with the fields status, summary and next_steps; no prose outside the object.",
+        ];
+        for warm_up in [false, true] {
+            time_listing_of_large_automations("prose", PROSE, warm_up).await;
+            time_listing_of_large_automations("credentials", CREDENTIALS, warm_up).await;
+        }
+    }
+
+    /// `cargo test --lib listing_speed_with_many_short_leaves -- --ignored --nocapture`:
+    /// the other shape of a big automation — hundreds of short strings (a Quick
+    /// Exec's arguments here, a workflow's steps elsewhere) rather than a few
+    /// long ones. Masking walks every string, so each one is a call of its own.
+    #[tokio::test]
+    #[ignore = "timing measurement, run on demand"]
+    async fn listing_speed_with_many_short_leaves() {
+        isolate_config_dir();
+        // Cold, then with the resources rendered ahead of the first read: the
+        // two runs hold different text, so neither is served by the other's memo.
+        for warm_up in [false, true] {
+            let run = if warm_up { "warmed" } else { "cold" };
+            let state = test_state();
+            let root = tempfile::tempdir().unwrap();
+            let project_id = "project-1".to_string();
+            seed_project(&state, mk_project(&project_id, root.path())).await;
+            state
+                .db
+                .with_conn(move |conn| {
+                    for index in 0..100 {
+                        let mut exec = sample_exec("project-1");
+                        exec.id = format!("qe-{index}");
+                        exec.name = format!("Automation exec {index} {run}");
+                        exec.args = (0..500)
+                            .map(|leaf| match leaf % 4 {
+                                0 => format!("--option-{index}-{leaf}"),
+                                1 => format!("value {index}/{leaf}"),
+                                2 => format!("--label=step-{leaf}"),
+                                _ => format!("https://example.com/{index}/{leaf}?page=2"),
+                            })
+                            .collect();
+                        crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .unwrap();
+
+            let warmed_in = if warm_up {
+                Some(time_the_warm_up(&state, &project_id).await)
+            } else {
+                None
+            };
+            let mut runs = Vec::new();
+            for _ in 0..3 {
+                let started = std::time::Instant::now();
+                let listing = list_resources(&state, &project_id).await;
+                runs.push(started.elapsed());
+                assert_eq!(listing.resources.len(), 100);
+            }
+            match warmed_in {
+                None => eprintln!("LISTING_SPEED short leaves, first (cold) then repeated: {runs:?}"),
+                Some(took) => eprintln!(
+                    "LISTING_SPEED short leaves, first after the warm-up (which took {took:?}) then repeated: {runs:?}"
+                ),
+            }
+        }
+    }
+
+    /// `cargo test --lib listing_speed_with_workflows_linking -- --ignored --nocapture`:
+    /// the reference graph (`uses` / `used_by`) on top of the masking. 40
+    /// workflows of 15 steps each point at 60 long prompts, 20 Quick Execs and
+    /// one another, so every listing renders every workflow, walks its steps for
+    /// references and, once published, reads its repository copy too.
+    #[tokio::test]
+    #[ignore = "timing measurement, run on demand"]
+    async fn listing_speed_with_workflows_linking_many_prompts() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        let sentences = [
+            "Review the mapping between the shipping token budget and the pin of each dependency.",
+            "Keep the answer short: list the files touched, then the tests run, then what is left.",
+            "The password policy lives in the security page; use a connection, never paste credentials.",
+            "Explain the trade-off first, then propose the smallest change; wait for approval before writing.",
+        ];
+        let prose = move |seed: usize, bytes: usize| {
+            let mut text = String::new();
+            let mut turn = seed;
+            while text.len() < bytes {
+                text.push_str(sentences[turn % sentences.len()]);
+                text.push_str(&format!(" (step {turn})\n"));
+                turn += 1;
+            }
+            text
+        };
+        state
+            .db
+            .with_conn(move |conn| {
+                for index in 0..60 {
+                    crate::db::quick_prompts::insert_quick_prompt(
+                        conn,
+                        &sample_prompt(
+                            "project-1",
+                            &format!("qp-{index}"),
+                            &prose(index, 8 * 1024),
+                        ),
+                    )?;
+                }
+                for index in 0..20 {
+                    let mut exec = sample_exec("project-1");
+                    exec.id = format!("qe-{index}");
+                    exec.name = format!("Automation exec {index}");
+                    crate::db::quick_execs::insert_quick_exec(conn, &exec)?;
+                }
+                for workflow in 0..40 {
+                    let mut steps: Vec<serde_json::Value> = (0..12)
+                        .map(|step| {
+                            serde_json::json!({
+                                "name": format!("ask-{step}"),
+                                "step_type": {"type": "Agent"},
+                                "quick_prompt_id": format!("qp-{}", (workflow * 7 + step) % 60),
+                                "prompt_template": prose(workflow + step, 1024),
+                            })
+                        })
+                        .collect();
+                    steps.push(serde_json::json!({
+                        "name": "collect",
+                        "step_type": {"type": "CollectApiData"},
+                        "collect_api_data": {"sources": [
+                            {"alias": "lint", "quick_exec_id": format!("qe-{}", workflow % 20)}
+                        ]},
+                    }));
+                    for child in 1..=2 {
+                        steps.push(serde_json::json!({
+                            "name": format!("child-{child}"),
+                            "step_type": {"type": "SubWorkflow"},
+                            "sub_workflow_id": format!("wf-{}", (workflow + child) % 40),
+                        }));
+                    }
+                    crate::db::workflows::insert_workflow(
+                        conn,
+                        &sample_workflow_json(
+                            &format!("wf-{workflow}"),
+                            &format!("Workflow {workflow}"),
+                            "project-1",
+                            serde_json::Value::Array(steps),
+                        ),
+                    )?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let time = |label: &'static str,
+                    expected_state: Option<ProjectRepositoryResourceStatus>| {
+            let state = state.clone();
+            let project_id = project_id.clone();
+            async move {
+                let mut runs = Vec::new();
+                for _ in 0..3 {
+                    let started = std::time::Instant::now();
+                    let listing = list_resources(&state, &project_id).await;
+                    runs.push(started.elapsed());
+                    assert_eq!(listing.resources.len(), 120);
+                    let linked = listing
+                        .resources
+                        .iter()
+                        .filter(|item| !item.uses.is_empty())
+                        .count();
+                    assert_eq!(linked, 40, "every workflow lists what it uses");
+                    if let Some(expected) = expected_state {
+                        assert!(listing.resources.iter().all(|item| item.status == expected));
+                    }
+                }
+                eprintln!("LISTING_SPEED {label}, first (cold) then repeated: {runs:?}");
+            }
+        };
+        time("workflows linking prompts, unpublished", None).await;
+
+        for (kind, prefix, count) in [
+            (ProjectRepositoryResourceKind::QuickPrompt, "qp", 60),
+            (ProjectRepositoryResourceKind::QuickExec, "qe", 20),
+            (ProjectRepositoryResourceKind::Workflow, "wf", 40),
+        ] {
+            for index in 0..count {
+                let published = publish_repository_resource(
+                    State(state.clone()),
+                    AxumPath(project_id.clone()),
+                    Json(PublishProjectRepositoryResourceRequest {
+                        kind,
+                        id: format!("{prefix}-{index}"),
+                        overwrite_repository_changes: false,
+                    }),
+                )
+                .await;
+                assert!(published.0.data.is_some(), "{:?}", published.0.error);
+            }
+        }
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["add", "-A"])
+            .status()
+            .unwrap();
+        crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+            .args(["commit", "-q", "-m", "publish"])
+            .status()
+            .unwrap();
+        read_every_file(root.path());
+        time(
+            "workflows linking prompts, all published",
+            Some(ProjectRepositoryResourceStatus::UpToDate),
+        )
+        .await;
+    }
+
+    // ── KT-903: skills are real Agent Skills in `.agents/skills` ────────────
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn commit_count(root: &Path) -> usize {
+        let output = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    async fn attach_skills(state: &crate::AppState, project_id: &str, ids: &[&str]) {
+        let project_id = project_id.to_string();
+        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::update_project_default_skills(conn, &project_id, &ids)
+            })
+            .await
+            .unwrap();
+    }
+
+    fn publish_request(id: &str) -> Json<PublishProjectRepositoryResourceRequest> {
+        Json(PublishProjectRepositoryResourceRequest {
+            kind: ProjectRepositoryResourceKind::Skill,
+            id: id.into(),
+            overwrite_repository_changes: false,
+        })
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn writing_a_skill_in_the_repository_makes_a_real_agent_skill_under_agents_skills() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        // A skill written by hand in Kronn, without a description, and a
+        // builtin one carrying a category, an icon and a license.
+        let custom_id = crate::core::skills::save_custom_skill(
+            "Reviewer Pro Kt903",
+            "",
+            "🔍",
+            &crate::models::SkillCategory::Business,
+            "Review carefully.\n\nSecond paragraph.",
+            Some("MIT"),
+            Some("Bash Read"),
+        )
+        .unwrap();
+        attach_skills(&state, &project_id, &["rust", &custom_id]).await;
+
+        for id in ["rust", custom_id.as_str()] {
+            let response = publish_repository_resource(
+                State(state.clone()),
+                AxumPath(project_id.clone()),
+                publish_request(id),
+            )
+            .await;
+            let mutation = response.0.data.expect("publish succeeds");
+            let path = root
+                .path()
+                .join(format!(".agents/skills/{}/SKILL.md", mutation.slug));
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                panic!("{id} must be written to .agents/skills/{}/", mutation.slug)
+            });
+            let file = crate::core::agent_skill::parse(&text).unwrap();
+            crate::core::agent_skill::validate(&file, &mutation.slug)
+                .unwrap_or_else(|error| panic!("{id} is not a valid Agent Skill: {error}\n{text}"));
+            assert!(text.starts_with("---\nname: "), "{text}");
+            assert!(
+                !text.contains("kronn:resource"),
+                "no Kronn blob in a real skill"
+            );
+            assert!(!file.body.is_empty());
+        }
+        assert!(
+            !root.path().join("kronn/skills").exists(),
+            "a skill is never written to kronn/skills"
+        );
+
+        let custom = std::fs::read_to_string(
+            root.path()
+                .join(".agents/skills/custom-reviewer-pro-kt903/SKILL.md"),
+        )
+        .unwrap();
+        let file = crate::core::agent_skill::parse(&custom).unwrap();
+        assert_eq!(
+            file.description, "Reviewer Pro Kt903",
+            "an empty description falls back to the name so the header stays valid"
+        );
+        assert_eq!(file.license.as_deref(), Some("MIT"));
+        assert_eq!(file.allowed_tools.as_deref(), Some("Bash Read"));
+        assert_eq!(file.metadata["kronn-name"], "Reviewer Pro Kt903");
+        assert_eq!(file.metadata["kronn-icon"], "🔍");
+        assert_eq!(file.metadata["kronn-category"], "business");
+        assert!(file.body.contains("Second paragraph."));
+        assert!(
+            !custom.contains("\nicon:") && !custom.contains("\ncategory:"),
+            "what is Kronn's own goes under metadata"
+        );
+
+        let lock = crate::core::repository_resources::load_lock(root.path())
+            .unwrap()
+            .unwrap();
+        for entry in lock
+            .resources
+            .iter()
+            .filter(|entry| entry.kind == ProjectRepositoryResourceKind::Skill)
+        {
+            assert_eq!(
+                entry.paths,
+                vec![format!(".agents/skills/{}/SKILL.md", entry.slug)]
+            );
+            assert!(lock.files.contains_key(&entry.paths[0]));
+        }
+        assert!(
+            lock.files
+                .keys()
+                .all(|path| !path.starts_with("kronn/skills")),
+            "{:?}",
+            lock.files.keys().collect::<Vec<_>>()
+        );
+
+        let listing = list_resources(&state, &project_id).await;
+        for slug in ["rust", "custom-reviewer-pro-kt903"] {
+            let skill = listing
+                .skills_present
+                .iter()
+                .find(|skill| skill.slug == slug)
+                .unwrap();
+            assert_eq!(
+                skill.publication_path,
+                format!(".agents/skills/{slug}/SKILL.md")
+            );
+            assert_eq!(skill.status, ProjectRepositoryResourceStatus::UpToDate);
+            assert_eq!(
+                skill.repository_paths,
+                vec![format!(".agents/skills/{slug}/SKILL.md")]
+            );
+        }
+
+        // Read back from the repository, the skill is what Kronn holds.
+        let entry = lock
+            .resources
+            .iter()
+            .find(|entry| entry.slug == "custom-reviewer-pro-kt903")
+            .unwrap();
+        let (document, _) =
+            crate::core::repository_resources::read_resource(root.path(), entry).unwrap();
+        let read: Skill = serde_json::from_value(document.resource).unwrap();
+        assert_eq!(read.name, "Reviewer Pro Kt903");
+        assert_eq!(read.icon, "🔍");
+        assert_eq!(read.content, "Review carefully.\n\nSecond paragraph.");
+        assert_eq!(read.license.as_deref(), Some("MIT"));
+    }
+
+    fn write_legacy_skill(root: &Path, skill: &Skill, slug: &str) -> (String, Vec<u8>) {
+        let document = crate::core::repository_resources::RepositoryDocument {
+            schema_version: crate::core::repository_resources::SCHEMA_VERSION,
+            kind: ProjectRepositoryResourceKind::Skill,
+            slug: slug.to_string(),
+            updated_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            requires: Vec::new(),
+            resource: serde_json::to_value(skill).unwrap(),
+            redacted_fields: Vec::new(),
+        };
+        let text = format!(
+            "---\nname: {slug}\ndescription: {}\n---\n\n<!-- kronn:resource\n{}\n-->\n\n{}\n",
+            serde_json::to_string(&skill.description).unwrap(),
+            serde_json::to_string_pretty(&document).unwrap(),
+            skill.content
+        );
+        let relative = format!("kronn/skills/{slug}/SKILL.md");
+        let path = root.join(&relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &text).unwrap();
+        (relative, text.into_bytes())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skills_under_kronn_skills_migrate_with_lock_identity_and_approval_kept() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        let skill = crate::core::skills::get_skill("rust").unwrap();
+        let (legacy_path, legacy_bytes) = write_legacy_skill(root.path(), &skill, "rust");
+        let lock = crate::core::repository_resources::RepositoryLock {
+            version: crate::core::repository_resources::SCHEMA_VERSION,
+            updated_at: Utc::now(),
+            resources: vec![crate::core::repository_resources::RepositoryLockResource {
+                kind: ProjectRepositoryResourceKind::Skill,
+                slug: "rust".into(),
+                name: skill.name.clone(),
+                level: "N1".into(),
+                paths: vec![legacy_path.clone()],
+                sha256: "legacy".into(),
+                required_secrets: Vec::new(),
+            }],
+            files: BTreeMap::from([(
+                legacy_path.clone(),
+                crate::core::repository_resources::sha256(&legacy_bytes),
+            )]),
+        };
+        std::fs::write(
+            root.path()
+                .join(crate::core::repository_resources::LOCK_PATH),
+            serde_json::to_vec_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-q", "-m", "legacy skills"]);
+        let commits = commit_count(root.path());
+
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        attach_skills(&state, &project_id, &["rust"]).await;
+        let approval_hash = crate::core::repository_resources::approval_hash(
+            &crate::core::repository_resources::render_skill(
+                &skill,
+                Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                "rust",
+            )
+            .unwrap()
+            .document,
+        );
+        let project_key = state
+            .db
+            .with_conn({
+                let project_id = project_id.clone();
+                let approval_hash = approval_hash.clone();
+                move |conn| {
+                    let key = crate::db::resource_identities::project_key(conn, Some(&project_id))?;
+                    crate::db::resource_identities::upsert(conn, &key, "skill", "rust", "rust")?;
+                    crate::db::repository_resources::upsert_alignment(
+                        conn,
+                        &key,
+                        "skill",
+                        "rust",
+                        "rust",
+                        "hash-in-the-former-format",
+                        "hash-in-the-former-format",
+                        "2026-09-01T00:00:00+00:00",
+                        false,
+                    )?;
+                    crate::db::repository_resources::approve(
+                        conn,
+                        &key,
+                        "skill",
+                        "rust",
+                        &approval_hash,
+                    )?;
+                    Ok::<_, anyhow::Error>(key)
+                }
+            })
+            .await
+            .unwrap();
+
+        // Before: still readable where it is, proposed for the move, and never
+        // presented as different only because its file format is older.
+        let listing = list_resources(&state, &project_id).await;
+        let before = listing
+            .skills_present
+            .iter()
+            .find(|entry| entry.slug == "rust")
+            .unwrap();
+        assert_eq!(before.status, ProjectRepositoryResourceStatus::UpToDate);
+        assert_eq!(before.repository_paths, vec![legacy_path.clone()]);
+        assert_eq!(before.publication_path, ".agents/skills/rust/SKILL.md");
+        let plan = skill_migration_plan(State(state.clone()), AxumPath(project_id.clone()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.moves[0].source, "kronn/skills/rust");
+        assert_eq!(plan.moves[0].target, ".agents/skills/rust");
+        assert!(plan.moves[0].converted && plan.moves[0].kronn_managed);
+        assert!(
+            root.path().join(&legacy_path).is_file(),
+            "the recap writes nothing"
+        );
+
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest::default()),
+        )
+        .await;
+        let result = response.0.data.expect("migration succeeds");
+        assert_eq!(result.moved.len(), 1);
+        assert!(result.unresolved.is_empty() && result.kept.is_empty());
+
+        // No duplicate: the folder left `kronn/skills`, the standard skill is
+        // in `.agents/skills`.
+        assert!(!root.path().join("kronn/skills").exists());
+        let text =
+            std::fs::read_to_string(root.path().join(".agents/skills/rust/SKILL.md")).unwrap();
+        let file = crate::core::agent_skill::parse(&text).unwrap();
+        crate::core::agent_skill::validate(&file, "rust").unwrap();
+        assert!(!text.contains("kronn:resource"));
+
+        // The lock follows the skill.
+        let lock = crate::core::repository_resources::load_lock(root.path())
+            .unwrap()
+            .unwrap();
+        let entry = lock
+            .resources
+            .iter()
+            .find(|entry| entry.slug == "rust")
+            .unwrap();
+        assert_eq!(
+            entry.paths,
+            vec![".agents/skills/rust/SKILL.md".to_string()]
+        );
+        assert_eq!(lock.resources.len(), 1);
+        assert!(!lock.files.contains_key(&legacy_path));
+        assert_eq!(
+            lock.files[".agents/skills/rust/SKILL.md"],
+            crate::core::repository_resources::sha256(text.as_bytes())
+        );
+
+        // The identity, the alignment and the approval follow it too.
+        let (identity, alignment, approved) = state
+            .db
+            .with_read_conn({
+                let project_key = project_key.clone();
+                let approval_hash = approval_hash.clone();
+                move |conn| {
+                    Ok((
+                        crate::db::resource_identities::lookup(
+                            conn,
+                            &project_key,
+                            "skill",
+                            "rust",
+                        )?,
+                        crate::db::repository_resources::find_alignment(
+                            conn,
+                            &project_key,
+                            "skill",
+                            "rust",
+                        )?,
+                        crate::db::repository_resources::is_approved(
+                            conn,
+                            &project_key,
+                            "skill",
+                            "rust",
+                            &approval_hash,
+                        )?,
+                    ))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(identity.as_deref(), Some("rust"));
+        assert!(approved, "the approval by fingerprint does not change");
+        let alignment = alignment.expect("the baseline is set against the new file");
+        let (_, new_hash) =
+            crate::core::repository_resources::read_resource(root.path(), entry).unwrap();
+        assert_eq!(alignment.repository_hash, new_hash);
+        assert_eq!(alignment.aligned_at, "2026-09-01T00:00:00+00:00");
+
+        let listing = list_resources(&state, &project_id).await;
+        let rows: Vec<_> = listing
+            .skills_present
+            .iter()
+            .filter(|entry| entry.slug == "rust")
+            .collect();
+        assert_eq!(rows.len(), 1, "no duplicate row");
+        assert_eq!(rows[0].status, ProjectRepositoryResourceStatus::UpToDate);
+        assert_eq!(
+            rows[0].repository_paths,
+            vec![".agents/skills/rust/SKILL.md".to_string()]
+        );
+
+        // Nothing was committed; the banner counts the move.
+        assert_eq!(commit_count(root.path()), commits);
+        assert!(listing
+            .uncommitted_managed_paths
+            .contains(&".agents/skills/rust/SKILL.md".to_string()));
+        assert!(
+            listing.uncommitted_managed_paths.contains(&legacy_path),
+            "{:?}",
+            listing.uncommitted_managed_paths
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn publishing_a_skill_still_under_kronn_skills_moves_it_instead_of_duplicating_it() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let skill = crate::core::skills::get_skill("rust").unwrap();
+        let (legacy_path, legacy_bytes) = write_legacy_skill(root.path(), &skill, "rust");
+        let lock = crate::core::repository_resources::RepositoryLock {
+            version: crate::core::repository_resources::SCHEMA_VERSION,
+            updated_at: Utc::now(),
+            resources: vec![crate::core::repository_resources::RepositoryLockResource {
+                kind: ProjectRepositoryResourceKind::Skill,
+                slug: "rust".into(),
+                name: skill.name.clone(),
+                level: "N1".into(),
+                paths: vec![legacy_path.clone()],
+                sha256: "legacy".into(),
+                required_secrets: Vec::new(),
+            }],
+            files: BTreeMap::from([(
+                legacy_path.clone(),
+                crate::core::repository_resources::sha256(&legacy_bytes),
+            )]),
+        };
+        std::fs::write(
+            root.path()
+                .join(crate::core::repository_resources::LOCK_PATH),
+            serde_json::to_vec_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        attach_skills(&state, &project_id, &["rust"]).await;
+
+        let response = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            publish_request("rust"),
+        )
+        .await;
+        assert!(response.0.data.is_some(), "{:?}", response.0.error);
+        assert!(root.path().join(".agents/skills/rust/SKILL.md").is_file());
+        assert!(
+            !root.path().join("kronn/skills").exists(),
+            "the former copy is removed, not left beside the new one"
+        );
+        let lock = crate::core::repository_resources::load_lock(root.path())
+            .unwrap()
+            .unwrap();
+        assert!(lock
+            .files
+            .keys()
+            .all(|path| !path.starts_with("kronn/skills")));
+
+        // A former copy someone edited is never deleted without saying so.
+        let root = tempfile::tempdir().unwrap();
+        let (legacy_path, legacy_bytes) = write_legacy_skill(root.path(), &skill, "rust");
+        let lock = crate::core::repository_resources::RepositoryLock {
+            version: crate::core::repository_resources::SCHEMA_VERSION,
+            updated_at: Utc::now(),
+            resources: vec![crate::core::repository_resources::RepositoryLockResource {
+                kind: ProjectRepositoryResourceKind::Skill,
+                slug: "rust".into(),
+                name: skill.name.clone(),
+                level: "N1".into(),
+                paths: vec![legacy_path.clone()],
+                sha256: "legacy".into(),
+                required_secrets: Vec::new(),
+            }],
+            files: BTreeMap::from([(
+                legacy_path.clone(),
+                crate::core::repository_resources::sha256(&legacy_bytes),
+            )]),
+        };
+        std::fs::write(
+            root.path()
+                .join(crate::core::repository_resources::LOCK_PATH),
+            serde_json::to_vec_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.path().join(&legacy_path), "edited by a human").unwrap();
+        state
+            .db
+            .with_conn({
+                let path = root.path().display().to_string();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE projects SET path = ?1 WHERE id = 'project-1'",
+                        [path],
+                    )?;
+                    Ok::<_, anyhow::Error>(())
+                }
+            })
+            .await
+            .unwrap();
+        let refused = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            publish_request("rust"),
+        )
+        .await;
+        assert!(
+            refused
+                .0
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("changed since the last alignment")),
+            "{:?}",
+            refused.0.error
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(&legacy_path)).unwrap(),
+            "edited by a human"
+        );
+        assert!(!root.path().join(".agents/skills/rust/SKILL.md").exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn migrate_all_lists_moves_and_conflicts_first_and_overwrites_nothing_without_a_choice() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        write_native_skill(root.path(), ".claude/skills", "review", "Review", "Claude.");
+        write_native_skill(root.path(), ".agents/skills", "review", "Review", "Agents.");
+        write_native_skill(root.path(), ".gemini/skills", "lint", "Lint", "Lint body.");
+        write_native_skill(
+            root.path(),
+            ".github/skills",
+            "triage",
+            "Triage",
+            "Triage body.",
+        );
+        git(root.path(), &["add", "-A"]);
+        git(root.path(), &["commit", "-q", "-m", "skills everywhere"]);
+        let commits = commit_count(root.path());
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+        // "Use in Kronn" pointed at the folder that is about to move.
+        let used = use_native_skill(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            native_request(".gemini/skills/lint/SKILL.md", false),
+        )
+        .await;
+        assert!(used.0.data.is_some());
+
+        let plan = skill_migration_plan(State(state.clone()), AxumPath(project_id.clone()))
+            .await
+            .0
+            .data
+            .unwrap();
+        let moves: Vec<_> = plan
+            .moves
+            .iter()
+            .map(|entry| (entry.source.as_str(), entry.target.as_str()))
+            .collect();
+        assert_eq!(
+            moves,
+            vec![
+                (".gemini/skills/lint", ".agents/skills/lint"),
+                (".github/skills/triage", ".agents/skills/triage"),
+            ]
+        );
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].slug, "review");
+        assert_eq!(plan.conflicts[0].versions.len(), 2);
+        assert!(
+            root.path().join(".gemini/skills/lint/SKILL.md").is_file(),
+            "the recap writes nothing"
+        );
+
+        // Without a choice, the conflict is skipped and nothing is overwritten.
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest::default()),
+        )
+        .await;
+        let result = response.0.data.expect("migration succeeds");
+        assert_eq!(result.unresolved, vec!["review"]);
+        assert_eq!(result.moved.len(), 2);
+        assert!(
+            std::fs::read_to_string(root.path().join(".agents/skills/review/SKILL.md"))
+                .unwrap()
+                .contains("Agents.")
+        );
+        assert!(root.path().join(".claude/skills/review/SKILL.md").is_file());
+        assert!(root.path().join(".agents/skills/lint/SKILL.md").is_file());
+        assert!(!root.path().join(".gemini/skills/lint").exists());
+
+        // The read-only reference follows the skill.
+        let reference = state
+            .db
+            .with_read_conn({
+                let project_id = project_id.clone();
+                move |conn| crate::db::project_skill_references::find(conn, &project_id, "lint")
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.relative_path, ".agents/skills/lint/SKILL.md");
+
+        // The user chooses the Claude version for the conflict.
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest {
+                resolutions: vec![crate::models::SkillMigrationResolution {
+                    slug: "review".into(),
+                    keep: ".claude/skills/review".into(),
+                }],
+            }),
+        )
+        .await;
+        let result = response.0.data.expect("second migration succeeds");
+        assert_eq!(result.moved.len(), 1);
+        assert!(result.unresolved.is_empty());
+        assert!(
+            std::fs::read_to_string(root.path().join(".agents/skills/review/SKILL.md"))
+                .unwrap()
+                .contains("Claude.")
+        );
+        assert!(!root.path().join(".claude/skills/review").exists());
+
+        // Nothing was committed; the banner shows the work waiting.
+        assert_eq!(commit_count(root.path()), commits);
+        let listing = list_resources(&state, &project_id).await;
+        for path in [
+            ".agents/skills/lint/SKILL.md",
+            ".agents/skills/triage/SKILL.md",
+            ".agents/skills/review/SKILL.md",
+            ".gemini/skills/lint/SKILL.md",
+            ".claude/skills/review/SKILL.md",
+        ] {
+            assert!(
+                listing
+                    .uncommitted_managed_paths
+                    .contains(&path.to_string()),
+                "{path} missing from {:?}",
+                listing.uncommitted_managed_paths
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn migrate_all_refuses_symbolic_links_and_paths_outside_the_repository() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "outside").unwrap();
+        write_native_skill(root.path(), ".claude/skills", "linked", "Linked", "Body.");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            root.path().join(".claude/skills/linked/notes.md"),
+        )
+        .unwrap();
+        write_native_skill(root.path(), ".claude/skills", "review", "Review", "Claude.");
+        write_native_skill(root.path(), ".agents/skills", "review", "Review", "Agents.");
+        let project_id = "project-1".to_string();
+        seed_project(&state, mk_project(&project_id, root.path())).await;
+
+        let plan = skill_migration_plan(State(state.clone()), AxumPath(project_id.clone()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert_eq!(plan.blocked.len(), 1);
+        assert_eq!(plan.blocked[0].path, ".claude/skills/linked");
+        assert!(plan.moves.is_empty());
+
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath(project_id.clone()),
+            Json(crate::models::SkillMigrationRequest {
+                resolutions: vec![crate::models::SkillMigrationResolution {
+                    slug: "review".into(),
+                    keep: "../../etc".into(),
+                }],
+            }),
+        )
+        .await;
+        let result = response.0.data.unwrap();
+        assert_eq!(result.unresolved, vec!["review"]);
+        assert!(root.path().join(".claude/skills/linked/SKILL.md").is_file());
+        assert!(!root.path().join(".agents/skills/linked").exists());
+        assert!(
+            std::fs::read_to_string(root.path().join(".agents/skills/review/SKILL.md"))
+                .unwrap()
+                .contains("Agents.")
+        );
+        assert!(outside.path().join("secret.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn migrating_needs_a_known_project() {
+        let state = test_state();
+        let response = migrate_skills(
+            State(state.clone()),
+            AxumPath("missing".into()),
+            Json(crate::models::SkillMigrationRequest::default()),
+        )
+        .await;
+        assert!(response.0.data.is_none());
+        let plan = skill_migration_plan(State(state), AxumPath("missing".into())).await;
+        assert!(plan.0.data.is_none());
     }
 }

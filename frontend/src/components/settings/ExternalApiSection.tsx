@@ -331,7 +331,9 @@ function ConnectionForm({
           </button>
           {testResult ? (
             <p className="set-hint" data-testid="ext-api-test-result" data-status={testResult.status}>
-              {testResult.hint ?? (testResult.models.length > 0 ? t('config.extApi.modelsLoaded', testResult.models.length) : t('config.extApi.noModels'))}
+              {testResult.status === 'billing_error'
+                ? t('config.extApi.billingError')
+                : testResult.hint ?? (testResult.models.length > 0 ? t('config.extApi.modelsLoaded', testResult.models.length) : t('config.extApi.noModels'))}
             </p>
           ) : <p className="set-hint" data-testid="ext-api-test-required">{t('config.extApi.testRequired')}</p>}
         </div>
@@ -900,7 +902,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                 )}
                 {savedTests[c.id] ? (
                   <p className="set-hint" data-testid={`ext-api-saved-test-result-${c.id}`} data-status={savedTests[c.id]?.status}>
-                    {savedTests[c.id]?.hint ?? (
+                    {savedTests[c.id]?.status === 'billing_error' ? t('config.extApi.billingError') : savedTests[c.id]?.hint ?? (
                       savedTests[c.id]?.models.length
                         ? t('config.extApi.modelsLoaded', savedTests[c.id]?.models.length ?? 0)
                         : t('config.extApi.noModels')

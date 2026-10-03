@@ -77,6 +77,19 @@ pub fn list_quick_apis(conn: &Connection) -> Result<Vec<QuickApi>> {
     Ok(items)
 }
 
+/// `list_quick_apis` for one project, in the same order: the rows of the other
+/// projects are neither read nor parsed.
+pub fn list_quick_apis_for_project(conn: &Connection, project_id: &str) -> Result<Vec<QuickApi>> {
+    let sql =
+        format!("SELECT {COLUMNS} FROM quick_apis WHERE project_id = ?1 ORDER BY updated_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let items = stmt
+        .query_map(params![project_id], |row| Ok(row_to_quick_api(row)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(items)
+}
+
 pub fn get_quick_api(conn: &Connection, id: &str) -> Result<Option<QuickApi>> {
     let sql = format!("SELECT {COLUMNS} FROM quick_apis WHERE id = ?1");
     let mut stmt = conn.prepare(&sql)?;

@@ -1474,6 +1474,21 @@ pub struct WorkflowAgentAttempt {
     /// Prompt tokens written to the provider's prompt cache. `None` when not reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_prompt_tokens: Option<u64>,
+    /// The CLI's own session id for this attempt, as the runtime reported it on
+    /// its `init` line — the name of the transcript it wrote (KT-911). `null`
+    /// for a runtime with no CLI session, or when it never got as far as
+    /// reporting one.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// What this attempt cost in USD, computed like a discussion reply's cost
+    /// (KT-894): the agent's own figure when it gives one, else the detailed
+    /// counters at the rates of the model that served it. `null` is unknown,
+    /// never free — `cost_unknown_reason` then says why.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Why `cost_usd` is `null`. Absent when the cost is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_unknown_reason: Option<String>,
 }
 
 impl WorkflowAgentProvenance {

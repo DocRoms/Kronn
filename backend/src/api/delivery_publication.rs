@@ -237,11 +237,17 @@ pub fn summary_from_manifest(
     )
 }
 
-/// Persists the model a worker launch's runtime reports serving, so an
-/// accepted delivery names it. Polls the launch's provenance capture: the
-/// delivery can be accepted while the worker's turn is still running.
+/// Persists what a worker launch's runtime reports about itself — the model it
+/// served, so an accepted delivery names it, and the CLI session it runs in, so
+/// the execution lists its transcripts (KT-911). Polls the launch's provenance
+/// capture: the delivery can be accepted while the worker's turn is still
+/// running.
 pub(crate) struct ServedModelRecorder {
     capture: crate::agents::provenance::AgentProvenanceCapture,
+    db: std::sync::Arc<crate::db::Database>,
+    execution_id: String,
+    dispatch_job_id: String,
+    agent_type: String,
     stop: tokio_util::sync::DropGuard,
     task: tokio::task::JoinHandle<()>,
 }
@@ -253,22 +259,30 @@ impl ServedModelRecorder {
         db: std::sync::Arc<crate::db::Database>,
         execution_id: String,
         dispatch_job_id: String,
+        agent_type: String,
     ) -> Self {
         let capture = crate::agents::provenance::AgentProvenanceCapture::default();
         let stop = tokio_util::sync::CancellationToken::new();
         let task = tokio::spawn({
             let capture = capture.clone();
             let stop = stop.clone();
+            let (db, execution_id, dispatch_job_id, agent_type) = (
+                db.clone(),
+                execution_id.clone(),
+                dispatch_job_id.clone(),
+                agent_type.clone(),
+            );
             async move {
                 let mut recorded: Option<String> = None;
+                let mut recorded_session: Option<String> = None;
                 loop {
                     let stopping = tokio::select! {
                         _ = stop.cancelled() => true,
                         _ = tokio::time::sleep(Self::POLL) => false,
                     };
-                    let observed = capture
+                    let (observed, session) = capture
                         .lock()
-                        .map(|state| state.observed_models.join(" / "))
+                        .map(|state| (state.observed_models.join(" / "), state.session_id.clone()))
                         .unwrap_or_default();
                     if !observed.is_empty() && recorded.as_deref() != Some(observed.as_str()) {
                         let (execution_id, dispatch_job_id, model) = (
@@ -295,6 +309,25 @@ impl ServedModelRecorder {
                             }
                         }
                     }
+                    if let Some(session) = session.filter(|s| recorded_session.as_ref() != Some(s))
+                    {
+                        match record_session(
+                            &db,
+                            &execution_id,
+                            &dispatch_job_id,
+                            &agent_type,
+                            &session,
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(true) => recorded_session = Some(session),
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!("worker CLI session not recorded: {error}")
+                            }
+                        }
+                    }
                     if stopping {
                         break;
                     }
@@ -303,6 +336,10 @@ impl ServedModelRecorder {
         });
         Self {
             capture,
+            db,
+            execution_id,
+            dispatch_job_id,
+            agent_type,
             stop: stop.drop_guard(),
             task,
         }
@@ -314,11 +351,83 @@ impl ServedModelRecorder {
     }
 
     /// Stop polling after a last write. Dropping the recorder does the same
-    /// without waiting for that write.
-    pub(crate) async fn finish(self) {
+    /// without waiting for that write. The process has ended, so the session it
+    /// named is final: the returned launch can still record what the turn cost.
+    pub(crate) async fn finish(self) -> FinishedWorkerLaunch {
         drop(self.stop);
         let _ = self.task.await;
+        let session_id = self
+            .capture
+            .lock()
+            .ok()
+            .and_then(|state| state.session_id.clone());
+        FinishedWorkerLaunch {
+            db: self.db,
+            execution_id: self.execution_id,
+            dispatch_job_id: self.dispatch_job_id,
+            agent_type: self.agent_type,
+            session_id,
+        }
     }
+}
+
+/// A worker launch whose process has ended.
+pub(crate) struct FinishedWorkerLaunch {
+    db: std::sync::Arc<crate::db::Database>,
+    execution_id: String,
+    dispatch_job_id: String,
+    agent_type: String,
+    session_id: Option<String>,
+}
+
+impl FinishedWorkerLaunch {
+    /// Record what the turn cost, on the session it ran in. A launch that never
+    /// named its session (it died before its init line) has nothing to attach a
+    /// cost to.
+    pub(crate) async fn record_cost(&self, cost: crate::db::orchestration::WorkerSessionCost) {
+        let Some(session) = self.session_id.as_deref() else {
+            return;
+        };
+        if let Err(error) = record_session(
+            &self.db,
+            &self.execution_id,
+            &self.dispatch_job_id,
+            &self.agent_type,
+            session,
+            Some(cost),
+        )
+        .await
+        {
+            tracing::warn!("worker CLI session cost not recorded: {error}");
+        }
+    }
+}
+
+async fn record_session(
+    db: &crate::db::Database,
+    execution_id: &str,
+    dispatch_job_id: &str,
+    agent_type: &str,
+    session_id: &str,
+    cost: Option<crate::db::orchestration::WorkerSessionCost>,
+) -> anyhow::Result<bool> {
+    let (execution_id, dispatch_job_id, agent_type, session_id) = (
+        execution_id.to_owned(),
+        dispatch_job_id.to_owned(),
+        agent_type.to_owned(),
+        session_id.to_owned(),
+    );
+    db.with_conn(move |conn| {
+        crate::db::orchestration::record_worker_cli_session(
+            conn,
+            &execution_id,
+            &dispatch_job_id,
+            &agent_type,
+            &session_id,
+            cost.as_ref(),
+        )
+    })
+    .await
 }
 
 /// Publish the accepted delivery's one report into the parent discussion.
@@ -1173,8 +1282,12 @@ mod tests {
                     None,
                     false,
                 ));
-            let recorder =
-                ServedModelRecorder::start(db.clone(), "exec-795".into(), "dispatch-795".into());
+            let recorder = ServedModelRecorder::start(
+                db.clone(),
+                "exec-795".into(),
+                "dispatch-795".into(),
+                "ClaudeCode".into(),
+            );
             let tokens = crate::models::setup::TokensConfig {
                 anthropic: None,
                 openai: None,
@@ -1247,5 +1360,77 @@ mod tests {
             served_model(&db).await.as_deref(),
             Some("claude-opus-5-5-20260915")
         );
+    }
+
+    async fn worker_sessions(db: &Database) -> Vec<crate::models::TaskExecutionWorkerSession> {
+        db.with_conn(|conn| crate::db::orchestration::list_worker_cli_sessions(conn, "exec-795"))
+            .await
+            .unwrap()
+    }
+
+    /// KT-911 — a Claude Code worker's launch leaves the CLI session its runtime
+    /// reported on the execution, and the turn's cost lands on that session.
+    #[tokio::test]
+    async fn a_claude_worker_launch_records_its_cli_session_and_what_it_cost() {
+        let db = std::sync::Arc::new(Database::open_in_memory().expect("in-memory database"));
+        seed_claude_worker_delivery(&db, None).await;
+
+        let project = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            project.path(),
+            crate::acp::test_support::CLAUDE_TURN_WITH_CACHE,
+        );
+        let transport: std::sync::Arc<dyn crate::acp::AcpTransport> = std::sync::Arc::new(
+            crate::acp::ClaudeAcpAdapter::new_with_program(fixture.to_string_lossy(), None, false),
+        );
+        let recorder = ServedModelRecorder::start(
+            db.clone(),
+            "exec-795".into(),
+            "dispatch-795".into(),
+            "ClaudeCode".into(),
+        );
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let mut process = crate::agents::runner::start_agent_with_config(
+            crate::agents::runner::AgentStartConfig {
+                provenance: Some(recorder.capture()),
+                test_acp_transport: Some(transport),
+                ..crate::agents::runner::AgentStartConfig::new(
+                    &crate::models::AgentType::ClaudeCode,
+                    project.path().to_str().unwrap(),
+                    "implement KT-911",
+                    &tokens,
+                )
+            },
+        )
+        .await
+        .expect("worker launch");
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+
+        let launch = recorder.finish().await;
+        let named = worker_sessions(&db).await;
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].session_id, "fixture-session");
+        assert_eq!(named[0].dispatch_job_id, "dispatch-795");
+        assert_eq!(named[0].agent_type, "ClaudeCode");
+        assert_eq!(named[0].attempt_no, 1, "the attempt the execution was on");
+        assert_eq!(named[0].cost_usd, None, "not priced until the turn ends");
+
+        launch
+            .record_cost(crate::db::orchestration::WorkerSessionCost {
+                usd: Some(1.14),
+                unknown_reason: None,
+            })
+            .await;
+        let priced = worker_sessions(&db).await;
+        assert_eq!(priced.len(), 1, "pricing updates the session, not adds one");
+        assert_eq!(priced[0].cost_usd, Some(1.14));
+        assert_eq!(priced[0].cost_unknown_reason, None);
     }
 }

@@ -17,12 +17,17 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { DiscussionSettingsPanel } from '../DiscussionSettingsPanel';
-import { discussions as discussionsApi } from '../../lib/api';
-import type { Discussion, Skill, AgentProfile, Directive } from '../../types/generated';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi } from '../../lib/api';
+import type { Discussion, Skill, AgentProfile, Directive, Project } from '../../types/generated';
 
 const noop = () => {};
 
 beforeEach(() => {
+  // The skill picker reads its lists when it opens (KT-923).
+  vi.mocked(skillsApi.list).mockReset();
+  vi.mocked(skillsApi.list).mockImplementation(() => Promise.resolve(skills));
+  vi.mocked(projectsApi.usedSkills).mockReset();
+  vi.mocked(projectsApi.usedSkills).mockResolvedValue([]);
   vi.mocked(discussionsApi.agentHandoffMode).mockReset();
   vi.mocked(discussionsApi.agentHandoffMode).mockImplementation(() => new Promise(() => {}));
   vi.mocked(discussionsApi.update).mockClear();
@@ -252,5 +257,100 @@ describe('DiscussionSettingsPanel — collapsed context sections', () => {
     await waitFor(() => expect(discussionsApi.update).toHaveBeenLastCalledWith('d-1', {
       execution_variable_retention_days: null,
     }));
+  });
+});
+
+// KT-923 — the skills of a discussion: the project's own first (the native
+// skills of its repository included), then the ticked ones, then the catalog
+// by category behind a fold, all searchable.
+describe('DiscussionSettingsPanel — skill picker', () => {
+  const catalog = [
+    { id: 'rust', name: 'Rust', description: 'Idiomatic Rust', icon: '🦀', category: 'Language', content: '', is_builtin: true, token_estimate: 0 },
+    { id: 'security', name: 'Security', description: 'Threat modelling', icon: '🔒', category: 'Domain', content: '', is_builtin: true, token_estimate: 0 },
+    { id: 'seo', name: 'SEO', description: '', icon: '📈', category: 'Business', content: '', is_builtin: true, token_estimate: 0 },
+  ] as Skill[];
+  const project = {
+    id: 'p-1', name: 'front_euronews', path: '/repos/front_euronews', default_skill_ids: [],
+  } as unknown as Project;
+  const blockMigration = {
+    project_id: 'p-1', slug: 'block-migration', name: 'Block migration',
+    root: '.agents/skills', relative_path: '.agents/skills/block-migration/SKILL.md',
+    referenced: true, published: false,
+  };
+
+  const openSkills = async (disc: Discussion, projects: Project[]) => {
+    vi.mocked(skillsApi.list).mockResolvedValue(catalog);
+    render(
+      <DiscussionSettingsPanel
+        discussion={disc}
+        projects={projects}
+        availableSkills={catalog}
+        availableProfiles={profiles}
+        availableDirectives={directives}
+        mcpConfigs={[]}
+        mcpIncompatibilities={[]}
+        contacts={[]}
+        onClose={noop}
+        onDiscussionUpdated={noop}
+        onShare={noop}
+        toast={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText('skills.selectSkills'));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  };
+
+  it('puts the project\'s skills first — block-migration with its origin — and folds the catalog', async () => {
+    vi.mocked(projectsApi.usedSkills).mockResolvedValue([blockMigration]);
+    await openSkills(makeDiscussion({ skill_ids: ['security'] }), [project]);
+
+    const used = document.querySelector('[data-section="used"]') as HTMLElement;
+    expect(used).toHaveTextContent('disc.skillsUsedByProject');
+    expect(used).toHaveTextContent('Block migration');
+    // (This file's `t` drops the arguments: the origin names its folder in the picker's own test.)
+    expect(used).toHaveTextContent('automation.skill.originRepository');
+    // Ticked skills come next, the catalog last and folded.
+    expect(document.querySelector('[data-section="ticked"]')).toHaveTextContent('Security');
+    expect(screen.queryByRole('button', { name: /Rust/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'automation.skill.availableToggle' }));
+    expect(screen.getByRole('button', { name: /Rust/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /SEO/ })).toBeInTheDocument();
+  });
+
+  it('a search opens what matches without unfolding by hand', async () => {
+    vi.mocked(projectsApi.usedSkills).mockResolvedValue([blockMigration]);
+    await openSkills(makeDiscussion(), [project]);
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'disc.skillSearch' }), { target: { value: 'threat' } });
+    expect(screen.getByRole('button', { name: /Security/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Block migration/ })).not.toBeInTheDocument();
+  });
+
+  it('ticking the repository skill saves its stable id with the discussion', async () => {
+    vi.mocked(projectsApi.usedSkills).mockResolvedValue([blockMigration]);
+    vi.mocked(discussionsApi.update).mockResolvedValue(undefined);
+    await openSkills(makeDiscussion({ skill_ids: ['rust'] }), [project]);
+
+    fireEvent.click(screen.getByRole('button', { name: /Block migration/ }));
+    expect(discussionsApi.update).toHaveBeenCalledWith('d-1', {
+      skill_ids: ['rust', 'repository:p-1:block-migration'],
+    });
+  });
+
+  it('unticking removes only that id and leaves the others as they were', async () => {
+    vi.mocked(projectsApi.usedSkills).mockResolvedValue([blockMigration]);
+    vi.mocked(discussionsApi.update).mockResolvedValue(undefined);
+    await openSkills(makeDiscussion({ skill_ids: ['rust', 'repository:p-1:block-migration'] }), [project]);
+
+    fireEvent.click(screen.getByRole('button', { name: /Block migration/ }));
+    expect(discussionsApi.update).toHaveBeenCalledWith('d-1', { skill_ids: ['rust'] });
+  });
+
+  it('shows the catalog by category, unfolded, for a discussion with no project', async () => {
+    await openSkills(makeDiscussion({ project_id: null }), [project]);
+
+    expect(screen.queryByText('disc.skillsUsedByProject')).not.toBeInTheDocument();
+    const categories = [...document.querySelectorAll('.skill-picker-group')].map(group => group.getAttribute('data-category'));
+    expect(categories).toEqual(['Language', 'Domain', 'Business']);
   });
 });

@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use super::provenance::{self, AgentProvenanceCapture};
 use crate::core::cmd::{async_cmd, sync_cmd};
-use crate::models::{AgentType, ModelTier, ModelTiersConfig, TokensConfig};
+use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
 // Repository search is not an API probe. A real KT-404 worker needed thirteen
@@ -1814,6 +1814,11 @@ pub trait AgentIo: Send {
     fn reported_prompt_cache(&self) -> PromptCacheUsage {
         PromptCacheUsage::default()
     }
+    /// The structured transport's usage with its parts kept apart — what a
+    /// cost is computed from (KT-894). `None` when nothing was reported.
+    fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        None
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -1846,6 +1851,9 @@ impl AgentIo for AgentProcess {
     }
     fn reported_prompt_cache(&self) -> PromptCacheUsage {
         AgentProcess::reported_prompt_cache(self)
+    }
+    fn reported_usage_counters(&self) -> Option<ReportedUsage> {
+        AgentProcess::reported_usage_counters(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -2567,6 +2575,11 @@ pub struct AgentStartConfig<'a> {
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
     pub skill_ids: &'a [String],
+    /// Skills only a project's repository holds (KT-923), already resolved and
+    /// masked by the caller at send time from `repository:<project>:<slug>` ids
+    /// in `skill_ids`. Injected in a block of their own, whatever the agent
+    /// discovers natively.
+    pub repository_skills: &'a [Skill],
     pub directive_ids: &'a [String],
     pub profile_ids: &'a [String],
     /// Override MCP context instead of reading from project filesystem.
@@ -2714,6 +2727,7 @@ impl<'a> AgentStartConfig<'a> {
             work_dir: None,
             full_access: false,
             skill_ids: &[],
+            repository_skills: &[],
             directive_ids: &[],
             profile_ids: &[],
             mcp_context_override: None,
@@ -3249,7 +3263,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         // Compare judges cannot discover a skill through a tool, and compact
         // injection would omit the normative anchors after the first lines.
         match config.run_snapshot_id {
-            Some(run_id) => crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids),
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids)
+            }
             None => crate::core::skills::build_skills_prompt(config.skill_ids),
         }
     } else if native_skills {
@@ -3263,10 +3279,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     } else {
         match config.run_snapshot_id {
-            Some(run_id) => crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids),
+            Some(run_id) => {
+                crate::core::skills::build_skills_prompt_for_run(run_id, config.skill_ids)
+            }
             None => crate::core::skills::build_skills_prompt(config.skill_ids),
         }
     };
+    let skills_prompt = crate::core::skills::append_repository_skills_prompt(
+        skills_prompt,
+        config.repository_skills,
+        compact,
+    );
 
     // 0.8.8 PR-B — enforce mode auto-attaches the `kronn-doc-author` cheat-sheet
     // when the agent's project carries a `docs/AGENTS.md`, so an agent that
@@ -3318,9 +3341,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         // a token-saving fallback in case the agent's one-shot mode
         // doesn't auto-pick the file up (which was the EW-7189 failure).
         match config.run_snapshot_id {
-            Some(run_id) => {
-                crate::core::profiles::build_profiles_prompt_compact_for_run(run_id, config.profile_ids)
-            }
+            Some(run_id) => crate::core::profiles::build_profiles_prompt_compact_for_run(
+                run_id,
+                config.profile_ids,
+            ),
             None => crate::core::profiles::build_profiles_prompt_compact(config.profile_ids),
         }
     } else {
@@ -3902,6 +3926,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                             if let Some(model) = provenance::claude_observed_model(&line) {
                                 provenance::observe_model(provenance.as_ref(), &model);
                             }
+                            if let Some(session_id) = provenance::claude_session_id(&line) {
+                                provenance::observe_session(provenance.as_ref(), &session_id);
+                            }
                         }
                         if tx_out.send(line).await.is_err() {
                             break;
@@ -4421,6 +4448,9 @@ async fn run_acp_session(
                     }
                     AcpSessionEvent::ModelObserved(model) => {
                         provenance::observe_model(provenance.as_ref(), &model);
+                    }
+                    AcpSessionEvent::CliSessionObserved(session_id) => {
+                        provenance::observe_session(provenance.as_ref(), &session_id);
                     }
                     AcpSessionEvent::ToolCall { name } => {
                         // A tool call is not text. Forwarding it on `tx` — the

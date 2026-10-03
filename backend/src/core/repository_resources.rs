@@ -5,12 +5,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
+use std::sync::{Arc, LazyLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::core::content_memo::{self, ContentMemo, MemoStats};
 use crate::core::export_secrets::{RedactedField, REDACTED};
 use crate::models::{
     ArtifactBundlePage, ProjectRepositoryResourceKind, QuickApi, QuickExec, QuickPrompt, Skill,
@@ -24,6 +26,12 @@ const CONFIG_PATH: &str = "kronn/kronn.toml";
 const ROUTER_PATH: &str = ".agents/skills/kronn/SKILL.md";
 const AGENTS_PATH: &str = "docs/AGENTS.md";
 const AGENTS_LINE: &str = "Kronn resources → `kronn/INDEX.md`";
+/// Where every agent looks for skills, and so where Kronn writes them: `kronn/`
+/// only holds what has no native home (prompts, automations, artifacts).
+pub const SKILLS_ROOT: &str = ".agents/skills";
+/// Where Kronn wrote skills before they moved to [`SKILLS_ROOT`]; still read,
+/// never written.
+pub const LEGACY_SKILLS_ROOT: &str = "kronn/skills";
 const DOCUMENT_START: &str = "<!-- kronn:resource\n";
 const DOCUMENT_END: &str = "\n-->";
 
@@ -76,11 +84,15 @@ impl Default for RepositoryLock {
     }
 }
 
+/// A resource as Kronn would write it. The document and the files are shared
+/// with the memo that holds this rendering, so cloning one copies a few short
+/// strings and never the JSON tree or the file bytes: a listing serves every
+/// resource from memory on each read and would otherwise copy all of it again.
 #[derive(Debug, Clone)]
 pub struct RenderedRepositoryResource {
-    pub document: RepositoryDocument,
+    pub document: Arc<RepositoryDocument>,
     pub name: String,
-    pub files: BTreeMap<String, Vec<u8>>,
+    pub files: Arc<BTreeMap<String, Vec<u8>>>,
     pub hash: String,
     pub required_secrets: Vec<String>,
 }
@@ -163,23 +175,51 @@ const INSTANCE_LOCAL_FIELDS: [&str; 6] = [
     "enabled",
 ];
 
+/// The resource of a document as the approval fingerprint reads it: the same
+/// object without its instance-local fields, borrowed rather than copied.
+struct DefinitionView<'a>(&'a Value);
+
+impl Serialize for DefinitionView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let Some(object) = self.0.as_object() else {
+            return self.0.serialize(serializer);
+        };
+        let kept = object
+            .iter()
+            .filter(|(key, _)| !INSTANCE_LOCAL_FIELDS.contains(&key.as_str()));
+        let mut map = serializer.serialize_map(None)?;
+        for (key, value) in kept {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
 /// Fingerprint the executable definition while excluding instance-local
 /// identity, timestamps, favorites and the workflow activation toggle.
+///
+/// A human's approval is recorded against this value, so it is spelled exactly
+/// as it always was: an object whose keys come in sorted order (`kind`,
+/// `requires`, `resource`, `schema_version`, `slug`), the resource's own keys
+/// sorted too, compact.
 pub fn approval_hash(document: &RepositoryDocument) -> String {
-    let mut resource = document.resource.clone();
-    if let Some(object) = resource.as_object_mut() {
-        for key in INSTANCE_LOCAL_FIELDS {
-            object.remove(key);
-        }
+    #[derive(Serialize)]
+    struct Definition<'a> {
+        kind: ProjectRepositoryResourceKind,
+        requires: &'a [String],
+        resource: DefinitionView<'a>,
+        schema_version: u32,
+        slug: &'a str,
     }
-    let value = serde_json::json!({
-        "schema_version": document.schema_version,
-        "kind": document.kind,
-        "slug": document.slug,
-        "requires": document.requires,
-        "resource": resource,
-    });
-    sha256(&serde_json::to_vec(&value).unwrap_or_default())
+    let definition = Definition {
+        kind: document.kind,
+        requires: &document.requires,
+        resource: DefinitionView(&document.resource),
+        schema_version: document.schema_version,
+        slug: &document.slug,
+    };
+    sha256(&serde_json::to_vec(&definition).unwrap_or_default())
 }
 
 fn resource_hash(files: &BTreeMap<String, Vec<u8>>) -> String {
@@ -229,14 +269,15 @@ fn replace_redacted_values(
                 secrets.insert(name.to_string());
                 return;
             }
-            let name = secret_name(kind, slug, path);
             if text == REDACTED {
+                let name = secret_name(kind, slug, path);
                 *text = format!("secret://{name}");
                 secrets.insert(name);
                 return;
             }
             let (redacted, count) = crate::core::redact::redact_for_audit_artifact(text);
             if count > 0 {
+                let name = secret_name(kind, slug, path);
                 *text = redacted.replace("***REDACTED***", &format!("secret://{name}"));
                 secrets.insert(name);
             }
@@ -315,105 +356,347 @@ fn rendered(
 ) -> RenderedRepositoryResource {
     let hash = resource_hash(&files);
     RenderedRepositoryResource {
-        document,
+        document: Arc::new(document),
         name,
-        files,
+        files: Arc::new(files),
         hash,
         required_secrets,
     }
+}
+
+/// Upper bound on what the render memo keeps: a project's automations are a
+/// few KB each, so this holds every project of a large install at once.
+const RENDER_MEMO_BUDGET: usize = 48 * 1024 * 1024;
+
+/// Rendered resources by the fingerprint of the content they were rendered
+/// from. Rendering masks every string of the resource, and a listing renders
+/// each automation of a project on every read: the result depends on that
+/// content alone, so it is computed once and served from here afterwards.
+static RENDER_MEMO: LazyLock<ContentMemo<RenderedRepositoryResource>> =
+    LazyLock::new(|| ContentMemo::new(RENDER_MEMO_BUDGET));
+
+/// How the render memo has answered so far: `misses` counts the resources
+/// whose secrets were actually masked, `hits` the ones served from memory.
+pub fn render_memo_stats() -> MemoStats {
+    RENDER_MEMO.stats()
+}
+
+/// Whether the render memo can take more without pushing out what it already
+/// holds. The background warm-up stops here rather than evict the renderings
+/// it has just computed to make room for the next ones.
+pub fn render_memo_has_room() -> bool {
+    RENDER_MEMO.used() < RENDER_MEMO.budget() / 8 * 7
+}
+
+/// Whether rendering `source` (the resource as JSON) under `slug` would be
+/// served from the render memo right now.
+#[cfg(test)]
+pub(crate) fn render_is_memoized(
+    kind: ProjectRepositoryResourceKind,
+    slug: &str,
+    updated_at: DateTime<Utc>,
+    source: &Value,
+) -> bool {
+    render_key(kind, slug, updated_at, source).is_ok_and(|key| RENDER_MEMO.contains(&key))
+}
+
+/// Upper bound on what the masked-text memo keeps: opening a sheet masks each
+/// file of the resource on both sides, and a sheet reopened later asks for the
+/// same texts.
+const MASKED_TEXT_MEMO_BUDGET: usize = 32 * 1024 * 1024;
+
+static MASKED_TEXT_MEMO: LazyLock<ContentMemo<String>> =
+    LazyLock::new(|| ContentMemo::new(MASKED_TEXT_MEMO_BUDGET));
+
+/// How the masked-text memo has answered so far, like [`render_memo_stats`].
+pub fn masked_text_memo_stats() -> MemoStats {
+    MASKED_TEXT_MEMO.stats()
+}
+
+/// What the masking writes in place of a secret value.
+const MASK: &str = "***REDACTED***";
+
+/// A `secret://NAME` reference in `text`, as the rendering writes it in place of
+/// a secret value: `NAME` is what the secret is called, not its value. A name
+/// that would itself be masked is someone's secret typed in the place of one,
+/// not a reference.
+fn references_shielded(text: &str) -> Option<String> {
+    const PREFIX: &str = "secret://";
+    let mut shielded = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut found = false;
+    while let Some(start) = rest.find(PREFIX) {
+        let after = &rest[start + PREFIX.len()..];
+        let name_len = after
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            .count();
+        let name = &after[..name_len];
+        let is_reference =
+            !name.is_empty() && crate::core::redact::redact_for_audit_artifact(name).1 == 0;
+        shielded.push_str(&rest[..start]);
+        if is_reference {
+            // Already in the shape the masking writes, so the patterns leave
+            // it as it is: what is left to mask is what is not a reference.
+            shielded.push_str(MASK);
+            found = true;
+            rest = &after[name_len..];
+        } else {
+            shielded.push_str(PREFIX);
+            rest = after;
+        }
+    }
+    shielded.push_str(rest);
+    found.then_some(shielded)
+}
+
+/// `text` with every secret value masked. The references to a secret that
+/// Kronn's rendering writes stay readable on a line where they are all there is
+/// to hide: the masking patterns would take `password=secret://NAME` for a
+/// password, and the sheet would lose the name of the secret the resource needs.
+/// A line that holds anything else to mask is masked whole, references included.
+fn mask_secrets(text: &str) -> String {
+    use crate::core::redact::redact_for_audit_artifact as redact;
+    if !text.contains("secret://") {
+        return redact(text).0;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let shielded: Vec<Option<String>> =
+        lines.iter().map(|line| references_shielded(line)).collect();
+    if shielded.iter().all(Option::is_none) {
+        return redact(text).0;
+    }
+    // One pass over the whole text, with the references of every line standing
+    // in as the mask: patterns that read across lines still see all of it.
+    let residual = lines
+        .iter()
+        .zip(&shielded)
+        .map(|(line, shielded)| shielded.as_deref().unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let masked = redact(&residual).0;
+    let masked_lines: Vec<&str> = masked.split('\n').collect();
+    if masked_lines.len() != lines.len() {
+        return redact(text).0;
+    }
+    // A line the pass left exactly as shielded had nothing else to hide: it
+    // gets its references back. Any other line stays as the pass wrote it.
+    lines
+        .iter()
+        .zip(&shielded)
+        .zip(&masked_lines)
+        .map(|((line, shielded), masked)| match shielded {
+            Some(shielded) if shielded == masked => *line,
+            _ => *masked,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `bytes` as text with every secret value masked: what a comparison may put in
+/// an answer, whichever side the file comes from. A repository file can hold a
+/// secret someone typed into it by hand, and Kronn's own rendering is masked
+/// already, so the same pass on both sides keeps one from showing what the other
+/// hides, and a secret present on both never reads as a difference. Memoized by
+/// the content, so a file is masked once however often it is asked for.
+pub fn masked_text(bytes: &[u8]) -> Arc<String> {
+    let key = content_memo::fingerprint(&[b"masked-text", bytes]);
+    MASKED_TEXT_MEMO
+        .get_or_try_insert(
+            &key,
+            |text: &String| text.len(),
+            || Ok::<_, std::convert::Infallible>(mask_secrets(&String::from_utf8_lossy(bytes))),
+        )
+        .unwrap_or_else(|never| match never {})
+}
+
+/// Masks every string of a JSON value the way [`masked_text`] masks a file.
+pub fn mask_value_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            let masked = masked_text(text.as_bytes());
+            if masked.as_str() != text.as_str() {
+                *text = masked.as_str().to_string();
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(mask_value_strings),
+        Value::Object(map) => map.values_mut().for_each(mask_value_strings),
+        _ => {}
+    }
+}
+
+fn rendered_weight(rendered: &RenderedRepositoryResource) -> usize {
+    // The document repeats the content held by the files: count both.
+    2 * rendered.files.values().map(Vec::len).sum::<usize>() + rendered.hash.len()
+}
+
+/// The memo key of a rendering: the *unmasked* content (`source`) with what
+/// else shapes the output (kind, slug, timestamp), so a changed definition, or
+/// the same one under another slug, is masked afresh while an unchanged one is
+/// not. `source` is the resource as a JSON value, whose object keys are always
+/// sorted: the maps a typed resource holds (`HashMap`s) would not serialize in
+/// a stable order, and a key that changed with it would never be found again.
+fn render_key(
+    kind: ProjectRepositoryResourceKind,
+    slug: &str,
+    updated_at: DateTime<Utc>,
+    source: &Value,
+) -> Result<String, String> {
+    let source = serde_json::to_vec(source).map_err(|error| error.to_string())?;
+    Ok(content_memo::fingerprint(&[
+        format!("{kind:?}").as_bytes(),
+        slug.as_bytes(),
+        updated_at.to_rfc3339().as_bytes(),
+        &source,
+    ]))
+}
+
+/// `render` behind the memo. `source` is handed to `render` on a miss, so the
+/// one JSON tree serves both as the key and as the document's content; on a hit
+/// nothing is copied but the shared handles of the rendering.
+fn memoized_render(
+    kind: ProjectRepositoryResourceKind,
+    slug: &str,
+    updated_at: DateTime<Utc>,
+    source: Value,
+    render: impl FnOnce(Value) -> Result<RenderedRepositoryResource, String>,
+) -> Result<RenderedRepositoryResource, String> {
+    let key = render_key(kind, slug, updated_at, &source)?;
+    RENDER_MEMO
+        .get_or_try_insert(&key, rendered_weight, || render(source))
+        .map(|rendered| RenderedRepositoryResource::clone(&rendered))
 }
 
 pub fn render_workflow(
     workflow: &Workflow,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let mut exported = workflow.clone();
     // Repository workflows are definitions, not activation state. Imports are
     // always disabled locally; omitting that local toggle from the effective
     // fingerprint lets a human approve the definition, then enable it without
     // changing the content they reviewed.
-    exported.enabled = false;
-    let mut redacted = Vec::new();
-    crate::core::export_secrets::redact_workflow(&mut exported, &mut redacted);
-    let (document, secrets) = document(
+    let mut source = serde_json::to_value(workflow).map_err(|error| error.to_string())?;
+    if let Some(object) = source.as_object_mut() {
+        object.insert("enabled".to_string(), Value::Bool(false));
+    }
+    memoized_render(
         ProjectRepositoryResourceKind::Workflow,
         slug,
         workflow.updated_at,
-        serde_json::to_value(exported).map_err(|error| error.to_string())?,
-        redacted,
-    );
-    let files = BTreeMap::from([(
-        format!("kronn/workflows/{slug}.yaml"),
-        json_file(&document)?,
-    )]);
-    Ok(rendered(document, workflow.name.clone(), files, secrets))
+        source,
+        |_| {
+            let mut exported = workflow.clone();
+            exported.enabled = false;
+            let mut redacted = Vec::new();
+            crate::core::export_secrets::redact_workflow(&mut exported, &mut redacted);
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::Workflow,
+                slug,
+                workflow.updated_at,
+                serde_json::to_value(exported).map_err(|error| error.to_string())?,
+                redacted,
+            );
+            let files = BTreeMap::from([(
+                format!("kronn/workflows/{slug}.yaml"),
+                json_file(&document)?,
+            )]);
+            Ok(rendered(document, workflow.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_quick_prompt(
     prompt: &QuickPrompt,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let (document, secrets) = document(
+    let source = serde_json::to_value(prompt).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::QuickPrompt,
         slug,
         prompt.updated_at,
-        serde_json::to_value(prompt).map_err(|error| error.to_string())?,
-        Vec::new(),
-    );
-    let prompt_template = document
-        .resource
-        .get("prompt_template")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let files = BTreeMap::from([(
-        format!("kronn/prompts/{slug}.md"),
-        markdown_file(
-            &document,
-            &prompt.name,
-            &prompt.description,
-            prompt_template,
-        )?,
-    )]);
-    Ok(rendered(document, prompt.name.clone(), files, secrets))
+        source,
+        |source| {
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::QuickPrompt,
+                slug,
+                prompt.updated_at,
+                source,
+                Vec::new(),
+            );
+            let prompt_template = document
+                .resource
+                .get("prompt_template")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let files = BTreeMap::from([(
+                format!("kronn/prompts/{slug}.md"),
+                markdown_file(
+                    &document,
+                    &prompt.name,
+                    &prompt.description,
+                    prompt_template,
+                )?,
+            )]);
+            Ok(rendered(document, prompt.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_quick_api(api: &QuickApi, slug: &str) -> Result<RenderedRepositoryResource, String> {
-    let mut exported = api.clone();
-    let mut redacted = Vec::new();
-    crate::core::export_secrets::redact_quick_api(&mut exported, &mut redacted);
-    let (document, secrets) = document(
+    let source = serde_json::to_value(api).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::QuickApi,
         slug,
         api.updated_at,
-        serde_json::to_value(exported).map_err(|error| error.to_string())?,
-        redacted,
-    );
-    let files = BTreeMap::from([(
-        format!("kronn/quick-apis/{slug}.yaml"),
-        json_file(&document)?,
-    )]);
-    Ok(rendered(document, api.name.clone(), files, secrets))
+        source,
+        |_| {
+            let mut exported = api.clone();
+            let mut redacted = Vec::new();
+            crate::core::export_secrets::redact_quick_api(&mut exported, &mut redacted);
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::QuickApi,
+                slug,
+                api.updated_at,
+                serde_json::to_value(exported).map_err(|error| error.to_string())?,
+                redacted,
+            );
+            let files = BTreeMap::from([(
+                format!("kronn/quick-apis/{slug}.yaml"),
+                json_file(&document)?,
+            )]);
+            Ok(rendered(document, api.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_quick_exec(
     exec: &QuickExec,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let mut exported = exec.clone();
-    let mut redacted = Vec::new();
-    crate::core::export_secrets::redact_quick_exec(&mut exported, &mut redacted);
-    let (document, secrets) = document(
+    let source = serde_json::to_value(exec).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::QuickExec,
         slug,
         exec.updated_at,
-        serde_json::to_value(exported).map_err(|error| error.to_string())?,
-        redacted,
-    );
-    let files = BTreeMap::from([(
-        format!("kronn/quick-execs/{slug}.yaml"),
-        json_file(&document)?,
-    )]);
-    Ok(rendered(document, exec.name.clone(), files, secrets))
+        source,
+        |_| {
+            let mut exported = exec.clone();
+            let mut redacted = Vec::new();
+            crate::core::export_secrets::redact_quick_exec(&mut exported, &mut redacted);
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::QuickExec,
+                slug,
+                exec.updated_at,
+                serde_json::to_value(exported).map_err(|error| error.to_string())?,
+                redacted,
+            );
+            let files = BTreeMap::from([(
+                format!("kronn/quick-execs/{slug}.yaml"),
+                json_file(&document)?,
+            )]);
+            Ok(rendered(document, exec.name.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_artifact(
@@ -421,29 +704,38 @@ pub fn render_artifact(
     updated_at: DateTime<Utc>,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let (document, secrets) = document(
+    let source = serde_json::to_value(artifact).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::Artifact,
         slug,
         updated_at,
-        serde_json::to_value(artifact).map_err(|error| error.to_string())?,
-        Vec::new(),
-    );
-    let html = document
-        .resource
-        .get("html")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let files = BTreeMap::from([
-        (
-            format!("kronn/artifacts/{slug}/artifact.yaml"),
-            json_file(&document)?,
-        ),
-        (
-            format!("kronn/artifacts/{slug}/index.html"),
-            html.as_bytes().to_vec(),
-        ),
-    ]);
-    Ok(rendered(document, artifact.title.clone(), files, secrets))
+        source,
+        |source| {
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::Artifact,
+                slug,
+                updated_at,
+                source,
+                Vec::new(),
+            );
+            let html = document
+                .resource
+                .get("html")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let files = BTreeMap::from([
+                (
+                    format!("kronn/artifacts/{slug}/artifact.yaml"),
+                    json_file(&document)?,
+                ),
+                (
+                    format!("kronn/artifacts/{slug}/index.html"),
+                    html.as_bytes().to_vec(),
+                ),
+            ]);
+            Ok(rendered(document, artifact.title.clone(), files, secrets))
+        },
+    )
 }
 
 pub fn render_skill(
@@ -451,23 +743,100 @@ pub fn render_skill(
     updated_at: DateTime<Utc>,
     slug: &str,
 ) -> Result<RenderedRepositoryResource, String> {
-    let (document, secrets) = document(
+    let source = serde_json::to_value(skill).map_err(|error| error.to_string())?;
+    memoized_render(
         ProjectRepositoryResourceKind::Skill,
         slug,
         updated_at,
-        serde_json::to_value(skill).map_err(|error| error.to_string())?,
-        Vec::new(),
-    );
-    let content = document
-        .resource
-        .get("content")
+        source,
+        |source| {
+            let (document, secrets) = document(
+                ProjectRepositoryResourceKind::Skill,
+                slug,
+                updated_at,
+                source,
+                Vec::new(),
+            );
+            let files = BTreeMap::from([(skill_path(slug), standard_skill_file(&document, slug)?)]);
+            Ok(rendered(document, skill.name.clone(), files, secrets))
+        },
+    )
+}
+
+/// The repository path of a skill's `SKILL.md`.
+pub fn skill_path(slug: &str) -> String {
+    format!("{SKILLS_ROOT}/{slug}/SKILL.md")
+}
+
+/// Whether `path` is a skill file at the location Kronn used before skills
+/// moved to [`SKILLS_ROOT`].
+pub fn is_legacy_skill_path(path: &str) -> bool {
+    path.strip_prefix(LEGACY_SKILLS_ROOT)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn resource_text<'a>(resource: &'a Value, key: &str) -> &'a str {
+    resource
+        .get(key)
         .and_then(Value::as_str)
-        .unwrap_or_default();
-    let files = BTreeMap::from([(
-        format!("kronn/skills/{slug}/SKILL.md"),
-        markdown_file(&document, &skill.name, &skill.description, content)?,
-    )]);
-    Ok(rendered(document, skill.name.clone(), files, secrets))
+        .unwrap_or_default()
+}
+
+/// A skill as a real Agent Skills file: `name` is the folder slug, the header
+/// stays valid whatever the skill holds (an empty description falls back to the
+/// display name, an oversized one is cut), and what is Kronn's own — display
+/// name, category, icon, attribution — goes under `metadata`.
+fn standard_skill_file(document: &RepositoryDocument, slug: &str) -> Result<Vec<u8>, String> {
+    use crate::core::skills::{
+        category_str, KRONN_CATEGORY_KEY, KRONN_EXTERNAL_KEY, KRONN_ICON_KEY, KRONN_NAME_KEY,
+        KRONN_SOURCE_URL_KEY,
+    };
+    let resource = &document.resource;
+    let display_name = resource_text(resource, "name").trim();
+    let mut description = resource_text(resource, "description").trim();
+    if description.is_empty() {
+        description = if display_name.is_empty() {
+            slug
+        } else {
+            display_name
+        };
+    }
+    let mut metadata = BTreeMap::new();
+    let mut keep = |key: &str, value: &str| {
+        if !value.is_empty() {
+            metadata.insert(key.to_string(), value.to_string());
+        }
+    };
+    keep(KRONN_NAME_KEY, display_name);
+    keep(KRONN_ICON_KEY, resource_text(resource, "icon"));
+    let category = match resource_text(resource, "category") {
+        "Language" => Some(crate::models::SkillCategory::Language),
+        "Business" => Some(crate::models::SkillCategory::Business),
+        "Domain" => Some(crate::models::SkillCategory::Domain),
+        _ => None,
+    };
+    keep(
+        KRONN_CATEGORY_KEY,
+        category.as_ref().map_or("", category_str),
+    );
+    if resource.get("external").and_then(Value::as_bool) == Some(true) {
+        keep(KRONN_EXTERNAL_KEY, "true");
+    }
+    keep(KRONN_SOURCE_URL_KEY, resource_text(resource, "source_url"));
+    let file = crate::core::agent_skill::AgentSkillFile {
+        name: slug.to_string(),
+        description: description
+            .chars()
+            .take(crate::core::agent_skill::DESCRIPTION_MAX)
+            .collect(),
+        license: Some(resource_text(resource, "license").to_string()),
+        compatibility: None,
+        allowed_tools: Some(resource_text(resource, "allowed_tools").to_string()),
+        metadata,
+        body: resource_text(resource, "content").to_string(),
+    };
+    crate::core::agent_skill::validate(&file, slug)?;
+    Ok(crate::core::agent_skill::render(&file).into_bytes())
 }
 
 /// Refuses a `kronn` path that exists but is not a directory (e.g. a launcher
@@ -532,6 +901,32 @@ pub fn validate_relative(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A skill file in the Agent Skills format as a resource document. It carries
+/// no date of its own, so the file's modification time stands in for one.
+fn standard_skill_document(
+    root: &Path,
+    relative: &str,
+    bytes: &[u8],
+    slug: &str,
+) -> Result<RepositoryDocument, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("resource {slug} is not UTF-8"))?;
+    let skill = crate::core::skills::parse_skill_markdown(slug, text, false)
+        .ok_or_else(|| format!("resource {slug} has no valid Skill frontmatter"))?;
+    let updated_at = std::fs::metadata(root.join(relative))
+        .and_then(|metadata| metadata.modified())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(|_| Utc::now());
+    Ok(RepositoryDocument {
+        schema_version: SCHEMA_VERSION,
+        kind: ProjectRepositoryResourceKind::Skill,
+        slug: slug.to_string(),
+        updated_at,
+        requires: Vec::new(),
+        resource: serde_json::to_value(skill).map_err(|error| error.to_string())?,
+        redacted_fields: Vec::new(),
+    })
+}
+
 pub fn read_resource(
     root: &Path,
     entry: &RepositoryLockResource,
@@ -550,6 +945,13 @@ pub fn read_resource(
         .first()
         .and_then(|path| files.get(path))
         .ok_or_else(|| format!("resource {} has no definition file", entry.slug))?;
+    let legacy_skill = entry.kind == ProjectRepositoryResourceKind::Skill
+        && std::str::from_utf8(first).is_ok_and(|text| text.contains(DOCUMENT_START));
+    if entry.kind == ProjectRepositoryResourceKind::Skill && !legacy_skill {
+        let path = entry.paths.first().map(String::as_str).unwrap_or_default();
+        let document = standard_skill_document(root, path, first, &entry.slug)?;
+        return Ok((document, resource_hash(&files)));
+    }
     let document: RepositoryDocument = if matches!(
         entry.kind,
         ProjectRepositoryResourceKind::QuickPrompt | ProjectRepositoryResourceKind::Skill
@@ -588,6 +990,14 @@ pub fn read_resource(
     {
         return Err(format!("resource metadata does not match {}", entry.slug));
     }
+    if legacy_skill {
+        // Compared as what a move to `.agents/skills` would write, so a skill
+        // still under `kronn/skills` reads as in sync with its Kronn copy when
+        // only the file format differs.
+        let standard = standard_skill_file(&document, &entry.slug)?;
+        let files = BTreeMap::from([(skill_path(&entry.slug), standard)]);
+        return Ok((document, resource_hash(&files)));
+    }
     if entry.kind == ProjectRepositoryResourceKind::Artifact {
         let html_path = entry
             .paths
@@ -603,6 +1013,91 @@ pub fn read_resource(
         return Ok((document, resource_hash(&files)));
     }
     Ok((document, resource_hash(&files)))
+}
+
+/// A skill Kronn wrote in its former format (`kronn/skills/<slug>/SKILL.md`,
+/// with the definition in a metadata comment) as the standard Agent Skills file
+/// a move to `.agents/skills` writes.
+pub fn legacy_skill_as_standard(
+    root: &Path,
+    slug: &str,
+    legacy_path: &str,
+) -> Result<Vec<u8>, String> {
+    let entry = RepositoryLockResource {
+        kind: ProjectRepositoryResourceKind::Skill,
+        slug: slug.to_string(),
+        name: String::new(),
+        level: String::new(),
+        paths: vec![legacy_path.to_string()],
+        sha256: String::new(),
+        required_secrets: Vec::new(),
+    };
+    let (document, _) = read_resource(root, &entry)?;
+    standard_skill_file(&document, slug)
+}
+
+/// Points the lock at the new place of skills that moved from `kronn/skills/`
+/// to `.agents/skills/`: each entry's path, the ownership record of the file
+/// and its content hash follow the skill, while its slug — the identity the
+/// alignment and the approvals are keyed by — does not change. The router
+/// skill is refreshed when Kronn wrote it and nobody edited it since. Returns
+/// the entries as they now stand.
+pub fn relocate_skill_entries(
+    root: &Path,
+    slugs: &[String],
+) -> Result<Vec<RepositoryLockResource>, String> {
+    let Some(mut lock) = load_lock(root)? else {
+        return Ok(Vec::new());
+    };
+    let mut relocated = Vec::new();
+    for slug in slugs {
+        let new_path = skill_path(slug);
+        let Some(entry) = lock.resources.iter_mut().find(|entry| {
+            entry.kind == ProjectRepositoryResourceKind::Skill && entry.slug == *slug
+        }) else {
+            continue;
+        };
+        let former: Vec<String> = entry
+            .paths
+            .iter()
+            .filter(|path| is_legacy_skill_path(path))
+            .cloned()
+            .collect();
+        if former.is_empty() {
+            continue;
+        }
+        validate_relative(&new_path)?;
+        let path = root.join(&new_path);
+        crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        entry.paths = vec![new_path.clone()];
+        entry.sha256 = resource_hash(&BTreeMap::from([(new_path.clone(), bytes.clone())]));
+        relocated.push(entry.clone());
+        for path in former {
+            lock.files.remove(&path);
+        }
+        lock.files.insert(new_path, sha256(&bytes));
+    }
+    if relocated.is_empty() {
+        return Ok(relocated);
+    }
+    lock.updated_at = Utc::now();
+    let current_router = std::fs::read(root.join(ROUTER_PATH)).ok();
+    let router = router_skill();
+    if let (Some(expected), Some(current)) = (lock.files.get(ROUTER_PATH), current_router) {
+        if sha256(&current) == *expected
+            && current != router
+            && write_atomic(root, ROUTER_PATH, &router).is_ok()
+        {
+            lock.files.insert(ROUTER_PATH.to_string(), sha256(&router));
+        }
+    }
+    let mut lock_bytes = serde_json::to_vec_pretty(&lock)
+        .map_err(|error| format!("cannot serialize kronn.lock: {error}"))?;
+    lock_bytes.push(b'\n');
+    write_atomic(root, LOCK_PATH, &lock_bytes)?;
+    Ok(relocated)
 }
 
 fn is_tracked(root: &Path, relative: &str) -> bool {
@@ -649,6 +1144,69 @@ fn may_replace(
         return Err(format!("{relative} changed since the last alignment"));
     }
     Ok(())
+}
+
+/// Whether a file Kronn wrote earlier may be deleted: it is gone already, or it
+/// is a plain file the lock lists and that still holds what Kronn wrote (unless
+/// the caller accepts losing edits). A file the lock does not list is not
+/// Kronn's to delete and is left alone.
+fn may_remove(
+    root: &Path,
+    relative: &str,
+    previous: &RepositoryLock,
+    allow_changed_owned: bool,
+) -> Result<(), String> {
+    validate_relative(relative)?;
+    let path = root.join(relative);
+    crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect {}: {error}", path.display())),
+    };
+    if !metadata.is_file() {
+        return Err(format!("refusing to remove non-file {}", path.display()));
+    }
+    let Some(expected) = previous.files.get(relative) else {
+        return Ok(());
+    };
+    let current =
+        std::fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if !allow_changed_owned && sha256(&current) != *expected {
+        return Err(format!("{relative} changed since the last alignment"));
+    }
+    Ok(())
+}
+
+/// Deletes what [`may_remove`] allowed, then the folders that emptied.
+fn remove_owned_file(root: &Path, relative: &str, previous: &RepositoryLock) -> Result<(), String> {
+    if !previous.files.contains_key(relative) {
+        return Ok(());
+    }
+    let path = root.join(relative);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot remove {}: {error}", path.display())),
+    }
+    remove_empty_parents(root, &path);
+    Ok(())
+}
+
+/// Removes `path`'s parent folders while they are empty, never `root` itself
+/// nor the top-level folder under it (`kronn/`, `.agents/`).
+pub(crate) fn remove_empty_parents(root: &Path, path: &Path) {
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        let depth = directory
+            .strip_prefix(root)
+            .map(|relative| relative.components().count())
+            .unwrap_or(0);
+        if depth < 2 || std::fs::remove_dir(directory).is_err() {
+            return;
+        }
+        current = directory.parent();
+    }
 }
 
 fn write_atomic(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
@@ -708,7 +1266,7 @@ fn config_toml(project_key: &str, lock: &RepositoryLock) -> Result<Vec<u8>, Stri
 /// changes so a repository can tell which model wrote its copy; publication
 /// regenerates the file every time, and refuses to replace a copy a human
 /// edited (`may_replace`) like any other managed file.
-const ROUTER_SKILL_VERSION: u32 = 1;
+const ROUTER_SKILL_VERSION: u32 = 2;
 
 /// Where a human reads about Kronn and installs it. Both are taken from the
 /// project README (a test keeps them there), never invented here.
@@ -719,7 +1277,7 @@ const ROUTER_SKILL_DESCRIPTION: &str = "Explains the shared AI resources in this
 
 const ROUTER_SKILL_BODY: &str = "# Kronn resources
 
-`kronn/` holds the AI resources this team shares through Git: skills, prompts, automations and artifacts. Kronn is a desktop/web app that orchestrates coding agents and writes these files; most of them are plain files any agent can use without it.
+`kronn/` holds the AI resources this team shares through Git that have no native home: prompts, automations and artifacts. Skills are real Agent Skills in `.agents/skills/`, where every agent looks for them. Kronn is a desktop/web app that orchestrates coding agents and writes these files; most of them are plain files any agent can use without it.
 
 Read `kronn/INDEX.md` first (one line per resource, with its level), then open only what the task needs. `kronn/kronn.lock` records what Kronn wrote: never edit it.
 
@@ -729,7 +1287,7 @@ Levels: **N0** readable by anyone, **N1** runnable with the CLIs on this machine
 
 - **Quick Prompt** (`kronn/prompts/*.md`): a prompt template. Ask the human for each `{{variable}}` it declares, fill them in, then carry out the prompt yourself.
 - **Quick Exec** (`kronn/quick-execs/*.yaml`, JSON content): one deterministic command (`resource.command` + `resource.args`). Run it as written from the repository root, filling `{{variable}}` from the human. Each `secret://NAME` is a secret: pass it by name through the environment variable `NAME` (`\"$NAME\"` in the command). If it is unset, ask the human to set it. Never write a secret value in a file, a command you print or your answer.
-- **Skills** (`kronn/skills/*/SKILL.md`): read them like any SKILL.md.
+- **Skills** (`.agents/skills/*/SKILL.md`): plain Agent Skills, read them like any SKILL.md.
 
 ## Needs Kronn
 
@@ -815,18 +1373,25 @@ pub fn can_write_repository(root: &Path) -> (bool, Option<crate::models::Reposit
     }
 }
 
-/// Repository-relative paths Kronn wrote (per `kronn.lock`) that `git status`
-/// reports as modified or untracked. Best-effort: any git failure (no repo,
-/// no binary) reports no uncommitted paths rather than failing the caller.
+/// Repository-relative paths Kronn manages that `git status` reports as
+/// modified, deleted or untracked: the files `kronn.lock` lists, everything in
+/// the skills folder Kronn writes and migrates into, and the skills a migration
+/// took out of the other native skill folders (only their deletion is
+/// reported: what else sits there is the repository's own). Best-effort: any
+/// git failure (no repo, no binary) reports no uncommitted paths rather than
+/// failing the caller.
 pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<String> {
-    if lock.files.is_empty() {
+    if lock.files.is_empty() && !root.join(SKILLS_ROOT).is_dir() {
         return Vec::new();
     }
+    let mut pathspecs: Vec<&str> = lock.files.keys().map(String::as_str).collect();
+    pathspecs.push(SKILLS_ROOT);
+    pathspecs.extend(crate::core::skill_migration::SOURCE_ROOTS.iter().copied());
     let output = crate::core::cmd::sync_cmd("git")
         .arg("-C")
         .arg(root)
         .args(["status", "--porcelain", "-uall", "--"])
-        .args(lock.files.keys())
+        .args(&pathspecs)
         .output();
     let Ok(output) = output else {
         return Vec::new();
@@ -836,8 +1401,17 @@ pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<Stri
     }
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.get(3..))
-        .map(str::to_string)
+        .filter_map(|line| Some((line.get(..2)?, line.get(3..)?)))
+        .filter(|(status, path)| {
+            let moved_out = crate::core::skill_migration::SOURCE_ROOTS
+                .iter()
+                .any(|source| {
+                    path.strip_prefix(source)
+                        .is_some_and(|rest| rest.starts_with('/'))
+                });
+            !moved_out || lock.files.contains_key(*path) || status.contains('D')
+        })
+        .map(|(_, path)| path.to_string())
         .collect()
 }
 
@@ -1082,21 +1656,39 @@ pub fn publish(
     let index = index_markdown(&next);
     let config = config_toml(project_key, &next)?;
     let router = router_skill();
-    let mut writes = resource.files;
+    let mut writes = BTreeMap::clone(&resource.files);
     writes.insert(INDEX_PATH.into(), index);
     writes.insert(CONFIG_PATH.into(), config);
     writes.insert(ROUTER_PATH.into(), router);
+
+    // Files this resource was published under before and no longer is (a skill
+    // that moved from `kronn/skills/` to `.agents/skills/`): removed once the
+    // new ones are in place, so publishing never leaves the resource twice.
+    let stale: Vec<String> = previous
+        .resources
+        .iter()
+        .filter(|item| item.kind == entry.kind && item.slug == entry.slug)
+        .flat_map(|item| item.paths.iter().cloned())
+        .filter(|path| !writes.contains_key(path))
+        .collect();
 
     for relative in writes.keys() {
         may_replace(root, relative, &previous, allow_changed_owned)?;
     }
     may_replace(root, LOCK_PATH, &previous, allow_changed_owned)?;
+    for relative in &stale {
+        may_remove(root, relative, &previous, allow_changed_owned)?;
+    }
 
     ensure_agents_line(root)?;
     for (relative, bytes) in &writes {
         write_atomic(root, relative, bytes)?;
     }
     next.files = previous.files.clone();
+    for relative in &stale {
+        remove_owned_file(root, relative, &previous)?;
+        next.files.remove(relative);
+    }
     for (path, bytes) in &writes {
         next.files.insert(path.clone(), sha256(bytes));
     }
@@ -1264,7 +1856,7 @@ pub fn unified_diff(repository: &[u8], kronn: &[u8]) -> String {
     render_unified_diff(&a, &b, &ops)
 }
 
-fn flatten_json(value: &Value, prefix: String, out: &mut BTreeMap<String, Value>) {
+fn flatten_json<'a>(value: &'a Value, prefix: String, out: &mut BTreeMap<String, &'a Value>) {
     match value {
         Value::Object(map) if !map.is_empty() => {
             for (key, item) in map {
@@ -1282,7 +1874,7 @@ fn flatten_json(value: &Value, prefix: String, out: &mut BTreeMap<String, Value>
             }
         }
         _ => {
-            out.insert(prefix, value.clone());
+            out.insert(prefix, value);
         }
     }
 }
@@ -1310,15 +1902,14 @@ pub fn field_diff(
                 .any(|local| field.split('.').next() == Some(*local))
         })
         .filter_map(|field| {
-            let repository_value = repository_flat.get(&field).cloned();
-            let kronn_value = kronn_flat.get(&field).cloned();
-            (repository_value != kronn_value).then_some(
-                crate::models::RepositoryResourceFieldDiff {
-                    field,
-                    repository: repository_value,
-                    kronn: kronn_value,
-                },
-            )
+            // Compared in place: only the values that differ are copied out.
+            let repository_value = repository_flat.get(&field).copied();
+            let kronn_value = kronn_flat.get(&field).copied();
+            (repository_value != kronn_value).then(|| crate::models::RepositoryResourceFieldDiff {
+                repository: repository_value.cloned(),
+                kronn: kronn_value.cloned(),
+                field,
+            })
         })
         .collect()
 }
@@ -1574,6 +2165,236 @@ mod tests {
     }
 
     #[test]
+    fn the_same_content_is_masked_once_and_changed_content_afresh() {
+        let prompt = sample_prompt("memo probe one: password=hunter2");
+        let mut edited = prompt.clone();
+        edited.prompt_template = "memo probe one: a different sentence".into();
+        let mut runs = 0;
+        let mut render = |slug: &str, prompt: &QuickPrompt| {
+            let source = serde_json::to_value(prompt).unwrap();
+            memoized_render(
+                ProjectRepositoryResourceKind::QuickPrompt,
+                slug,
+                prompt.updated_at,
+                source,
+                |_| {
+                    runs += 1;
+                    render_quick_prompt_unmemoized(prompt, slug)
+                },
+            )
+            .unwrap()
+        };
+
+        let first = render("memo-probe-one", &prompt);
+        let second = render("memo-probe-one", &prompt);
+        assert_eq!(first.hash, second.hash);
+        assert_eq!(first.files, second.files);
+        assert_eq!(first.required_secrets, second.required_secrets);
+
+        let third = render("memo-probe-one", &edited);
+        assert_ne!(
+            first.hash, third.hash,
+            "changed content is not served stale"
+        );
+
+        render("memo-probe-other-slug", &prompt);
+        assert_eq!(
+            runs, 3,
+            "masked for the first content, the edit and the other slug — never twice for the same"
+        );
+    }
+
+    /// The prompt rendered without the memo, for the counting test above.
+    fn render_quick_prompt_unmemoized(
+        prompt: &QuickPrompt,
+        slug: &str,
+    ) -> Result<RenderedRepositoryResource, String> {
+        let (document, secrets) = document(
+            ProjectRepositoryResourceKind::QuickPrompt,
+            slug,
+            prompt.updated_at,
+            serde_json::to_value(prompt).map_err(|error| error.to_string())?,
+            Vec::new(),
+        );
+        let body = document
+            .resource
+            .get("prompt_template")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let files = BTreeMap::from([(
+            format!("kronn/prompts/{slug}.md"),
+            markdown_file(&document, &prompt.name, &prompt.description, &body)?,
+        )]);
+        Ok(rendered(document, prompt.name.clone(), files, secrets))
+    }
+
+    #[test]
+    fn a_rendering_served_from_memory_still_holds_no_secret_value() {
+        let secret = "memo-leak-probe-7f3a";
+        let prompt = sample_prompt(&format!(
+            "Call the API with password={secret} and Authorization: Bearer abcdef0123456789abcdef"
+        ));
+        let before = render_memo_stats();
+        let fresh = render_quick_prompt(&prompt, "memo-leak-probe").unwrap();
+        let cached = render_quick_prompt(&prompt, "memo-leak-probe").unwrap();
+        assert!(
+            render_memo_stats().hits > before.hits,
+            "the second rendering comes from the memo"
+        );
+        for rendered in [&fresh, &cached] {
+            let everything = format!(
+                "{}{}{:?}",
+                rendered
+                    .files
+                    .values()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                    .collect::<String>(),
+                serde_json::to_string(&rendered.document).unwrap(),
+                rendered.required_secrets,
+            );
+            assert!(!everything.contains(secret), "{everything}");
+            assert!(
+                !everything.contains("abcdef0123456789abcdef"),
+                "{everything}"
+            );
+            assert!(everything.contains("secret://KRONN_QUICKPROMPT_MEMO_LEAK_PROBE_"));
+        }
+        assert_eq!(fresh.hash, cached.hash);
+    }
+
+    #[test]
+    fn masked_text_keeps_the_references_of_a_rendering_and_hides_anything_else() {
+        // Kronn's own rendering: every secret is a reference already, and the
+        // text shows the names the resource needs.
+        let rendered = render_quick_prompt(
+            &sample_prompt("Use password=masked-text-probe-1 and the key sk-abcdefghijklmnopqrstuvwxyz0123456789."),
+            "masked-text",
+        )
+        .unwrap();
+        let file = rendered.files.values().next().unwrap();
+        let shown = masked_text(file);
+        assert_eq!(shown.as_bytes(), file.as_slice(), "nothing left to hide");
+        assert!(shown.contains("password=secret://KRONN_QUICKPROMPT_MASKED_TEXT_"));
+        assert!(shown.contains("\"prompt_template\": \"Use password=secret://"));
+
+        // A secret typed into a file by hand is hidden, wherever it sits.
+        for (text, secret) in [
+            (
+                "Use password=hunter2-typed-by-hand.",
+                "hunter2-typed-by-hand",
+            ),
+            (r#"{"token": "tok-typed-by-hand"}"#, "tok-typed-by-hand"),
+            (
+                "key sk-abcdefghijklmnopqrstuvwxyz0123456789 here",
+                "sk-abcdefghijklmnopqrstuvwxyz0123456789",
+            ),
+        ] {
+            let shown = masked_text(text.as_bytes());
+            assert!(!shown.contains(secret), "{secret} survived: {shown}");
+            assert!(shown.contains("***REDACTED***"), "{shown}");
+        }
+
+        // Next to a reference it is hidden just the same. A line with anything
+        // else to mask is masked whole, references included; the lines around
+        // it keep theirs.
+        let mixed = masked_text(b"password=secret://NEEDED_ONE and password=typed-beside-it");
+        assert!(!mixed.contains("typed-beside-it"), "{mixed}");
+        assert!(!mixed.contains("NEEDED_ONE"), "{mixed}");
+        let lines = masked_text(
+            b"password=secret://NEEDED_ONE\npassword=typed-on-the-next-line\n\"token\": \"secret://NEEDED_TWO\"\n",
+        );
+        assert!(!lines.contains("typed-on-the-next-line"), "{lines}");
+        assert_eq!(
+            lines.lines().collect::<Vec<_>>(),
+            [
+                "password=secret://NEEDED_ONE",
+                "password=***REDACTED***",
+                "\"token\": \"secret://NEEDED_TWO\"",
+            ]
+        );
+
+        // A "reference" whose name is a secret is not one.
+        let disguised = masked_text(b"token=secret://ghp_abcdefghijklmnopqrstuvwxyz1234567890");
+        assert!(
+            !disguised.contains("ghp_abcdefghijklmnopqrstuvwxyz1234567890"),
+            "{disguised}"
+        );
+
+        // Masked once, then served from memory; invalid UTF-8 is read lossily.
+        let before = masked_text_memo_stats();
+        masked_text("password=memo-probe-once".as_bytes());
+        masked_text("password=memo-probe-once".as_bytes());
+        assert!(masked_text_memo_stats().hits > before.hits);
+        assert!(!masked_text(&[b'a', 0xff, b'b']).is_empty());
+    }
+
+    #[test]
+    fn masking_the_strings_of_a_value_reaches_every_level() {
+        let mut value = serde_json::json!({
+            "args": ["--flag", "password=nested-probe-secret"],
+            "inner": {"note": "key sk-abcdefghijklmnopqrstuvwxyz0123456789", "n": 3},
+            "ref": "secret://KEEP_ME",
+        });
+        mask_value_strings(&mut value);
+        let shown = value.to_string();
+        assert!(!shown.contains("nested-probe-secret"), "{shown}");
+        assert!(
+            !shown.contains("sk-abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("secret://KEEP_ME") && shown.contains("\"n\":3"),
+            "{shown}"
+        );
+    }
+
+    fn skill_with(name: &str, description: &str, body: &str) -> Skill {
+        let raw = format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n");
+        crate::core::skills::parse_skill_markdown("review", &raw, false).unwrap()
+    }
+
+    #[test]
+    fn a_rendered_skill_is_a_valid_agent_skill_whatever_it_holds() {
+        let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let long = "x".repeat(2_000);
+        for description in ["", "One line.", long.as_str()] {
+            let skill = skill_with("Review Diffs", description, "Read the diff.");
+            let rendered = render_skill(&skill, timestamp, "review").unwrap();
+            assert_eq!(
+                rendered.files.keys().collect::<Vec<_>>(),
+                vec![".agents/skills/review/SKILL.md"]
+            );
+            let text = String::from_utf8(rendered.files[".agents/skills/review/SKILL.md"].clone())
+                .unwrap();
+            let file = crate::core::agent_skill::parse(&text).unwrap();
+            crate::core::agent_skill::validate(&file, "review")
+                .unwrap_or_else(|error| panic!("{error}\n{text}"));
+            assert_eq!(file.body, "Read the diff.");
+            assert_eq!(file.metadata["kronn-name"], "Review Diffs");
+        }
+        assert!(
+            render_skill(&skill_with("A", "b", "c"), timestamp, "Not A Slug").is_err(),
+            "a folder name the specification rejects is never written"
+        );
+    }
+
+    #[test]
+    fn a_skill_read_back_from_the_repository_keeps_what_kronn_wrote() {
+        let root = tempfile::TempDir::new().unwrap();
+        let skill = skill_with("Review Diffs", "Review \"carefully\".", "Read the diff.");
+        let rendered = render_skill(&skill, Utc::now(), "review").unwrap();
+        let entry = publish(root.path(), "repo", rendered.clone(), false).unwrap();
+        assert_eq!(entry.paths, vec![".agents/skills/review/SKILL.md"]);
+        assert!(!root.path().join("kronn/skills").exists());
+        let (document, hash) = read_resource(root.path(), &entry).unwrap();
+        assert_eq!(hash, rendered.hash);
+        assert_eq!(document.resource["name"], "Review Diffs");
+        assert_eq!(document.resource["description"], "Review \"carefully\".");
+        assert_eq!(document.resource["content"], "Read the diff.");
+    }
+
+    #[test]
     fn rendering_preserves_and_declares_existing_secret_references() {
         let (_, secrets) = document(
             ProjectRepositoryResourceKind::QuickApi,
@@ -1673,7 +2494,7 @@ mod tests {
             "`secret://NAME`",
             "environment variable `NAME`",
             "Never write a secret value",
-            "`kronn/skills/*/SKILL.md`",
+            "`.agents/skills/*/SKILL.md`",
             // What needs Kronn, and what to do about it.
             "Workflows",
             "Quick APIs",
@@ -1897,6 +2718,214 @@ mod tests {
 
         let prompt = render_quick_prompt(&sample_prompt("body"), "deploy-prompt").unwrap();
         assert_eq!(resource_adr_level(&prompt.document), ResourceAdrLevel::N1);
+    }
+
+    /// One resource of each kind, with secrets in the places each kind
+    /// masks, as fixed inputs for the byte-for-byte regression below.
+    fn one_of_each_kind() -> Vec<(&'static str, RenderedRepositoryResource)> {
+        let timestamp = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+
+        let workflow: Workflow = serde_json::from_value(serde_json::json!({
+            "id": "wf-golden", "name": "Nightly", "project_id": "project-1",
+            "trigger": {"type": "Manual"},
+            "steps": [
+                {
+                    "name": "fetch", "step_type": {"type": "ApiCall"},
+                    "api_headers": {
+                        "Authorization": "Bearer sk-live-1234567890abcdefghij",
+                        "Accept": "application/json"
+                    },
+                    "api_query": {"token": "golden-query-token-1"},
+                    "api_body": {"password": "hunter2-golden"}
+                },
+                {
+                    "name": "ask", "step_type": {"type": "Agent"},
+                    "quick_prompt_id": "qp-1",
+                    "prompt_template": "Summarize with password=hunter2-golden"
+                }
+            ],
+            "actions": [], "safety": {}, "workspace_config": null, "concurrency_limit": null,
+            "enabled": true,
+            "artifacts": {
+                "report": {"path": "out/report.md", "format": "markdown"},
+                "summary": {"path": "out/summary.md"},
+                "plan": {"path": "out/plan.md"}
+            },
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:10Z"
+        }))
+        .unwrap();
+
+        let mut api = sample_api("/deploy");
+        api.api_headers = Some(
+            [
+                ("Authorization", "Bearer sk-live-1234567890abcdefghij"),
+                ("Accept", "application/json"),
+                ("X-Trace", "trace-me"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+        );
+        api.api_query = Some(
+            [("api_key", "golden-api-key-123456"), ("page", "2")]
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+        );
+        api.api_body = Some(serde_json::json!({"token": "golden-body-token-1234"}));
+
+        let artifact = ArtifactBundlePage {
+            id: "page-golden".into(),
+            title: "Dashboard".into(),
+            slug: "dashboard".into(),
+            html: "<h1>Dashboard</h1><p>password=hunter2-golden</p>".into(),
+            created_by_agent: Some("agent".into()),
+            datasets: vec![crate::models::ArtifactBundleDataset {
+                name: "visits".into(),
+                kind: crate::models::LivePageDatasetKind::TimeSeries,
+                has_current: true,
+                current: serde_json::json!({"total": 3}),
+                schema: None,
+                max_points: 100,
+                max_age_days: Some(30),
+                updated_at: timestamp,
+                points: vec![crate::models::ArtifactBundlePoint {
+                    observed_at: timestamp,
+                    payload: serde_json::json!({"n": 3}),
+                    dedupe_key: Some("k".into()),
+                }],
+            }],
+        };
+
+        vec![
+            (
+                "skill",
+                render_skill(
+                    &skill_with(
+                        "Review Diffs",
+                        "Review the diff.",
+                        "Read it. Never paste password=hunter2-golden.",
+                    ),
+                    timestamp,
+                    "review",
+                )
+                .unwrap(),
+            ),
+            ("workflow", render_workflow(&workflow, "nightly").unwrap()),
+            (
+                "quick_prompt",
+                render_quick_prompt(
+                    &sample_prompt("Deploy with password=hunter2-golden and {{env}}"),
+                    "deploy-prompt",
+                )
+                .unwrap(),
+            ),
+            ("quick_api", render_quick_api(&api, "deploy-api").unwrap()),
+            (
+                "quick_exec",
+                render_quick_exec(&sample_exec("golden-exec-token-123456"), "deploy").unwrap(),
+            ),
+            (
+                "artifact",
+                render_artifact(&artifact, timestamp, "dashboard").unwrap(),
+            ),
+        ]
+    }
+
+    /// Everything a rendering holds, as one comparable line: the name, the
+    /// hash, the secrets it needs, the SHA-256 of each file and of the document.
+    fn rendering_report(rendered: &RenderedRepositoryResource) -> String {
+        let files = rendered
+            .files
+            .iter()
+            .map(|(path, bytes)| format!("{path}={}", sha256(bytes)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let document = serde_json::to_string(&rendered.document).unwrap();
+        format!(
+            "{}|{}|{}|{}|{}",
+            rendered.name,
+            rendered.hash,
+            rendered.required_secrets.join(","),
+            files,
+            sha256(document.as_bytes()),
+        )
+    }
+
+    /// The renderings as they were before the memo stopped copying them
+    /// (KT-915): the same bytes for every kind, the first time and when served
+    /// from memory.
+    #[test]
+    fn a_rendering_of_each_kind_is_byte_for_byte_what_it_was() {
+        // Captured from the code before KT-915, on the same inputs.
+        const GOLDEN: &[(&str, &str)] = &[
+            ("skill", "Review Diffs|25b7d61d9af630b921ee974a6869a1a534fe6c07cddbd2e0324cc789bf619b7b|KRONN_SKILL_REVIEW_RESOURCE_CONTENT|.agents/skills/review/SKILL.md=8eafc218dc94b47b4111c2782555105a7c5b047c416765939716c1b8ab6028c0|df734bb3f7c52ea936112bda29a2adccf1d3a1cd9d2bf6b1a5d6cef17a919757"),
+            ("workflow", "Nightly|d7682da200ed0f772d00120da678a61075639be4571a8e8736dc795d7b58457f|KRONN_WORKFLOW_NIGHTLY_RESOURCE_STEPS_0_API_BODY_PASSWORD,KRONN_WORKFLOW_NIGHTLY_RESOURCE_STEPS_0_API_HEADERS_AUTHORIZATION,KRONN_WORKFLOW_NIGHTLY_RESOURCE_STEPS_0_API_QUERY_TOKEN,KRONN_WORKFLOW_NIGHTLY_RESOURCE_STEPS_1_PROMPT_TEMPLATE|kronn/workflows/nightly.yaml=f1637d40dbd2f9df01552e94ab6ffda91e342966c800f9a060f2d1dcc10e467b|ade233b7459dfbc71fffb31af98520e432b9a7d71281022f48173377f465dab7"),
+            ("quick_prompt", "Deploy prompt|8e7a2d997c74ac2d17a0b56716de53b744f04c199dba922d1fb17a239e7a55d2|KRONN_QUICKPROMPT_DEPLOY_PROMPT_RESOURCE_PROMPT_TEMPLATE|kronn/prompts/deploy-prompt.md=4c60f7029a19acbec6d39bf74cc2482660ee3e0dbf6aac42f3917e0f518c608b|fd85ecd6fd4dcfadee43d99631edb3b6f1bdd0130e7c06f9724f46bbcc3d9494"),
+            ("quick_api", "Deploy API|0e8da30d7d9dd62992126b2666ae17362e018482b5f1e4c4d64bd45c0e84dcc7|KRONN_QUICKAPI_DEPLOY_API_RESOURCE_API_BODY_TOKEN,KRONN_QUICKAPI_DEPLOY_API_RESOURCE_API_HEADERS_AUTHORIZATION,KRONN_QUICKAPI_DEPLOY_API_RESOURCE_API_QUERY_API_KEY|kronn/quick-apis/deploy-api.yaml=fd34ca4c1de2297bc7ce03460cd53c47554755689df4c8e1daf01b031396dc90|6bc0dba4fabe88b1e29ef5330b9e03fa71ed302090759170ce01169faf7016e1"),
+            ("quick_exec", "Deploy|a75df74e3326b413dbd65a19de210e8536feb23023146342d6c315c3ef6c6581|KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1|kronn/quick-execs/deploy.yaml=3c1c60800277774fe7e66a72b52f35c09edab68a0acb0810dcfbb9aba02fbffd|497df76e8905142dccf14134668d0a40aaf45f7429280c4495af5e42ee409ad9"),
+            ("artifact", "Dashboard|49b445a3915484650fed7d4ebd1b8e7024574698ac898253da9080fa02e573dd|KRONN_ARTIFACT_DASHBOARD_RESOURCE_HTML|kronn/artifacts/dashboard/artifact.yaml=e7c8a57d1cb02dbd749d4e9e8495186ee4853389bcddc8a2935de3b84da5d67a,kronn/artifacts/dashboard/index.html=bfde334af049d419908f618093509446e0dddc03b0666f9ccca8406d325b56b8|7712afc0eb98dea2d0c6b0d758795a0fdd2e0d243d458be228db2851ef0f5d1a"),
+        ];
+        let first = one_of_each_kind();
+        let again = one_of_each_kind();
+        for ((kind, rendered), (_, memoized)) in first.iter().zip(&again) {
+            assert_eq!(
+                rendering_report(rendered),
+                rendering_report(memoized),
+                "{kind}: served from memory it reads the same"
+            );
+        }
+        let reports: Vec<(&str, String)> = first
+            .iter()
+            .map(|(kind, rendered)| (*kind, rendering_report(rendered)))
+            .collect();
+        assert_eq!(reports.len(), GOLDEN.len(), "one golden per kind");
+        for ((kind, report), (golden_kind, golden)) in reports.iter().zip(GOLDEN) {
+            assert_eq!(kind, golden_kind);
+            assert_eq!(report, golden, "{kind} no longer renders the same bytes");
+        }
+    }
+
+    /// A human's approval is recorded against this fingerprint: it must keep
+    /// its value for every kind, whatever changes in how it is computed.
+    #[test]
+    fn the_approval_fingerprint_of_each_kind_is_what_it_was() {
+        // Captured from the code before KT-915, on the same inputs.
+        const GOLDEN: &[(&str, &str)] = &[
+            (
+                "skill",
+                "5d304a12154f6a2f6dfea10ade3146433afad0c454697598340b772bca49bbbd",
+            ),
+            (
+                "workflow",
+                "7db581d36db5956dcd9bc203904cd49ec2ea5de2beddec254e0070175069f62e",
+            ),
+            (
+                "quick_prompt",
+                "3ff492d895b5381a21e623c5cddfb04a0d95e9110e1798b78bd9ec3539fd281e",
+            ),
+            (
+                "quick_api",
+                "fb38880bd2400abd299cd03770e67656364528d4dc2e97c35f7ebde6a4a546ad",
+            ),
+            (
+                "quick_exec",
+                "da4c4edfcbc5a4d7a471e2a29a892ba69b610f9e3427184c1edc51ba3384e87d",
+            ),
+            (
+                "artifact",
+                "dd00399f571be35bc512e23eba03c29f8e7843387f77f3c431ee1eb97d8ebfd8",
+            ),
+        ];
+        let fingerprints: Vec<(&str, String)> = one_of_each_kind()
+            .iter()
+            .map(|(kind, rendered)| (*kind, approval_hash(&rendered.document)))
+            .collect();
+        assert_eq!(fingerprints.len(), GOLDEN.len(), "one golden per kind");
+        for ((kind, fingerprint), (golden_kind, golden)) in fingerprints.iter().zip(GOLDEN) {
+            assert_eq!(kind, golden_kind);
+            assert_eq!(fingerprint, golden, "{kind} would lose its approvals");
+        }
     }
 
     #[test]

@@ -1,47 +1,32 @@
-import { Clock, Grid3X3, MessageCircle, Plus, Puzzle, Trash2, CheckSquare, Plug, Key } from 'lucide-react';
+import { ChevronRight, Clock, Plus, Puzzle, Trash2, CheckSquare, Plug, Key } from 'lucide-react';
 import type { McpConfigDisplay } from '../../types/generated';
 import { CollectionShell } from '../CollectionShell';
 import { CollectionFavoritesHeader } from '../CollectionFavoritesHeader';
-import { CollectionProjectTree } from '../CollectionProjectTree';
 import { CollectionRowActions } from '../CollectionRowActions';
 import { CollectionSidebarFooter } from '../CollectionSidebarFooter';
 import { ContextHelp } from '../ContextHelp';
 import { MatrixText } from '../MatrixText';
 import { HostSyncChip } from '../HostSyncChip';
-import { getProjectGroup } from '../../lib/constants';
 import { PluginKindBadge } from './PluginKindBadge';
 import { PluginDetailPanel } from './PluginDetailPanel';
 import { PluginProjectOverview } from './PluginProjectOverview';
 import { PluginToolbarPanel, PluginToolbarToggle } from './PluginToolbar';
-import { configHealth, latestPluginTest, visibleToPluginProject } from './pluginHealth';
+import { latestPluginTest } from './pluginHealth';
 import type { McpPageState } from './useMcpPageState';
-
-interface ProjectPluginItem {
-  key: string;
-  projectId: string | null;
-  config: McpConfigDisplay;
-}
 
 export function PluginCollectionView({ state }: { state: McpPageState }) {
   const {
-    t, isMobile, projects, configs,
+    t, isMobile,
     totalConfigs, visibleConfigs, favoriteConfigIds, toggleConfigFavorite,
     mcpSearch, setMcpSearch, selectedConfigId, setSelectedConfigId,
     selectedConfigIds, setSelectedConfigIds, handleDeleteSelectedMcpConfigs,
     sidebarOpen, setSidebarOpen,
-    isBuiltinConfig, driftBySlug, probeByConfig, probeTestedAtByConfig, mcpOverview,
+    isBuiltinConfig, driftBySlug, healthFor,
     collapsedMcpGroups, setCollapsedMcpGroups,
     handleDeleteMcpConfig, showBuiltinFallback,
-    selectedProjectId, setSelectedProjectId, pluginSearchLabel,
+    activeFilterCount, clearPluginFilters, pluginSearchLabel,
     setShowAddMcp, setAddMcpSelected, setAddMcpSearch, addMcpTriggerRef,
   } = state;
-
-  const healthFor = (config: McpConfigDisplay) => configHealth(config, {
-    liveProbe: probeByConfig[config.id],
-    liveTestedAt: probeTestedAtByConfig[config.id],
-    incomplete: mcpOverview.incomplete_configs.find(item => item.config_id === config.id),
-    hasEndpointDrift: (driftBySlug[config.server_id]?.length ?? 0) > 0,
-  });
 
   return <div className="mcp-plugin-shell">
     <CollectionShell<McpConfigDisplay>
@@ -96,7 +81,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
             if (next.has(group)) next.delete(group); else next.add(group);
             return next;
           });
-          const row = (config: McpConfigDisplay, keyPrefix: string, projectId?: string | null) => {
+          const row = (config: McpConfigDisplay, keyPrefix: string) => {
             const rowProps = getRowProps(config);
             const selected = isMultiSelected(config);
             const stateValue = healthFor(config);
@@ -123,10 +108,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
                   className={`${rowProps.className} disc-item-open`}
                   onClick={canMultiSelect
                     ? () => toggleMultiSelection(config.id)
-                    : () => {
-                      if (projectId !== undefined) setSelectedProjectId(projectId ?? '__none__');
-                      rowProps.onClick();
-                    }}
+                    : rowProps.onClick}
                   aria-label={canMultiSelect ? `${config.label} · ${t('collection.selectItem')}` : `${config.label} — ${t('mcp.openDetails')}`}
                   role={canMultiSelect ? 'checkbox' : undefined}
                   aria-checked={canMultiSelect ? selected : undefined}
@@ -166,43 +148,19 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
 
           const favorites = canMultiSelect ? [] : visibleItems.filter(config => favoriteConfigIds.has(config.id));
           const recent = canMultiSelect ? [] : visibleItems
+            .filter(config => !favoriteConfigIds.has(config.id))
             .map(config => ({ config, testedAt: latestPluginTest(config) }))
             .filter((item): item is { config: McpConfigDisplay; testedAt: string } => item.testedAt !== null)
             .sort((left, right) => right.testedAt.localeCompare(left.testedAt))
             .slice(0, 5)
             .map(item => item.config);
-          const projectItems: ProjectPluginItem[] = [];
-          for (const config of visibleItems) {
-            if (visibleToPluginProject(config, '__none__')) projectItems.push({ key: `none-${config.id}`, projectId: null, config });
-            for (const project of projects) {
-              if (visibleToPluginProject(config, project.id)) projectItems.push({ key: `${project.id}-${config.id}`, projectId: project.id, config });
-            }
-          }
-          const groupHealth = new Map<string, 'warning' | 'error'>();
-          const attentionState = (items: ProjectPluginItem[]) => {
-            const states = items.map(item => healthFor(item.config));
-            return states.includes('error') ? 'error' : states.includes('warning') ? 'warning' : null;
-          };
-          const healthItems = (projectId: string | '__none__') => configs
-            .filter(config => visibleToPluginProject(config, projectId))
-            .map(config => ({ key: config.id, projectId: projectId === '__none__' ? null : projectId, config }));
-          const noProjectHealth = attentionState(healthItems('__none__'));
-          if (noProjectHealth) groupHealth.set('__none__', noProjectHealth);
-          for (const project of projects) {
-            const projectHealth = attentionState(healthItems(project.id));
-            if (projectHealth) groupHealth.set(project.id, projectHealth);
-          }
-          for (const project of projects) {
-            const org = getProjectGroup(project, t('disc.local'), t('disc.local'));
-            const key = `org::${org}`;
-            const projectHealth = groupHealth.get(project.id);
-            if (projectHealth === 'error' || (projectHealth === 'warning' && groupHealth.get(key) !== 'error')) {
-              groupHealth.set(key, projectHealth);
-            }
-          }
           const favoritesCollapsed = collapsedGroups.has('favorites');
           const recentCollapsed = collapsedGroups.has('recent');
-          const projectsCollapsed = collapsedGroups.has('projects');
+          const allCollapsed = collapsedGroups.has('all');
+          // A plugin is listed once (KT-907): the shortcut sections take theirs
+          // out of the full list, like the Discussions sidebar does for favorites.
+          const shortcutIds = new Set([...favorites, ...recent].map(config => config.id));
+          const others = visibleItems.filter(config => !shortcutIds.has(config.id));
 
           return <div className="disc-sidebar-list mcp-sidebar-items">
             {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!favoritesCollapsed}>
@@ -215,39 +173,17 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
               </button>
               {!recentCollapsed && recent.map(config => row(config, 'recent'))}
             </div>}
-            <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!projectsCollapsed}>
-              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleGroup('projects')} aria-expanded={!projectsCollapsed}>
-                <Grid3X3 size={10} /><span>{t('projects.title')}</span><span className="disc-group-count">{projects.length + 2}</span>
+            {others.length > 0 && <div className="disc-sidebar-section mcp-sidebar-all" data-expanded={!allCollapsed}>
+              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleGroup('all')} aria-expanded={!allCollapsed}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!allCollapsed} />
+                <span>{t('mcp.allPlugins')}</span><span className="disc-group-count">{others.length}</span>
               </button>
-              {!projectsCollapsed && <div className="disc-project-tree">
-                <button type="button" className="mcp-project-selector" aria-current={selectedProjectId === '__all__' && !selectedConfigId ? 'page' : undefined} onClick={() => { setSelectedProjectId('__all__'); setSelectedConfigId(null); }}>
-                  <Grid3X3 size={10} />{t('mcp.allPlugins')}<span className="disc-group-count">{visibleItems.length}</span>
-                </button>
-                <CollectionProjectTree<ProjectPluginItem>
-                  projects={projects}
-                  items={projectItems}
-                  getProjectId={item => item.projectId}
-                  isItemActive={item => item.config.id === selectedConfigId}
-                  collapsedGroups={collapsedGroups}
-                  onToggleGroup={toggleGroup}
-                  renderGroupStatus={groupKey => {
-                    const stateValue = groupHealth.get(groupKey);
-                    return stateValue
-                      ? <span className="mcp-health-dot" data-state={stateValue} aria-label={t(`mcp.health.${stateValue}`)} />
-                      : null;
-                  }}
-                  renderGroup={({ project, items }) => items.map(item => row(item.config, item.key, project?.id ?? null))}
-                  labels={{ noProject: t('disc.noProject'), local: t('disc.local') }}
-                  noProjectIcon={<MessageCircle size={10} />}
-                  noProjectGroupKey="__none__"
-                  showEmptyProjects
-                  showEmptyNoProject
-                  selectedProjectId={selectedProjectId === '__none__' ? null : selectedProjectId}
-                  onSelectProject={projectId => { setSelectedProjectId(projectId ?? '__none__'); setSelectedConfigId(null); }}
-                />
-              </div>}
-            </div>
-            {visibleItems.length === 0 && <div className="disc-empty">{t('mcp.filter.empty')}</div>}
+              {!allCollapsed && others.map(config => row(config, 'all'))}
+            </div>}
+            {visibleItems.length === 0 && <div className="disc-empty">
+              {t('mcp.filter.empty')}
+              {activeFilterCount > 0 && <button type="button" className="mcp-filter-clear" onClick={clearPluginFilters}>{t('collection.clearFilters')}</button>}
+            </div>}
           </div>;
         },
         sidebarFooter: <CollectionSidebarFooter label={t('mcp.sidebar.hint')} navigateLabel={t('disc.sidebar.navigate')} searchLabel={t('disc.sidebar.searchShortcut')} />,

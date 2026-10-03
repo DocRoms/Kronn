@@ -186,6 +186,33 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
 
+/// `metadata` keys a skill written by Kronn carries for Kronn's own use: the
+/// Agent Skills format keeps `name` for the folder slug, so the display name,
+/// icon, category and attribution live here.
+pub(crate) const KRONN_NAME_KEY: &str = "kronn-name";
+pub(crate) const KRONN_ICON_KEY: &str = "kronn-icon";
+pub(crate) const KRONN_CATEGORY_KEY: &str = "kronn-category";
+pub(crate) const KRONN_EXTERNAL_KEY: &str = "kronn-external";
+pub(crate) const KRONN_SOURCE_URL_KEY: &str = "kronn-source-url";
+
+/// The lowercase word a category is written as in a skill file.
+pub(crate) fn category_str(category: &SkillCategory) -> &'static str {
+    match category {
+        SkillCategory::Language => "language",
+        SkillCategory::Domain => "domain",
+        SkillCategory::Business => "business",
+    }
+}
+
+fn category_from_str(value: &str) -> Option<SkillCategory> {
+    match value.trim().to_lowercase().as_str() {
+        "language" => Some(SkillCategory::Language),
+        "domain" => Some(SkillCategory::Domain),
+        "business" => Some(SkillCategory::Business),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
     let trimmed = raw.trim_start();
     if !trimmed.starts_with("---") {
@@ -217,7 +244,7 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
         }
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
-            name = val.trim().to_string();
+            name = crate::core::agent_skill::decode_scalar(val);
         } else if let Some(val) = line.strip_prefix("description:") {
             description = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("icon:") {
@@ -246,6 +273,36 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
             if !v.is_empty() {
                 source_url = Some(v);
             }
+        }
+    }
+
+    // A skill in the Agent Skills format keeps what is Kronn's own under
+    // `metadata` and may quote or fold its values: read those, they win over
+    // the bare line reading above.
+    if let Ok(standard) = crate::core::agent_skill::parse(raw) {
+        let kronn = |key: &str| standard.metadata.get(key).filter(|value| !value.is_empty());
+        if let Some(value) = kronn(KRONN_NAME_KEY) {
+            name = value.clone();
+        }
+        if !standard.description.is_empty() {
+            description = standard.description.clone();
+        }
+        if let Some(value) = kronn(KRONN_ICON_KEY) {
+            icon = value.clone();
+        }
+        if let Some(value) = kronn(KRONN_CATEGORY_KEY) {
+            category = category_from_str(value).unwrap_or(category);
+        }
+        if let Some(value) = kronn(KRONN_EXTERNAL_KEY) {
+            external = matches!(value.as_str(), "true" | "yes" | "1");
+        }
+        if let Some(value) = kronn(KRONN_SOURCE_URL_KEY) {
+            source_url = Some(value.clone());
+        }
+        license = standard.license.or(license);
+        allowed_tools = standard.allowed_tools.or(allowed_tools);
+        if name.is_empty() {
+            name = standard.name;
         }
     }
 
@@ -445,16 +502,20 @@ pub fn release_skills_snapshot(run_id: &str) {
     SKILL_SNAPSHOTS.release(run_id);
 }
 
-fn render_skills_prompt(skills: &[Skill]) -> String {
+fn render_skills_block(header: &str, skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    let mut prompt = String::from("=== Active Skills ===\n\n");
+    let mut prompt = format!("=== {header} ===\n\n");
     for skill in skills {
         prompt.push_str(&format!("--- {} ---\n{}\n\n", skill.name, skill.content));
     }
     prompt
+}
+
+fn render_skills_prompt(skills: &[Skill]) -> String {
+    render_skills_block("Active Skills", skills)
 }
 
 /// Build the combined skill prompt text for injection.
@@ -468,12 +529,12 @@ pub fn build_skills_prompt_for_run(run_id: &str, skill_ids: &[String]) -> String
     render_skills_prompt(&get_skills_snapshot(run_id, skill_ids))
 }
 
-fn render_skills_prompt_compact(skills: &[Skill]) -> String {
+fn render_skills_block_compact(header: &str, skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
 
-    let mut prompt = String::from("=== Skills ===\n");
+    let mut prompt = format!("=== {header} ===\n");
     for skill in skills {
         // Take first 2-3 meaningful lines (up to ~200 chars) for better context
         let mut summary = String::new();
@@ -496,6 +557,32 @@ fn render_skills_prompt_compact(skills: &[Skill]) -> String {
         prompt.push_str(&format!("[{}: {}]\n", skill.name, summary));
     }
     prompt
+}
+
+fn render_skills_prompt_compact(skills: &[Skill]) -> String {
+    render_skills_block_compact("Skills", skills)
+}
+
+/// `prompt` (the catalog skills' text, possibly empty or a native-files hint)
+/// followed by the skills a project's repository holds (KT-923), laid out like
+/// the catalog's — full for an agent that takes them, compact for one with a
+/// small context window. They get a block of their own: the native-files hint
+/// says nothing about a `SKILL.md` Kronn did not write, so this text is what
+/// makes sure the agent reads it.
+pub fn append_repository_skills_prompt(prompt: String, skills: &[Skill], compact: bool) -> String {
+    if skills.is_empty() {
+        return prompt;
+    }
+    let block = if compact {
+        render_skills_block_compact("Repository Skills", skills)
+    } else {
+        render_skills_block("Repository Skills", skills)
+    };
+    if prompt.is_empty() {
+        block
+    } else {
+        format!("{prompt}\n{block}")
+    }
 }
 
 /// Build a compact skills prompt for agents with small context windows.
@@ -594,8 +681,15 @@ pub fn save_custom_skill(
 
     let slug = unique_skill_slug(&dir, name)?;
     let id = format!("custom-{}", slug);
-    let file_content =
-        render_skill_markdown(name, description, icon, category, content, license, allowed_tools);
+    let file_content = render_skill_markdown(
+        name,
+        description,
+        icon,
+        category,
+        content,
+        license,
+        allowed_tools,
+    );
 
     let path = dir.join(format!("{}.md", slug));
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
@@ -636,8 +730,15 @@ pub fn update_custom_skill(
         return Err(format!("Skill '{}' not found", id));
     }
 
-    let file_content =
-        render_skill_markdown(name, description, icon, category, content, license, allowed_tools);
+    let file_content = render_skill_markdown(
+        name,
+        description,
+        icon,
+        category,
+        content,
+        license,
+        allowed_tools,
+    );
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
 
@@ -1093,6 +1194,76 @@ mod tests {
         assert!(prompt.contains("=== Active Skills ==="));
     }
 
+    fn repository_skill(name: &str, content: &str) -> Skill {
+        Skill {
+            id: format!("repository:p1:{name}"),
+            name: name.into(),
+            description: String::new(),
+            icon: "📂".into(),
+            category: SkillCategory::Domain,
+            content: content.into(),
+            is_builtin: false,
+            token_estimate: 0,
+            license: None,
+            allowed_tools: None,
+            auto_triggers: None,
+            external: false,
+            source_url: None,
+        }
+    }
+
+    #[test]
+    fn repository_skills_leave_the_catalog_prompt_alone_when_there_are_none() {
+        assert_eq!(
+            append_repository_skills_prompt("catalog".into(), &[], false),
+            "catalog"
+        );
+        assert_eq!(
+            append_repository_skills_prompt(String::new(), &[], true),
+            ""
+        );
+    }
+
+    #[test]
+    fn repository_skills_follow_the_catalog_ones_in_a_block_of_their_own() {
+        let skills = [repository_skill("block-migration", "Move the block.")];
+        let alone = append_repository_skills_prompt(String::new(), &skills, false);
+        assert_eq!(
+            alone,
+            "=== Repository Skills ===\n\n--- block-migration ---\nMove the block.\n\n"
+        );
+
+        let catalog = build_skills_prompt(&["rust".into()]);
+        let both = append_repository_skills_prompt(catalog.clone(), &skills, false);
+        assert!(both.starts_with(&catalog));
+        assert!(
+            both.contains("=== Active Skills ===") && both.contains("=== Repository Skills ===")
+        );
+        assert!(both.ends_with(&alone));
+
+        // Even when the catalog's part is only the native-files hint: a
+        // SKILL.md Kronn did not write is not what that hint points at.
+        let hinted = append_repository_skills_prompt(
+            "For this task, prioritize your rust skills.".into(),
+            &skills,
+            false,
+        );
+        assert!(hinted.contains("Move the block."));
+    }
+
+    #[test]
+    fn repository_skills_are_summarised_for_a_small_context_agent() {
+        let skills = [repository_skill(
+            "block-migration",
+            "Move the block.\nThen check it.",
+        )];
+        let prompt = append_repository_skills_prompt(String::new(), &skills, true);
+        assert_eq!(
+            prompt,
+            "=== Repository Skills ===\n[block-migration: Move the block. Then check it.]\n"
+        );
+    }
+
     #[test]
     fn new_language_skills_exist() {
         for id in ["java", "kotlin", "swift", "csharp"] {
@@ -1109,6 +1280,32 @@ mod tests {
             assert!(skill.is_some(), "Domain skill '{}' must exist", id);
             assert_eq!(skill.unwrap().category, SkillCategory::Domain);
         }
+    }
+
+    #[test]
+    fn a_standard_agent_skill_keeps_kronns_fields_under_metadata() {
+        let raw = "---\nname: review\ndescription: \"Review \\\"carefully\\\".\"\nlicense: \"MIT\"\nallowed-tools: \"Bash Read\"\nmetadata:\n  kronn-name: \"Review Diffs\"\n  kronn-icon: \"🔍\"\n  kronn-category: \"language\"\n  kronn-external: \"true\"\n  kronn-source-url: \"https://example.test/skill\"\n---\n\nRead the diff.\n";
+        let skill = parse_skill_markdown("review", raw, false).unwrap();
+        assert_eq!(skill.name, "Review Diffs");
+        assert_eq!(skill.description, "Review \"carefully\".");
+        assert_eq!(skill.icon, "🔍");
+        assert_eq!(skill.category, SkillCategory::Language);
+        assert_eq!(skill.license.as_deref(), Some("MIT"));
+        assert_eq!(skill.allowed_tools.as_deref(), Some("Bash Read"));
+        assert!(skill.external);
+        assert_eq!(
+            skill.source_url.as_deref(),
+            Some("https://example.test/skill")
+        );
+        assert_eq!(skill.content, "Read the diff.");
+    }
+
+    #[test]
+    fn a_plain_standard_skill_is_named_after_its_header() {
+        let raw = "---\nname: \"3d-models\"\ndescription: >\n  Model in\n  three dimensions.\n---\nBody.\n";
+        let skill = parse_skill_markdown("3d-models", raw, false).unwrap();
+        assert_eq!(skill.name, "3d-models");
+        assert_eq!(skill.description, "Model in three dimensions.");
     }
 
     #[test]

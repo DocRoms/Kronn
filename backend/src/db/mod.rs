@@ -47,6 +47,7 @@ pub mod quick_exec_runs;
 pub mod quick_execs;
 pub mod quick_prompts;
 pub mod repository_resources;
+pub mod resource_changes;
 pub mod resource_identities;
 pub mod review_ledger;
 pub mod run_outcome;
@@ -103,9 +104,17 @@ pub struct Database {
     /// webhooked these failures died with them.
     boot_interrupted: Mutex<Vec<workflows::ReconciledRun>>,
     catalog_refresh_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Raised whenever the write connection changes a row a repository
+    /// resource is rendered from — see [`resource_changes`].
+    resource_changes: Arc<resource_changes::ResourceChanges>,
 }
 
 impl Database {
+    /// The signal of resource writes, for whoever has to react to them.
+    pub fn resource_changes(&self) -> Arc<resource_changes::ResourceChanges> {
+        Arc::clone(&self.resource_changes)
+    }
+
     /// Open (or create) the database file in the Kronn data directory.
     pub fn open() -> Result<Self> {
         let dir = config::config_dir()?;
@@ -119,12 +128,15 @@ impl Database {
         let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         migrations::run(&conn)?;
+        let resource_changes = Arc::new(resource_changes::ResourceChanges::default());
+        resource_changes::watch(&conn, &resource_changes);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             read_conn: None,
             path: PathBuf::from(":memory:"),
             boot_interrupted: Mutex::new(Vec::new()),
             catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
+            resource_changes,
         })
     }
 
@@ -282,12 +294,17 @@ impl Database {
             }
         };
 
+        // Watched once everything the open itself writes (migrations, the
+        // boot reconcile) is behind: the warm-up starts from what is there.
+        let resource_changes = Arc::new(resource_changes::ResourceChanges::default());
+        resource_changes::watch(&conn, &resource_changes);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             read_conn,
             path: path.clone(),
             boot_interrupted: Mutex::new(boot_interrupted),
             catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
+            resource_changes,
         })
     }
 

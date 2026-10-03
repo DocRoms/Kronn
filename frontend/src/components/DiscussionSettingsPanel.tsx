@@ -41,6 +41,7 @@ import type {
   Skill,
 } from '../types/generated';
 import { ProfileTooltip } from './ProfileTooltip';
+import { DiscussionSkillPicker } from './DiscussionSkillPicker';
 import './DiscussionToolPanel.css';
 import './DiscussionSettingsPanel.css';
 
@@ -352,37 +353,31 @@ export function DiscussionSettingsPanel({
             </ConfigAccordion>
           )}
 
-          {availableSkills.length > 0 && (
+          {(availableSkills.length > 0 || discussion.project_id) && (
             <ConfigAccordion
               icon={<Zap size={12} />}
               title={t('skills.selectSkills')}
               count={skillCount}
               expanded={expandedSection === 'skills'}
               onToggle={() => setExpandedSection(current => current === 'skills' ? null : 'skills')}
+              bare
             >
-              {availableSkills.map(skill => {
-                const active = (discussion.skill_ids ?? []).includes(skill.id);
-                return (
-                  <button
-                    key={skill.id}
-                    type="button"
-                    className="disc-toggle-pill"
-                    data-active={active}
-                    data-color="accent"
-                    onClick={() => {
-                      const current = discussion.skill_ids ?? [];
-                      void updateDiscussion({
-                        skill_ids: active
-                          ? current.filter(id => id !== skill.id)
-                          : [...current, skill.id],
-                      });
-                    }}
-                  >
-                    {active && <Check size={8} />}
-                    {skill.icon} {skill.name}
-                  </button>
-                );
-              })}
+              <DiscussionSkillPicker
+                projectId={discussion.project_id}
+                projects={projects}
+                catalog={availableSkills}
+                selectedIds={discussion.skill_ids ?? []}
+                onToggle={skillId => {
+                  const current = discussion.skill_ids ?? [];
+                  void updateDiscussion({
+                    skill_ids: current.includes(skillId)
+                      ? current.filter(id => id !== skillId)
+                      : [...current, skillId],
+                  });
+                }}
+                t={t}
+                chipClassName="disc-toggle-pill"
+              />
             </ConfigAccordion>
           )}
 
@@ -553,6 +548,7 @@ function ConfigAccordion({
   expanded,
   onToggle,
   children,
+  bare = false,
 }: {
   icon: ReactNode;
   title: string;
@@ -560,6 +556,8 @@ function ConfigAccordion({
   expanded: boolean;
   onToggle: () => void;
   children: ReactNode;
+  /** The content lays itself out (no chip wall around it). */
+  bare?: boolean;
 }) {
   return (
     <div className="disc-settings-accordion">
@@ -569,7 +567,7 @@ function ConfigAccordion({
         <span>{title}</span>
         {count > 0 && <strong>{count}</strong>}
       </button>
-      {expanded && <div className="disc-settings-chips">{children}</div>}
+      {expanded && (bare ? children : <div className="disc-settings-chips">{children}</div>)}
     </div>
   );
 }

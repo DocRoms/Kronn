@@ -1277,8 +1277,7 @@ mod bidirectional_link_tests {
         // never attach "(original kind: api)" right after A's name (which
         // read as if it described A instead of B).
         assert_eq!(
-            reverse.description,
-            "↩ Auto-linked from Frontend — Backend is the api for Frontend",
+            reverse.description, "↩ Auto-linked from Frontend — Backend is the api for Frontend",
             "the direction must be unambiguous: B (Backend) is the api, FOR A (Frontend)"
         );
     }

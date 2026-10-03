@@ -535,9 +535,8 @@ pub fn upsert_probe_result(
 /// reused across every row in `list_configs_display` to avoid a query per
 /// config.
 fn list_last_probes(conn: &Connection) -> Result<HashMap<String, Vec<McpLastProbe>>> {
-    let mut stmt = conn.prepare(
-        "SELECT config_id, access, ok, code, summary, tested_at FROM mcp_probe_results",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT config_id, access, ok, code, summary, tested_at FROM mcp_probe_results")?;
     let rows = stmt.query_map([], |row| {
         let config_id: String = row.get(0)?;
         let access: String = row.get(1)?;
@@ -631,7 +630,11 @@ pub fn list_configs_display(
                 // Orphaned config (server row missing): no capability to
                 // offer, badge falls back to the same default the frontend
                 // used when it couldn't resolve a registry descriptor.
-                None => (Vec::new(), PluginKind::default(), CredentialSource::default()),
+                None => (
+                    Vec::new(),
+                    PluginKind::default(),
+                    CredentialSource::default(),
+                ),
             };
             let effective_preferred_interface = if interfaces.contains(&preferred_interface) {
                 preferred_interface

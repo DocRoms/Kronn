@@ -104,11 +104,10 @@ pub async fn execute_collect_api_data_step(
                 child_context.set(name.clone(), rendered);
             }
 
-            let saved_exec = if source.quick_exec.is_none()
-                && !source.quick_exec_id.trim().is_empty()
-            {
-                let quick_exec_id = source.quick_exec_id.clone();
-                match state
+            let saved_exec =
+                if source.quick_exec.is_none() && !source.quick_exec_id.trim().is_empty() {
+                    let quick_exec_id = source.quick_exec_id.clone();
+                    match state
                     .db
                     .with_read_conn(move |conn| {
                         let exec = crate::db::quick_execs::get_quick_exec(conn, &quick_exec_id)?;
@@ -142,9 +141,9 @@ pub async fn execute_collect_api_data_step(
                         .with_kind(source_kind)
                     }
                 }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
             let inline_exec = source.quick_exec;
             let exec_config = inline_exec
                 .map(|exec| {

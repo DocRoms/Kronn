@@ -155,6 +155,8 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     started_at: '2026-09-23T15:40:21Z',
     duration_ms: 7_800,
     succeeded: true,
+    session_id: null,
+    cost_usd: null,
     ...over,
   });
 

@@ -30,10 +30,13 @@ test('header and row overflow menus open on a direct click', async ({ page, requ
   const headerButton = page.getByRole('button', { name: /autres actions|more actions/i });
   await expect(headerButton).toBeVisible();
   await headerButton.click();
-  const headerMenu = page.locator('.disc-sidebar-header-menu');
+  // The header menu is the shared CollectionShell one: a role="menu" named
+  // like its trigger.
+  const headerMenu = page.getByRole('menu', { name: /autres actions|more actions/i });
   await expect(headerMenu).toBeVisible();
 
   await page.keyboard.press('Escape');
+  await expect(headerMenu).toBeHidden();
   const row = page.locator(`[data-tour-disc-id="${discussionId}"]`).first();
   await expect(row).toBeVisible();
   const rowButton = row.locator('.disc-item-more-btn');

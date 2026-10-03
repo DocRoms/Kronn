@@ -110,6 +110,46 @@ afterEach(() => {
 });
 
 describe('ExternalApiSection', () => {
+  it.each(['draft', 'saved'] as const)('shows a localized billing error for a %s connection and allows a new test', async mode => {
+    listMock.mockResolvedValue(mode === 'saved'
+      ? [conn({ id: 'mimo', endpoint: 'https://api.xiaomimimo.com', has_credential: true })]
+      : []);
+    testMock.mockResolvedValueOnce({
+      ok: false,
+      status: 'billing_error',
+      models: [],
+      catalog: [],
+      hint: 'The provider requires payment (HTTP 402).',
+    });
+    renderSection();
+    if (mode === 'draft') {
+      fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+      fireEvent.click(screen.getByTestId('ext-api-preset-other'));
+      fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://api.xiaomimimo.com/v1' } });
+      fireEvent.change(screen.getByTestId('ext-api-key'), { target: { value: 'sk-test-key' } });
+    }
+    const testId = mode === 'draft' ? 'ext-api-test' : 'ext-api-test-saved-mimo';
+    const resultId = mode === 'draft' ? 'ext-api-test-result' : 'ext-api-saved-test-result-mimo';
+    fireEvent.click(await screen.findByTestId(testId));
+    await waitFor(() => expect(screen.getByTestId(resultId)).toHaveAttribute('data-status', 'billing_error'));
+    expect(screen.getByTestId(resultId)).toHaveTextContent('config.extApi.billingError');
+    expect(screen.getByTestId(resultId)).not.toHaveTextContent('config.extApi.noModels');
+    expect(screen.getByTestId(resultId)).not.toHaveTextContent('The provider requires payment');
+    if (mode === 'draft') {
+      expect(screen.getByTestId('ext-api-tier-default')).toBeDisabled();
+    } else {
+      expect(screen.queryByTestId('ext-api-saved-models-mimo')).not.toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByTestId(testId));
+    await waitFor(() => expect(screen.getByTestId(resultId)).toHaveAttribute('data-status', 'success'));
+    expect(screen.getByTestId(resultId)).not.toHaveTextContent('config.extApi.billingError');
+    if (mode === 'draft') {
+      expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled();
+    } else {
+      expect(screen.getByTestId('ext-api-saved-models-mimo')).toHaveTextContent('model-a');
+    }
+  });
+
   it('keeps an absent saved text tier visible but unavailable after a successful test', async () => {
     listMock.mockResolvedValue([conn({ endpoint: 'https://saved.example.test', default_model: 'retired/model' })]);
     renderSection();

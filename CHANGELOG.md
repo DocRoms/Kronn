@@ -13,6 +13,44 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The Automation page lists the skills. "Skills" is a fifth type in the
+  sidebar Filter, with its count, next to Workflows, Quick APIs, Quick Prompts
+  and Quick Execs, and covers the built-in skills as well as the ones you
+  wrote. A skill sits under every project that lists it among its default
+  skills, and under "No project" when none does; the flat lists (Favorites,
+  Recent) show it once. Opening one shows its sheet in the main column: name,
+  description, category, the projects that use it, and its `SKILL.md` — rendered
+  as Markdown without raw HTML (the same rendering as a repository resource) or
+  as Source. Name and description are searchable, like the other types. The
+  sheet is for reading: no variable, no launch. A skill is still edited in
+  Config › Skills, which the sheet links to; a skill you wrote can be deleted
+  from its row or its sheet, a built-in one cannot. A skill has no pin on the
+  server, so its favorites are kept in this browser. Merging skills with Quick
+  Prompts stays KT-906 (KT-914).
+
+- Skills are real Agent Skills, written where agents look for them. Writing a
+  skill into the repository now produces `.agents/skills/<slug>/SKILL.md` in the
+  standard format (valid `name` and `description`, Kronn's own fields under
+  `metadata`), never `kronn/skills/`, which keeps only what has no native home.
+  A repository that already has `kronn/skills/<slug>` is offered the move, with
+  its lock entry, identity and approvals following the skill and no duplicate
+  left behind. The Skills tab gets "Migrate everything to .agents/skills" when
+  skills sit in `.claude/skills`, `.gemini/skills`, `.codex/skills`,
+  `.github/skills`, `.opencode/skill(s)`, `.cursor/skills` or `kronn/skills`:
+  a recap lists every move (source → target) and every conflict (same slug,
+  different contents — you pick the version, nothing is overwritten
+  silently) before anything is written, and nothing is committed
+  (KT-903).
+
+- Each Agent step attempt exposes the CLI session it ran in and what it cost:
+  `agent_provenance.attempts[].session_id` is the id Claude Code reports on its
+  `init` line, the name of its transcript, and `cost_usd` is priced like a
+  discussion reply (KT-894) — `null` with `cost_unknown_reason` when the
+  counters or the rate are missing. Callers no longer have to find transcripts
+  by the worktree name or a token added to the prompt. `task_exec_status` lists
+  the worker's CLI sessions, rework attempts and relaunches included
+  (`worker_sessions`, with their cost), and its compact view names the latest.
+
 - The project's repository resources (`GET /api/projects/:id/repository-resources`)
   now describe both sides of every item. Its `status` is one of
   `repository_only`, `kronn_only`, `up_to_date`, `repository_newer`,
@@ -20,12 +58,37 @@ Release notes for 0.9.3 and earlier are available in the
   found outside `kronn/`). Each item carries the repository date (last commit's
   author and date, else the file's mtime), the Kronn date and `aligned_at`; its
   `required_secrets` with whether Kronn's stored configs hold each name; its
-  ADR-005 level; a unified diff per file (`file_diffs`, the artifact's HTML
-  included) and, for workflows, Quick APIs and Quick Execs, a field-by-field
-  diff, both for the three states where the sides differ; and `write_preview`,
-  every path a publish would write, `docs/AGENTS.md` and the router skill
-  included. The listing also reports `can_write_repository` with its reason
-  and `uncommitted_managed_paths`.
+  ADR-005 level; and `write_preview`, every path a publish would write,
+  `docs/AGENTS.md` and the router skill included. The listing also reports
+  `can_write_repository` with its reason and `uncommitted_managed_paths`. What
+  differs is not in the listing: `GET .../repository-resources/comparison?kind=&id=`
+  returns, for the three states where the sides differ, a unified diff per file
+  (`file_diffs`, the artifact's HTML included) and, for workflows, Quick APIs
+  and Quick Execs, a field-by-field diff (`field_diff`). The Compare sheet asks
+  for it when it opens and shows a loading state meanwhile.
+- The sheet of a resource in the "AI & automation" tab (skill, Quick Prompt,
+  Quick Exec, Quick API, workflow, artifact) now shows the resource itself, under
+  its details: a "Repository / Kronn / Diff" picker over the file as the
+  repository holds it, as Kronn holds it (masked, as a publish would write it) or
+  what differs, using the same diff as the Compare sheet. A skill's `SKILL.md` is
+  rendered as Markdown, with a "Rendered / Source" switch; every other kind is
+  shown as text. A mode with nothing to show is off with the reason on hover
+  ("not in the repository", "not in Kronn", "identical"). The sheet opens on
+  Repository when only the repository has it, on Kronn when only Kronn has it or
+  when the two are identical, and on Diff when they differ, saying which side is
+  newer when only one moved. The text comes from
+  `GET .../repository-resources/comparison`, which now answers for every
+  resource, not only the ones that differ: `files` lists each file with its
+  `repository` and `kronn` text (either absent when that side has no file, cut
+  and flagged `truncated` past 512 KiB). Both sides are masked the same way,
+  the repository's too — a secret typed by hand into a file in Git never
+  reaches the texts, the diffs or the field view — while a `secret://NAME`
+  reference stays readable. The listing still carries no content (KT-913).
+- The skills the Kronn catalog provides that a project does not have yet
+  ("Available in Kronn, not in this project": built-in ones and the ones a user
+  wrote) open their sheet like every other row: the `SKILL.md` as Kronn holds
+  it, rendered or as source, with the repository mode off ("not in the
+  repository") and "Attach to the project" unchanged (KT-913).
 - A native skill outside `kronn/` can be used in Kronn without `kronn.lock`
   (`POST .../repository-resources/skills/use`: a read-only reference to its
   path) or copied into Kronn as a managed skill
@@ -33,9 +96,88 @@ Release notes for 0.9.3 and earlier are available in the
   repository and replaces an edited copy only with `overwrite_kronn_changes`).
   The same skill under several skill folders is grouped by slug, every path
   kept, and flagged when the copies differ.
+- The Automation sub-tab of a project's "AI & automation" tab filters by type
+  (All / QP / QA / QE / Workflow), each chip with its count. It stacks with the
+  location filter and the search, and every chip counts what choosing it would
+  show given the others.
+- The global Automation page filters by state (All / Favorites / Active /
+  Inactive; only a disabled workflow is inactive) next to the type and project
+  filters, and sorts its sidebar by name, last modification or type (favorites
+  stay first). On a screen narrower than 640 px, the project tab's filters fold
+  behind one "Filters (n)" button.
+- `task_exec_update_validations({task_execution_id, validations, reason})`: the
+  principal replaces the validations of an existing execution without
+  relaunching it. The set replaces the current one, is held to the launch rules,
+  and is journaled (`validations_replaced`) with the actor, the reason and the
+  previous set; the room, the worktree, the attempts and the earlier validation
+  results are untouched. It is refused while an integration runs, once the
+  execution is terminal, and for a campaign run's shared gates.
+- `task_exec_reassign({task_execution_id, validations, reason})`: the principal
+  replaces the validations of an existing execution without relaunching it, with
+  `validations` in place of `worker` (one change per call). The set replaces the
+  current one, is held to the launch rules, and is journaled
+  (`validations_replaced`) with the actor, the reason and the previous set; the
+  room, the worktree, the attempts and the earlier validation results are
+  untouched. It is refused while an integration runs, once the execution is
+  terminal, and for a campaign run's shared gates. It is a change of an existing
+  tool rather than a new one so the MCP catalogue does not grow.
+- `task_exec_prepare` accepts the `validations` it will launch with and answers
+  `launchable: false` (reason `invalid_validations`) for one that could never run.
+- `tool_manual({tool: "task_exec_prepare"})` now states how a validation runs: one
+  allowlisted binary and literal arguments, no shell, from the root of the
+  worktree, with `pnpm --dir …` / `cargo … --manifest-path … --target-dir …` as
+  the forms that replace `cd … &&` and `VAR=…`.
+- Resources of a project's repository listing now say what they are linked to
+  (KT-905). Each item of `GET /api/projects/:id/repository-resources` carries
+  `uses` (what a workflow's steps or an Artifact's action blocks reference:
+  Quick Prompts, Quick APIs, Quick Execs, sub-workflows, Artifacts) and
+  `used_by`, as `{ kind, id, slug, name, missing }`; a reference to something
+  the project does not hold is kept and flagged `missing`. A row shows a
+  discreet "3 linked" count and its sheet lists "Uses" and "Used by", each
+  entry opening the linked resource. Ticking a resource ticks everything it
+  needs (recursively, loops included) with a "3 linked items added" line; a
+  resource a ticked one still needs cannot be unticked ("required by
+  nightly-triage"); "Align all" follows the same rule. Writing or loading a
+  single resource announces its dependencies and includes them by default;
+  leaving them out warns that it will only partly work.
 
 ### Changed
 
+- The Plugins sidebar no longer carries a per-project tree, so each plugin is
+  listed once (a global plugin used to appear once per project, and again
+  under "No project"). It is a flat list: Favorites and "Recently tested"
+  (both collapsible, and taken out of the full list) then "All plugins", each
+  row keeping its scope chips ("All projects · 3 projects"). Project, Health
+  (error / to check / ready) and Local sync (available in local CLIs / not
+  synced) join Type in the filter panel; the filter icon stays lit while one is
+  set, and "Clear filters" resets them all. The Project filter drives the
+  overview panel, whose summary and "Test all" / "Test the project" button
+  follow it. A plugin's scope is now edited only from the Access tab of its
+  sheet.
+- The global Automation page's search, Filter and Sort are back in the sidebar,
+  under the title, as on Plugins and Discussions. The Filter panel unfolds
+  under the search with a full-width select each for Type (with counts), State
+  and Project, and "Clear filters"; the icon stays lit while one is set. The
+  filter bar KT-904 had put above the list is removed, and `/` still reaches
+  the search.
+- The Automation sidebar is regrouped and lighter (KT-916). Under the search, a
+  "Group by" control — Type, Project or None, Type by default and remembered in
+  this browser — splits the list into collapsible groups (a coloured dot, the
+  name and the count), or keeps it flat. The panel of three selects and the
+  separate Sort button are gone: the filters are chips on a line that wraps —
+  a type chip that reads "All" until you pick one (its list shows each type with
+  its count), "Pinned", "Active" and "Recent" toggles that stack with it and with
+  the search, and "+ Project", which turns into a removable `project ×` chip.
+  "Clear filters" appears only while a chip is set. Rows are 44 px: name, then
+  the trigger, the step count and the state of the last run for a workflow; the
+  pin and the ⋯ menu still show on hover. The Favorites and Recent sections are
+  replaced by the "Pinned" and "Recent" chips ("Recent" keeps the last 20
+  automations you opened, latest first). The order is set from the header's ⋯
+  menu: name, last modified, last opened, and reverse. A skill still sits under
+  every project that lists it. The type list is now in the order Workflows,
+  Quick Prompts, Quick APIs, Quick Execs, Skills, and the "Inactive" state
+  filter is gone (an inactive workflow is shown by its ○ icon; "Active" hides
+  it).
 - `not_published`, `repository_modified` and `kronn_modified` are now
   `kronn_only`, `repository_newer` and `kronn_newer`; a resource that exists
   only in the repository is `repository_only`. A resource that exists on both
@@ -62,9 +204,118 @@ Release notes for 0.9.3 and earlier are available in the
   tokens on the first call and on every re-read. A native discussion turn is off
   by default too; start the backend with `KRONN_CLAUDE_AUTO_MEMORY=1` to keep it
   there. See [Claude auto-memory](docs/operations/claude-auto-memory.md).
+- The repository resources of a project are masked ahead of the first listing
+  instead of on it. A background task renders the workflows, Quick Prompts,
+  Quick APIs, Quick Execs and Artifacts of every project a couple of seconds
+  after the backend starts, and again once they have stopped being edited
+  (from the API, an agent tool, an import or a workflow run alike, with a
+  debounce), filling the memory Kronn already keeps for that (capped at
+  48 MiB, and the task stops when it is nearly full). It never delays the
+  startup or a request — it reads the database in short slices, masks off its
+  lock, breathes between two resources and stops with the backend — so the
+  first listing after a restart reads from memory like the following ones.
+  Reads copy less: a rendering shares its document and files with that memory,
+  the workflow references, the approval fingerprint and the field diff no longer
+  copy the JSON they read, each resource and each repository file is read once
+  per listing, and only the project's own rows are read. Nothing changes in the
+  answers, byte for byte, nor in what is masked (KT-915).
 
 ### Fixed
 
+- The Automation sidebar folds every group, the first one included (KT-921).
+  The group that held the open automation was forced open, and the first group
+  (Workflows) almost always does: clicking its header did nothing. A group now
+  folds and unfolds like the others, whatever it holds, by type or by project;
+  the open automation stays open in the main column. A search or a multiple
+  selection still lays the groups open. With "None" there is no group, hence
+  nothing to fold.
+
+- The Skills type lists the skills a project actually uses, wherever they come
+  from (KT-921). A native skill of a repository that you "used in Kronn" from
+  the AI & automation tab (`block-migration` in `.agents/skills/`, say) had no
+  place on the Automation page, which only read the Kronn catalog and the
+  projects' default skills. It now sits under its project, with where it lives
+  ("Repository · .agents/skills"), and its sheet shows the `SKILL.md` read from
+  the repository — masked and rendered as safe Markdown like any repository
+  file, and read only for a skill the project really uses. So does a skill Kronn
+  published into a repository (`kronn.lock`). Such a skill is edited in its
+  repository: the sheet offers neither the Config link nor a delete. New routes:
+  `GET /api/projects/used-skills` (all projects at once, two small reads each)
+  and `GET /api/projects/:id/repository-resources/skills/content`.
+
+- The Automation list no longer shows the whole skills catalog (KT-921). In
+  "All" and in Skills, only the skills used by at least one project are listed
+  — attached, referenced from a repository, or published into it. The others
+  wait at the bottom, folded, under "Voir les skills disponibles (N)", in the
+  three groupings. A search still finds them and lays the section open; the
+  type and project counters and the library total count what the list shows.
+
+- The skills of a discussion are grouped, searchable, and include the ones a
+  repository holds (KT-923). The skill picker of "New discussion" and of a
+  discussion's settings listed the whole catalog flat, without the native
+  skills of the project's repository (`block-migration` in `.agents/skills/`
+  could not be picked). Both now share one picker with the Automation page's
+  logic: "Utilisés par ce projet" first (attached, referenced from the
+  repository or published, with "Dépôt · .agents/skills" for a repository
+  skill), then the skills already ticked, then the rest of the catalog by
+  category behind "Voir les skills disponibles (N)". A search on the name or
+  the description lays out what matches; a discussion with no project shows the
+  catalog by category. Nothing is fixed in the front: the lists are read from
+  `GET /api/skills` and `GET /api/projects/used-skills` each time the picker
+  opens, the section follows the project chosen in the form at once, and a skill
+  used, published or attached since — or gone from the repository — shows or
+  disappears on the next opening, without reloading the page. A ticked skill
+  that no longer exists stays visible, flagged, so it can be removed. A
+  repository skill is stored as `repository:<project>:<slug>` in the
+  discussion's `skill_ids`, and the agent really receives it: at each send the
+  backend reads its `SKILL.md` from the project's repository, for a path the
+  project uses only, never through a symbolic link or out of the repository,
+  masked like any repository text and cut at 64 KiB, then injects it in a
+  "Repository Skills" block of the prompt (compact for the agents that take
+  compact skills). A skill it cannot load — another project's, no longer used,
+  file gone — is said at the head of the reply, never dropped silently. A
+  `SKILL.md` edited between two messages is read again by the second. Only the
+  `SKILL.md` is injected; skills with extra files stay KT-919.
+
+- The AI & automation tab of a project with many automations no longer takes
+  seconds to load (about 5.2 s in front_euronews, the same on every read).
+  Each read rendered every automation and masked its secrets again, and built
+  the diffs of every differing one. The listing now carries no diff, only the
+  status; the diffs come from `.../repository-resources/comparison` when
+  the Compare sheet opens. The masked rendering of a resource is kept in memory
+  under a fingerprint of the content it was made from, so the same content is
+  never masked twice, and text that cannot hold a secret no longer goes through
+  the masking regexes (a check on the literal every match must contain, with a
+  property test that the output is unchanged). Masking is otherwise the same:
+  the same patterns, the same non-leak tests. The links between resources
+  (`uses`, `used_by`, the "N linked" badge, the transfer announcements) stay in
+  the listing and do not depend on the diffs: on 120 resources, 40 of them
+  workflows of 15 steps, they cost about 2 ms when nothing is published and
+  about 9 ms when every resource has its repository file, out of about 100 ms.
+- An approved delivery the integration sends back (a validation that goes red, a
+  merge conflict) no longer stays in `ChangesRequested` with nobody working it
+  and nobody told. The send-back now re-activates the worker with the failing
+  command, its exit code and its output (a joined CLI is re-offered the next
+  attempt, a native worker is redispatched) and posts a notice, with the same
+  evidence, to the principal that approved. The principal can also run the
+  integration again on the same approved delivery with `task_exec_resume` when
+  the failure did not come from it (a flaky test, the environment): no new
+  delivery, the validations already green for that candidate are not re-run, and
+  it is refused once the worker committed or delivered again.
+- `task_exec_launch` no longer accepts a validation Quick Exec can never run
+  (`cd frontend && npx tsc -b`, `CARGO_TARGET_DIR=… cargo test`, a pipe, a
+  binary off the allowlist). It was accepted, the worker delivered, the review
+  approved, and the integration then refused the command (`` `cd` is not in the
+  Quick Exec allowlist ``) and sent an approved task back to `ChangesRequested`.
+  The launch, the campaign policy and the preflight now refuse it up front, with
+  the form that runs.
+- The brief of a worker with a shell no longer tells it to "run the validations".
+  It runs the targeted tests; the long validations the principal persisted are
+  played by Kronn at integration, and the worker commits and delivers in the same
+  turn without waiting on a background command. A full `cargo test` started in the
+  background outlived the 600 s shell limit, the worker handed the turn back to
+  wait for it and ended without delivering (`worker_completed_without_delivery`,
+  twice on KT-847).
 - The merge commit Kronn creates when it integrates a task branch now carries
   the `Signed-off-by` of the configured git identity, so a repository that
   enforces the DCO no longer turns the release PR red on it.

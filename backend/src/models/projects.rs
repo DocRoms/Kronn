@@ -166,12 +166,6 @@ pub struct ProjectRepositorySkill {
     pub approval_required: bool,
     #[serde(default)]
     pub approved: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub diff: Option<String>,
-    /// One unified diff per differing file, for the same states as `diff`.
-    #[serde(default)]
-    pub file_diffs: Vec<RepositoryResourceFileDiff>,
     pub repository_paths: Vec<String>,
     /// True when this slug is present under more than one native skill root
     /// (`.claude/skills`, `.agents/skills`…) and those copies are not
@@ -235,21 +229,6 @@ pub struct ProjectRepositoryResource {
     pub approval_required: bool,
     #[serde(default)]
     pub approved: bool,
-    /// Real unified diff of the resource's main file (the rendered HTML for
-    /// an artifact). Present only for `repository_newer`, `kronn_newer` and
-    /// `conflict`; `file_diffs` carries every file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub diff: Option<String>,
-    /// One unified diff per differing file — an artifact's `artifact.yaml`
-    /// and `index.html` each get their own entry.
-    #[serde(default)]
-    pub file_diffs: Vec<RepositoryResourceFileDiff>,
-    /// Field-by-field diff of the resource definition (trigger, commands,
-    /// agents, models…). Populated for workflow, Quick API and Quick Exec,
-    /// for the same three states as `diff`.
-    #[serde(default)]
-    pub field_diff: Vec<RepositoryResourceFieldDiff>,
     pub repository_paths: Vec<String>,
     /// Every path publishing this resource would write, including the
     /// shared scaffold (`kronn/INDEX.md`, `kronn/kronn.toml`, the router
@@ -279,6 +258,39 @@ pub struct ProjectRepositoryResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kronn_fingerprint: Option<String>,
+    /// What this resource references (a workflow's Quick Prompts, Quick APIs,
+    /// Quick Execs, sub-workflows and Artifacts; an Artifact's action blocks),
+    /// in stable identities. A reference to something the project does not
+    /// hold is listed too, flagged `missing`.
+    #[serde(default)]
+    pub uses: Vec<RepositoryResourceLink>,
+    /// The resources of this project that reference this one.
+    #[serde(default)]
+    pub used_by: Vec<RepositoryResourceLink>,
+}
+
+/// One edge of the reference graph between a project's resources, seen from
+/// either end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryResourceLink {
+    pub kind: ProjectRepositoryResourceKind,
+    /// The linked resource's listing `id`; the id the reference points at when
+    /// the target is `missing`.
+    pub id: String,
+    /// The linked resource's stable `(kind, slug)` identity. Absent when
+    /// `missing`: nothing known to derive it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub slug: Option<String>,
+    /// Display name; the referenced id when `missing`.
+    pub name: String,
+    /// Nothing the project holds answers to this reference: no resource of
+    /// this project in Kronn, none in its repository. It may still exist
+    /// elsewhere (another project, the global scope), where a publish or an
+    /// import would not carry it.
+    #[serde(default)]
+    pub missing: bool,
 }
 
 /// A secret name a resource requires (`secret://NAME` in its file, listed in
@@ -290,6 +302,56 @@ pub struct ProjectRepositoryResource {
 pub struct RequiredSecretStatus {
     pub name: String,
     pub configured: bool,
+}
+
+/// What the repository and Kronn hold for one resource, and what differs,
+/// computed when someone opens its sheet rather than on every listing: the
+/// listing only says *that* the two sides differ (its `status`), never *how*,
+/// and carries no content. The Kronn side is the masked rendering a publish
+/// would write, so it holds no secret value; the repository side is the file as
+/// it stands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryResourceComparison {
+    /// Every file of the resource with its text on each side that holds it —
+    /// the content itself, whether or not the two sides agree. Empty when
+    /// neither side has a file.
+    #[serde(default)]
+    pub files: Vec<RepositoryResourceFileContent>,
+    /// Real unified diff of the resource's main file (the rendered HTML for
+    /// an artifact). Present only for `repository_newer`, `kronn_newer` and
+    /// `conflict`; `file_diffs` carries every file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diff: Option<String>,
+    /// One unified diff per differing file — an artifact's `artifact.yaml`
+    /// and `index.html` each get their own entry.
+    #[serde(default)]
+    pub file_diffs: Vec<RepositoryResourceFileDiff>,
+    /// Field-by-field diff of the resource definition (trigger, commands,
+    /// agents, models…). Populated for workflow, Quick API and Quick Exec,
+    /// for the same three states as `diff`.
+    #[serde(default)]
+    pub field_diff: Vec<RepositoryResourceFieldDiff>,
+}
+
+/// One file of a resource as each side holds it. A side without the file has
+/// no text (`None`), which is how the sheet knows a mode has nothing to show.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryResourceFileContent {
+    pub path: String,
+    /// The file as it stands in the repository; absent when it is not there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub repository: Option<String>,
+    /// The masked rendering Kronn would write; absent when Kronn has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kronn: Option<String>,
+    /// A side was cut at the size bound. The diff always covers the whole file.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// The unified diff (repository side against Kronn side) of one file a
@@ -355,6 +417,165 @@ pub struct RepositoryNativeSkillRequest {
     /// from the repository file. Without it, that copy is never overwritten.
     #[serde(default)]
     pub overwrite_kronn_changes: bool,
+}
+
+/// A skill a project uses that its `default_skill_ids` do not tell: a native
+/// `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
+/// because Kronn published it into the repository. The Automation page reads
+/// these for every project at once, so nothing here renders or compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectUsedSkill {
+    pub project_id: String,
+    /// The catalog skill this is, when the catalog knows its slug (a skill
+    /// Kronn published from its catalog). `None`: only the repository holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub skill_id: Option<String>,
+    pub slug: String,
+    pub name: String,
+    /// The native skill folder holding it (`.agents/skills`).
+    pub root: String,
+    /// Repository-relative path of its `SKILL.md`.
+    pub relative_path: String,
+    /// "Use in Kronn" pointed at it: read from the source on every use.
+    pub referenced: bool,
+    /// `kronn.lock` lists it: Kronn wrote it into the repository.
+    pub published: bool,
+}
+
+/// The `SKILL.md` of a used skill, as the repository holds it now: masked the
+/// way every repository text is, and cut when it is larger than a sheet can
+/// carry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectSkillFile {
+    pub relative_path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+/// What "Migrate everything to `.agents/skills`" would do, computed without
+/// touching the repository: one line per skill folder that moves (source →
+/// target) and one per slug whose copies differ and need the user's choice.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationPlan {
+    /// Always `.agents/skills`.
+    pub target_root: String,
+    pub moves: Vec<SkillMigrationMove>,
+    /// Same slug, different contents: nothing is written for these until a
+    /// version is chosen, and nothing is overwritten unless it is chosen.
+    pub conflicts: Vec<SkillMigrationConflict>,
+    /// Skill folders that cannot be moved safely (a symbolic link, an
+    /// unreadable file…), left exactly where they are.
+    pub blocked: Vec<SkillMigrationBlocked>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationMove {
+    pub slug: String,
+    /// The skill folder as it is now, e.g. `.claude/skills/review`.
+    pub source: String,
+    /// Where it goes, e.g. `.agents/skills/review`.
+    pub target: String,
+    pub action: SkillMigrationAction,
+    /// The skill was written by Kronn in its former format and is rewritten
+    /// as a standard Agent Skill on the way.
+    pub converted: bool,
+    /// Kronn tracks this skill in `kronn.lock`: the lock and the alignment
+    /// follow it to the new location.
+    pub kronn_managed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SkillMigrationAction {
+    /// The folder moves to the target.
+    Move,
+    /// The target already holds the same content: the folder is only removed,
+    /// nothing is lost.
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationConflict {
+    pub slug: String,
+    pub target: String,
+    /// The distinct contents found for this slug, each with the folders that
+    /// hold it.
+    pub versions: Vec<SkillMigrationVersion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationVersion {
+    /// First 8 characters of the content hash.
+    pub fingerprint: String,
+    /// The skill folders holding this content, the target included.
+    pub paths: Vec<String>,
+    /// The target already holds this version: choosing it changes nothing
+    /// there.
+    pub at_target: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationBlocked {
+    pub path: String,
+    pub reason: SkillMigrationBlockReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SkillMigrationBlockReason {
+    /// The folder, or something in it, is a symbolic link.
+    Symlink,
+    /// A file could not be read, or is not a regular file.
+    Unreadable,
+    /// `.agents/skills/kronn` is Kronn's own router skill.
+    ReservedSlug,
+    /// The target folder exists but holds no `SKILL.md`.
+    TargetOccupied,
+    /// Too many files or too much data to move as one skill.
+    TooLarge,
+}
+
+/// The choices the user made in the recap.
+#[derive(Debug, Clone, Default, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationRequest {
+    /// One per conflict the user resolved. A conflict without one is skipped:
+    /// Kronn never picks a version.
+    #[serde(default)]
+    pub resolutions: Vec<SkillMigrationResolution>,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationResolution {
+    pub slug: String,
+    /// One of the folders listed in the conflict's versions: its content is
+    /// the one written to the target.
+    pub keep: String,
+}
+
+/// What a migration did. Nothing is committed: the files sit in the working
+/// tree, and the uncommitted-changes banner counts them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillMigrationResult {
+    pub moved: Vec<SkillMigrationMove>,
+    /// Slugs whose conflict had no choice: untouched.
+    pub unresolved: Vec<String>,
+    /// Folders left where they were because their content is not what the
+    /// target now holds.
+    pub kept: Vec<String>,
+    pub blocked: Vec<SkillMigrationBlocked>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

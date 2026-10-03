@@ -406,6 +406,52 @@ persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
 manifest.
 
+Kronn runs each validation at integration the way it runs a Quick Exec, not
+through a shell: `command` is split on whitespace into ONE binary and its
+literal arguments, the binary must be a bare name on the Quick Exec allowlist
+(`cargo`, `make`, `node`, `pnpm`, `npm`, `tsc`, `eslint`, `vitest`, `python3`,
+`git`, `gh`, `rtk` and a few probes; `cd` and `npx` are not on it), and the
+working directory is always the root of the execution's worktree. `&&`, `||`,
+`|`, `;`, `&`, redirections, `$(…)`, backticks and a leading `VAR=value` are
+shell syntax and are refused, since they would reach the binary as literal
+text. A subdirectory is reached with the tool's own option:
+`pnpm --dir frontend exec tsc -b --pretty false`,
+`cargo test --manifest-path backend/Cargo.toml --target-dir <dir>`.
+`task_exec_prepare` accepts the same optional `validations` and answers
+`launchable: false` with reason `invalid_validations` (naming the form that runs)
+for a command that could never run; `task_exec_launch` refuses it the same way
+before anything is created, so a bad gate is no longer found at integration,
+after the worker delivered and the review passed. The contract is served by
+`tool_manual({tool: "task_exec_prepare"})`.
+`[src: file: backend/src/core/quick_exec.rs]`
+`[src: file: backend/src/api/orchestration.rs]`
+
+To correct the gates of an execution that already exists, the principal calls
+`task_exec_reassign({task_execution_id, validations, reason})` — `validations`
+instead of `worker`, ONE change per call (both, or neither, is refused). The
+set REPLACES the current one (`[]` removes every gate), is held to the launch
+rules, and is journaled on the execution (`validations_replaced`, with the actor,
+the reason and the previous set); nothing is relaunched and earlier validation
+results stay as evidence. It is refused while the execution is Integrating,
+Validating or Applying, once it is Done, Failed or Cancelled, and for an
+execution of a campaign run, whose gates are the campaign's shared policy.
+`[src: file: backend/src/db/orchestration.rs]`
+The swap is a change of `task_exec_reassign` and not a tool of its own because
+every declaration is paid for on every session (`mcp_surface_budget.py`), and
+because that tool is already the principal's amendment of a live execution:
+principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
+have let a self-reviewing worker weaken its own gates and ties the swap to the
+persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
+`[src: file: backend/src/api/orchestration.rs]`
+
+The worker brief of a worker with a shell says who runs which gates: the worker
+runs the TARGETED tests, the long validations the principal persisted are played
+by Kronn at integration, and the worker commits and delivers in the same turn
+without ever waiting on a background command (its shell tool cuts a command at
+600 s, and a worker that hands the turn back to wait ends without delivering,
+`worker_completed_without_delivery`).
+`[src: file: backend/src/api/orchestration.rs]`
+
 `task_exec_status` returns `next_action.tool = task_exec_resume` only for a
 publicly recoverable Applying-origin checkpoint. The principal may then call
 `task_exec_resume`, which uses the backend's guarded resume path: it rechecks
@@ -417,12 +463,41 @@ retried. The tool cannot advance provisioning- or review-owned checkpoints.
 [src: file: backend/scripts/disc-introspection-mcp.py:921-941]
 [src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
+An approved delivery the integration sends back (a red validation, a merge
+conflict) is not left in `ChangesRequested`. In the same checkpoint the worker
+is re-activated on the next attempt with the failing command, its exit code and
+its output (a joined CLI through a control offer, parked
+`Blocked(awaiting_worker_acceptance)` until it re-accepts; a native worker
+through a fresh dispatch, back to `Working`), and the principal that approved
+gets a notice in the parent room, addressed to its pinned session, with the
+same evidence. When the failure did not come from the delivery, the principal
+calls `task_exec_resume`: the integration runs again on the same approved
+delivery, without a new delivery, and validations already green for that
+candidate are not run again. The relaunched worker is stood down first, and the
+call is refused once the worker committed or left changes since the send-back,
+or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
+the re-validation does not rewind the attempt the send-back opened.
+[src: file: backend/src/api/orchestration.rs]
+[src: file: backend/src/db/orchestration.rs]
+
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
 validations (command, exit code, duration) and a backend-derived
 `next_action`, trimmed to stay under 1 000 characters as the bridge prints it.
 The default `view: "full"` is unchanged: worker briefs and reviews read its
 lineage, attempts and manifests.
+
+`view: "full"` also lists `worker_sessions` (KT-911): one entry per CLI process
+the worker started, oldest first, with its `attempt_no`, the `dispatch_job_id`
+that launched it, its `agent_type`, its `session_id` (the id the CLI reported on
+its init line, which is the name of its transcript), and `cost_usd` (`null`
+with a `cost_unknown_reason` when unknown, and while the turn is still running).
+A rework starts a new attempt and a relaunched dispatch starts a new process;
+both keep their earlier entries. Only the execution's current dispatch may add
+one, so a replaced worker cannot relabel it. `view: "compact"` carries the
+`session_id` of the latest two. An HTTP worker has no CLI session and lists none.
+[src: file: backend/src/db/orchestration.rs]
+[src: file: backend/src/api/delivery_publication.rs]
 
 `task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
 the execution is in one of the `wait_for` statuses and adds

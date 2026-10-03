@@ -2,7 +2,20 @@ import type {
   ProjectRepositoryResource,
   ProjectRepositoryResources,
   ProjectRepositorySkill,
+  RepositoryResourceLink,
 } from '../../types/generated';
+
+/** A reference to another resource of the listing, by the target's fields. */
+export const link = (
+  target: Pick<ProjectRepositoryResource, 'id' | 'name' | 'kind'> & { slug?: string },
+  missing = false,
+): RepositoryResourceLink => ({
+  kind: target.kind,
+  id: target.id,
+  slug: missing ? undefined : target.slug ?? target.name.toLowerCase().replace(/\s+/g, '-'),
+  name: target.name,
+  missing,
+});
 
 export const resource = (overrides: Partial<ProjectRepositoryResource> & Pick<ProjectRepositoryResource, 'id' | 'name' | 'kind' | 'status'>): ProjectRepositoryResource => ({
   slug: overrides.name.toLowerCase().replace(/\s+/g, '-'),
@@ -10,11 +23,11 @@ export const resource = (overrides: Partial<ProjectRepositoryResource> & Pick<Pr
   adr_level: 'N1',
   approval_required: overrides.status === 'approval_required',
   approved: false,
-  file_diffs: [],
-  field_diff: [],
   repository_paths: [`kronn/${overrides.kind}/${overrides.name.toLowerCase().replace(/\s+/g, '-')}.yaml`],
   write_preview: [],
   required_secrets: [],
+  uses: [],
+  used_by: [],
   ...overrides,
 });
 
@@ -26,10 +39,9 @@ export const skill = (overrides: Partial<ProjectRepositorySkill> & Pick<ProjectR
   suggested: false,
   approval_required: false,
   approved: false,
-  file_diffs: [],
   repository_paths: [],
   repository_paths_diverge: false,
-  publication_path: `kronn/skills/${overrides.id}/SKILL.md`,
+  publication_path: `.agents/skills/${overrides.id}/SKILL.md`,
   write_preview: [],
   referenced: false,
   required_secrets: [],

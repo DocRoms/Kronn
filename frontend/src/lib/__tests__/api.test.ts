@@ -291,6 +291,32 @@ describe('api module', () => {
       );
     });
 
+    it('repositoryResourceComparison asks for one resource by kind and id, encoded', async () => {
+      mockFetchResponse({ file_diffs: [], field_diff: [] });
+      const { projects } = await getApi();
+      await projects.repositoryResourceComparison('proj-1', 'quick_exec', 'repository:quick_exec:a b');
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/projects/proj-1/repository-resources/comparison?kind=quick_exec&id=repository%3Aquick_exec%3Aa%20b',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('usedSkills lists them for every project, and usedSkillFile reads one SKILL.md by path, encoded', async () => {
+      mockFetchResponse([]);
+      const { projects } = await getApi();
+      await projects.usedSkills();
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/projects/used-skills',
+        expect.objectContaining({ method: 'GET' }),
+      );
+      mockFetchResponse({ relative_path: '.agents/skills/a b/SKILL.md', content: '# Skill', truncated: false });
+      await projects.usedSkillFile('proj-1', '.agents/skills/a b/SKILL.md');
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        '/api/projects/proj-1/repository-resources/skills/content?relative_path=.agents%2Fskills%2Fa%20b%2FSKILL.md',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
     it('gitCommit sends files and message', async () => {
       mockFetchResponse({ hash: 'abc1234', message: 'fix bug' });
       const { projects } = await getApi();

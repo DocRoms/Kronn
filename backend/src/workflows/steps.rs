@@ -29,6 +29,12 @@ struct AgentOutput {
     /// `None`: the runtime reported no usage for this run.
     tokens_used: Option<u64>,
     prompt_cache: runner::PromptCacheUsage,
+    /// The usage `tokens_used` came from, parts kept apart: an attempt's cost is
+    /// computed from these, never from the total (KT-894). `None` when the
+    /// runtime reported only a total, or nothing.
+    reported_usage: Option<runner::ReportedUsage>,
+    /// The cost the agent itself reported, when it gives one.
+    reported_cost_usd: Option<f64>,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
 }
@@ -1217,6 +1223,12 @@ async fn run_agent_with_timeout(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
     let id = provenance.attempts.len() as u32 + 1;
+    let (cost_usd, cost_unknown_reason) = attempt_cost(
+        &step.agent,
+        &runtime.observed_models,
+        runtime.resolved_model.as_deref().or(requested_model),
+        &result,
+    );
     provenance.attempts.push(WorkflowAgentAttempt {
         id,
         role,
@@ -1248,11 +1260,83 @@ async fn run_agent_with_timeout(
             .as_ref()
             .ok()
             .and_then(|output| output.prompt_cache.cache_write_prompt_tokens),
+        session_id: runtime.session_id,
+        cost_usd,
+        cost_unknown_reason,
     });
     result.map(|mut output: AgentOutput| {
         output.attempt_id = id;
         output
     })
+}
+
+/// What one finished attempt cost, or why that is unknown — priced exactly like
+/// a discussion reply (`core::pricing::price_reply`, KT-894): the agent's own
+/// figure when it reports one, else the detailed counters at the rates of the
+/// model that served it. Unknown is `None` plus a reason, never `0.0`.
+///
+/// The serving model is the one the provider reported when it reported exactly
+/// one; with none reported the resolved (else requested) model stands in, as it
+/// does for a reply. Several reported models leave one aggregate usage that no
+/// single rate prices.
+fn attempt_cost(
+    agent: &AgentType,
+    observed_models: &[String],
+    fallback_model: Option<&str>,
+    result: &Result<AgentOutput>,
+) -> (Option<f64>, Option<String>) {
+    let Ok(output) = result else {
+        return (
+            None,
+            Some("the attempt failed before the runtime reported its usage".into()),
+        );
+    };
+    let tokens_used = output.tokens_used.unwrap_or(0);
+    if tokens_used == 0 && output.reported_cost_usd.is_none() {
+        return (
+            None,
+            Some("the runtime reported no usage for this attempt".into()),
+        );
+    }
+    let model =
+        match observed_models {
+            [] => fallback_model,
+            [only] => Some(only.as_str()),
+            _ => return (
+                None,
+                Some(
+                    "several models served the attempt, so its aggregate usage cannot be priced"
+                        .into(),
+                ),
+            ),
+        };
+    let agent_label = serde_json::to_string(agent)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_string();
+    let counters = output.reported_usage.and_then(|usage| {
+        crate::core::pricing::TokenCounters::from_agent_report(
+            &agent_label,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.prompt_cache.cached_prompt_tokens,
+            usage.prompt_cache.cache_write_prompt_tokens,
+        )
+    });
+    let priced = crate::core::pricing::price_reply(
+        &agent_label,
+        model,
+        tokens_used,
+        output.reported_cost_usd,
+        counters,
+    );
+    let reason = match priced.cost_usd {
+        Some(_) => None,
+        None => priced
+            .cost_unknown
+            .map(|reason| reason.reason().to_string()),
+    };
+    (priced.cost_usd, reason)
 }
 
 /// 2026-06-10 — format a useful error when an agent process fails with an
@@ -1298,6 +1382,8 @@ async fn drive_agent_to_output(
     let is_stream_json = process.output_mode() == OutputMode::StreamJson;
     let mut stream_json_tokens: u64 = 0;
     let mut stream_json_cache = runner::PromptCacheUsage::default();
+    let mut stream_json_usage: Option<runner::ReportedUsage> = None;
+    let mut stream_json_cost: Option<f64> = None;
     let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
     // Tool-call accumulator (see run_agent_with_timeout's doc): Claude Code's
     // stream-json emits tool input as partial JSON deltas; we buffer them and
@@ -1322,11 +1408,19 @@ async fn drive_agent_to_output(
                         StreamJsonEvent::Usage {
                             input_tokens,
                             output_tokens,
+                            cost_usd,
                             prompt_cache,
-                            ..
                         } => {
                             stream_json_tokens = input_tokens + output_tokens;
                             stream_json_cache = prompt_cache;
+                            stream_json_usage = Some(runner::ReportedUsage {
+                                input_tokens,
+                                output_tokens,
+                                prompt_cache,
+                            });
+                            if let Some(cost) = cost_usd {
+                                stream_json_cost = Some(cost);
+                            }
                         }
                         StreamJsonEvent::TerminalError(failure) => {
                             stream_json_tokens = stream_json_tokens
@@ -1461,6 +1555,11 @@ async fn drive_agent_to_output(
     } else {
         process.reported_prompt_cache()
     };
+    let reported_usage = if stream_json_tokens > 0 {
+        stream_json_usage
+    } else {
+        process.reported_usage_counters()
+    };
     let tokens_used = if stream_json_tokens > 0 {
         Some(stream_json_tokens)
     } else if let Some(reported) = process.reported_token_usage() {
@@ -1487,6 +1586,8 @@ async fn drive_agent_to_output(
         text: output,
         tokens_used,
         prompt_cache,
+        reported_usage,
+        reported_cost_usd: stream_json_cost,
         native_tool_calls,
         runtime_notices: stderr_lines
             .into_iter()
@@ -2914,6 +3015,10 @@ mod drive_agent_to_output_tests {
 #[cfg(test)]
 #[path = "steps_provenance_test.rs"]
 mod provenance_tests;
+
+#[cfg(test)]
+#[path = "steps_attempt_session_test.rs"]
+mod attempt_session_tests;
 
 #[cfg(test)]
 mod http_native_tool_step_tests {

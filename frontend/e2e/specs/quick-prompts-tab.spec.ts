@@ -14,26 +14,30 @@
  */
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { WorkflowsPage } from '../pages/WorkflowsPage';
 
 test.describe('Quick Prompts section', () => {
   test('opens from the Automation sidebar and renders without crashing', async ({ page }) => {
     const dashboard = new DashboardPage(page);
+    const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
 
-    // The shared sidebar exposes the QP category through a stable tour anchor;
-    // `data-active` confirms the content panel switched to it.
-    const qpSection = page.locator('[data-tour-id="automation-kind-quick-prompt"]');
-    await expect(qpSection).toBeVisible({ timeout: 5_000 });
-    await qpSection.click();
-    await expect(qpSection).toHaveAttribute('data-active', 'true');
+    // The shared sidebar exposes the QP category on its type chip; the chip
+    // leaving "all" (`data-active`) confirms the list switched to it.
+    await expect(workflows.kindChip).toBeVisible({ timeout: 5_000 });
+    await expect(workflows.kindChip).toHaveAttribute('data-active', 'false');
+    await workflows.selectKind('quickPrompts');
+    await expect(workflows.kindChip).toHaveAttribute('data-value', 'quickPrompts');
+    await expect(workflows.kindChip).toHaveAttribute('data-active', 'true');
   });
 
   test('section content renders the create-QP CTA when not empty', async ({ page }) => {
     const dashboard = new DashboardPage(page);
+    const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
-    await page.locator('[data-tour-id="automation-kind-quick-prompt"]').click();
+    await workflows.selectKind('quickPrompts');
     // Wait for the QP section body to mount. We don't assert anything
     // schema-bound — just that the page didn't throw and a button
     // (any) is reachable. Catches a render-time TypeError that

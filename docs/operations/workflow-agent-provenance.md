@@ -39,6 +39,21 @@ Each attempt also keeps the prompt-cache reads and writes its runtime
 reported (`cached_prompt_tokens`, `cache_write_prompt_tokens`); the step result
 sums them over the attempts that reported one. `tokens_used` excludes them.
 
+Each attempt also names the CLI session it ran in (`session_id`) and what it
+cost (`cost_usd`, KT-911). `session_id` is the id a Claude Code process reports
+on its `system`/`init` line, which is the name of the transcript it writes under
+`~/.claude/projects/`; it is `null` for a runtime with no CLI session (HTTP
+providers) or one that died before its init line, and it is kept for failed
+attempts too. Relaunches and repair/escalation attempts each have their own.
+`cost_usd` is priced like a discussion reply (KT-894, `core::pricing::price_reply`):
+the agent's own figure when it reports one, else the four detailed counters
+(input, cache reads, cache writes, output) at the rates of the model the
+provider reported. It is `null`, never `0`, when it cannot be computed, and
+`cost_unknown_reason` then says why: a bare total, cache reads or writes not
+reported, no confirmed rate for the served model, no model, several served
+models (one aggregate usage no single rate prices), no usage reported, or an
+attempt that failed before reporting its usage.
+
 This records execution metadata on the completed step row. It is not an
 independent transaction journal of every in-flight provider request; abrupt
 process termination before the step result is saved may leave no provenance.

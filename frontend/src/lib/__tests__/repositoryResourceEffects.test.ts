@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { listing, resource, skill } from '../../components/__tests__/repositoryResourceFixtures';
-import { describeTransfer, type TransferKind } from '../repositoryResourceEffects';
+import { describeTransfer, transferSide, type TransferKind } from '../repositoryResourceEffects';
 import { allRows, buildRows } from '../repositoryResourceRows';
 
 const context = { kronnExists: true, formatDate: (iso?: string) => iso ?? '—' };
@@ -58,5 +58,42 @@ describe('transfer effects', () => {
     const lines = describeTransfer({ kind: 'use_native', rows }, { ...context, nativePath: '.agents/skills/x/SKILL.md' });
     expect(lines[0]).toMatchObject({ key: 'projects.repositoryResources.effect.usePath', args: ['.agents/skills/x/SKILL.md'] });
     expect(lines.map(line => line.tone)).toEqual(['write', 'commit', 'activation', 'loss']);
+  });
+
+  it('writing with linked items lists their files too and says how many come along', () => {
+    const data = listing({
+      resources: [
+        resource({ id: 'a', name: 'A', kind: 'workflow', status: 'kronn_only', repository_paths: ['kronn/workflows/a.yaml'], write_preview: ['kronn/workflows/a.yaml'] }),
+        resource({ id: 'b', name: 'B', kind: 'quick_prompt', status: 'kronn_only', repository_paths: ['kronn/prompts/b.md'], write_preview: ['kronn/prompts/b.md'] }),
+      ],
+    });
+    const [workflow, prompt] = allRows(buildRows(data));
+    const lines = describeTransfer({ kind: 'publish', rows: [workflow], linked: [prompt] }, context);
+    expect(lines[0].args).toEqual(['kronn/prompts/b.md, kronn/workflows/a.yaml']);
+    expect(lines[1]).toMatchObject({ tone: 'write', key: 'projects.repositoryResources.effect.linkedIncluded', args: [1] });
+    expect(describeTransfer({ kind: 'publish', rows: [workflow], linked: [] }, context).map(line => line.key.split('.').pop()))
+      .not.toContain('linkedIncluded');
+  });
+
+  it('loading with linked items says how many come along, and the repository stays untouched', () => {
+    const data = listing({
+      resources: [
+        resource({ id: 'a', name: 'A', kind: 'workflow', status: 'repository_only' }),
+        resource({ id: 'b', name: 'B', kind: 'quick_prompt', status: 'repository_only' }),
+      ],
+    });
+    const [workflow, prompt] = allRows(buildRows(data));
+    const keys = describeTransfer({ kind: 'import', rows: [workflow], linked: [prompt] }, context)
+      .map(line => line.key.split('.').pop());
+    expect(keys).toEqual(['repositoryUntouched', 'kronnCreates', 'linkedIncluded', 'commitNone', 'needsApproval', 'lossNone']);
+  });
+
+  it('only a one-resource transfer between the two sides has dependencies to announce', () => {
+    expect(transferSide('publish')).toBe('repository');
+    expect(transferSide('update_repository')).toBe('repository');
+    expect(transferSide('import')).toBe('kronn');
+    expect(transferSide('update_kronn')).toBe('kronn');
+    expect(['publish_selected', 'use_native', 'copy_native', 'attach'].map(kind => transferSide(kind as TransferKind)))
+      .toEqual([null, null, null, null]);
   });
 });

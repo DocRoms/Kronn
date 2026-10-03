@@ -1,4 +1,4 @@
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { NewDiscussionForm } from '../NewDiscussionForm';
 import type { Project, AgentDetection } from '../../types/generated';
@@ -7,6 +7,8 @@ import type { ExternalApiConnectionView } from '../../lib/api';
 
 vi.mock('../../lib/api', () => ({
   skills: { list: vi.fn().mockResolvedValue([]) },
+  // KT-923 — the skill picker reads what each project uses when it opens.
+  projects: { usedSkills: vi.fn().mockResolvedValue([]) },
   profiles: { list: vi.fn().mockResolvedValue([]) },
   directives: { list: vi.fn().mockResolvedValue([]) },
   // 0.8.6 phase 4 — NewDiscussionForm reads the saved default tier on
@@ -1328,5 +1330,110 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
       const currentTier = document.querySelector('.kr-agent-switch-current-tier') as HTMLElement;
       expect(currentTier.getAttribute('data-tier')).toBe('default');
     });
+  });
+});
+
+// KT-923 — the skill picker of the form: the project's own skills first (the
+// native skills of its repository included), following the project chosen.
+describe('NewDiscussionForm — skill picker', () => {
+  const CATALOG = [
+    { id: 'rust', name: 'Rust', description: 'Idiomatic Rust', icon: '🦀', category: 'Language', content: '', is_builtin: true, token_estimate: 0 },
+    { id: 'security', name: 'Security', description: 'Threat modelling', icon: '🔒', category: 'Domain', content: '', is_builtin: true, token_estimate: 0 },
+  ];
+  const usedBy = (project_id: string, slug: string, name: string) => ({
+    project_id, slug, name, root: '.agents/skills',
+    relative_path: `.agents/skills/${slug}/SKILL.md`, referenced: true, published: false,
+  });
+
+  afterEach(async () => {
+    const apiMod = await import('../../lib/api');
+    (apiMod.skills.list as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (apiMod.projects.usedSkills as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  });
+
+  const translate = (key: string, ...args: (string | number)[]) => (args.length ? `${key}:${args.join(',')}` : key);
+
+  const openSkillPicker = async (onSubmit = vi.fn()) => {
+    const apiMod = await import('../../lib/api');
+    (apiMod.skills.list as ReturnType<typeof vi.fn>).mockResolvedValue(CATALOG);
+    (apiMod.projects.usedSkills as ReturnType<typeof vi.fn>).mockResolvedValue([
+      usedBy('proj-git', 'block-migration', 'Block migration'),
+      usedBy('proj-local', 'hero-banner', 'Hero banner'),
+    ]);
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO, PROJECT_WITHOUT_REPO]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={translate}
+      />,
+    );
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    fireEvent.click(await waitFor(() => {
+      const toggle = document.querySelector('.disc-advanced-toggle') as HTMLElement | null;
+      if (!toggle) throw new Error('advanced toggle not rendered yet');
+      return toggle;
+    }));
+    fireEvent.click(screen.getByText('skills.selectSkills'));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  };
+
+  const chooseProject = (name: string) => {
+    fireEvent.focus(screen.getByRole('combobox', { name: 'disc.project' }));
+    fireEvent.click(screen.getByRole('option', { name }));
+  };
+  const usedSection = () => document.querySelector('[data-section="used"]');
+
+  it('shows the catalog by category before a project is chosen, then the project\'s skills first', async () => {
+    await openSkillPicker();
+    expect(usedSection()).toBeNull();
+    expect([...document.querySelectorAll('.skill-picker-group')].map(group => group.getAttribute('data-category')))
+      .toEqual(['Language', 'Domain']);
+
+    chooseProject(PROJECT_WITH_REPO.name);
+    expect(usedSection()).toHaveTextContent('disc.skillsUsedByProject');
+    expect(usedSection()).toHaveTextContent('Block migration');
+    expect(usedSection()).toHaveTextContent('automation.skill.originRepository:.agents/skills');
+    // The rest of the catalog waits behind the fold.
+    expect(screen.getByRole('button', { name: 'automation.skill.availableToggle:2' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('follows the project as it changes', async () => {
+    await openSkillPicker();
+    chooseProject(PROJECT_WITH_REPO.name);
+    expect(usedSection()).toHaveTextContent('Block migration');
+
+    chooseProject(PROJECT_WITHOUT_REPO.name);
+    expect(usedSection()).toHaveTextContent('Hero banner');
+    expect(usedSection()).not.toHaveTextContent('Block migration');
+  });
+
+  it('submits the repository skill under its stable id, and drops it when the project changes', async () => {
+    const onSubmit = vi.fn();
+    await openSkillPicker(onSubmit);
+    chooseProject(PROJECT_WITH_REPO.name);
+    fireEvent.click(screen.getByRole('button', { name: /Block migration/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'automation.skill.availableToggle:2' }));
+    fireEvent.click(screen.getByRole('button', { name: /Rust/ }));
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), { target: { value: 'Migrate the hero.' } });
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'proj-git',
+      skillIds: ['repository:proj-git:block-migration', 'rust'],
+    })));
+
+    // Another project's repository skill does not follow; a catalog one stays.
+    chooseProject(PROJECT_WITHOUT_REPO.name);
+    expect(document.querySelector('[data-missing="true"]')).toBeNull();
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    await waitFor(() => expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectId: 'proj-local',
+      skillIds: ['rust'],
+    })));
   });
 });

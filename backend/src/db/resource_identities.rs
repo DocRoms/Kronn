@@ -196,7 +196,10 @@ mod tests {
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM resource_identities", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 1, "reimporting the same slug must not duplicate the row");
+        assert_eq!(
+            rows, 1,
+            "reimporting the same slug must not duplicate the row"
+        );
     }
 
     #[test]
@@ -217,7 +220,10 @@ mod tests {
             lookup(&conn, "proj-a", "quick_prompt", "triage").unwrap(),
             Some("qp-a".into())
         );
-        assert_eq!(lookup(&conn, "proj-b", "quick_prompt", "triage").unwrap(), None);
+        assert_eq!(
+            lookup(&conn, "proj-b", "quick_prompt", "triage").unwrap(),
+            None
+        );
     }
 
     #[test]

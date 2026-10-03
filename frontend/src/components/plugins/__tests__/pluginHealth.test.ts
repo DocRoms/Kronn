@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { McpConfigDisplay } from '../../../types/generated';
-import { accessHealth, configHealth, latestPluginTest, visibleToPluginProject } from '../pluginHealth';
+import { accessHealth, configHealth, isAvailableLocally, latestPluginTest, visibleToPluginProject } from '../pluginHealth';
 
 const config = (overrides: Partial<McpConfigDisplay> = {}): McpConfigDisplay => ({
   id: 'config-1',
@@ -55,5 +55,12 @@ describe('plugin health projection', () => {
     expect(visibleToPluginProject(scoped, '__all__')).toBe(true);
     expect(visibleToPluginProject(config({ is_global: true }), '__none__')).toBe(true);
     expect(visibleToPluginProject(config({ include_general: false, project_ids: [] }), '__none__')).toBe(true);
+  });
+
+  it('counts a plugin as local when it is host-synced or reachable through a CLI', () => {
+    expect(isAvailableLocally(config({ interfaces: ['mcp'], host_sync: 'None' }))).toBe(false);
+    expect(isAvailableLocally(config({ interfaces: ['mcp'], host_sync: 'GlobalOnly' }))).toBe(true);
+    expect(isAvailableLocally(config({ interfaces: ['mcp'], host_sync: 'MirrorAll' }))).toBe(true);
+    expect(isAvailableLocally(config({ interfaces: ['cli'], host_sync: 'None' }))).toBe(true);
   });
 });

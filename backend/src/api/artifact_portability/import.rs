@@ -451,7 +451,8 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
     {
         bail!("The imported root Artifact must be a new resource");
     }
-    let project_key = crate::db::resource_identities::project_key(conn, request.project_id.as_deref())?;
+    let project_key =
+        crate::db::resource_identities::project_key(conn, request.project_id.as_deref())?;
     let mut planned = Vec::new();
     let mut observations = Vec::new();
     for source in resources {
@@ -470,7 +471,8 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
                 &kind_key(source.kind),
                 source.slug(),
             )?;
-            observations.push(json!({"kind":source.kind,"id":source.id,"prior_identity":prior_identity}));
+            observations
+                .push(json!({"kind":source.kind,"id":source.id,"prior_identity":prior_identity}));
             planned.push(PlannedResource {
                 target_id: Uuid::new_v4().to_string(),
                 entry: ArtifactImportEntry {

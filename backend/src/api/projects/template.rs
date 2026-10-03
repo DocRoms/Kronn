@@ -593,7 +593,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
-        write(&src.join("docs/AGENTS.md"), &"# {{PROJECT_NAME}}\n".repeat(20));
+        write(
+            &src.join("docs/AGENTS.md"),
+            &"# {{PROJECT_NAME}}\n".repeat(20),
+        );
         copy_dir_nondestructive(&src, &dst).unwrap();
         let body = std::fs::read_to_string(dst.join("docs/AGENTS.md")).unwrap();
         assert!(!body.contains("FIRST-RUN TASK"), "{body}");

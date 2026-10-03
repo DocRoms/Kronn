@@ -469,6 +469,17 @@ async fn orchestration_cli_tool_routes_require_server_verifiable_identity() {
                 "reason": "test"
             }),
         ),
+        // KT-839: replacing the gates rides the same route, so it needs the same
+        // server-verifiable identity — it must not be a way around it.
+        (
+            format!("/api/orchestration/tool/executions/{missing_execution}/reassign"),
+            serde_json::json!({
+                "source_agent": "",
+                "source_session_id": "",
+                "validations": [{"command": "cargo test"}],
+                "reason": "test"
+            }),
+        ),
     ];
 
     for (path, body) in calls {
@@ -2720,7 +2731,13 @@ async fn artifact_import_reuses_a_pre_migration_global_identity_when_importing_i
         .db
         .with_conn(move |conn| {
             kronn::db::quick_prompts::insert_quick_prompt(conn, &existing_quick_prompt)?;
-            kronn::db::resource_identities::upsert(conn, "", "quick_prompt", "qp-portable", "existing-qp")
+            kronn::db::resource_identities::upsert(
+                conn,
+                "",
+                "quick_prompt",
+                "qp-portable",
+                "existing-qp",
+            )
         })
         .await
         .unwrap();
@@ -2859,9 +2876,7 @@ async fn artifact_import_resolves_workflow_skill_profile_directive_ids_and_warns
         ("directive", "does-not-exist-directive"),
     ] {
         assert!(
-            warnings
-                .iter()
-                .any(|w| w["kind"] == kind && w["id"] == id),
+            warnings.iter().any(|w| w["kind"] == kind && w["id"] == id),
             "missing {kind} {id} must be signalled clearly: {warnings:?}"
         );
     }
@@ -3217,6 +3232,84 @@ async fn project_repository_resources_lists_project_artifacts_without_publishing
 }
 
 #[tokio::test]
+async fn project_repository_resources_expose_uses_and_used_by_with_missing_references() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["linked-project", "Linked project", project_path, now.to_rfc3339()],
+                )?;
+                kronn::db::quick_execs::insert_quick_exec(
+                    conn,
+                    &kronn::models::QuickExec {
+                        id: "qe-lint".into(),
+                        name: "Lint".into(),
+                        icon: "terminal".into(),
+                        description: String::new(),
+                        project_id: Some("linked-project".into()),
+                        command: "cargo".into(),
+                        args: vec!["check".into()],
+                        timeout_secs: 30,
+                        output_format: Default::default(),
+                        variables: Vec::new(),
+                        pinned: false,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                let workflow: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
+                    "id": "wf-nightly", "name": "Nightly triage", "project_id": "linked-project",
+                    "trigger": {"type": "Manual"},
+                    "steps": [
+                        {"name": "lint", "step_type": {"type": "CollectApiData"},
+                         "collect_api_data": {"sources": [{"alias": "lint", "quick_exec_id": "qe-lint"}]}},
+                        {"name": "ask", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-gone"}
+                    ],
+                    "actions": [], "safety": {}, "workspace_config": null,
+                    "concurrency_limit": null, "enabled": false,
+                    "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339()
+                }))
+                .unwrap();
+                kronn::db::workflows::insert_workflow(conn, &workflow)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, response) =
+        get_json(app, "/api/projects/linked-project/repository-resources").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    let resources = response["data"]["resources"].as_array().unwrap();
+    let find = |id: &str| resources.iter().find(|item| item["id"] == id).unwrap();
+    assert_eq!(
+        find("wf-nightly")["uses"],
+        serde_json::json!([
+            {"kind": "quick_exec", "id": "qe-lint", "slug": "lint", "name": "Lint", "missing": false},
+            {"kind": "quick_prompt", "id": "qp-gone", "name": "qp-gone", "missing": true},
+        ])
+    );
+    assert_eq!(find("wf-nightly")["used_by"], serde_json::json!([]));
+    assert_eq!(find("qe-lint")["uses"], serde_json::json!([]));
+    assert_eq!(
+        find("qe-lint")["used_by"],
+        serde_json::json!([
+            {"kind": "workflow", "id": "wf-nightly", "slug": "nightly-triage", "name": "Nightly triage", "missing": false},
+        ])
+    );
+}
+
+#[tokio::test]
 async fn repository_resource_publish_align_import_and_hash_approval_round_trip() {
     let state = test_state();
     state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
@@ -3287,8 +3380,8 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     let published_text = std::fs::read_to_string(&resource_path).unwrap();
     assert!(!published_text.contains("literal-secret-value"));
     assert!(published_text.contains("secret://KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
-    let config_text = std::fs::read_to_string(project_directory.path().join("kronn/kronn.toml"))
-        .unwrap();
+    let config_text =
+        std::fs::read_to_string(project_directory.path().join("kronn/kronn.toml")).unwrap();
     assert!(config_text.contains("KRONN_QUICKEXEC_DEPLOY_RESOURCE_ARGS_1"));
     assert!(!config_text.contains("literal-secret-value"));
     for relative in [
@@ -3339,10 +3432,60 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     )
     .await;
     assert_eq!(conflict["data"]["resources"][0]["status"], "conflict");
-    assert!(conflict["data"]["resources"][0]["diff"]
+    // The listing says that the two sides differ, never how, and holds no secret…
+    assert!(conflict["data"]["resources"][0].get("diff").is_none());
+    assert!(conflict["data"]["resources"][0].get("file_diffs").is_none());
+    assert!(conflict["data"]["resources"][0].get("files").is_none());
+    assert!(!conflict.to_string().contains("literal-secret-value"));
+    // …the diff and the text of each side are asked for when the sheet opens,
+    // masked like the file.
+    let (comparison_status, comparison) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/comparison?kind=quick_exec&id=qe-portable",
+    )
+    .await;
+    assert_eq!(comparison_status, StatusCode::OK);
+    assert_eq!(comparison["success"], true, "{comparison}");
+    assert!(comparison["data"]["diff"]
         .as_str()
         .unwrap()
         .contains("--- repository"));
+    let files = comparison["data"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{comparison}");
+    assert!(files[0]["repository"].is_string() && files[0]["kronn"].is_string());
+    assert_ne!(files[0]["repository"], files[0]["kronn"]);
+    assert!(files[0]["kronn"].as_str().unwrap().contains("Kronn edit"));
+    assert!(!comparison.to_string().contains("literal-secret-value"));
+
+    // A secret typed by hand into the repository file, which Kronn never held,
+    // is masked in the answer too: in the text of that side, in the diff and in
+    // the field-by-field view.
+    let typed_text = std::fs::read_to_string(&resource_path).unwrap().replace(
+        "\"description\": \"\"",
+        "\"description\": \"run with api_key=typed-by-hand-e2e\"",
+    );
+    assert!(typed_text.contains("typed-by-hand-e2e"));
+    std::fs::write(&resource_path, typed_text).unwrap();
+    let (_, typed) = get_json(
+        app.clone(),
+        "/api/projects/portable-project/repository-resources/comparison?kind=quick_exec&id=qe-portable",
+    )
+    .await;
+    assert_eq!(typed["success"], true, "{typed}");
+    assert!(
+        !typed.to_string().contains("typed-by-hand-e2e"),
+        "a secret typed into the repository file leaked: {typed}"
+    );
+    assert!(typed["data"]["files"][0]["repository"]
+        .as_str()
+        .unwrap()
+        .contains("api_key=***REDACTED***"));
+    assert!(typed["data"]["diff"]
+        .as_str()
+        .unwrap()
+        .contains("api_key=***REDACTED***"));
+    // The rest of the flow starts again from the file as it was.
+    std::fs::write(&resource_path, format!("{published_text}\n")).unwrap();
 
     let (_, refused) = post_json(
         app.clone(),
@@ -3408,7 +3551,10 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     )
     .await;
     // An unapproved imported change surfaces as approval_required first.
-    assert_eq!(changed["data"]["resources"][0]["status"], "approval_required");
+    assert_eq!(
+        changed["data"]["resources"][0]["status"],
+        "approval_required"
+    );
     assert_eq!(changed["data"]["resources"][0]["approval_required"], true);
 
     let (_, republished) = post_json(
@@ -3479,8 +3625,8 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
     state
         .db
         .with_conn(|conn| {
-            let mut item = kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?
-                .expect("quick exec");
+            let mut item =
+                kronn::db::quick_execs::get_quick_exec(conn, "qe-portable")?.expect("quick exec");
             item.args.push("--dry-run".into());
             item.updated_at = chrono::Utc::now();
             kronn::db::quick_execs::update_quick_exec(conn, &item)
@@ -3822,8 +3968,11 @@ async fn project_repository_resources_classifies_repository_and_kronn_skills() {
         "[package]\nname='demo'\n",
     )
     .unwrap();
-    std::fs::write(project_directory.path().join("go.mod"), "module example.test/demo\n")
-        .unwrap();
+    std::fs::write(
+        project_directory.path().join("go.mod"),
+        "module example.test/demo\n",
+    )
+    .unwrap();
     state
         .db
         .with_conn({
@@ -3886,6 +4035,190 @@ async fn project_repository_resources_classifies_repository_and_kronn_skills() {
         .unwrap()
         .iter()
         .any(|skill| skill["id"] == "typescript" && skill["provenance"] == "kronn"));
+}
+
+#[tokio::test]
+async fn skill_migration_routes_show_the_recap_then_move_without_overwriting() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    for (relative, body) in [
+        (".claude/skills/review/SKILL.md", "Claude version."),
+        (".agents/skills/review/SKILL.md", "Agents version."),
+        (".gemini/skills/lint/SKILL.md", "Lint."),
+    ] {
+        let path = project_directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!("---\nname: skill\ndescription: Test skill\n---\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["migrating-project", "Migrating", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (status, plan) = get_json(
+        app.clone(),
+        "/api/projects/migrating-project/repository-resources/skills/migration",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(plan["success"], true, "{plan}");
+    assert_eq!(plan["data"]["target_root"], ".agents/skills");
+    assert_eq!(plan["data"]["moves"][0]["source"], ".gemini/skills/lint");
+    assert_eq!(plan["data"]["moves"][0]["target"], ".agents/skills/lint");
+    assert_eq!(plan["data"]["conflicts"][0]["slug"], "review");
+    assert_eq!(
+        plan["data"]["conflicts"][0]["versions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        project_directory
+            .path()
+            .join(".gemini/skills/lint")
+            .is_dir(),
+        "the recap moves nothing"
+    );
+
+    let (_, migrated) = post_json(
+        app,
+        "/api/projects/migrating-project/repository-resources/skills/migrate",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(migrated["success"], true, "{migrated}");
+    assert_eq!(migrated["data"]["moved"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        migrated["data"]["unresolved"],
+        serde_json::json!(["review"])
+    );
+    assert!(project_directory
+        .path()
+        .join(".agents/skills/lint/SKILL.md")
+        .is_file());
+    assert!(!project_directory
+        .path()
+        .join(".gemini/skills/lint")
+        .exists());
+    assert!(std::fs::read_to_string(
+        project_directory
+            .path()
+            .join(".agents/skills/review/SKILL.md")
+    )
+    .unwrap()
+    .contains("Agents version."));
+    assert!(project_directory
+        .path()
+        .join(".claude/skills/review/SKILL.md")
+        .is_file());
+}
+
+// KT-921 — a native skill "used in Kronn" from a repository is listed for its
+// project by the Automation page, and its SKILL.md is served from the repository.
+#[tokio::test]
+async fn a_native_skill_used_in_kronn_is_listed_with_its_folder_and_its_skill_md_is_served() {
+    let state = test_state();
+    let project_directory = tempfile::TempDir::new().unwrap();
+    let skill_path = project_directory
+        .path()
+        .join(".agents/skills/block-migration/SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill_path,
+        "---\nname: Block migration\ndescription: Moves a block\n---\n\nRun the codemod.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project_directory.path().join(".agents/skills/unused")).unwrap();
+    std::fs::write(
+        project_directory
+            .path()
+            .join(".agents/skills/unused/SKILL.md"),
+        "---\nname: Unused\ndescription: Nobody uses it\n---\n\nNot referenced.\n",
+    )
+    .unwrap();
+    state
+        .db
+        .with_conn({
+            let project_path = project_directory.path().to_string_lossy().into_owned();
+            move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params!["front-euronews", "front_euronews", project_path, now],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    // Nothing is used yet: the static route answers, not `/api/projects/{id}`.
+    let (status, none) = get_json(app.clone(), "/api/projects/used-skills").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(none["success"], true, "{none}");
+    assert_eq!(none["data"], serde_json::json!([]));
+
+    let (_, used) = post_json(
+        app.clone(),
+        "/api/projects/front-euronews/repository-resources/skills/use",
+        serde_json::json!({ "relative_path": ".agents/skills/block-migration/SKILL.md" }),
+    )
+    .await;
+    assert_eq!(used["success"], true, "{used}");
+
+    let (_, listed) = get_json(app.clone(), "/api/projects/used-skills").await;
+    assert_eq!(
+        listed["data"],
+        serde_json::json!([{
+            "project_id": "front-euronews",
+            "slug": "block-migration",
+            "name": "Block migration",
+            "root": ".agents/skills",
+            "relative_path": ".agents/skills/block-migration/SKILL.md",
+            "referenced": true,
+            "published": false,
+        }]),
+        "the folder skill nobody referenced stays out"
+    );
+
+    let (status, file) = get_json(
+        app.clone(),
+        "/api/projects/front-euronews/repository-resources/skills/content?relative_path=.agents%2Fskills%2Fblock-migration%2FSKILL.md",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(file["success"], true, "{file}");
+    assert!(file["data"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Run the codemod."));
+    assert_eq!(file["data"]["truncated"], false);
+
+    let (_, refused) = get_json(
+        app,
+        "/api/projects/front-euronews/repository-resources/skills/content?relative_path=.agents%2Fskills%2Funused%2FSKILL.md",
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(refused["data"].is_null());
 }
 
 #[tokio::test]
@@ -12037,6 +12370,116 @@ async fn external_api_test_route_probes_a_chat_model_not_the_first_one_listed() 
 }
 
 #[tokio::test]
+async fn external_api_billing_error_stops_model_probes_without_leaking_upstream_details() {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for (preset, models) in [
+        ("other", serde_json::json!([])),
+        ("other", serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"])),
+        ("nvidia", serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"])),
+        (
+            "open_router",
+            serde_json::json!(["mimo-v2.5", "mimo-v2.5-tts"]),
+        ),
+    ] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/key"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "mimo-v2.5"}, {"id": "mimo-v2.5-tts"}]
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer sk-or-v1-billing-test-secret"))
+            .and(body_partial_json(serde_json::json!({"model": "mimo-v2.5"})))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "402",
+                    "type": "insufficient_balance",
+                    "message": "Insufficient account balance — private account 私密 sk-or-v1-billing-test-secret"
+                }
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({"model": "mimo-v2.5-tts"}),
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_string("TTS needs an assistant role"))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+
+        let (status, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": format!("{}/v1", upstream.uri()),
+                "api_key": "sk-or-v1-billing-test-secret",
+                "origin_preset": preset,
+                "models": models
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["ok"], false, "{preset}: {response}");
+        assert_eq!(
+            response["data"]["status"], "billing_error",
+            "{preset}: {response}"
+        );
+        let hint = response["data"]["hint"].as_str().unwrap();
+        assert!(hint.contains("402") && hint.contains("balance"), "{hint}");
+        assert_eq!(response["data"]["models"], serde_json::json!([]));
+        assert!(!response.to_string().contains("billing-test-secret"));
+        assert!(!response.to_string().contains("private account"));
+        assert!(!response.to_string().contains("TTS"));
+        upstream.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn external_api_billing_error_is_reported_during_catalogue_and_key_checks() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for (preset, endpoint) in [("other", "/v1/models"), ("open_router", "/v1/key")] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(402).set_body_string("private billing details"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let (_, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": upstream.uri(),
+                "api_key": "sk-or-v1-billing-test-secret",
+                "origin_preset": preset
+            }),
+        )
+        .await;
+        assert_eq!(response["data"]["ok"], false);
+        assert_eq!(response["data"]["status"], "billing_error", "{response}");
+        assert!(!response.to_string().contains("private billing details"));
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -15259,7 +15702,8 @@ async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates
         .unwrap();
 
     let app = build_router_with_auth(state.clone(), false);
-    let (status, dry) = post_json(app, "/api/mcps/refresh?dry_run=true", serde_json::json!({})).await;
+    let (status, dry) =
+        post_json(app, "/api/mcps/refresh?dry_run=true", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "dry-run refresh failed: {dry:?}");
     assert_eq!(dry["success"], true, "{dry:?}");
     assert_eq!(dry["data"]["dry_run"], true);

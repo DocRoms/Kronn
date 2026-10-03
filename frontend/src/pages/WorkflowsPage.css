@@ -20,23 +20,12 @@
 
 .automation-viewer {
   min-width: 0;
+  min-height: 0;
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--kr-sp-6);
   scrollbar-gutter: stable;
-}
-
-.automation-project-filter {
-  width: 100%;
-  min-height: 30px;
-  padding: 4px 8px;
-  border: 1px solid var(--kr-border-light);
-  border-radius: var(--kr-r-sm);
-  background: var(--kr-bg-input);
-  color: var(--kr-text-secondary);
-  font: inherit;
-  font-size: var(--kr-fs-xs);
 }
 
 .automation-sidebar-items .disc-sidebar-section {
@@ -86,6 +75,83 @@
 
 .automation-resource-row .disc-item-open {
   min-width: 0;
+}
+
+/* ── Sidebar groups and rows (KT-916) ──────────────────────
+   A group header (dot, name, count, fold) and 44 px rows under it. */
+.automation-group {
+  min-width: 0;
+  margin-bottom: var(--kr-sp-2);
+}
+
+.automation-group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.automation-group-header:hover,
+.automation-group-header:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.automation-group-header:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
+}
+
+.automation-group-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--kr-text-dim);
+}
+
+.automation-group-dot[data-kind='workflows'] { background: var(--kr-accent); }
+.automation-group-dot[data-kind='quickPrompts'] { background: var(--kr-info); }
+.automation-group-dot[data-kind='quickApis'] { background: var(--kr-purple); }
+.automation-group-dot[data-kind='quickExecs'] { background: var(--kr-warning); }
+.automation-group-dot[data-kind='skills'] { background: var(--kr-success); }
+
+.automation-group-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-group-count {
+  flex: 0 0 auto;
+  color: var(--kr-text-muted);
+  font-weight: 600;
+}
+
+.automation-group .disc-swipe-wrap {
+  margin: 2px 5px;
+  border-radius: 8px;
+}
+
+.automation-resource-row {
+  contain-intrinsic-size: auto 44px;
+}
+
+.automation-resource-row .disc-item-open {
+  min-height: 44px;
+  padding-block: 4px;
 }
 
 @media (max-width: 760px) {
@@ -8189,30 +8255,4 @@
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
-}
-.automation-kind-filters {
-  display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--kr-border);
-}
-
-.automation-kind-filters button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  padding: 4px 7px;
-  border: 1px solid var(--kr-border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--kr-text-muted);
-  font-size: 10px;
-}
-
-.automation-kind-filters button[data-active='true'] {
-  border-color: var(--kr-accent);
-  color: var(--kr-accent-ink);
-  background: var(--kr-accent-bg);
 }

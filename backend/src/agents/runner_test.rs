@@ -210,6 +210,65 @@ mod tests {
         );
     }
 
+    /// KT-923 — a skill only the repository holds reaches the agent: the prompt
+    /// it receives carries the `SKILL.md`, in the expertise section and apart
+    /// from the catalog skills.
+    #[tokio::test]
+    async fn a_repository_skill_reaches_the_agents_prompt() {
+        let fixture = Arc::new(NativeRouteFixture {
+            created: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::atomic::AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let skill = crate::models::Skill {
+            id: "repository:p1:block-migration".into(),
+            name: "Block migration".into(),
+            description: String::new(),
+            icon: "📂".into(),
+            category: crate::models::SkillCategory::Domain,
+            content: "Move the block, then run the migration checks.".into(),
+            is_builtin: false,
+            token_estimate: 0,
+            license: None,
+            allowed_tools: None,
+            auto_triggers: None,
+            external: false,
+            source_url: None,
+        };
+        let agent = AgentType::OpenCode;
+        let mut process = start_agent_with_config(AgentStartConfig {
+            skill_ids: &["repository:p1:block-migration".to_string()],
+            repository_skills: std::slice::from_ref(&skill),
+            test_acp_transport: Some(fixture.clone()),
+            ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "migrate", &tokens)
+        })
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+
+        let prompts = fixture.prompts.lock().unwrap();
+        let prompt = &prompts[0];
+        let expertise = prompt
+            .find("=== YOUR EXPERTISE ===")
+            .expect("the skills section is in the prompt");
+        let block = prompt
+            .find("=== Repository Skills ===")
+            .expect("the repository block");
+        assert!(block > expertise);
+        assert!(prompt
+            .contains("--- Block migration ---\nMove the block, then run the migration checks."));
+        assert!(prompt.ends_with("migrate"));
+    }
+
     #[test]
     fn acp_mcp_registry_uses_only_command_entries_without_environment_values() {
         let project = tempfile::tempdir().unwrap();
