@@ -6,15 +6,101 @@
     <title>Kronn</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <!-- Styles moved to src/styles/ — loaded via main.tsx import -->
+    <!-- The one loading screen of a cold start (src/lib/bootScreen.ts). It
+         paints before any stylesheet, so it carries its own styles, and the
+         app keeps this element until nothing is loading any more. -->
+    <style>
+      html, body { margin: 0; background: #140822; }
+      html.kronn-boot-light, html.kronn-boot-light body { background: #f6f7f9; }
+      .kronn-boot {
+        position: fixed; inset: 0; z-index: 2147483000;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 16px; padding: 0 16px; background: #140822; text-align: center;
+        font: 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: rgba(255, 255, 255, 0.70);
+        transition: opacity 200ms ease;
+      }
+      html.kronn-boot-light .kronn-boot { color: #51596b; }
+      .kronn-boot--done { opacity: 0; pointer-events: none; }
+      .kronn-boot svg { flex-shrink: 0; transform-origin: center; animation: kronn-startup-rotate 6s linear infinite; }
+      .kronn-boot span { max-width: 360px; }
+      .kronn-boot button {
+        margin-top: 8px; padding: 8px 20px; border-radius: 8px; cursor: pointer;
+        font: inherit; color: #b98cff; background: rgba(185, 140, 255, 0.08);
+        border: 1px solid rgba(185, 140, 255, 0.3);
+      }
+      html.kronn-boot-light .kronn-boot button { color: #6d3fd1; }
+      @keyframes kronn-startup-rotate { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .kronn-boot svg { animation: none; } }
+    </style>
   </head>
   <body>
-    <div id="root">
-      <main class="bootstrap-error" role="status" aria-live="polite">
-        <h1>Kronn</h1>
-        <p>Starting the local service… First launch may take a little longer.</p>
-      </main>
+    <div id="kronn-boot" class="kronn-boot" role="status" aria-live="polite">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="38 48 436 436" width="100" height="100" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="kronn-boot-frame" gradientUnits="userSpaceOnUse"
+                          x1="441" y1="60" x2="84" y2="470">
+            <stop offset="0" stop-color="#1fbdda"/>
+            <stop offset="0.45" stop-color="#6f5ef0"/>
+            <stop offset="1" stop-color="#bd3ce6"/>
+          </linearGradient>
+          <linearGradient id="kronn-boot-top" x1="0.2" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stop-color="#5fd8ea"/><stop offset="1" stop-color="#17b4d4"/>
+          </linearGradient>
+          <linearGradient id="kronn-boot-hub" x1="0.2" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stop-color="#a98ee8"/><stop offset="1" stop-color="#4a86e8"/>
+          </linearGradient>
+          <linearGradient id="kronn-boot-peer" x1="0.2" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stop-color="#dc94e6"/><stop offset="1" stop-color="#9b6ef0"/>
+          </linearGradient>
+        </defs>
+        <path d="M256 60 L429 152 V380 L256 470 L84 380 V152 Z"
+              fill="none" stroke="url(#kronn-boot-frame)" stroke-width="25" stroke-linejoin="round"/>
+        <g fill="none" stroke="url(#kronn-boot-frame)" stroke-width="12" stroke-linecap="round">
+          <path d="M148.4 257.6 A 108 108 0 0 1 210.4 169.1"/>
+          <path d="M301.6 169.1 A 108 108 0 0 1 363.6 257.6"/>
+          <path d="M318 355.5 A 108 108 0 0 1 194 355.5"/>
+        </g>
+        <g fill="none" stroke="url(#kronn-boot-frame)" stroke-width="9" stroke-linecap="round">
+          <path d="M256 273 V165"/>
+          <path d="M256 273 L157 316"/>
+          <path d="M256 273 L356 316"/>
+        </g>
+        <circle cx="256" cy="165" r="33" fill="url(#kronn-boot-top)"/>
+        <circle cx="157" cy="316" r="29" fill="url(#kronn-boot-peer)"/>
+        <circle cx="356" cy="316" r="29" fill="url(#kronn-boot-peer)"/>
+        <circle cx="256" cy="273" r="50" fill="url(#kronn-boot-hub)"/>
+      </svg>
+      <span data-boot-text>Starting Kronn…</span>
+      <button type="button" data-boot-retry hidden>Retry</button>
     </div>
+    <script>
+      // The saved theme's background and the UI language from the first frame.
+      (function () {
+        var light = { light: 1, sakura: 1, euronews: 1 };
+        var bg = { dark: '#140822', light: '#f6f7f9', matrix: '#050805', gotham: '#0a0d14', sakura: '#fff5fa', euronews: '#f5f8fd' };
+        var starting = { fr: 'Démarrage de Kronn…', en: 'Starting Kronn…', es: 'Iniciando Kronn…', zh: '正在启动 Kronn…' };
+        var theme = null, locale = null;
+        try {
+          theme = localStorage.getItem('kronn:theme');
+          locale = localStorage.getItem('kronn:ui-locale');
+        } catch (e) { /* storage blocked */ }
+        if (!theme || theme === 'system' || !bg[theme]) {
+          theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        if (!starting[locale]) {
+          var nav = (navigator.language || 'en').slice(0, 2).toLowerCase();
+          locale = starting[nav] ? nav : 'en';
+        }
+        var root = document.documentElement;
+        if (light[theme]) root.className += ' kronn-boot-light';
+        root.style.background = bg[theme];
+        document.getElementById('kronn-boot').style.background = bg[theme];
+        root.lang = locale;
+        document.querySelector('[data-boot-text]').textContent = starting[locale];
+      })();
+    </script>
+    <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -3422,7 +3422,7 @@ pub async fn list_batch_run_summaries(
 ) -> Json<ApiResponse<Vec<BatchRunSummary>>> {
     match state
         .db
-        .with_conn(crate::db::workflows::list_batch_run_summaries)
+        .with_read_conn(crate::db::workflows::list_batch_run_summaries)
         .await
     {
         Ok(summaries) => Json(ApiResponse::ok(summaries)),

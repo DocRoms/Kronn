@@ -3708,6 +3708,27 @@ fn workflow_latest_run_aggregation_does_not_read_run_payload_pages() {
 }
 
 #[test]
+fn batch_run_listing_finds_batches_through_the_run_type_index() {
+    // KT-983 — run_type sits after the large step payload; without this index
+    // the listing walks every payload page (20-40 s on a 10 GB base).
+    let conn = test_db();
+    let mut statement = conn
+        .prepare("EXPLAIN QUERY PLAN SELECT id FROM workflow_runs WHERE run_type = 'batch' ORDER BY started_at DESC")
+        .unwrap();
+    let plan: Vec<String> = statement
+        .query_map([], |row| row.get(3))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_workflow_runs_type_started")),
+        "batch listing must use the run_type index: {plan:?}"
+    );
+    assert!(!plan.iter().any(|detail| detail.contains("TEMP B-TREE")));
+}
+
+#[test]
 fn workflow_latest_run_index_upgrade_preserves_existing_runs_and_ties() {
     let conn = Connection::open_in_memory().unwrap();
     migrations::run_through(&conn, "189_artifact_message_origin").unwrap();
@@ -6947,4 +6968,49 @@ async fn restarting_kronn_interrupts_an_orphaned_audit_run_and_keeps_it_resumabl
         resumable.last_completed_step, 4,
         "progress must survive the restart so resume picks up at step 5"
     );
+}
+
+#[test]
+fn batch_summaries_name_the_parent_workflow_and_count_its_runs_from_the_oldest() {
+    // KT-983 — the parent lookup was rewritten to stay cheap on a large base;
+    // the label it produces must not change.
+    let conn = test_db();
+    let mut workflow = sample_workflow("wf-cron");
+    workflow.name = "Framing — analyse".into();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let base = Utc::now() - chrono::Duration::hours(3);
+    for (index, id) in ["run-1", "run-2", "run-3"].iter().enumerate() {
+        let mut run = sample_run(id, "wf-cron");
+        run.started_at = base + chrono::Duration::minutes(index as i64);
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    crate::db::workflows::ensure_batch_placeholder_workflow(&conn, "qp-s", "TestQP", None).unwrap();
+    for (id, parent) in [
+        ("b-2", Some("run-2")),
+        ("b-3", Some("run-3")),
+        ("b-manual", None),
+    ] {
+        let mut batch = sample_batch_run(id, "qp-s", 1);
+        batch.parent_run_id = parent.map(str::to_string);
+        crate::db::workflows::insert_run(&conn, &batch).unwrap();
+    }
+
+    let summaries = crate::db::workflows::list_batch_run_summaries(&conn).unwrap();
+    let summary = |id: &str| summaries.iter().find(|s| s.run_id == id).unwrap();
+    assert_eq!(
+        summary("b-2").parent_workflow_id.as_deref(),
+        Some("wf-cron")
+    );
+    assert_eq!(
+        summary("b-2").parent_workflow_name.as_deref(),
+        Some("Framing — analyse")
+    );
+    assert_eq!(summary("b-2").parent_run_sequence, Some(2));
+    assert_eq!(summary("b-3").parent_run_sequence, Some(3));
+    assert_eq!(
+        summary("b-manual").parent_workflow_id,
+        None,
+        "a manual batch has no parent"
+    );
+    assert_eq!(summary("b-manual").parent_run_sequence, None);
 }

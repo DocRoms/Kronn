@@ -8,6 +8,7 @@ import { LayoutDensityProvider } from './lib/LayoutDensityContext';
 import { LocalIdentityProvider } from './lib/LocalIdentityContext';
 import { ThemeEffects } from './components/ThemeEffects';
 import { loadInitialLocale, renderBootstrapFailure } from './lib/bootstrapLocale';
+import { finishBootScreen } from './lib/bootScreen';
 import {
   getDesktopBackendUrl,
   isTauriAssetLocation,
@@ -49,6 +50,7 @@ async function bootstrap() {
 
 void bootstrap().catch(error => {
   console.error('[bootstrap] failed to load the interface:', error);
+  finishBootScreen();
   const rootEl = document.getElementById('root');
   const detail = error instanceof Error ? error.message : String(error);
   if (rootEl) renderBootstrapFailure(rootEl, () => void retryDesktopStartup(), detail);

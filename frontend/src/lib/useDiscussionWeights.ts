@@ -9,7 +9,7 @@
 // 'loading' from inside the effect would cascade renders (and React's lint
 // rejects it), so results carry the key they belong to and the state falls out
 // of comparing that key with the current one.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DiscussionWeightView } from '../types/generated';
 import { config as configApi } from './api';
 import type { WeightLoadState } from './weightFormat';
@@ -117,15 +117,21 @@ export function useDiscussionWeights(discussionIds: string[]): DiscussionWeights
   const weights =
     outcome !== null && outcome.key === key && outcome.ok ? outcome.weights : EMPTY;
 
-  return {
-    enabled: enabled === true,
-    state: batchState,
-    weights,
-    stateFor: (id: string) => {
+  // Stable while the batch is unchanged: the sidebar caches badges on it.
+  const stateFor = useCallback(
+    (id: string): WeightLoadState => {
       if (batchState !== 'ready') return batchState;
       // Bounding the request does not make the rows beyond the bound weigh
       // nothing: they were never measured, and must not render a 0.
       return requested.has(id) ? 'ready' : 'unmeasured';
     },
+    [batchState, requested],
+  );
+
+  return {
+    enabled: enabled === true,
+    state: batchState,
+    weights,
+    stateFor,
   };
 }

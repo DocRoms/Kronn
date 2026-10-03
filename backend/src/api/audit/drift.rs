@@ -28,7 +28,7 @@ pub async fn check_drift(
 ) -> Json<ApiResponse<DriftCheckResponse>> {
     let project = match state
         .db
-        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
         .await
     {
         Ok(Some(p)) => p,
@@ -38,9 +38,10 @@ pub async fn check_drift(
 
     let project_path = scanner::resolve_host_path(&project.path);
 
-    let result =
-        tokio::task::spawn_blocking(move || crate::core::checksums::check_drift(&project_path))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::checksums::check_drift_cached(&project_path)
+    })
+    .await;
 
     match result {
         Ok(drift) => {

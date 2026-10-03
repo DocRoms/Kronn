@@ -61,7 +61,7 @@ pub async fn audit_latest(
 ) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
     let result = state
         .db
-        .with_conn(move |conn| crate::db::audit_runs::latest_completed(conn, &id))
+        .with_read_conn(move |conn| crate::db::audit_runs::latest_completed(conn, &id))
         .await;
     match result {
         Ok(row) => Json(ApiResponse::ok(row)),

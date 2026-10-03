@@ -12,7 +12,8 @@ import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
-import { KronnMark } from './components/KronnMark';
+import { LoadingState } from './components/LoadingState';
+import { armBootScreen } from './lib/bootScreen';
 import { standaloneLivePageId, standaloneLivePageMosaic } from './lib/live-page-navigation';
 import { discussionMosaicRoute } from './lib/discussion-mosaic-navigation';
 import './App.css';
@@ -27,25 +28,29 @@ export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(readCachedSetupStatus);
   const setupStatusRef = useRef<SetupStatus | null>(setupStatus);
   const [loading, setLoading] = useState(setupStatus === null);
-  const [apiError, setApiError] = useState(false);
+  // The backend has not answered for a while: still the loader, plus a calm
+  // note and a retry. A restart with migrations can outlast the quick retries.
+  const [slowStart, setSlowStart] = useState(false);
   // Under Docker, agent installs land in the container (not the host) → the
   // wizard disables Install and points to the host `kronn` CLI. Default false
   // (native/Tauri) until health resolves; a failed probe leaves it false.
   const [inDocker, setInDocker] = useState(false);
   const retries = useRef(0);
+  // Retries never give up while the backend is down; they stop with the app.
+  const mounted = useRef(true);
   const [, setRouteRevision] = useState(0);
 
   const applySetupStatus = useCallback((status: SetupStatus) => {
     setupStatusRef.current = status;
     cacheSetupStatus(status);
     setSetupStatus(status);
+    setSlowStart(false);
     setLoading(false);
   }, []);
 
   const fetchStatus = useCallback(function fetchSetupStatus(resetRetries = false) {
     if (resetRetries) retries.current = 0;
     if (!setupStatusRef.current) setLoading(true);
-    setApiError(false);
     // CRITICAL: time out the request. `getStatus` can HANG (not reject) when
     // the backend is slow — e.g. agent detection contends under concurrent-
     // agent load — and a hung promise fires neither .then nor .catch, so the
@@ -60,7 +65,7 @@ export function App() {
         // Auto-retry up to 5 times with 2s delay (backend may still be starting)
         if (retries.current < 5) {
           retries.current += 1;
-          setTimeout(fetchSetupStatus, RETRY_DELAY);
+          setTimeout(() => { if (mounted.current) fetchSetupStatus(); }, RETRY_DELAY);
           return;
         }
         // A returning tab can keep rendering the last known setup state while
@@ -73,7 +78,7 @@ export function App() {
         // if a fast endpoint answers, the backend IS up — setup/status is just
         // wedged — so proceed optimistically as a returning (non-first-run)
         // user instead of holding the whole app hostage to one slow probe.
-        // Only a genuinely unreachable backend shows the error screen.
+        // An unreachable backend keeps the loader and keeps retrying.
         withTimeout(configApi.getLanguage(), 4000)
           .then(() => {
             console.warn('setup/status timed out but backend is reachable — proceeding optimistically.');
@@ -88,18 +93,26 @@ export function App() {
             };
             setupStatusRef.current = optimisticStatus;
             setSetupStatus(optimisticStatus);
+            setSlowStart(false);
             setLoading(false);
-            setApiError(false);
           })
           .catch(() => {
-            setSetupStatus(null);
-            setApiError(true);
-            setLoading(false);
+            // Unreachable: keep the loader and keep trying until it answers.
+            if (mounted.current) setSlowStart(true);
+            setTimeout(() => { if (mounted.current) fetchSetupStatus(); }, RETRY_DELAY);
           });
       });
   }, [applySetupStatus]);
 
-  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+  // After the first commit, every loader that wants the start-up screen holds
+  // it; if none does, the app is ready.
+  useEffect(() => { armBootScreen(); }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    fetchStatus();
+    return () => { mounted.current = false; };
+  }, [fetchStatus]);
   useEffect(() => { healthApi.get().then(h => setInDocker(h.in_docker)).catch(() => {}); }, []);
   useEffect(() => {
     const updateRoute = () => setRouteRevision(revision => revision + 1);
@@ -142,19 +155,14 @@ export function App() {
   }, []);
 
   if (loading) {
-    return <LoadingScreen />;
-  }
-
-  // API unreachable — show error screen with retry, NOT the wizard
-  if (apiError) {
-    return <ApiErrorScreen onRetry={() => fetchStatus(true)} />;
+    return <LoadingState fullscreen phase={slowStart ? 'slow' : 'connecting'} onRetry={slowStart ? () => fetchStatus(true) : undefined} />;
   }
 
   // First run or setup incomplete → show wizard
   if (!setupStatus || setupStatus.is_first_run || setupStatus.current_step !== 'Complete') {
     return (
       <ErrorBoundary>
-        <Suspense fallback={<LoadingScreen />}>
+        <Suspense fallback={<LoadingState fullscreen />}>
           <SetupWizard
             initialStatus={setupStatus}
             inDocker={inDocker}
@@ -172,7 +180,7 @@ export function App() {
   if (discussionMosaic) {
     return (
       <ErrorBoundary>
-        <Suspense fallback={<LoadingScreen />}>
+        <Suspense fallback={<LoadingState fullscreen />}>
           <StandaloneDiscussionMosaic {...discussionMosaic} />
         </Suspense>
       </ErrorBoundary>
@@ -183,7 +191,7 @@ export function App() {
   if (standaloneMosaic) {
     return (
       <ErrorBoundary>
-        <Suspense fallback={<LoadingScreen />}>
+        <Suspense fallback={<LoadingState fullscreen />}>
           <StandaloneLivePageMosaic
             pageIds={standaloneMosaic.pageIds}
             layout={standaloneMosaic.layout}
@@ -197,7 +205,7 @@ export function App() {
   if (standalonePageId) {
     return (
       <ErrorBoundary>
-        <Suspense fallback={<LoadingScreen />}>
+        <Suspense fallback={<LoadingState fullscreen />}>
           <StandaloneLivePage pageId={standalonePageId} />
         </Suspense>
       </ErrorBoundary>
@@ -207,7 +215,7 @@ export function App() {
   // Setup complete → show dashboard
   return (
     <ErrorBoundary>
-      <Suspense fallback={<LoadingScreen />}>
+      <Suspense fallback={<LoadingState fullscreen />}>
         <UpdateBanner />
         <BackendStatus />
         <Dashboard onReset={() => {
@@ -221,65 +229,5 @@ export function App() {
         }} />
       </Suspense>
     </ErrorBoundary>
-  );
-}
-
-function ApiErrorScreen({ onRetry }: { onRetry: () => void }) {
-  return (
-    <div className="app-fullscreen">
-      <div className="app-error-icon">!</div>
-      <span className="app-error-title">
-        Cannot connect to backend
-      </span>
-      <span className="app-error-desc">
-        The API server is unreachable. Check that the backend is running and try again.
-      </span>
-      <button onClick={onRetry} className="app-retry-btn">
-        Retry
-      </button>
-      <style>{`@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-}`}</style>
-    </div>
-  );
-}
-
-function LoadingScreen() {
-  // Cycle through progress hints every 1.5 s so the user knows the boot
-  // is alive even when first-load takes 4-5 s (Vite cold compile + lazy
-  // chunks + setup-status round trip). Pre-fix the user just saw
-  // "Entering the grid…" frozen for 5 s and assumed the app had hung
-  // — Alicia's audit on 2026-05-09 specifically called that out.
-  // We don't translate this string set: the boot screen renders BEFORE
-  // I18nProvider mounts (it lives outside the Suspense for that very
-  // provider), so calling `useT()` here would crash with "useT must be
-  // used within I18nProvider". The hints below are written so they're
-  // self-explanatory regardless of locale.
-  const hints = [
-    'Entering the grid…',
-    'Loading config…',
-    'Detecting agents…',
-    'Almost ready…',
-  ];
-  const [hintIdx, setHintIdx] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => {
-      setHintIdx(prev => Math.min(prev + 1, hints.length - 1));
-    }, 1500);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  return (
-    <div className="app-fullscreen" role="status" aria-live="polite">
-      <KronnMark size={100} className="app-loading-mark" />
-      <span className="app-loading-text">
-        {hints[hintIdx]}
-      </span>
-    </div>
   );
 }

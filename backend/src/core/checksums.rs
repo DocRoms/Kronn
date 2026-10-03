@@ -788,6 +788,72 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
     }
 }
 
+/// How long a drift result is reused while the manifest is unchanged. Drift
+/// hashes every mapped source file; the Projects page asks for it per audited
+/// project, so recomputing it on each request cost seconds.
+const DRIFT_REUSE: Duration = Duration::from_secs(60);
+
+type DriftStamp = Option<std::time::SystemTime>;
+
+struct CachedDrift {
+    computed_at: std::time::Instant,
+    manifest: DriftStamp,
+    result: DriftResult,
+}
+
+type DriftGate = std::sync::Arc<std::sync::Mutex<()>>;
+
+static DRIFT_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, CachedDrift>>,
+> = std::sync::LazyLock::new(Default::default);
+static DRIFT_GATES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, DriftGate>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn manifest_stamp(project_path: &Path) -> DriftStamp {
+    let manifest = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
+    std::fs::metadata(manifest).and_then(|m| m.modified()).ok()
+}
+
+/// `check_drift`, reused for `DRIFT_REUSE` while the audit manifest is
+/// unchanged (an audit rewrites it, which recomputes at once). Concurrent
+/// requests for one project compute it once and share the result.
+pub fn check_drift_cached(project_path: &Path) -> DriftResult {
+    let gate = DRIFT_GATES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(project_path.to_path_buf())
+        .or_default()
+        .clone();
+    let _computing = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let manifest = manifest_stamp(project_path);
+    if let Some(hit) = DRIFT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(project_path)
+    {
+        if hit.manifest == manifest && hit.computed_at.elapsed() < DRIFT_REUSE {
+            return hit.result.clone();
+        }
+    }
+    #[cfg(test)]
+    tests::record_drift_computation(project_path);
+    let result = check_drift(project_path);
+    DRIFT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            project_path.to_path_buf(),
+            CachedDrift {
+                computed_at: std::time::Instant::now(),
+                manifest,
+                result: result.clone(),
+            },
+        );
+    result
+}
+
 #[cfg(test)]
 #[path = "checksums_test.rs"]
 mod tests;

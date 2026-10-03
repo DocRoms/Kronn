@@ -78,7 +78,8 @@ test.describe('Backend status pill — surfaces health failures + auto-recovers'
 
     const pill = page.locator('.kronn-backend-status').first();
     await expect(pill).toHaveAttribute('role', 'status');
-    await expect(pill).toContainText(/Backend (unreachable|injoignable|inalcanzable)/);
+    // A restart is the usual cause: the pill says it reconnects, not that it broke.
+    await expect(pill).toContainText(/reconnexion|reconnecting|reconectando/);
 
     // Restore /api/health. Offline polling is deliberately accelerated, so a
     // restarted backend clears the warning in roughly two seconds.

@@ -370,7 +370,7 @@ fn run_git_status_impl(
 
     // Check if there's an open PR/MR for this branch
     let pr_url = if !branch.is_empty() && !is_default_branch {
-        check_pr_url(repo_path, &branch)
+        cached_pr_url(repo_path, &branch)
     } else {
         None
     };
@@ -1699,26 +1699,94 @@ pub fn run_create_pr(
     }
 
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    forget_pr_urls(repo_path);
     Ok(url)
+}
+
+/// How long a branch's PR lookup is reused. `gh pr view` is a network call and
+/// git-status runs each time a discussion opens (KT-983): uncached, it added
+/// ~0.7 s to every open, and far more on a slow network.
+const PR_URL_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+/// A lookup that takes longer than this gives up: a missing PR link is better
+/// than a discussion that does not open.
+const PR_URL_LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+type PrUrlCache =
+    std::collections::HashMap<(std::path::PathBuf, String), (Option<String>, std::time::Instant)>;
+static PR_URLS: std::sync::LazyLock<std::sync::Mutex<PrUrlCache>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// [`check_pr_url`], reused for [`PR_URL_TTL`] per repository and branch,
+/// "no PR" included.
+pub fn cached_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
+    let key = (repo_path.to_path_buf(), branch.to_string());
+    if let Ok(cache) = PR_URLS.lock() {
+        if let Some((url, at)) = cache.get(&key) {
+            if at.elapsed() < PR_URL_TTL {
+                return url.clone();
+            }
+        }
+    }
+    let url = check_pr_url(repo_path, branch);
+    if let Ok(mut cache) = PR_URLS.lock() {
+        cache.retain(|_, (_, at)| at.elapsed() < PR_URL_TTL);
+        cache.insert(key, (url.clone(), std::time::Instant::now()));
+    }
+    url
+}
+
+/// Drop what is known about this repository's PRs: Kronn just created one.
+pub fn forget_pr_urls(repo_path: &Path) {
+    if let Ok(mut cache) = PR_URLS.lock() {
+        cache.retain(|(repo, _), _| repo != repo_path);
+    }
+}
+
+/// Run `command`, giving up after `limit`.
+fn output_within(
+    mut command: std::process::Command,
+    limit: std::time::Duration,
+) -> Option<std::process::Output> {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if started.elapsed() < limit => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// Check if an open PR/MR exists for a branch.
 pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
     let provider = detect_provider(repo_path);
-    let output = match provider {
-        "gitlab" => sync_cmd("glab")
-            .args([
+    let mut command = match provider {
+        "gitlab" => {
+            let mut command = sync_cmd("glab");
+            command.args([
                 "mr", "view", branch, "--json", "web_url", "--jq", ".web_url",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .ok()?,
-        _ => sync_cmd("gh")
-            .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
-            .current_dir(repo_path)
-            .output()
-            .ok()?,
+            ]);
+            command
+        }
+        _ => {
+            let mut command = sync_cmd("gh");
+            command.args(["pr", "view", branch, "--json", "url", "--jq", ".url"]);
+            command
+        }
     };
+    command.current_dir(repo_path);
+    let output = output_within(command, PR_URL_LOOKUP_LIMIT)?;
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if url.is_empty() {
@@ -1777,6 +1845,31 @@ pub fn default_pr_template(branch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_pr_lookup_that_hangs_is_given_up_instead_of_blocking_the_discussion() {
+        // KT-983 — `gh pr view` runs on every git-status; a slow network must
+        // cost at most the limit, never the whole page.
+        let mut command = std::process::Command::new("sleep");
+        command.arg("5");
+        let started = std::time::Instant::now();
+        let output = super::output_within(command, std::time::Duration::from_millis(200));
+        assert!(output.is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let mut quick = std::process::Command::new("echo");
+        quick.arg("https://example.test/pr/1");
+        let output = super::output_within(quick, std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "https://example.test/pr/1"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -2262,7 +2355,18 @@ filename src/main.rs
             .unwrap();
         for index in 0..305 {
             let output = std::process::Command::new("git")
-                .args(["commit", "--allow-empty", "-m", &format!("history {index}")])
+                // Background auto-gc repacks refs mid-loop and the next commit
+                // can fail with "could not parse HEAD" on a loaded machine.
+                .args([
+                    "-c",
+                    "gc.auto=0",
+                    "-c",
+                    "maintenance.auto=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    &format!("history {index}"),
+                ])
                 .current_dir(repo.path())
                 .output()
                 .unwrap();

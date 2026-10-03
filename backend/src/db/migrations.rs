@@ -799,6 +799,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "207_project_agent_files",
         include_str!("sql/207_project_agent_files.sql"),
     ),
+    (
+        "208_workflow_runs_type_index",
+        include_str!("sql/208_workflow_runs_type_index.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

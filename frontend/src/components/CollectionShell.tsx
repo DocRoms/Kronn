@@ -374,13 +374,14 @@ export function CollectionShell<TItem>({
     if (isMobile) collapseSidebar();
   };
 
-  const toggleMultiSelection = (id: CollectionItemId) => {
+  // Stable between selection changes: rows are memoised on it.
+  const toggleMultiSelection = useCallback((id: CollectionItemId) => {
     if (!selectedIds || !onSelectedIdsChange) return;
     const next = new Set(selectedIds);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     onSelectedIdsChange(next);
-  };
+  }, [onSelectedIdsChange, selectedIds]);
 
   const onSidebarKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (!shortcutsEnabled) return;

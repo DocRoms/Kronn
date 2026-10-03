@@ -739,6 +739,40 @@ Release notes for 0.9.3 and earlier are available in the
   and surfaced as the raw body; the status is now read correctly, for every HTTP
   agent.
 
+- The Projects page opens without waiting seconds (KT-987). Every refresh of
+  the project list, on any page, asked each audited project for its drift —
+  which hashes every source the audit mapped — and repeated it on the next
+  refresh; the first open measured 3.9 s for one project. Drift is now asked
+  only on the Projects page, once per project and audit state, and the
+  backend reuses a result for a minute while the audit manifest is unchanged
+  (an audit recomputes it at once). The project list, a project, its drift and
+  audit details no longer wait behind database writes (a first list measured
+  8.5 s while a workflow was writing), and the projects' docs are read in
+  parallel.
+
+- Kronn shows one loading screen from launch to ready, and no longer looks
+  broken while its local service restarts (KT-986). Starting showed the Kronn
+  loader, then unstyled black text, then "Cannot connect to backend" after
+  about 10 s — a restart with migrations takes longer — and each tab then
+  showed its own "Chargement…". Now the loader painted by the first frame stays
+  until the first projects and discussions are in, and only its sentence
+  changes ("Connecting to the local service…", then "The local service is
+  starting…" with a Retry). It keeps trying instead of giving up, and every tab
+  is fetched in the background so switching never waits. When the service
+  stops while Kronn is open, a "Local service restarting — reconnecting…" pill
+  appears at once (it used to wait for a 30 s poll, leaving Projects or
+  Plugins empty with no explanation), and the loads that failed retry on their
+  own when it answers again.
+
+- The Discussions page no longer freezes on a large base (KT-983). Opening it
+  listed batch runs by reading every workflow run's results, 20 to 40 s on a
+  10 GB base, while the first opened discussion waited behind that request; it
+  now reads an index (45 ms). A discussion's git status also waited on
+  `gh pr view` every time: the pull-request link is now cached for two minutes
+  and the lookup gives up after 4 s. Selecting a discussion re-rendered every
+  card of the sidebar (about 200 ms per click); only the two cards that change
+  now re-render.
+
 - In Docker, agents can no longer control the host's Docker (KT-979). The
   host's Docker socket was mounted into the container, so any agent could use
   it to take over the machine. It is now off by default; the project Docker

@@ -829,7 +829,11 @@ pub async fn docker_running_projects(
         return Json(ApiResponse::err(bounded_command_error(&output)));
     }
 
-    let projects = match state.db.with_conn(crate::db::projects::list_projects).await {
+    let projects = match state
+        .db
+        .with_read_conn(crate::db::projects::list_projects)
+        .await
+    {
         Ok(projects) => projects
             .into_iter()
             .map(|project| {
