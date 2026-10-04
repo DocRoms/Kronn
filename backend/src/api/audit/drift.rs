@@ -289,6 +289,8 @@ pub async fn partial_audit(
             guard_project,
         );
         drop_guard.hold_lease();
+        // Its agent sessions get the audit MCP rule (no kronn-internal, no Memory).
+        let _audit_session = crate::core::audit_mcp_filter::AuditSessionGuard::enter(&project_path);
 
         // A3 — partial runs get their own audit_runs row: history and the
         // resume/validate rules must see a failed or newer partial, not

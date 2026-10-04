@@ -12,7 +12,7 @@
 //!
 //! Allowlist is the union of:
 //!   - [`AUDIT_MCP_ALLOWLIST`]: hard-coded set useful for audits
-//!     (introspection, reasoning, memory, lib-docs lookup, git).
+//!     (reasoning, lib-docs lookup, git).
 //!   - `KRONN_AUDIT_MCP_EXTRA` env var (comma-separated): user
 //!     override for power users who NEED a specific MCP during an
 //!     audit (rare).
@@ -30,12 +30,70 @@ use std::path::Path;
 /// runtime so user-curated `.mcp.json` files with different
 /// capitalization still resolve.
 pub const AUDIT_MCP_ALLOWLIST: &[&str] = &[
-    "kronn-internal",      // Kronn's own introspection — always
     "Sequential Thinking", // Structured reasoning, useful on big audits
-    "Memory",              // Cross-step state
     "context7",            // External lib docs lookup
     "Git",                 // Repo history (git log, blame) without Bash
 ];
+
+/// Servers an audit never gets, whatever the allowlist extra says. An audit
+/// reads untrusted repository content: `kronn-internal` exposes write tools and
+/// other projects' discussions, `Memory` a knowledge graph shared across
+/// projects. The ACP broker applies the same rule to Kronn's own bridge.
+pub const AUDIT_MCP_EXCLUDED: &[&str] = &["kronn-internal", "Memory"];
+
+/// Whether `name` is one of [`AUDIT_MCP_EXCLUDED`] (case-insensitive).
+pub fn excluded_from_audit(name: &str) -> bool {
+    AUDIT_MCP_EXCLUDED
+        .iter()
+        .any(|excluded| excluded.eq_ignore_ascii_case(name))
+}
+
+/// Projects with an audit in progress, by canonical path. Lets the ACP broker
+/// recognise an audit session without a flag threaded through the runner.
+static ACTIVE_AUDITS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn audit_key(project_path: &Path) -> std::path::PathBuf {
+    project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf())
+}
+
+/// Marks a project as being audited for as long as it lives.
+pub struct AuditSessionGuard {
+    key: std::path::PathBuf,
+}
+
+impl AuditSessionGuard {
+    pub fn enter(project_path: &Path) -> Self {
+        let key = audit_key(project_path);
+        if let Ok(mut active) = ACTIVE_AUDITS.lock() {
+            *active.entry(key.clone()).or_default() += 1;
+        }
+        Self { key }
+    }
+}
+
+impl Drop for AuditSessionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_AUDITS.lock() {
+            if let Some(count) = active.get_mut(&self.key) {
+                *count -= 1;
+                if *count == 0 {
+                    active.remove(&self.key);
+                }
+            }
+        }
+    }
+}
+
+/// Whether an audit of `project_path` is in progress.
+pub fn audit_in_progress(project_path: &Path) -> bool {
+    ACTIVE_AUDITS
+        .lock()
+        .is_ok_and(|active| active.contains_key(&audit_key(project_path)))
+}
 
 /// Env var the user can set to extend the allowlist for a single
 /// audit run. Comma-separated names, case-insensitive. Empty / unset
@@ -65,7 +123,7 @@ fn build_allowlist(extra: Option<&str>) -> HashSet<String> {
     if let Some(extra) = extra {
         for raw in extra.split(',') {
             let name = raw.trim();
-            if !name.is_empty() {
+            if !name.is_empty() && !excluded_from_audit(name) {
                 set.insert(name.to_lowercase());
             }
         }
@@ -248,28 +306,62 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    /// Lock the allowlist contents so a future "let's add foo" PR
-    /// doesn't silently drop one of the 5 servers — these are the
-    /// only MCPs Kronn defaults to ON during an audit, and dropping
-    /// one (e.g. `kronn-internal`) would break introspection on
-    /// every audit run.
+    /// Lock the allowlist contents: these are the only MCPs Kronn defaults
+    /// to ON during an audit, and the excluded ones must never come back.
     #[test]
-    fn allowlist_covers_the_5_audit_friendly_servers() {
-        assert!(AUDIT_MCP_ALLOWLIST.contains(&"kronn-internal"));
+    fn allowlist_covers_the_audit_friendly_servers_and_never_the_excluded_ones() {
         assert!(AUDIT_MCP_ALLOWLIST.contains(&"Sequential Thinking"));
-        assert!(AUDIT_MCP_ALLOWLIST.contains(&"Memory"));
         assert!(AUDIT_MCP_ALLOWLIST.contains(&"context7"));
         assert!(AUDIT_MCP_ALLOWLIST.contains(&"Git"));
+        for excluded in AUDIT_MCP_EXCLUDED {
+            assert!(!AUDIT_MCP_ALLOWLIST.contains(excluded), "{excluded}");
+        }
+        assert!(excluded_from_audit("KRONN-INTERNAL"));
+        assert!(excluded_from_audit("memory"));
+        assert!(!excluded_from_audit("context7"));
+    }
+
+    #[test]
+    fn excluded_servers_are_dropped_even_when_named_as_extra() {
+        let raw = json!({
+            "mcpServers": {
+                "kronn-internal": {"command": "python3", "args": ["x.py"]},
+                "Memory": {"command": "npx", "args": ["memory"]},
+                "Fastly": {"command": "fastly-mcp"},
+            }
+        })
+        .to_string();
+        let (_, report) =
+            filter_mcp_json_with_extra(&raw, Some("Memory, kronn-internal, Fastly")).unwrap();
+        assert_eq!(report.kept, vec!["Fastly".to_string()]);
+        assert_eq!(
+            report.dropped,
+            vec!["Memory".to_string(), "kronn-internal".to_string()]
+        );
+    }
+
+    #[test]
+    fn audit_session_guard_counts_nested_entries() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!audit_in_progress(tmp.path()));
+        let outer = AuditSessionGuard::enter(tmp.path());
+        let inner = AuditSessionGuard::enter(tmp.path());
+        assert!(audit_in_progress(tmp.path()));
+        drop(inner);
+        assert!(audit_in_progress(tmp.path()));
+        drop(outer);
+        assert!(!audit_in_progress(tmp.path()));
     }
 
     #[test]
     fn filter_drops_non_allowlisted_servers() {
-        // Real-world shape: user has 5 MCPs configured. The 3
-        // not in the allowlist (Fastly, Docker, atlassian) drop;
-        // the 2 in it (kronn-internal, context7) survive.
+        // Real-world shape: user has 6 MCPs configured. The 3
+        // not in the allowlist (Fastly, Docker, atlassian) drop, so does the
+        // excluded kronn-internal; the 2 in it (Git, context7) survive.
         let raw = json!({
             "mcpServers": {
                 "kronn-internal": {"command": "python3", "args": ["x.py"]},
+                "Git":            {"command": "git-mcp"},
                 "Fastly":         {"command": "fastly-mcp"},
                 "Docker":         {"command": "docker-mcp"},
                 "context7":       {"command": "node", "args": ["c7.js"]},
@@ -280,19 +372,17 @@ mod tests {
         let (filtered, report) = filter_mcp_json_with_extra(&raw, None).unwrap();
         let servers = filtered.get("mcpServers").unwrap().as_object().unwrap();
         assert_eq!(servers.len(), 2);
-        assert!(servers.contains_key("kronn-internal"));
+        assert!(servers.contains_key("Git"));
         assert!(servers.contains_key("context7"));
         // Report mirrors the split for SSE / logs.
-        assert_eq!(
-            report.kept,
-            vec!["context7".to_string(), "kronn-internal".to_string()]
-        );
+        assert_eq!(report.kept, vec!["Git".to_string(), "context7".to_string()]);
         assert_eq!(
             report.dropped,
             vec![
                 "Docker".to_string(),
                 "Fastly".to_string(),
-                "atlassian".to_string()
+                "atlassian".to_string(),
+                "kronn-internal".to_string(),
             ]
         );
     }
@@ -300,12 +390,12 @@ mod tests {
     #[test]
     fn allowlist_matching_is_case_insensitive() {
         // A user-curated `.mcp.json` may capitalize names differently
-        // ("SEQUENTIAL THINKING", "memory", "GIT"). The lookup must
+        // ("SEQUENTIAL THINKING", "Context7", "GIT"). The lookup must
         // not care so we don't silently drop them.
         let raw = json!({
             "mcpServers": {
                 "SEQUENTIAL THINKING": {"command": "x"},
-                "memory":              {"command": "y"},
+                "Context7":            {"command": "y"},
                 "GIT":                 {"command": "z"},
             }
         })
@@ -327,7 +417,7 @@ mod tests {
         // Whitespace around names tolerated.
         let raw = json!({
             "mcpServers": {
-                "kronn-internal": {"command": "a"},
+                "Git":            {"command": "a"},
                 "Fastly":         {"command": "b"},
                 "Docker":         {"command": "c"},
                 "atlassian":      {"command": "d"},
@@ -336,7 +426,7 @@ mod tests {
         .to_string();
         let (_filtered, report) =
             filter_mcp_json_with_extra(&raw, Some(" Fastly , Docker ")).unwrap();
-        assert!(report.kept.contains(&"kronn-internal".to_string()));
+        assert!(report.kept.contains(&"Git".to_string()));
         assert!(report.kept.contains(&"Fastly".to_string()));
         assert!(report.kept.contains(&"Docker".to_string()));
         assert!(report.dropped.contains(&"atlassian".to_string()));
@@ -425,7 +515,7 @@ mod tests {
         let mcp = tmp.path().join(".mcp.json");
         let original = json!({
             "mcpServers": {
-                "kronn-internal": {"command": "x"},
+                "Git":            {"command": "x"},
                 "Fastly":         {"command": "y"},
                 "Docker":         {"command": "z"},
             }
@@ -436,7 +526,7 @@ mod tests {
             let swap = AuditMcpSwap::install(tmp.path())
                 .unwrap()
                 .expect("swap should install when there's something to filter");
-            assert_eq!(swap.report().kept, vec!["kronn-internal".to_string()]);
+            assert_eq!(swap.report().kept, vec!["Git".to_string()]);
             assert_eq!(
                 swap.report().dropped,
                 vec!["Docker".to_string(), "Fastly".to_string()]
@@ -446,7 +536,7 @@ mod tests {
                 serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
             let servers = live.get("mcpServers").unwrap().as_object().unwrap();
             assert_eq!(servers.len(), 1);
-            assert!(servers.contains_key("kronn-internal"));
+            assert!(servers.contains_key("Git"));
         } // swap drops here → restore must run
 
         let restored: Value =
@@ -474,8 +564,8 @@ mod tests {
             &mcp,
             json!({
                 "mcpServers": {
-                    "kronn-internal": {"command": "x"},
-                    "Memory":         {"command": "y"},
+                    "Git":            {"command": "x"},
+                    "context7":       {"command": "y"},
                 }
             })
             .to_string(),
@@ -528,7 +618,7 @@ mod tests {
             &mcp,
             json!({
                 "mcpServers": {
-                    "kronn-internal": {"command": "x"},
+                    "Git":            {"command": "x"},
                     "Fastly":         {"command": "y"},
                 }
             })
@@ -557,7 +647,7 @@ mod tests {
             &mcp,
             json!({
                 "mcpServers": {
-                    "kronn-internal": {"command": "x"},
+                    "Git":            {"command": "x"},
                     "Fastly":         {"command": "y"},
                 }
             })

@@ -186,6 +186,9 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
         ));
     }
 
+    if broker.audit_excludes("kronn-internal") {
+        return Some(format!("mcp_servers={{{}}}", entries.trim_end_matches(',')));
+    }
     let launch = crate::agents::runner::disc_introspection_mcp_command()?;
     broker.register_trusted_mcp_server(&AcpMcpServer {
         id: "kronn-internal".to_owned(),
@@ -996,6 +999,25 @@ exec sleep 30"#,
         for var in crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS {
             assert!(argv.contains(var), "{var} must be listed by name: {argv}");
         }
+    }
+
+    #[test]
+    fn an_audit_session_override_has_no_kronn_internal_and_stays_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"Git": {"command": "git-mcp", "args": ["serve"]}}}"#,
+        )
+        .unwrap();
+        let broker = AcpPermissionBroker::scoped(
+            false,
+            AcpSessionScope::new(Some(dir.path().to_path_buf()), "unbound-discussion"),
+        );
+        let _audit = crate::core::audit_mcp_filter::AuditSessionGuard::enter(dir.path());
+        let config = codex_project_mcp_override(dir.path(), &broker).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).expect("valid TOML");
+        let servers = parsed["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), ["Git"]);
     }
 
     #[test]

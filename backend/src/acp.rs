@@ -1241,6 +1241,7 @@ fn native_session_mcp_servers(
     candidates: Vec<AcpMcpServer>,
     internal: Option<crate::agents::runner::InternalMcpCommand>,
 ) -> Vec<AcpMcpServer> {
+    let candidates = broker.without_audit_excluded(candidates);
     let requested_internal = candidates
         .iter()
         .any(|server| server.id == "kronn-internal");
@@ -1667,6 +1668,33 @@ mod tests {
             native_session_mcp_servers(&broker, vec![], Some(launch())).is_empty(),
             "catalogue probes that do not request MCP must remain tool-free"
         );
+    }
+
+    #[test]
+    fn an_audit_session_gets_no_kronn_internal_bridge() {
+        let project = tempfile::tempdir().unwrap();
+        let broker = AcpPermissionBroker::scoped(
+            false,
+            AcpSessionScope::new(Some(project.path().to_path_buf()), "unbound-discussion"),
+        );
+        let launch = crate::agents::runner::InternalMcpCommand {
+            command: "owned-kronn-mcp".into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        let bridge = AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: "owned-kronn-mcp".into(),
+            args: vec![],
+            allowed_tools: Vec::new(),
+        };
+        let _audit = crate::core::audit_mcp_filter::AuditSessionGuard::enter(project.path());
+        assert!(native_session_mcp_servers(&broker, vec![bridge], Some(launch)).is_empty());
+        assert!(broker
+            .audit_log()
+            .iter()
+            .any(|e| e.server.as_deref() == Some("kronn-internal")
+                && e.reason.contains("excluded from audits")));
     }
 
     struct FakeTransport;

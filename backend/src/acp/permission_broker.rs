@@ -53,6 +53,9 @@ pub struct AcpAuditEntry {
     pub locations: Vec<String>,
 }
 
+/// Label the runner gives a session that serves no discussion.
+pub(crate) const UNBOUND_SESSION_LABEL: &str = "unbound-discussion";
+
 /// Project/session scope a broker enforces on top of the `full_access` gate.
 /// Two independent, defense-in-depth checks key off this:
 /// - [`AcpPermissionBroker::authorize_mcp_servers`] re-derives the project's
@@ -212,6 +215,49 @@ impl AcpPermissionBroker {
         Ok(())
     }
 
+    /// An audit step's session: its project is being audited and it serves no
+    /// discussion (the runner labels such a session `unbound-discussion`). A
+    /// room participant on the same project keeps its tools during an audit.
+    fn is_audit_session(&self) -> bool {
+        self.scope.as_ref().is_some_and(|scope| {
+            scope.session_label == UNBOUND_SESSION_LABEL
+                && scope
+                    .project_root
+                    .as_deref()
+                    .is_some_and(crate::core::audit_mcp_filter::audit_in_progress)
+        })
+    }
+
+    /// Whether the audit rule (`core::audit_mcp_filter::AUDIT_MCP_EXCLUDED`)
+    /// withholds `server_id` from this session. A withheld server is recorded
+    /// as an explicit refusal, never silently missing.
+    pub fn audit_excludes(&self, server_id: &str) -> bool {
+        let excluded = self.is_audit_session()
+            && crate::core::audit_mcp_filter::excluded_from_audit(server_id);
+        if excluded {
+            self.record_context(
+                "mcp/authorize_server",
+                AcpPermissionVerdict::Deny,
+                "excluded from audits by the audit MCP rule".to_owned(),
+                Some(server_id.to_owned()),
+                None,
+                Vec::new(),
+            );
+        }
+        excluded
+    }
+
+    /// `servers` without those the audit rule withholds from this session.
+    pub fn without_audit_excluded(
+        &self,
+        servers: Vec<super::AcpMcpServer>,
+    ) -> Vec<super::AcpMcpServer> {
+        servers
+            .into_iter()
+            .filter(|server| !self.audit_excludes(&server.id))
+            .collect()
+    }
+
     /// Reconstruct candidates from this session's canonical project registry.
     /// Matching an id is insufficient: a caller could attach another command
     /// or arguments to an authorized name. Only an exact candidate match is
@@ -221,6 +267,7 @@ impl AcpPermissionBroker {
         &self,
         candidates: Vec<super::AcpMcpServer>,
     ) -> Vec<super::AcpMcpServer> {
+        let candidates = self.without_audit_excluded(candidates);
         let Some(scope) = self.scope.as_ref() else {
             self.register_authorized_servers(&candidates);
             return candidates;
@@ -855,6 +902,60 @@ mod tests {
                 && entry.server.as_deref() == Some("safe")
                 && entry.reason.contains("differs")
         }));
+    }
+
+    #[test]
+    fn an_audit_session_is_refused_kronn_internal_and_memory_with_the_filter_rule() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers": {"Memory": {"command": "memory-mcp"}, "Git": {"command": "git-mcp"}}}"#,
+        )
+        .unwrap();
+        let server = |id: &str, command: &str| crate::acp::AcpMcpServer {
+            id: id.into(),
+            command: command.into(),
+            args: vec![],
+            allowed_tools: vec![],
+        };
+        let scoped = |label: &str| {
+            AcpPermissionBroker::scoped(
+                false,
+                AcpSessionScope::new(Some(project.path().to_path_buf()), label),
+            )
+        };
+        let candidates = || vec![server("Memory", "memory-mcp"), server("Git", "git-mcp")];
+
+        // No audit in progress: the registry decides, as before.
+        let before = scoped(UNBOUND_SESSION_LABEL);
+        assert_eq!(before.authorize_mcp_servers(candidates()).len(), 2);
+        assert!(!before.audit_excludes("kronn-internal"));
+
+        let _audit = crate::core::audit_mcp_filter::AuditSessionGuard::enter(project.path());
+        let audit = scoped(UNBOUND_SESSION_LABEL);
+        let kept = audit.authorize_mcp_servers(candidates());
+        assert_eq!(
+            kept.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["Git"]
+        );
+        assert!(audit.audit_excludes("kronn-internal"));
+        let refusals: Vec<_> = audit
+            .audit_log()
+            .into_iter()
+            .filter(|e| e.reason.contains("excluded from audits"))
+            .filter_map(|e| e.server)
+            .collect();
+        assert_eq!(refusals, ["Memory", "kronn-internal"]);
+        // The same rule as the `.mcp.json` filter, server for server.
+        for id in crate::core::audit_mcp_filter::AUDIT_MCP_EXCLUDED {
+            assert!(audit.audit_excludes(id), "{id}");
+        }
+        assert!(!audit.audit_excludes("Git"));
+
+        // A discussion on the audited project keeps Kronn's bridge.
+        let room = scoped("disc-1");
+        assert!(!room.audit_excludes("kronn-internal"));
+        assert_eq!(room.authorize_mcp_servers(candidates()).len(), 2);
     }
 
     #[test]

@@ -164,7 +164,7 @@ impl AcpTransport for ClaudeAcpAdapter {
         // Always supply a strict registry, even when absent/invalid/refused.
         // Freeze the exact authorized snapshot: passing its path would allow
         // a replacement between negotiation and CLI startup to widen scope.
-        if self.launch.worker_context.is_none() {
+        if self.launch.worker_context.is_none() && !self.broker.audit_excludes("kronn-internal") {
             // This is Kronn's own executable, not a user/project declaration.
             // Keep room tools available even without a project, just as the
             // Codex adapter does, without restoring any global MCP registry.

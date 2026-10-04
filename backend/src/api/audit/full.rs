@@ -706,6 +706,8 @@ pub async fn full_audit(
         // returns (success OR panic). Discussions / workflows that
         // would spawn during this window see the filtered set + a
         // banner explains; trade-off documented in the swap module.
+        // The ACP broker applies the same exclusions to Kronn's own bridge.
+        let _audit_session = crate::core::audit_mcp_filter::AuditSessionGuard::enter(&project_path);
         let _audit_mcp_swap = crate::core::audit_mcp_filter::AuditMcpSwap::install(&project_path)
             .ok()
             .flatten();

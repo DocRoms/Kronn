@@ -80,6 +80,15 @@ Release notes for 0.9.3 and earlier are available in the
   in documents Kronn does not own (KT-1020): moved `docs/legacy/` documents and
   root instruction files with human content outside Kronn's block are
   reported, not blocking, and the repair step never rewrites them.
+
+
+
+- Audits no longer receive the `kronn-internal` and Memory MCP servers
+  (KT-935): the `.mcp.json` filter and the ACP broker apply the same exclusion,
+  so an OpenCode, Claude or Codex audit gets neither Kronn's write tools nor a
+  knowledge graph shared across projects, and the refusal is logged instead of
+  appearing as a registry error. Discussions on the audited project keep
+  their tools.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its
