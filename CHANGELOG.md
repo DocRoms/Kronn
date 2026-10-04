@@ -153,6 +153,16 @@ Release notes for 0.9.3 and earlier are available in the
   or, in a shell script, use the new `{{value|sh}}` filter, which renders one
   single-quoted word. `{{run.id}}` and `{{time.now…}}` stay allowed. Saved
   workflows keep running unchanged until they are next edited.
+- The desktop app keeps its local port from one launch to the next, so the
+  interface settings stored by the browser no longer reset at every launch or
+  after "Allow connections from other devices" restarts it (KT-972). The port
+  is saved in `desktop-port.json` in the data directory and can be pinned
+  there; a busy port is replaced for that launch only. The port is held from
+  the moment it is chosen, and the app only opens a backend that proves it is
+  the one it just started, never another Kronn answering on the same port.
+  Interface preferences (theme, tour progress, folds and sidebars, favourites,
+  default project, dismissed update) are also kept by the backend and
+  restored on a new origin; drafts and unsent messages stay on the device.
 
 - A task delegated to Gemini, Copilot, Kiro or OpenCode as a launched worker
   ran with the discussion's full access and without its delivery context, so

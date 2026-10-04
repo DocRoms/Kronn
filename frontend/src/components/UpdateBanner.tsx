@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { version as versionApi } from '../lib/api';
 import type { VersionCheck } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { safeSetItem } from '../lib/safeStorage';
 
 /**
  * Self-hosted Kronn auto-update banner.
@@ -49,7 +50,7 @@ export function UpdateBanner() {
     // Hoist it to a local so TypeScript follows the narrowing.
     const latest = info.latest;
     if (!latest) return;
-    try { localStorage.setItem(DISMISS_KEY, latest); } catch { /* incognito */ }
+    safeSetItem(DISMISS_KEY, latest);
     setDismissed(latest);
   };
 

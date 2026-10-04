@@ -811,6 +811,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "210_workflow_runs_project",
         include_str!("sql/210_workflow_runs_project.sql"),
     ),
+    (
+        "211_ui_preferences",
+        include_str!("sql/211_ui_preferences.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

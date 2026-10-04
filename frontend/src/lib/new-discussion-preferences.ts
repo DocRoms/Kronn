@@ -1,3 +1,5 @@
+import { safeRemoveItem, safeSetItem } from './safeStorage';
+
 const DEFAULT_PROJECT_KEY = 'kronn:new-discussion:default-project';
 
 export function loadDefaultDiscussionProject(): string {
@@ -9,15 +11,9 @@ export function loadDefaultDiscussionProject(): string {
 }
 
 export function saveDefaultDiscussionProject(projectId: string | null): void {
-  try {
-    if (projectId) {
-      localStorage.setItem(DEFAULT_PROJECT_KEY, projectId);
-    } else {
-      localStorage.removeItem(DEFAULT_PROJECT_KEY);
-    }
-  } catch {
-    // Storage can be disabled or full. The current form selection still works.
-  }
+  // Storage can be disabled or full; the current form selection still works.
+  if (projectId) safeSetItem(DEFAULT_PROJECT_KEY, projectId);
+  else safeRemoveItem(DEFAULT_PROJECT_KEY);
 }
 
 export const NEW_DISCUSSION_PREFERENCES = {

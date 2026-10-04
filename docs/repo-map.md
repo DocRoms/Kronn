@@ -21,6 +21,8 @@ Kronn/
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token, ui_language/stt_model/tts_voices for Tauri persistence)
+│       │   ├── ui_preferences.rs # GET/PUT /api/ui-preferences — server copy of synced localStorage keys (64 KiB cap), see frontend lib/uiPreferences.ts
+│       │   ├── health.rs       # /api/health (unauthenticated) + per-launch desktop `instance` tag
 │       │   ├── projects.rs     # Project CRUD (~1396L) + scan + bootstrap + clone + template install + git ops + defaults
 │       │   ├── projects/docker.rs # Project-scoped Docker Compose status + closed start/stop/restart actions
 │       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
@@ -287,7 +289,7 @@ Kronn/
 ├── kronn                       # CLI entrypoint (bash script, cross-platform)
 ├── desktop/                    # Tauri desktop app (native Windows/macOS/Linux wrapper)
 │   ├── package.json            # Desktop app dependencies
-│   └── src-tauri/              # Tauri Rust backend (embedded server, COOP/COEP headers)
+│   └── src-tauri/              # Tauri Rust backend (embedded server, COOP/COEP headers; src/port.rs = saved loopback port)
 ├── docker-compose.yml          # 3 services: backend, frontend, gateway
 ├── Makefile                    # start, stop, logs, build, dev-backend, dev-frontend, typegen
 └── .docker/                    # Docker configs (nginx gateway)

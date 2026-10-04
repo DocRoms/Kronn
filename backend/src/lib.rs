@@ -674,21 +674,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // a bug on GitHub" button can stamp them into the issue template
         // without hitting an authenticated endpoint first. Docker's curl-based
         // healthcheck ignores the body, so adding fields is backwards-safe.
-        .route(
-            "/api/health",
-            get(|| async {
-                axum::Json(serde_json::json!({
-                    "ok": true,
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "host_os": crate::agents::detect_host_label_public(),
-                    // Lets the UI gate the "Install agent" button: under Docker the
-                    // backend runs in a Linux container that can't install onto the
-                    // host, so the UI points to the host-side `kronn` CLI instead.
-                    // Native (Tauri/CLI) → false → Install works on the host.
-                    "in_docker": crate::core::env::is_docker(),
-                }))
-            }),
-        )
+        .route("/api/health", get(api::health::health))
         // ── Setup wizard ──
         .route("/api/open-url", post(api::setup::open_url))
         .route("/api/setup/status", get(api::setup::get_status))
@@ -816,6 +802,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/config/tts-voices", get(api::setup::get_tts_voices))
         .route("/api/config/tts-voice", post(api::setup::save_tts_voice))
+        .route(
+            "/api/ui-preferences",
+            get(api::ui_preferences::get).put(api::ui_preferences::put),
+        )
         .route(
             "/api/config/global-context",
             get(api::setup::get_global_context).post(api::setup::save_global_context),

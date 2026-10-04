@@ -816,6 +816,9 @@ export const config = {
   getTtsVoices: () => api<Record<string, string>>('GET', '/config/tts-voices'),
   saveTtsVoice: (lang: string, voiceId: string) =>
     api<void>('POST', '/config/tts-voice', { lang, voice_id: voiceId }),
+  /** KT-972 — interface preferences mirrored server-side (see lib/uiPreferences). */
+  getUiPreferences: () => api<Record<string, string>>('GET', '/ui-preferences'),
+  saveUiPreferences: (values: Record<string, string>) => api<void>('PUT', '/ui-preferences', values),
   /** Global context (markdown) injected into discussions. */
   getGlobalContext: () => api<string>('GET', '/config/global-context'),
   saveGlobalContext: (content: string) => api<void>('POST', '/config/global-context', content),

@@ -53,6 +53,7 @@ pub mod review_ledger;
 pub mod run_outcome;
 pub mod run_state;
 pub mod shared_runs;
+pub mod ui_preferences;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;

@@ -19,6 +19,7 @@ use kronn::{
 // Embed frontend/dist/ into the binary at compile time.
 // This ensures the desktop app works regardless of install location.
 use include_dir::{include_dir, Dir};
+mod port;
 static FRONTEND_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../frontend/dist");
 const BACKEND_STARTUP_ATTEMPTS: usize = 600;
 const BACKEND_STARTUP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -165,15 +166,10 @@ async fn wake_lock_watcher(db: Arc<Database>) {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/// Find a free TCP port for the embedded backend
-fn find_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind to free port");
-    listener.local_addr().unwrap().port()
-}
-
 /// Confirm that the embedded loopback listener answers Kronn's health contract
-/// before the packaged webview navigates away from its loading screen.
-fn probe_kronn_backend(port: u16) -> Option<String> {
+/// before the packaged webview navigates away from its loading screen. The
+/// `instance` tag must be this launch's: another Kronn on the port is refused.
+fn probe_kronn_backend(port: u16, expected_instance: &str) -> Option<String> {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let Ok(mut stream) =
         std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(400))
@@ -198,6 +194,9 @@ fn probe_kronn_backend(port: u16) -> Option<String> {
     }
     let body = response.split("\r\n\r\n").nth(1)?;
     let health: serde_json::Value = serde_json::from_str(body).ok()?;
+    if health["instance"].as_str() != Some(expected_instance) {
+        return None;
+    }
     health["ok"]
         .as_bool()
         .filter(|ok| *ok)
@@ -550,9 +549,11 @@ fn configure_embedded_server(server: &mut kronn::models::ServerConfig, port: u16
     server.runtime_port = Some(port);
 }
 
-/// Start the Kronn backend server on a given port (runs in a tokio task)
+/// Start the Kronn backend server on the port reserved by `reserved`
+/// (runs in a tokio task).
 async fn start_backend(
     port: u16,
+    reserved: std::net::TcpListener,
     dist_dir: std::path::PathBuf,
     data_dir_lock: std::fs::File,
 ) -> anyhow::Result<()> {
@@ -778,7 +779,15 @@ async fn start_backend(
         ));
 
     let addr = format!("{}:{}", bind_host, port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = if kronn::core::net_expose::is_exposed_host(&bind_host) {
+        // Every interface is wanted: release the loopback reservation and
+        // re-bind; a failure ends startup and `wait_for_backend` reports it.
+        drop(reserved);
+        tokio::net::TcpListener::bind(&addr).await?
+    } else {
+        reserved.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(reserved)?
+    };
     kronn::core::net_expose::record_bound_host(&bind_host);
     tracing::info!("Kronn ready on http://{}", addr);
 
@@ -794,6 +803,8 @@ async fn start_backend(
 
 struct BackendInfo {
     port: u16,
+    /// `instance` value this launch's backend serves on /api/health.
+    instance: String,
     startup_error: std::sync::Mutex<Option<String>>,
 }
 
@@ -808,7 +819,7 @@ async fn wait_for_backend(info: tauri::State<'_, BackendInfo>) -> Result<String,
         {
             return Err(message);
         }
-        if probe_kronn_backend(info.port).is_some() {
+        if probe_kronn_backend(info.port, &info.instance).is_some() {
             return Ok(format!("http://127.0.0.1:{}", info.port));
         }
         tokio::time::sleep(BACKEND_STARTUP_POLL).await;
@@ -853,6 +864,39 @@ async fn pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Bind the saved desktop port (or a free one) and record a first choice.
+fn reserve_backend_port() -> std::io::Result<port::ChosenPort> {
+    let path = config::config_dir()
+        .ok()
+        .map(|dir| port::port_file_path(&dir));
+    let persisted = path
+        .as_deref()
+        .map_or(port::Persisted::Missing, port::read_persisted);
+    if persisted == port::Persisted::Invalid {
+        tracing::warn!(
+            "Ignoring an invalid {}: expected {{\"port\": <1024-65535>}}",
+            port::PORT_FILE
+        );
+    }
+    let chosen = port::choose_port(persisted.port(), port::bind_loopback)?;
+    if port::should_persist(&persisted) {
+        if let Some(path) = path.as_deref() {
+            if let Err(error) = port::write_persisted(path, chosen.port) {
+                tracing::warn!(
+                    "Cannot save the desktop port to {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    tracing::info!(
+        "Embedded backend port {} ({})",
+        chosen.port,
+        if chosen.reused { "saved" } else { "new" }
+    );
+    Ok(chosen)
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -880,7 +924,29 @@ fn main() {
             (None, Some(message))
         }
     };
-    let port = find_free_port();
+    // The port is chosen and held only by the data-directory owner, so two
+    // launches never race on the saved value.
+    let mut startup_error = startup_error;
+    let mut reserved_listener = None;
+    let mut port = 0;
+    if data_dir_lock.is_some() {
+        match reserve_backend_port() {
+            Ok(chosen) => {
+                port = chosen.port;
+                reserved_listener = Some(chosen.listener);
+            }
+            Err(error) => {
+                let message = format!(
+                    "Kronn cannot reserve a local port for its service: {error}. Check the application logs, then retry."
+                );
+                tracing::error!("{message}");
+                startup_error = Some(message);
+            }
+        }
+    }
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let instance = kronn::api::health::instance_tag(&nonce);
+    kronn::api::health::set_instance_nonce(nonce);
 
     // Extract frontend dist (embedded in binary for production, filesystem for dev)
     let dist_dir = extract_frontend_dist();
@@ -892,6 +958,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(BackendInfo {
             port,
+            instance,
             startup_error: std::sync::Mutex::new(startup_error),
         })
         .invoke_handler(tauri::generate_handler![
@@ -943,7 +1010,9 @@ fn main() {
             }
 
             // Start the backend only when this process owns the data directory.
-            if let Some(data_dir_lock) = data_dir_lock.take() {
+            if let (Some(data_dir_lock), Some(reserved)) =
+                (data_dir_lock.take(), reserved_listener.take())
+            {
                 let backend_port = port;
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -952,7 +1021,9 @@ fn main() {
                         .build()
                         .expect("Failed to create Tokio runtime");
                     rt.block_on(async {
-                        if let Err(e) = start_backend(backend_port, dist_dir, data_dir_lock).await {
+                        if let Err(e) =
+                            start_backend(backend_port, reserved, dist_dir, data_dir_lock).await
+                        {
                             tracing::error!("Backend failed: {}", e);
                             let message =
                                 format!("Kronn's local service stopped during startup: {e}");
@@ -1105,14 +1176,55 @@ mod enrich_path_tests {
         }
 
         assert_eq!(
-            probe_kronn_backend(serve_once(r#"{"ok":true,"version":"0.9.5"}"#)),
+            probe_kronn_backend(
+                serve_once(r#"{"ok":true,"version":"0.9.5","instance":"ours"}"#),
+                "ours"
+            ),
             Some("0.9.5".into())
         );
-        assert_eq!(probe_kronn_backend(serve_once(r#"{"ok":false}"#)), None);
         assert_eq!(
-            probe_kronn_backend(serve_once(r#"{"ok":true,"version":"99.0.0"}"#)),
-            Some("99.0.0".into())
+            probe_kronn_backend(serve_once(r#"{"ok":false,"instance":"ours"}"#), "ours"),
+            None
         );
+        // Another Kronn, or one predating the instance tag, is never adopted.
+        assert_eq!(
+            probe_kronn_backend(
+                serve_once(r#"{"ok":true,"version":"99.0.0","instance":"theirs"}"#),
+                "ours"
+            ),
+            None
+        );
+        assert_eq!(
+            probe_kronn_backend(serve_once(r#"{"ok":true,"version":"0.14.2"}"#), "ours"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_foreign_kronn_on_the_saved_port_forces_a_fallback_and_is_not_adopted() {
+        let foreign = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let saved = foreign.local_addr().unwrap().port();
+        let ours = kronn::api::health::instance_tag("our-launch");
+        let theirs = kronn::api::health::instance_tag("their-launch");
+        std::thread::spawn(move || {
+            for stream in foreign.incoming().take(1) {
+                let mut stream = stream.unwrap();
+                let mut request = [0_u8; 512];
+                let _ = stream.read(&mut request);
+                let body = format!(r#"{{"ok":true,"version":"0.14.3","instance":"{theirs}"}}"#);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let chosen = port::choose_port(Some(saved), port::bind_loopback).unwrap();
+        assert_ne!(chosen.port, saved, "the busy saved port is not reused");
+        assert!(!port::should_persist(&port::Persisted::Port(saved)));
+        assert_eq!(probe_kronn_backend(saved, &ours), None);
     }
 
     #[test]
