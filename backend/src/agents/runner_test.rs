@@ -284,7 +284,7 @@ mod tests {
         )
         .unwrap();
 
-        let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let servers = acp_project_mcp_servers(project.path().to_str().unwrap(), false);
         // Kronn's own bridge rides along and is asserted on its own below;
         // what this test guards is which PROJECT servers survive the filter.
         let project_servers: Vec<_> = servers
@@ -297,6 +297,32 @@ mod tests {
         assert_eq!(project_servers[0].command, "safe-server");
         assert_eq!(project_servers[0].args, vec!["--project"]);
         assert!(project_servers[0].allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn acp_mcp_registry_keeps_an_env_credentialed_server_for_an_agent_resolving_references() {
+        // KT-1003: Claude turns env values into references it resolves from
+        // its own process, so only a credential in `args` drops a server.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{
+                "mcpServers": {
+                    "safe": {"command": "safe-server"},
+                    "credentialed": {"command": "private-server", "env": {"API_KEY": "secret"}},
+                    "leaky": {"command": "leaky-server", "args": ["--token", "secret"]}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let ids: Vec<String> = acp_project_mcp_servers(project.path().to_str().unwrap(), true)
+            .into_iter()
+            .map(|server| server.id)
+            .filter(|id| id != "kronn-internal")
+            .collect();
+
+        assert_eq!(ids, vec!["credentialed".to_string(), "safe".to_string()]);
     }
 
     #[test]
@@ -316,7 +342,7 @@ mod tests {
         )
         .unwrap();
 
-        let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let servers = acp_project_mcp_servers(project.path().to_str().unwrap(), false);
         let project_servers: Vec<_> = servers
             .iter()
             .filter(|server| server.id != "kronn-internal")
@@ -348,7 +374,7 @@ mod tests {
         let previous = std::env::var("KRONN_DISC_INTROSPECTION_MCP").ok();
         std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
 
-        let with_no_project = acp_project_mcp_servers("");
+        let with_no_project = acp_project_mcp_servers("", false);
         let bridge = with_no_project
             .iter()
             .find(|server| server.id == "kronn-internal")
@@ -378,7 +404,7 @@ mod tests {
             r#"{"mcpServers":{"kronn-internal":{"command":"project-spoof"}}}"#,
         )
         .unwrap();
-        let project_registry = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let project_registry = acp_project_mcp_servers(project.path().to_str().unwrap(), false);
         let own: Vec<_> = project_registry
             .iter()
             .filter(|server| server.id == "kronn-internal")

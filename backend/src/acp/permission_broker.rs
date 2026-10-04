@@ -245,8 +245,13 @@ impl AcpPermissionBroker {
                         .into_iter()
                         .filter_map(|(id, entry)| {
                             let command = entry.command.clone()?;
+                            // Only command and args are compared and passed on:
+                            // env values never leave the adapter that owns them.
                             (!command.trim().is_empty()
-                                && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
+                                && !entry
+                                    .args
+                                    .as_deref()
+                                    .is_some_and(crate::core::mcp_scanner::mcp_args_carry_secret))
                             .then_some((
                                 id.clone(),
                                 super::AcpMcpServer {

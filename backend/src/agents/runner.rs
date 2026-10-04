@@ -4252,7 +4252,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 #[derive(Clone, Copy)]
 pub(crate) enum SpawnIo<'a> {
     Direct(Option<&'a str>),
-    Adapter,
+    /// Stdin left to the adapter, plus environment for this launch only.
+    Adapter(&'a [(String, String)]),
 }
 
 /// Per-launch secrets remain in process environment, never prompt/argv.
@@ -4498,7 +4499,7 @@ async fn run_acp_session(
     use tokio::io::AsyncWriteExt;
 
     let mut host = AcpHost::new(1, transport);
-    let mcp_servers = acp_project_mcp_servers(project_path);
+    let mcp_servers = acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode);
     if let Err(error) = host
         .negotiate(AcpInitialize {
             protocol_version: 1,
@@ -4907,7 +4908,14 @@ async fn acp_start_failure(host: &crate::acp::AcpHost, failure: String) -> Strin
 /// project registry. Values from an MCP `env` map can be credentials; keeping
 /// those entries out of the ACP payload preserves the server-side secret
 /// boundary until the broker can inject scoped credentials directly.
-fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
+///
+/// `env_by_reference`: the agent's adapter turns an entry's env values into
+/// references it resolves from its own process (Claude, KT-1003), so an entry
+/// is kept unless a credential sits in its `args`.
+fn acp_project_mcp_servers(
+    project_path: &str,
+    env_by_reference: bool,
+) -> Vec<crate::acp::AcpMcpServer> {
     // Kronn's own bridge first, and independently of any project: an ACP agent
     // that cannot call `disc_append` is mute in the room it was invited to.
     // Claude gets this through `--mcp-config` and Codex through its TOML
@@ -4945,9 +4953,15 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
             // `args` (`["--token", "secret"]`) drops the whole server rather
             // than partially redacting it — the ACP no-secret promise covers
             // both shapes (KT-542 review).
-            (!command.trim().is_empty()
-                && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
-            .then_some(crate::acp::AcpMcpServer {
+            let leaks = if env_by_reference {
+                entry
+                    .args
+                    .as_deref()
+                    .is_some_and(crate::core::mcp_scanner::mcp_args_carry_secret)
+            } else {
+                crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry)
+            };
+            (!command.trim().is_empty() && !leaks).then_some(crate::acp::AcpMcpServer {
                 id,
                 command,
                 args: entry.args.unwrap_or_default(),
@@ -12243,7 +12257,8 @@ fn claude_auto_memory_kept(
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
-/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write.
+/// `SpawnIo::Adapter(env)` leaves that pipe for the adapter's awaited prompt
+/// write and gives the child `env` on top of its inherited environment.
 /// stderr is piped in both modes; the caller must drain it concurrently or a
 /// verbose child blocks once the pipe buffer fills.
 ///
@@ -12270,7 +12285,7 @@ pub(crate) fn try_spawn(
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
-        SpawnIo::Adapter => None,
+        SpawnIo::Adapter(_) => None,
     };
     // Resolve the final command. We also remember whether the resolved binary
     // lives inside WSL (`via_wsl`) so we can pick the right exec strategy
@@ -12332,10 +12347,13 @@ pub(crate) fn try_spawn(
     let mut cmd = async_cmd(&final_cmd);
     // Under Docker, the MCP values the project's `.mcp.json` refers to (KT-964).
     crate::core::mcp_secret_refs::apply_to(&mut cmd, std::path::Path::new(&effective_work_dir));
+    if let SpawnIo::Adapter(env) = io {
+        cmd.envs(env.iter().map(|(name, value)| (name, value)));
+    }
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
         .stdin(
-            if stdin_payload.is_some() || matches!(io, SpawnIo::Adapter) {
+            if stdin_payload.is_some() || matches!(io, SpawnIo::Adapter(_)) {
                 Stdio::piped()
             } else {
                 Stdio::null()

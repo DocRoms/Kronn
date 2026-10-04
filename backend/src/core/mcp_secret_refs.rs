@@ -67,6 +67,19 @@ pub fn is_reference(value: &str) -> bool {
         })
 }
 
+/// Whether a value is exactly one `${NAME}` environment reference.
+fn is_variable(value: &str) -> bool {
+    value
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(|name| {
+            name.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
 /// An MCP entry's env as references, and the values those references stand for.
 pub fn as_references(
     config_id: &str,
@@ -76,6 +89,35 @@ pub fn as_references(
     let mut values = Vec::with_capacity(env.len());
     for (key, value) in env {
         let name = reference_name(config_id, key);
+        references.insert(key.clone(), format!("${{{name}}}"));
+        values.push((name, value.clone()));
+    }
+    (references, values)
+}
+
+/// A project `.mcp.json` entry's env as references for one agent launch, and
+/// the values to give that launch's process. Values already written as
+/// references, and any whole `${NAME}` the user wrote for the CLI to resolve,
+/// stay untouched. The scope is a digest of the entry id, so two entries whose
+/// ids share a prefix never share a variable.
+pub fn entry_as_references(
+    entry_id: &str,
+    env: &HashMap<String, String>,
+) -> (HashMap<String, String>, Vec<(String, String)>) {
+    use sha2::Digest;
+    let scope: String = sha2::Sha256::digest(entry_id.as_bytes())
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut references = HashMap::with_capacity(env.len());
+    let mut values = Vec::new();
+    for (key, value) in env {
+        if is_variable(value) {
+            references.insert(key.clone(), value.clone());
+            continue;
+        }
+        let name = reference_name(&scope, key);
         references.insert(key.clone(), format!("${{{name}}}"));
         values.push((name, value.clone()));
     }
@@ -253,5 +295,24 @@ mod tests {
         assert!(given("1"));
         assert!(!given("0"), "natively nothing is injected");
         remember(&project.path().to_string_lossy(), Vec::new());
+    }
+
+    #[test]
+    fn an_entry_keeps_its_references_and_ids_sharing_a_prefix_never_collide() {
+        let env = HashMap::from([
+            ("TOKEN".to_string(), "secret-eu".to_string()),
+            ("REGION".to_string(), "${KRONN_MCP_ABC_REGION}".to_string()),
+            ("HOME_TOKEN".to_string(), "${GITHUB_TOKEN}".to_string()),
+        ]);
+        let (references, values) = entry_as_references("aws-cloudwatch-eu", &env);
+        assert_eq!(references["REGION"], "${KRONN_MCP_ABC_REGION}");
+        assert_eq!(references["HOME_TOKEN"], "${GITHUB_TOKEN}");
+        assert!(is_reference(&references["TOKEN"]));
+        assert!(!references["TOKEN"].contains("secret-eu"));
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].1, "secret-eu");
+
+        let (other, _) = entry_as_references("aws-cloudwatch-us", &env);
+        assert_ne!(references["TOKEN"], other["TOKEN"]);
     }
 }

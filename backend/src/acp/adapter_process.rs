@@ -303,7 +303,7 @@ mod tests {
             dir,
             "",
             None,
-            crate::agents::runner::SpawnIo::Adapter,
+            crate::agents::runner::SpawnIo::Adapter(&[]),
             None,
             None,
             None,

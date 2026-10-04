@@ -443,7 +443,7 @@ impl AcpTransport for CodexAcpAdapter {
             &cwd,
             "OPENAI_API_KEY",
             self.launch.api_key.as_deref(),
-            SpawnIo::Adapter,
+            SpawnIo::Adapter(&[]),
             self.discussion_id.as_deref(),
             self.launch.worker_context.as_ref(),
             self.launch.room_agent_context.as_ref(),

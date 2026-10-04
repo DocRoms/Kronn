@@ -11,6 +11,22 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- The plugin catalogue offers MySQL / MariaDB (KT-996, #217), through the
+  community server `@benborla29/mcp-server-mysql`: host, port, user, password
+  and database, read-only unless a write flag is set on the server.
+
+### Fixed
+
+- Natively, a Claude discussion kept none of its project's MCP servers once
+  one of them carried a credential in its environment (KT-1003): the whole
+  `.mcp.json` was refused. Each authorized server now stays on its own. Its
+  environment values reach Claude as `${KRONN_MCP_…}` references in the
+  command line and as values in the Claude process's own environment, never in
+  argv, ACP payloads or events. A credential passed in `args` still leaves its
+  server out.
+
 ### Changed
 
 - The release notes are now generated from the installers a release really
