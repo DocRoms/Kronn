@@ -24761,34 +24761,51 @@ async fn three_concurrent_media_jobs_advance_independently_without_cross_attribu
 async fn three_claimed_media_jobs_advance_concurrently_not_sequentially() {
     use base64::Engine;
     use wiremock::matchers::{body_string_contains, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    // Records when each upstream call arrives: concurrency shows in how close
+    // together the three calls land, not in a wall-clock total that a loaded
+    // machine stretches.
+    struct Arrivals {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+        response: ResponseTemplate,
+    }
+    impl Respond for Arrivals {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            self.seen.lock().unwrap().push(std::time::Instant::now());
+            self.response.clone()
+        }
+    }
 
     const DELAY_MS: u64 = 500;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let upstream = MockServer::start().await;
     let payload = base64::engine::general_purpose::STANDARD.encode(b"slow-bytes");
     for prompt in ["un chat lent", "un chien lent"] {
         Mock::given(method("POST"))
             .and(path("/v1/images"))
             .and(body_string_contains(prompt))
-            .respond_with(
-                ResponseTemplate::new(200)
+            .respond_with(Arrivals {
+                seen: seen.clone(),
+                response: ResponseTemplate::new(200)
                     .set_delay(std::time::Duration::from_millis(DELAY_MS))
                     .set_body_json(serde_json::json!({
                         "id": format!("gen-{prompt}"),
                         "data": [{"b64_json": payload}],
                         "usage": {"cost": 0.01, "is_byok": false}
                     })),
-            )
+            })
             .mount(&upstream)
             .await;
     }
     Mock::given(method("POST"))
         .and(path("/v1/videos"))
-        .respond_with(
-            ResponseTemplate::new(200)
+        .respond_with(Arrivals {
+            seen: seen.clone(),
+            response: ResponseTemplate::new(200)
                 .set_delay(std::time::Duration::from_millis(DELAY_MS))
                 .set_body_json(serde_json::json!({ "id": "prov-vid-slow", "status": "pending" })),
-        )
+        })
         .mount(&upstream)
         .await;
 
@@ -24821,19 +24838,23 @@ async fn three_claimed_media_jobs_advance_concurrently_not_sequentially() {
     }
 
     let client = reqwest::Client::new();
-    let started = std::time::Instant::now();
     kronn::agents::media_runner::tick(&state, &client)
         .await
         .expect("sweep");
-    let elapsed = started.elapsed();
 
-    // Sequential would take at least 3 * DELAY_MS (~1.5 s); real concurrency
-    // keeps the whole batch close to one round trip. The threshold sits well
-    // under the sequential floor while leaving generous room for scheduling
-    // overhead on a loaded CI box.
+    // Sequential calls would land at least DELAY_MS apart, since each waits
+    // for the previous response; concurrent ones arrive together.
+    let mut arrivals = seen.lock().unwrap().clone();
+    arrivals.sort();
+    assert_eq!(
+        arrivals.len(),
+        3,
+        "every claimed job must reach the provider"
+    );
+    let spread = *arrivals.last().unwrap() - arrivals[0];
     assert!(
-        elapsed < std::time::Duration::from_millis(DELAY_MS * 2),
-        "batch took {elapsed:?} for 3 jobs each delayed {DELAY_MS}ms — \
+        spread < std::time::Duration::from_millis(DELAY_MS),
+        "the three calls arrived {spread:?} apart with a {DELAY_MS}ms provider delay — \
          advanced sequentially instead of concurrently"
     );
 }
