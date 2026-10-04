@@ -15,7 +15,7 @@ import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
-import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
+import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Zap,
@@ -23,7 +23,7 @@ import {
   MessageSquare, AlertTriangle,
   FileCode, ShieldCheck, BookOpen, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
-  Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package, ListTodo,
+  Code2, GitBranch, Package, ListTodo,
   CircleHelp,
   Container,
   Copy,
@@ -34,6 +34,9 @@ import { ProjectGitPanel } from './ProjectGitPanel';
 import { ProjectTasksPanel } from './ProjectTasksPanel';
 import { ContextHelp } from './ContextHelp';
 import { ProjectDockerPanel } from './ProjectDockerPanel';
+import { ProjectGitBlock } from './project/ProjectGitBlock';
+import { ProjectDependenciesBlock } from './project/ProjectDependenciesBlock';
+import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCachedResource';
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
@@ -56,27 +59,6 @@ function readProjectDetailView(): ProjectDetailView {
     return 'overview';
   }
 }
-
-const LANGUAGE_COLORS: Record<string, string> = {
-  TypeScript: '#3178c6',
-  JavaScript: '#f1e05a',
-  Rust: '#dea584',
-  PHP: '#4f5d95',
-  Python: '#3572a5',
-  Go: '#00add8',
-  Java: '#b07219',
-  Kotlin: '#a97bff',
-  Swift: '#f05138',
-  C: '#555555',
-  'C++': '#f34b7d',
-  'C#': '#178600',
-  Ruby: '#701516',
-  Vue: '#41b883',
-  Svelte: '#ff3e00',
-  CSS: '#663399',
-  HTML: '#e34c26',
-  Shell: '#89e051',
-};
 
 /** Format a millisecond duration as `Xs` under 60s, `MmSSs` past 60s. */
 function formatElapsedShort(ms: number): string {
@@ -163,15 +145,6 @@ export function ProjectCard({
   );
   const [visibleDiscussionCount, setVisibleDiscussionCount] = useState(10);
   const [discussionLoadAmount, setDiscussionLoadAmount] = useState<'10' | '50' | 'all'>('10');
-  const [overviewGit, setOverviewGit] = useState<GitStatusResponse | null>(null);
-  const [overviewGitLoading, setOverviewGitLoading] = useState(false);
-  const [overviewGitError, setOverviewGitError] = useState(false);
-  const gitLanguageRefreshRef = useRef(false);
-  const [dependencyUpdates, setDependencyUpdates] = useState<DependencyUpdateSummary | null>(null);
-  const [dependencyUpdatesLoading, setDependencyUpdatesLoading] = useState(false);
-  const [dependencyUpdatesError, setDependencyUpdatesError] = useState(false);
-  const [dependencyMonitoringSaving, setDependencyMonitoringSaving] = useState(false);
-  const dependencyRefreshRef = useRef(false);
   const [auditEvidence, setAuditEvidence] = useState<AuditEvidenceResponse | null>(null);
   const [contextAudit, setContextAudit] = useState<ContextAuditResponse | null>(null);
   const [contextAuditLoading, setContextAuditLoading] = useState(false);
@@ -200,30 +173,6 @@ export function ProjectCard({
       });
     return () => { alive = false; };
   }, [detailMode, isOpen, proj.id]);
-
-  useEffect(() => {
-    if (!detailMode || !isOpen || detailView !== 'overview' || proj.path_exists === false) return;
-    let alive = true;
-    void Promise.resolve().then(async () => {
-      if (!alive) return;
-      setOverviewGitLoading(true);
-      setOverviewGitError(false);
-      try {
-        const status = await projectsApi.gitStatus(proj.id);
-        if (alive) setOverviewGit(status);
-      } catch {
-        if (alive) {
-          setOverviewGit(null);
-          setOverviewGitError(true);
-        }
-      } finally {
-        if (alive) setOverviewGitLoading(false);
-      }
-    });
-    return () => {
-      alive = false;
-    };
-  }, [detailMode, detailView, isOpen, proj.id, proj.path_exists]);
 
   const refreshContextAudit = useCallback(async () => {
     if (contextAuditLoading || proj.path_exists === false) return;
@@ -289,73 +238,6 @@ export function ProjectCard({
       setAcceptingContextBaseline(false);
     }
   }, [acceptingContextBaseline, proj.id, t, toast]);
-
-  const refreshGitLanguages = useCallback(async () => {
-    if (gitLanguageRefreshRef.current) return;
-    gitLanguageRefreshRef.current = true;
-    setOverviewGitLoading(true);
-    setOverviewGitError(false);
-    try {
-      setOverviewGit(await projectsApi.gitStatus(proj.id, true));
-    } catch {
-      setOverviewGitError(true);
-    } finally {
-      gitLanguageRefreshRef.current = false;
-      setOverviewGitLoading(false);
-    }
-  }, [proj.id]);
-
-  useEffect(() => {
-    if (!detailMode || !isOpen || detailView !== 'overview' || proj.path_exists === false) return;
-    let alive = true;
-    void Promise.resolve().then(async () => {
-      if (!alive) return;
-      setDependencyUpdatesLoading(true);
-      setDependencyUpdatesError(false);
-      try {
-        const summary = await projectsApi.dependencyUpdates(proj.id);
-        if (alive) setDependencyUpdates(summary);
-      } catch {
-        if (alive) {
-          setDependencyUpdates(null);
-          setDependencyUpdatesError(true);
-        }
-      } finally {
-        if (alive) setDependencyUpdatesLoading(false);
-      }
-    });
-    return () => {
-      alive = false;
-    };
-  }, [detailMode, detailView, isOpen, proj.id, proj.path_exists]);
-
-  const refreshDependencyUpdates = useCallback(async () => {
-    if (dependencyRefreshRef.current) return;
-    dependencyRefreshRef.current = true;
-    setDependencyUpdatesLoading(true);
-    setDependencyUpdatesError(false);
-    try {
-      setDependencyUpdates(await projectsApi.dependencyUpdates(proj.id, true));
-    } catch {
-      setDependencyUpdatesError(true);
-    } finally {
-      dependencyRefreshRef.current = false;
-      setDependencyUpdatesLoading(false);
-    }
-  }, [proj.id]);
-
-  const updateDependencyMonitoring = useCallback(async (intervalDays: number | null) => {
-    if (dependencyMonitoringSaving) return;
-    setDependencyMonitoringSaving(true);
-    try {
-      await projectsApi.setDependencyMonitoring(proj.id, intervalDays);
-      setDependencyUpdates(await projectsApi.dependencyUpdates(proj.id));
-    } catch {
-      setDependencyUpdatesError(true);
-    } finally {
-      setDependencyMonitoringSaving(false);
-    }
-  }, [dependencyMonitoringSaving, proj.id]);
 
   // ── Collapsible sections ──
   // 0.8.4 (#323 / F3) — on `Validated` and `Audited`, `aiContext` is
@@ -648,11 +530,6 @@ export function ProjectCard({
   );
   const projMcps = mcpConfigs.filter(c => c.is_global || c.project_ids.includes(proj.id));
   const projWorkflows = workflows.filter(w => w.project_id === proj.id);
-  const repositoryUrl = overviewGit?.remote_url
-    ?? (proj.repo_url?.startsWith('http') ? proj.repo_url.replace(/\.git\/?$/, '') : null);
-  const pullRequestsUrl = overviewGit?.pull_requests_url ?? overviewGit?.pr_url ?? null;
-  const languageStats = overviewGit?.languages ?? [];
-  const languageTotalBytes = languageStats.reduce((total, item) => total + item.bytes, 0);
   const contextDrift = contextAudit?.drift;
   const contextGrowthCount = contextDrift?.paid_agent_growth.length ?? 0;
   const contextBrokenRouteCount = contextDrift?.newly_broken_routes.length ?? 0;
@@ -675,89 +552,6 @@ export function ProjectCard({
     : proj.mcp_sync_report?.status === 'ReadOnly' || proj.mcp_sync_report?.status === 'MissingSecrets'
       ? 'warning'
       : 'error';
-  const languageCheckedTime = overviewGit?.languages_checked_at
-    ? new Date(overviewGit.languages_checked_at).toLocaleTimeString(locale, {
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-    : null;
-  const incompleteDependencyChecks = dependencyUpdates?.managers.filter(
-    manager => manager.status === 'Unsupported'
-      || manager.status === 'Unavailable'
-      || manager.status === 'Error'
-      || manager.status === 'TimedOut',
-  ).length ?? 0;
-  const dependencyCheckedAt = dependencyUpdates?.checked_at
-    ? new Date(dependencyUpdates.checked_at).toLocaleString(locale, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    })
-    : null;
-  const dependencyNextCheckAt = dependencyUpdates?.next_check_at
-    ? new Date(dependencyUpdates.next_check_at).toLocaleString(locale, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    })
-    : null;
-  const dependencySummary = (() => {
-    if (dependencyUpdatesLoading) {
-      return { tone: 'loading', label: t('projects.master.overview.dependenciesChecking') };
-    }
-    if (dependencyUpdatesError || !dependencyUpdates) {
-      return { tone: 'muted', label: t('projects.master.overview.dependenciesUnavailable') };
-    }
-    if (dependencyUpdates.managers.length === 0) {
-      return { tone: 'muted', label: t('projects.master.overview.dependenciesNone') };
-    }
-    if (dependencyUpdates.total_outdated > 0) {
-      return {
-        tone: 'warning',
-        label: t('projects.master.overview.dependencyOutdatedCount', dependencyUpdates.total_outdated),
-      };
-    }
-    if (incompleteDependencyChecks > 0) {
-      return {
-        tone: 'muted',
-        label: t('projects.master.overview.dependenciesPartial', incompleteDependencyChecks),
-      };
-    }
-    return { tone: 'success', label: t('projects.master.overview.dependenciesUpToDate') };
-  })();
-  const gitSync = (() => {
-    if (overviewGitLoading) {
-      return { tone: 'loading', label: t('projects.master.overview.gitLoading') };
-    }
-    if (overviewGitError || !overviewGit) {
-      return { tone: 'muted', label: t('projects.master.overview.gitUnavailable') };
-    }
-    if (!overviewGit.has_upstream) {
-      return {
-        tone: repositoryUrl ? 'warning' : 'muted',
-        label: repositoryUrl
-          ? t('projects.master.overview.noUpstream')
-          : t('projects.master.overview.localOnly'),
-      };
-    }
-    if (overviewGit.ahead > 0 && overviewGit.behind > 0) {
-      return {
-        tone: 'warning',
-        label: t('projects.master.overview.diverged', overviewGit.ahead, overviewGit.behind),
-      };
-    }
-    if (overviewGit.behind > 0) {
-      return {
-        tone: 'warning',
-        label: t('projects.master.overview.behind', overviewGit.behind),
-      };
-    }
-    if (overviewGit.ahead > 0) {
-      return {
-        tone: 'info',
-        label: t('projects.master.overview.ahead', overviewGit.ahead),
-      };
-    }
-    return { tone: 'success', label: t('projects.master.overview.upToDate') };
-  })();
   // 0.8.2 — Tracker-MCP hint. The audit Phase 3 + AutoPilot workflow get
   // dramatically more useful when a GitHub/GitLab/Jira/Linear MCP is
   // wired (real ticket creation, real issue context, "fetch_issue" step
@@ -2035,281 +1829,15 @@ export function ProjectCard({
                   </p>
                 )}
               </section>
-              <div className="project-overview-repository" data-testid="project-overview-repository">
-                <div className="project-overview-repository-head">
-                  <div className="project-overview-repository-title">
-                    <span className="project-overview-repository-icon" aria-hidden="true">
-                      <GitBranch size={17} />
-                    </span>
-                    <div>
-                      <span>{t('projects.master.overview.repository')}</span>
-                      {repositoryUrl ? (
-                        <a href={repositoryUrl} target="_blank" rel="noreferrer">
-                          {repositoryUrl.replace(/^https?:\/\//, '')}
-                          <ExternalLink size={11} />
-                        </a>
-                      ) : (
-                        <strong>{t('projects.master.overview.local')}</strong>
-                      )}
-                    </div>
-                  </div>
-                  <div className="project-overview-repository-actions">
-                    {repositoryUrl && (
-                      <a href={repositoryUrl} target="_blank" rel="noreferrer">
-                        <ExternalLink size={13} />
-                        {t('projects.master.overview.openRepository')}
-                      </a>
-                    )}
-                    {pullRequestsUrl && (
-                      <a href={pullRequestsUrl} target="_blank" rel="noreferrer">
-                        <GitPullRequest size={13} />
-                        {overviewGit?.provider === 'gitlab'
-                          ? t('projects.master.overview.mergeRequests')
-                          : t('projects.master.overview.pullRequests')}
-                      </a>
-                    )}
-                  </div>
-                </div>
-                <div className="project-overview-repository-meta">
-                  <span className="project-overview-git-chip">
-                    <GitBranch size={12} />
-                    {overviewGit?.branch || t('projects.master.overview.unknownBranch')}
-                  </span>
-                  <span className="project-overview-git-chip">
-                    <Tag size={12} />
-                    {overviewGit?.last_tag || t('projects.master.overview.noTag')}
-                  </span>
-                  <span className="project-overview-git-chip" data-tone={gitSync.tone}>
-                    <i aria-hidden="true" />
-                    {gitSync.label}
-                  </span>
-                  {!!overviewGit?.files.length && (
-                    <span className="project-overview-git-chip" data-tone="warning">
-                      {t('projects.master.overview.localChanges', overviewGit.files.length)}
-                    </span>
-                  )}
-                  {languageCheckedTime && (
-                    <button
-                      type="button"
-                      className="project-overview-language-refresh"
-                      data-cached={overviewGit?.languages_cached}
-                      onClick={() => void refreshGitLanguages()}
-                      disabled={overviewGitLoading}
-                      aria-label={t('projects.master.overview.languagesRefresh')}
-                      title={overviewGit?.languages_cached
-                        ? t('projects.master.overview.languagesCachedAt', languageCheckedTime)
-                        : t('projects.master.overview.languagesCheckedAt', languageCheckedTime)}
-                    >
-                      <RefreshCw size={11} className={overviewGitLoading ? 'is-spinning' : undefined} />
-                      {overviewGit?.languages_cached
-                        ? t('projects.master.overview.languagesCachedShort', languageCheckedTime)
-                        : languageCheckedTime}
-                    </button>
-                  )}
-                </div>
-                {/* KT-94 follow-up — the bar now arrives ~20 s AFTER the git
-                    status (background computation). Rendering nothing until then
-                    made the whole card jump when it landed; keep the slot at its
-                    final height with a pending shimmer instead (CLS ≈ 0). */}
-                {languageStats.length === 0 && (
-                  <div className="project-overview-languages" aria-hidden="true">
-                    <div className="project-overview-languages-title">
-                      <strong>{t('projects.master.overview.languages')}</strong>
-                      <span>{t('projects.master.overview.languagesPending')}</span>
-                    </div>
-                    <div className="project-overview-language-bar project-overview-language-bar--pending" />
-                    <div className="project-overview-language-legend">
-                      <span>
-                        <i style={{ background: 'var(--kr-text-faint)' }} />
-                        <strong>…</strong>
-                      </span>
-                    </div>
-                  </div>
-                )}
-                {languageStats.length > 0 && languageTotalBytes > 0 && (
-                  <div className="project-overview-languages">
-                    <div className="project-overview-languages-title">
-                      <strong>{t('projects.master.overview.languages')}</strong>
-                      <span>{t('projects.master.overview.languagesHint')}</span>
-                    </div>
-                    <div
-                      className="project-overview-language-bar"
-                      role="img"
-                      aria-label={t('projects.master.overview.languages')}
-                    >
-                      {languageStats.map(item => {
-                        const percentage = (item.bytes / languageTotalBytes) * 100;
-                        return (
-                          <span
-                            key={item.language}
-                            style={{
-                              width: `${percentage}%`,
-                              background: LANGUAGE_COLORS[item.language] ?? 'var(--kr-text-faint)',
-                            }}
-                            title={`${item.language} · ${percentage.toFixed(1)} %`}
-                          />
-                        );
-                      })}
-                    </div>
-                    <div className="project-overview-language-legend">
-                      {languageStats.slice(0, 8).map(item => {
-                        const percentage = (item.bytes / languageTotalBytes) * 100;
-                        return (
-                          <span key={item.language}>
-                            <i style={{ background: LANGUAGE_COLORS[item.language] ?? 'var(--kr-text-faint)' }} />
-                            <strong>{item.language}</strong>
-                            {percentage.toFixed(1)} %
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-              <div className="project-overview-dependencies" data-testid="project-overview-dependencies">
-                <div className="project-overview-dependencies-head">
-                  <div className="project-overview-repository-title">
-                    <span className="project-overview-repository-icon" aria-hidden="true">
-                      <Package size={17} />
-                    </span>
-                    <div>
-                      <span>{t('projects.master.overview.dependencies')}</span>
-                      <strong>
-                        {dependencySummary.label}
-                        {!!dependencyUpdates?.total_outdated && dependencyUpdates.total_major > 0 && (
-                          <span className="project-overview-dependency-major">
-                            {' · '}
-                            {t('projects.master.overview.dependencyMajorCount', dependencyUpdates.total_major)}
-                          </span>
-                        )}
-                      </strong>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="project-overview-dependencies-refresh"
-                    onClick={() => void refreshDependencyUpdates()}
-                    disabled={dependencyUpdatesLoading}
-                    aria-label={t('projects.master.overview.dependenciesRefresh')}
-                    title={t('projects.master.overview.dependenciesRefresh')}
-                  >
-                    <RefreshCw size={13} className={dependencyUpdatesLoading ? 'is-spinning' : undefined} />
-                    {t('projects.master.overview.dependenciesRefresh')}
-                  </button>
-                </div>
-                <div className="project-overview-dependencies-meta">
-                  <span className="project-overview-git-chip" data-tone={dependencySummary.tone}>
-                    <i aria-hidden="true" />
-                    {dependencySummary.label}
-                    {!!dependencyUpdates?.total_outdated && dependencyUpdates.total_major > 0 && (
-                      <strong className="project-overview-dependency-major">
-                        {' · '}
-                        {t('projects.master.overview.dependencyMajorCount', dependencyUpdates.total_major)}
-                      </strong>
-                    )}
-                  </span>
-                  {dependencyUpdates?.cached && (
-                    <span className="project-overview-git-chip">
-                      {t('projects.master.overview.dependenciesCached')}
-                    </span>
-                  )}
-                  {dependencyCheckedAt && (
-                    <span className="project-overview-dependencies-date">
-                      {t('projects.master.overview.dependenciesCheckedAt', dependencyCheckedAt)}
-                    </span>
-                  )}
-                  {dependencyNextCheckAt && (
-                    <span className="project-overview-dependencies-date">
-                      {t('projects.master.overview.dependenciesNextCheckAt', dependencyNextCheckAt)}
-                    </span>
-                  )}
-                  <label className="project-overview-dependencies-schedule">
-                    <span>{t('projects.master.overview.dependenciesSchedule')}</span>
-                    <select
-                      value={dependencyUpdates?.monitoring_interval_days ?? 'manual'}
-                      disabled={!dependencyUpdates || dependencyMonitoringSaving}
-                      onChange={event => {
-                        const value = event.currentTarget.value;
-                        void updateDependencyMonitoring(
-                          value === 'manual' ? null : Number(value),
-                        );
-                      }}
-                    >
-                      <option value="manual">
-                        {t('projects.master.overview.dependenciesScheduleManual')}
-                      </option>
-                      <option value="7">
-                        {t('projects.master.overview.dependenciesScheduleWeekly')}
-                      </option>
-                      <option value="14">
-                        {t('projects.master.overview.dependenciesScheduleFortnightly')}
-                      </option>
-                      <option value="30">
-                        {t('projects.master.overview.dependenciesScheduleMonthly')}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                {!!dependencyUpdates?.managers.length && (
-                  <div className="project-overview-dependency-list">
-                    {dependencyUpdates.managers.map(manager => {
-                      const packages = manager.packages ?? [];
-                      const status = manager.status === 'UpdatesAvailable'
-                        ? (
-                          <>
-                            {t('projects.master.overview.dependencyOutdatedCount', manager.outdated)}
-                            {manager.major > 0 && (
-                              <strong className="project-overview-dependency-major">
-                                {' · '}
-                                {t('projects.master.overview.dependencyMajorCount', manager.major)}
-                              </strong>
-                            )}
-                          </>
-                        )
-                        : manager.status === 'UpToDate'
-                          ? t('projects.master.overview.dependencyUpToDate')
-                          : manager.status === 'Unsupported'
-                            ? t('projects.master.overview.dependencyUnsupported')
-                            : manager.status === 'Unavailable'
-                              ? t('projects.master.overview.dependencyToolUnavailable')
-                              : manager.status === 'TimedOut'
-                                ? t('projects.master.overview.dependencyTimedOut')
-                                : t('projects.master.overview.dependencyCheckFailed');
-                      const tone = manager.status === 'UpdatesAvailable'
-                        ? 'warning'
-                        : manager.status === 'UpToDate'
-                          ? 'success'
-                          : 'muted';
-                      return (
-                        <div key={`${manager.manager}:${manager.manifest}`} className="project-overview-dependency-row">
-                          <div>
-                            <strong>{manager.manager}</strong>
-                            <span>{manager.manifest}</span>
-                            {!!packages.length && (
-                              <small>
-                                {packages.slice(0, 3).map((pkg, index) => (
-                                  <span
-                                    key={pkg.name}
-                                    className={pkg.major ? 'project-overview-dependency-package-major' : undefined}
-                                  >
-                                    {index > 0 ? ' · ' : ''}
-                                    {pkg.name} {pkg.current} → {pkg.latest}
-                                  </span>
-                                ))}
-                                {manager.outdated > 3 && <span>{` · +${manager.outdated - 3}`}</span>}
-                              </small>
-                            )}
-                          </div>
-                          <span className="project-overview-git-chip" data-tone={tone}>
-                            <i aria-hidden="true" />
-                            {status}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+              <ProjectGitBlock
+                projectId={proj.id}
+                repoUrl={proj.repo_url ?? null}
+                enabled={detailMode && isOpen && detailView === 'overview' && proj.path_exists !== false}
+              />
+              <ProjectDependenciesBlock
+                projectId={proj.id}
+                enabled={detailMode && isOpen && detailView === 'overview' && proj.path_exists !== false}
+              />
               <div className="project-overview-grid">
                 <button type="button" onClick={() => selectDetailView('discussions')}>
                   <MessageSquare size={16} />
@@ -2484,7 +2012,7 @@ export function ProjectCard({
                 projectId={proj.id}
                 onBranchChanged={() => {
                   setGitRevision(revision => revision + 1);
-                  setOverviewGit(null);
+                  invalidateCachedResource(projectGitCacheKey(proj.id));
                   onRefetch();
                 }}
               />

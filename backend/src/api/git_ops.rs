@@ -193,7 +193,17 @@ pub fn run_git_status_page(
     commit_offset: u32,
     commit_limit: u32,
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, commit_offset, commit_limit, true)
+    run_git_status_impl(repo_path, commit_offset, commit_limit, true, true)
+}
+
+/// Same status without the network PR lookup: a PR link already known from an
+/// earlier lookup is still reported, an unknown one stays empty.
+pub fn run_git_status_page_without_pr_lookup(
+    repo_path: &Path,
+    commit_offset: u32,
+    commit_limit: u32,
+) -> Result<GitStatusResponse, String> {
+    run_git_status_impl(repo_path, commit_offset, commit_limit, true, false)
 }
 
 /// Selected discussion workspaces replace branch-relative evidence with their
@@ -202,7 +212,7 @@ pub fn run_git_status_page(
 pub(crate) fn run_git_status_without_commit_evidence(
     repo_path: &Path,
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT, false)
+    run_git_status_impl(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT, false, true)
 }
 
 fn run_git_status_impl(
@@ -210,6 +220,7 @@ fn run_git_status_impl(
     commit_offset: u32,
     commit_limit: u32,
     include_commit_evidence: bool,
+    lookup_pr: bool,
 ) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
         let output = sync_cmd("git")
@@ -370,7 +381,11 @@ fn run_git_status_impl(
 
     // Check if there's an open PR/MR for this branch
     let pr_url = if !branch.is_empty() && !is_default_branch {
-        cached_pr_url(repo_path, &branch)
+        if lookup_pr {
+            cached_pr_url(repo_path, &branch)
+        } else {
+            known_pr_url(repo_path, &branch)
+        }
     } else {
         None
     };
@@ -1735,6 +1750,14 @@ pub fn cached_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
     url
 }
 
+/// The PR link a previous lookup found, without ever starting a new one.
+fn known_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
+    let key = (repo_path.to_path_buf(), branch.to_string());
+    let cache = PR_URLS.lock().ok()?;
+    let (url, at) = cache.get(&key)?;
+    (at.elapsed() < PR_URL_TTL).then(|| url.clone()).flatten()
+}
+
 /// Drop what is known about this repository's PRs: Kronn just created one.
 pub fn forget_pr_urls(repo_path: &Path) {
     if let Ok(mut cache) = PR_URLS.lock() {
@@ -1845,6 +1868,48 @@ pub fn default_pr_template(branch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_without_pr_lookup_reports_only_a_link_already_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = sync_cmd("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        git(&["checkout", "-q", "-b", "feature"]);
+
+        let unknown = run_git_status_page_without_pr_lookup(dir.path(), 0, 10).unwrap();
+        assert_eq!(unknown.branch, "feature");
+        assert_eq!(unknown.pr_url, None, "no lookup, nothing known");
+
+        PR_URLS.lock().unwrap().insert(
+            (dir.path().to_path_buf(), "feature".to_string()),
+            (
+                Some("https://example.test/pr/7".into()),
+                std::time::Instant::now(),
+            ),
+        );
+        let known = run_git_status_page_without_pr_lookup(dir.path(), 0, 10).unwrap();
+        assert_eq!(known.pr_url.as_deref(), Some("https://example.test/pr/7"));
+        forget_pr_urls(dir.path());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_pr_lookup_that_hangs_is_given_up_instead_of_blocking_the_discussion() {

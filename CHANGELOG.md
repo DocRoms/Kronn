@@ -32,6 +32,11 @@ Release notes for 0.9.3 and earlier are available in the
   the dependency review and the full CI gate (label-gated jobs included) run
   on it, and the release waits for that gate (KT-1023).
 
+- Opening a project shows the last known Git and Dependencies results at once,
+  with their date, and refreshes them behind a discreet indicator. A failed
+  refresh keeps the previous result instead of blanking the block, and the
+  Git block renders local status before the pull-request lookup completes
+  (KT-989).
 - Plugins page: the toolbar button that rescans the projects' `.mcp.json` files
   is labelled as such instead of "Sync", the preview names how many projects
   are affected, and the report after applying lists created, merged, rewritten

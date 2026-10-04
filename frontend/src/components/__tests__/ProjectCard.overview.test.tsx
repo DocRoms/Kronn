@@ -1,6 +1,7 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
+import { clearCachedResources } from '../../hooks/useCachedResource';
 
 vi.mock('../../lib/api', () => buildApiMock({
   projects: {
@@ -121,6 +122,7 @@ const PROJECT: Project = {
 describe('ProjectCard — repository overview', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearCachedResources();
     localStorage.removeItem('kronn:projectDetailView');
     sessionStorage.clear();
   });
@@ -465,8 +467,9 @@ describe('ProjectCard — repository overview', () => {
       />,
     );
 
+    await waitFor(() => expect(projectsApi.gitStatus).toHaveBeenCalledWith('p-overview', false, undefined, undefined, true));
     await waitFor(() => expect(projectsApi.gitStatus).toHaveBeenCalledWith('p-overview'));
-    await waitFor(() => expect(projectsApi.dependencyUpdates).toHaveBeenCalledWith('p-overview'));
+    await waitFor(() => expect(projectsApi.dependencyUpdates).toHaveBeenCalledWith('p-overview', false));
     expect(await screen.findByText('v0.9.0')).toBeInTheDocument();
     expect(screen.getByText('projects.master.overview.upToDate')).toBeInTheDocument();
     expect(screen.getByText('projects.master.overview.localChanges')).toBeInTheDocument();
@@ -498,7 +501,7 @@ describe('ProjectCard — repository overview', () => {
     fireEvent.click(languageRefresh);
     fireEvent.click(languageRefresh);
     await waitFor(() => expect(projectsApi.gitStatus).toHaveBeenCalledWith('p-overview', true));
-    expect(projectsApi.gitStatus).toHaveBeenCalledTimes(2);
+    expect(projectsApi.gitStatus).toHaveBeenCalledTimes(3);
 
     const refreshButton = screen.getByRole('button', {
       name: 'projects.master.overview.dependenciesRefresh',

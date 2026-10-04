@@ -1219,9 +1219,11 @@ export const projects = {
     refreshLanguages = false,
     commitOffset?: number,
     commitLimit?: number,
+    skipPrLookup = false,
   ) => {
     const query = new URLSearchParams();
     if (refreshLanguages) query.set('refresh', 'true');
+    if (skipPrLookup) query.set('skip_pr_lookup', 'true');
     if (commitOffset != null) query.set('commit_offset', String(commitOffset));
     if (commitLimit != null) query.set('commit_limit', String(commitLimit));
     const suffix = query.size > 0 ? `?${query.toString()}` : '';
