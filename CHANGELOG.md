@@ -74,6 +74,13 @@ Release notes for 0.9.3 and earlier are available in the
   explicit consent (`accept_args_override`). Custom arguments, which may hold
   tokens, now travel only in the encrypted bundle, and a manual import can no
   longer claim a `mcp-` or `api-` id reserved for the built-in catalogue.
+- Native skill and agent files are safer to write (KT-1011): nothing is
+  written through a symlinked folder such as a `.claude/skills` pointing
+  outside the repository, every front-matter value is quoted so a newline in
+  a skill description can no longer add a key like `allowed-tools`,
+  concurrent runs on one project no longer drop each other's entries from the
+  ownership ledger, and "Migrate to .agents/skills" no longer offers the
+  catalogue copies Kronn synced itself as repository skills.
 
 ### Changed
 

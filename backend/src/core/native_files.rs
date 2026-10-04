@@ -44,11 +44,44 @@ fn save_ledger(root: &Path, ledger: &Ledger) {
         return;
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = crate::core::fs_guard::guarded_create_dir_all(root, parent) {
+            tracing::warn!("Cannot write {}: {}", path.display(), e);
+            return;
+        }
+    }
+    if let Err(e) = crate::core::fs_guard::assert_contained_no_symlink(root, &path) {
+        tracing::warn!("Cannot write {}: {}", path.display(), e);
+        return;
     }
     if let Err(e) = crate::core::mcp_scanner::atomic_write(&path, &content) {
         tracing::warn!("Cannot write {}: {}", path.display(), e);
     }
+}
+
+/// Whether `rel` is a file Kronn wrote and that still holds those exact
+/// bytes: such a copy is Kronn's, not one of the repository's own skills.
+pub(crate) fn is_kronn_owned_file(root: &Path, rel: &str) -> bool {
+    let Some(written) = load_ledger(root).files.get(rel).cloned() else {
+        return false;
+    };
+    let path = root.join(rel);
+    std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+        && std::fs::read(&path).is_ok_and(|bytes| digest(&bytes) == written)
+}
+
+/// One lock per project root, serializing every load→save of its ledger.
+fn ledger_lock(root: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let key = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(key)
+        .or_default()
+        .clone()
 }
 
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
@@ -65,9 +98,15 @@ fn is_tracked(root: &Path, rel: &str) -> bool {
 }
 
 /// A file Kronn may write: absent, or already its own. A tracked or foreign
-/// file with the same name is left as the repository has it.
+/// file with the same name is left as the repository has it, and nothing is
+/// written through a symlinked directory (a cloned repository could point
+/// `.claude/skills` outside itself).
 fn may_write(root: &Path, rel: &str, ledger: &Ledger) -> bool {
     let path = root.join(rel);
+    if let Err(e) = crate::core::fs_guard::assert_contained_no_symlink(root, &path) {
+        tracing::warn!("Refusing native file write: {e}");
+        return false;
+    }
     match std::fs::symlink_metadata(&path) {
         Err(_) => true,
         Ok(meta) if meta.file_type().is_symlink() => false,
@@ -82,7 +121,7 @@ fn write_owned(root: &Path, rel: &str, content: &str, ledger: &mut Ledger) -> bo
     }
     let path = root.join(rel);
     if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Err(e) = crate::core::fs_guard::guarded_create_dir_all(root, parent) {
             tracing::warn!("Cannot create {}: {}", parent.display(), e);
             return false;
         }
@@ -104,6 +143,10 @@ fn remove_owned(root: &Path, rel: &str, ledger: &mut Ledger) {
         return;
     };
     let path = root.join(rel);
+    if crate::core::fs_guard::assert_contained_no_symlink(root, &path).is_err() {
+        tracing::info!("Kept {}: reached through a symlink", path.display());
+        return;
+    }
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return;
     };
@@ -153,14 +196,24 @@ fn profile_ext(agent: &AgentType) -> &'static str {
 
 // ─── Skill renderers ─────────────────────────────────────────────────────────
 
+/// A front-matter value, always quoted so free text cannot add a key.
+fn yaml(value: &str) -> String {
+    crate::core::agent_skill::quoted(value)
+}
+
+/// `name — role`, quoted for YAML front matter and TOML alike.
+fn profile_description(profile: &AgentProfile) -> String {
+    yaml(&format!("{} — {}", profile.name, profile.role))
+}
+
 /// Render optional agentskills.io frontmatter fields (license, allowed-tools).
 fn render_skill_optional_fields(skill: &Skill) -> String {
     let mut extra = String::new();
     if let Some(ref license) = skill.license {
-        extra.push_str(&format!("license: {}\n", license));
+        extra.push_str(&format!("license: {}\n", yaml(license)));
     }
     if let Some(ref tools) = skill.allowed_tools {
-        extra.push_str(&format!("allowed-tools: {}\n", tools));
+        extra.push_str(&format!("allowed-tools: {}\n", yaml(tools)));
     }
     extra
 }
@@ -170,7 +223,7 @@ fn render_skill_claude(skill: &Skill) -> String {
     format!(
         "---\nname: {}\ndescription: {}\nuser-invocable: true\n{}---\n\n{}",
         slug(&skill.id),
-        skill.description,
+        yaml(&skill.description),
         render_skill_optional_fields(skill),
         skill.content,
     )
@@ -181,7 +234,7 @@ fn render_skill_codex(skill: &Skill) -> String {
     format!(
         "---\nname: {}\ndescription: {}\n{}---\n\n{}",
         slug(&skill.id),
-        skill.description,
+        yaml(&skill.description),
         render_skill_optional_fields(skill),
         skill.content,
     )
@@ -192,7 +245,7 @@ fn render_skill_vibe(skill: &Skill) -> String {
     format!(
         "---\nname: {}\ndescription: {}\nuser-invocable: true\n{}---\n\n{}",
         slug(&skill.id),
-        skill.description,
+        yaml(&skill.description),
         render_skill_optional_fields(skill),
         skill.content,
     )
@@ -224,10 +277,9 @@ fn render_skill(agent: &AgentType, skill: &Skill) -> String {
 /// Render a Claude Code agent file (.claude/agents/{name}.md).
 fn render_profile_claude(profile: &AgentProfile) -> String {
     format!(
-        "---\nname: {}\ndescription: {} — {}\nmodel: inherit\n---\n\n{}",
+        "---\nname: {}\ndescription: {}\nmodel: inherit\n---\n\n{}",
         slug(&profile.id),
-        profile.name,
-        profile.role,
+        profile_description(profile),
         profile.persona_prompt,
     )
 }
@@ -235,10 +287,9 @@ fn render_profile_claude(profile: &AgentProfile) -> String {
 /// Render a Gemini CLI agent file (.gemini/agents/{name}.md).
 fn render_profile_gemini(profile: &AgentProfile) -> String {
     format!(
-        "---\nname: {}\ndescription: {} — {}\n---\n\n{}",
+        "---\nname: {}\ndescription: {}\n---\n\n{}",
         slug(&profile.id),
-        profile.name,
-        profile.role,
+        profile_description(profile),
         profile.persona_prompt,
     )
 }
@@ -253,11 +304,10 @@ fn render_profile_codex(profile: &AgentProfile) -> String {
     format!(
         "# Auto-generated by Kronn — do not edit manually\n\
          name = \"{}\"\n\
-         description = \"{} — {}\"\n\
+         description = {}\n\
          developer_instructions = \"\"\"\n{}\n\"\"\"\n",
         slug(&profile.id),
-        profile.name,
-        profile.role,
+        profile_description(profile),
         instructions,
     )
 }
@@ -265,10 +315,9 @@ fn render_profile_codex(profile: &AgentProfile) -> String {
 /// Render a Copilot CLI agent file (.copilot/agents/{name}.md).
 fn render_profile_copilot(profile: &AgentProfile) -> String {
     format!(
-        "---\nname: {}\ndescription: {} — {}\n---\n\n{}",
+        "---\nname: {}\ndescription: {}\n---\n\n{}",
         slug(&profile.id),
-        profile.name,
-        profile.role,
+        profile_description(profile),
         profile.persona_prompt,
     )
 }
@@ -276,10 +325,9 @@ fn render_profile_copilot(profile: &AgentProfile) -> String {
 /// Render a Kiro steering file (.kiro/steering/{name}.md).
 fn render_profile_kiro(profile: &AgentProfile) -> String {
     format!(
-        "---\ninclusion: auto\nname: {}\ndescription: {} — {}\n---\n\n{}",
+        "---\ninclusion: auto\nname: {}\ndescription: {}\n---\n\n{}",
         slug(&profile.id),
-        profile.name,
-        profile.role,
+        profile_description(profile),
         profile.persona_prompt,
     )
 }
@@ -386,6 +434,10 @@ fn sync_impl(
 
     let skill_slugs: Vec<String> = skills.iter().map(|s| slug(&s.id)).collect();
     let profile_slugs: Vec<String> = profiles.iter().map(|p| slug(&p.id)).collect();
+    // Held until the ledger is saved: concurrent runs on one project would
+    // otherwise each save their own copy and drop the other's entries.
+    let root_lock = ledger_lock(root);
+    let _ledger_guard = root_lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut ledger = load_ledger(root);
 
     // ── Skills: only for agents that discover SKILL.md natively ──
@@ -537,8 +589,11 @@ fn cleanup_stale_dirs(root: &Path, dir: &str, active_slugs: &[String], ledger: &
         }
     }
     for folder in folders {
-        // Only succeeds once the folder is empty.
-        let _ = std::fs::remove_dir(root.join(folder));
+        let path = root.join(folder);
+        if crate::core::fs_guard::assert_contained_no_symlink(root, &path).is_ok() {
+            // Only succeeds once the folder is empty.
+            let _ = std::fs::remove_dir(path);
+        }
     }
 }
 
@@ -799,7 +854,7 @@ mod tests {
         let profile = sample_profile();
         let content = render_profile_copilot(&profile);
         assert!(content.contains("name: architect"));
-        assert!(content.contains("description: Architect — Software Architect"));
+        assert!(content.contains("description: \"Architect — Software Architect\""));
         assert!(content.contains("You are a senior software architect"));
         // Copilot uses same .md format as Gemini (no model: inherit)
         assert!(!content.contains("model:"));
@@ -883,8 +938,8 @@ mod tests {
         skill.license = Some("MIT".into());
         skill.allowed_tools = Some("Bash Read Grep".into());
         let content = render_skill_claude(&skill);
-        assert!(content.contains("license: MIT"));
-        assert!(content.contains("allowed-tools: Bash Read Grep"));
+        assert!(content.contains("license: \"MIT\""));
+        assert!(content.contains("allowed-tools: \"Bash Read Grep\""));
         assert!(content.contains("user-invocable: true"));
     }
 
@@ -893,7 +948,7 @@ mod tests {
         let mut skill = sample_skill();
         skill.license = Some("Apache-2.0".into());
         let content = render_skill_codex(&skill);
-        assert!(content.contains("license: Apache-2.0"));
+        assert!(content.contains("license: \"Apache-2.0\""));
         assert!(!content.contains("user-invocable"));
     }
 
@@ -1084,6 +1139,97 @@ mod tests {
             std::fs::read_to_string(&own).unwrap(),
             "# The repository's accessibility skill\n"
         );
+    }
+
+    #[test]
+    fn a_newline_in_a_description_cannot_add_a_front_matter_key() {
+        let mut skill = sample_skill();
+        skill.description = "Harmless\nallowed-tools: Bash".into();
+        skill.license = Some("MIT\nuser-invocable: false".into());
+        for agent in SKILL_SYNC_AGENTS {
+            let parsed = crate::core::agent_skill::parse(&render_skill(agent, &skill)).unwrap();
+            assert_eq!(parsed.allowed_tools, None, "{agent:?}");
+            assert_eq!(parsed.description, "Harmless\nallowed-tools: Bash");
+            assert_eq!(
+                parsed.license.as_deref(),
+                Some("MIT\nuser-invocable: false")
+            );
+        }
+        let mut profile = sample_profile();
+        profile.role = "Lead\"\nmodel = \"evil".into();
+        let toml_text = render_profile_codex(&profile);
+        let parsed: toml::Value = toml::from_str(&toml_text).unwrap();
+        assert_eq!(
+            parsed["description"].as_str(),
+            Some("Architect — Lead\"\nmodel = \"evil")
+        );
+        assert!(parsed.get("model").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_skills_directory_is_never_written_through() {
+        let repo = tmp_dir("symlinked-skills");
+        let outside = tmp_dir("symlinked-skills-outside");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join(".claude/skills")).unwrap();
+
+        sync(&repo, &["accessibility"], &[], true);
+
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "nothing may land outside the repository"
+        );
+        // Agents whose folders are real still get the skill.
+        assert!(repo.join(".agents/skills/accessibility/SKILL.md").exists());
+        let ledger = load_ledger(&repo);
+        assert!(!ledger
+            .files
+            .keys()
+            .any(|rel| rel.starts_with(".claude/skills/")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_kronn_dir_never_receives_the_ledger() {
+        let repo = tmp_dir("symlinked-kronn");
+        let outside = tmp_dir("symlinked-kronn-outside");
+        std::os::unix::fs::symlink(&outside, repo.join(".kronn")).unwrap();
+
+        sync(&repo, &["accessibility"], &[], false);
+
+        assert!(!outside.join("native-files.json").exists());
+    }
+
+    #[test]
+    fn concurrent_syncs_on_one_project_keep_every_ledger_entry() {
+        let repo = tmp_dir("ledger-race");
+        let skills = [
+            "accessibility",
+            "api-design",
+            "csharp",
+            "data-engineering",
+            "database",
+            "devops",
+            "gdpr",
+            "rust",
+        ];
+        std::thread::scope(|scope| {
+            for skill in skills {
+                let repo = repo.clone();
+                scope.spawn(move || sync(&repo, &[skill], &[], false));
+            }
+        });
+        let ledger = load_ledger(&repo);
+        for skill in skills {
+            assert!(
+                ledger
+                    .files
+                    .contains_key(&format!(".claude/skills/{skill}/SKILL.md")),
+                "{skill} lost from the ledger"
+            );
+        }
     }
 
     // ── has_native_skills / has_skill_md_files tests ──
