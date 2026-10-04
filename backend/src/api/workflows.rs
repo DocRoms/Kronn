@@ -519,28 +519,103 @@ async fn validate_child_targets_db(
     validate_child_targets(start_id, own, &own.on_failure, &workflows)
 }
 
-/// Async wrapper: short-circuits when no SubWorkflow step is present (no DB
-/// hit for the common case), else loads every workflow's steps and runs the
-/// pure validator above.
+/// Async wrapper: loads every workflow's steps, checks the graph below the
+/// saved workflow, then the graphs of the workflows that use it as a child.
 async fn validate_sub_workflow_graph_db(
     state: &AppState,
     start_id: &str,
     steps: &[WorkflowStep],
 ) -> Result<(), String> {
-    if !steps
-        .iter()
-        .any(|s| matches!(s.step_type, StepType::SubWorkflow))
-    {
-        return Ok(());
-    }
     let all = state
         .db
         .with_conn(crate::db::workflows::list_workflows)
         .await
         .map_err(|e| format!("DB error loading workflows for sub-workflow validation: {e}"))?;
-    let graph: std::collections::HashMap<String, Vec<WorkflowStep>> =
-        all.into_iter().map(|w| (w.id, w.steps)).collect();
-    validate_sub_workflow_graph(start_id, steps, &graph)
+    let graph: std::collections::HashMap<String, Vec<WorkflowStep>> = all
+        .iter()
+        .map(|w| (w.id.clone(), w.steps.clone()))
+        .collect();
+    validate_sub_workflow_graph(start_id, steps, &graph)?;
+    validate_sub_workflow_parents(start_id, steps, &all)
+}
+
+/// Re-validates, with `start_id`'s new steps, every workflow that reaches it
+/// through SubWorkflow steps: editing a child later must not give a parent a
+/// Gate, a cycle or too deep a nesting.
+pub(crate) fn validate_sub_workflow_parents(
+    start_id: &str,
+    start_steps: &[WorkflowStep],
+    workflows: &[Workflow],
+) -> Result<(), String> {
+    fn reaches(
+        from: &str,
+        target: &str,
+        graph: &std::collections::HashMap<String, Vec<WorkflowStep>>,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !seen.insert(from.to_string()) {
+            return false;
+        }
+        graph.get(from).into_iter().flatten().any(|step| {
+            matches!(step.step_type, StepType::SubWorkflow)
+                && step
+                    .sub_workflow_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|child| child == target || reaches(child, target, graph, seen))
+        })
+    }
+    let mut graph: std::collections::HashMap<String, Vec<WorkflowStep>> = workflows
+        .iter()
+        .map(|w| (w.id.clone(), w.steps.clone()))
+        .collect();
+    graph.insert(start_id.to_string(), start_steps.to_vec());
+    for parent in workflows.iter().filter(|w| w.id != start_id) {
+        if !reaches(
+            &parent.id,
+            start_id,
+            &graph,
+            &mut std::collections::HashSet::new(),
+        ) {
+            continue;
+        }
+        validate_sub_workflow_graph(&parent.id, &graph[&parent.id], &graph).map_err(|e| {
+            format!(
+                "Le workflow « {} » utilise celui-ci comme sous-workflow : {e}",
+                parent.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// The sub-workflow rules for a workflow imported from a repository's
+/// `kronn/` folder. Targets this instance does not know are skipped here: the
+/// repository names them by another instance's ids.
+pub(crate) fn validate_imported_sub_workflow_graph(
+    imported: &Workflow,
+    workflows: &[Workflow],
+) -> Result<(), String> {
+    let graph: std::collections::HashMap<String, Vec<WorkflowStep>> = workflows
+        .iter()
+        .filter(|w| w.id != imported.id)
+        .map(|w| (w.id.clone(), w.steps.clone()))
+        .collect();
+    let resolvable: Vec<WorkflowStep> = imported
+        .steps
+        .iter()
+        .filter(|step| {
+            !matches!(step.step_type, StepType::SubWorkflow)
+                || step
+                    .sub_workflow_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|target| target == imported.id || graph.contains_key(target))
+        })
+        .cloned()
+        .collect();
+    validate_sub_workflow_graph(&imported.id, &resolvable, &graph)?;
+    validate_sub_workflow_parents(&imported.id, &imported.steps, workflows)
 }
 
 /// Per-step required-field check, extracted from the loop above so the
@@ -3750,21 +3825,34 @@ pub async fn decide_run(
     // human racing the auto-approve timer) could both pass it and spawn two
     // concurrent `resume_run`s on the same run. The conditional UPDATE
     // (`… WHERE status = 'WaitingApproval'`) lets exactly ONE caller win.
-    let claim_run_id = run.id.clone();
+    // A run that resumes is re-admitted against the concurrency limit in the
+    // same closure as the claim.
+    let claim_run = run.clone();
+    let claim_workflow = workflow.clone();
     let claim_status = new_status.clone();
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::claim_waiting_run(conn, &claim_run_id, &claim_status)
+            if claim_status == RunStatus::Running {
+                if let Err(reason) = crate::workflows::concurrency::resume_within_limit(
+                    conn,
+                    &claim_workflow,
+                    &claim_run,
+                )? {
+                    return Ok(Err(reason));
+                }
+            }
+            crate::db::workflows::claim_waiting_run(conn, &claim_run.id, &claim_status).map(Ok)
         })
         .await
     {
-        Ok(true) => {} // we won the claim — proceed
-        Ok(false) => {
+        Ok(Ok(true)) => {} // we won the claim — proceed
+        Ok(Ok(false)) => {
             return Json(ApiResponse::err(
                 "Run was just decided by another caller — decision ignored (no double-resume)",
             ));
         }
+        Ok(Err(reason)) => return Json(ApiResponse::err(reason)),
         Err(e) => return Json(ApiResponse::err(format!("DB error claiming run: {e}"))),
     }
 

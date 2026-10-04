@@ -687,6 +687,10 @@ impl Workspace {
             }
         );
 
+        // Same agent configs as a discussion worktree, so an Agent step keeps
+        // the project's MCP servers and its strict MCP config.
+        crate::core::worktree::copy_agent_configs(repo_path, &worktree_path);
+
         let ws = Self {
             path: worktree_path,
             branch,
@@ -745,7 +749,13 @@ impl Workspace {
     /// Failures: best-effort. If the preserve check itself errors out, we
     /// default to preserving the branch (safer than silently dropping work).
     pub async fn cleanup(self) -> Result<CleanupOutcome> {
-        self.run_hook("before_remove").await?;
+        // A failing or hung teardown hook must not leave the checkout behind.
+        if let Err(error) = self.run_hook("before_remove").await {
+            tracing::warn!(
+                path = %self.path.display(),
+                "before_remove hook failed, removing the worktree anyway: {error:#}"
+            );
+        }
 
         // Snapshot branch state BEFORE removing the worktree — afterwards
         // the worktree path is gone and `git -C <worktree>` calls fail.
@@ -832,7 +842,10 @@ impl Workspace {
             // would otherwise pin the run and its concurrency slot forever —
             // this await is outside the cancel race, so Stop can't reach it.
             // `kill_on_drop` ensures the timed-out child doesn't leak.
+            #[cfg(not(test))]
             const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+            #[cfg(test)]
+            const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
             let mut command = async_cmd("sh");
             command
                 .args(["-c", cmd])
@@ -1454,6 +1467,49 @@ mod tests {
         let outcome = ws.cleanup().await.expect("cleanup");
         // No new commits committed → no preserve.
         assert!(outcome.preserved.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_isolated_worktree_gets_the_project_agent_configs() {
+        let (_dir, repo) = make_test_repo().await;
+        let mcp = r#"{"mcpServers":{"kronn-internal":{"command":"kronn-mcp"}}}"#;
+        std::fs::write(repo.join(".mcp.json"), mcp).unwrap();
+        std::fs::create_dir_all(repo.join(".gemini")).unwrap();
+        std::fs::write(repo.join(".gemini/settings.json"), "{}").unwrap();
+
+        let ws = Workspace::create(&repo, "mcp-wf", "0a0b0c0d-run", None, None)
+            .await
+            .expect("create worktree");
+
+        assert_eq!(
+            std::fs::read_to_string(ws.path.join(".mcp.json")).unwrap(),
+            mcp,
+            "the agent launcher reads `.mcp.json` from its working directory"
+        );
+        assert!(ws.path.join(".gemini/settings.json").is_file());
+        assert!(!ws.path.join(".vibe/config.toml").exists());
+        ws.cleanup().await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn a_hung_before_remove_hook_does_not_keep_the_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        let hooks = WorkspaceHooks {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: Some("sleep 30".into()),
+        };
+        let ws = Workspace::create(&repo, "hung-hook", "deadbeef-hook", Some(hooks), None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+
+        ws.cleanup()
+            .await
+            .expect("cleanup goes on after the hook timeout");
+
+        assert!(!path.exists(), "the worktree is removed anyway");
     }
 
     #[tokio::test]

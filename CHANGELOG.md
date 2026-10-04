@@ -197,6 +197,18 @@ Release notes for 0.9.3 and earlier are available in the
   now marked processed only once its run is admitted, so an issue refused by
   the concurrency limit or the preflight is polled again instead of never
   running.
+- Workflow run lifecycle holes (KT-1018). Approving a gate whose worktree had
+  disappeared continued the run in the main checkout; it now fails with the
+  reason instead. A run paused on a gate keeps its concurrency slot, and a gate
+  approval or an interrupted resume is refused while the limit is reached. A
+  run that stops on an error removes its worktree right away (keeping a branch
+  that holds unintegrated commits) instead of waiting for the next start, and
+  a failing or hung `before_remove` hook no longer keeps the worktree. Adding a
+  Gate to a workflow another one uses as a sub-workflow is refused, and a
+  workflow imported from a repository's `kronn/` folder goes through the
+  editor's save rules. Isolated workflow worktrees get the project's agent
+  configs (`.mcp.json` and the others), so an Agent step keeps the project's
+  MCP servers and its strict MCP config instead of the host's.
 
 ### Changed
 

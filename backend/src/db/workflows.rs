@@ -2189,14 +2189,11 @@ pub fn get_last_run(conn: &Connection, workflow_id: &str) -> Result<Option<Workf
     Ok(run)
 }
 
-/// Count active runs for a workflow (for concurrency limiting).
+/// Count active runs for a workflow (for concurrency limiting). A run paused
+/// on a gate holds its slot: approving it must not put the workflow over its
+/// limit.
 pub fn count_active_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
-    let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1 AND status IN ('Pending', 'Running')",
-        params![workflow_id],
-        |row| row.get(0),
-    )?;
-    Ok(count)
+    count_admitted_runs(conn, workflow_id, None, None)
 }
 
 /// Active runs of a workflow that rendered the same concurrency key. `None`
@@ -2206,10 +2203,29 @@ pub fn count_active_runs_for_key(
     workflow_id: &str,
     key: Option<&str>,
 ) -> Result<u32> {
+    count_admitted_runs(conn, workflow_id, Some(key), None)
+}
+
+/// Runs holding a concurrency slot, optionally in one key bucket
+/// (`Some(None)` = the empty key) and without `exclude_run_id`.
+pub fn count_admitted_runs(
+    conn: &Connection,
+    workflow_id: &str,
+    key: Option<Option<&str>>,
+    exclude_run_id: Option<&str>,
+) -> Result<u32> {
     let count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs
-          WHERE workflow_id = ?1 AND status IN ('Pending', 'Running') AND concurrency_key IS ?2",
-        params![workflow_id, key],
+          WHERE workflow_id = ?1
+            AND status IN ('Pending', 'Running', 'WaitingApproval')
+            AND (?2 = 0 OR concurrency_key IS ?3)
+            AND id IS NOT ?4",
+        params![
+            workflow_id,
+            key.is_some() as i64,
+            key.flatten(),
+            exclude_run_id
+        ],
         |row| row.get(0),
     )?;
     Ok(count)

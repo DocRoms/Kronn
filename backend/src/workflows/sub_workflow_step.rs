@@ -1934,4 +1934,101 @@ mod tests {
             secret.result.output
         );
     }
+
+    // ─── KT-1018 — a child edited later is checked against its parents ───
+
+    fn workflow_json(id: &str, steps: serde_json::Value) -> crate::models::Workflow {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "project_id": null,
+            "trigger": {"type": "Manual"}, "steps": steps, "actions": [],
+            "safety": {}, "workspace_config": null, "concurrency_limit": null,
+            "enabled": true,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn gate_steps() -> serde_json::Value {
+        serde_json::json!([
+            {"name": "work", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}},
+            {"name": "review", "step_type": {"type": "Gate"}, "gate_message": "Go?"}
+        ])
+    }
+
+    #[test]
+    fn a_gate_added_to_a_child_is_refused_through_every_parent() {
+        let parent = workflow_json(
+            "wf-parent",
+            serde_json::json!([{"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-middle"}]),
+        );
+        let middle = workflow_json(
+            "wf-middle",
+            serde_json::json!([{"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-leaf"}]),
+        );
+        let leaf = workflow_json(
+            "wf-leaf",
+            serde_json::json!([{"name": "work", "step_type": {"type": "JsonData"}, "json_data_payload": {}}]),
+        );
+        let unrelated = workflow_json("wf-unrelated", serde_json::json!([]));
+        let all = vec![parent, middle, leaf.clone(), unrelated];
+        let with_gate = workflow_json("wf-leaf", gate_steps()).steps;
+
+        let error =
+            crate::api::workflows::validate_sub_workflow_parents("wf-leaf", &with_gate, &all)
+                .unwrap_err();
+        assert!(error.contains("Gate"), "{error}");
+        assert!(
+            crate::api::workflows::validate_sub_workflow_parents("wf-leaf", &leaf.steps, &all)
+                .is_ok()
+        );
+        assert!(
+            crate::api::workflows::validate_sub_workflow_parents("wf-unrelated", &with_gate, &all)
+                .is_ok(),
+            "a workflow nobody calls may hold a gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn editing_a_child_to_add_a_gate_is_refused_by_the_update_endpoint() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let parent = workflow_json(
+            "wf-edit-parent",
+            serde_json::json!([{"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-edit-child"}]),
+        );
+        let child = workflow_json(
+            "wf-edit-child",
+            serde_json::json!([{"name": "work", "step_type": {"type": "JsonData"}, "json_data_payload": {}}]),
+        );
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &child)?;
+                crate::db::workflows::insert_workflow(conn, &parent)
+            })
+            .await
+            .unwrap();
+        let request: crate::models::UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({ "steps": gate_steps() })).unwrap();
+
+        let response = crate::api::workflows::update(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("wf-edit-child".to_string()),
+            axum::Json(request),
+        )
+        .await;
+
+        let error = response.0.error.expect("refused");
+        assert!(error.contains("wf-edit-parent"), "{error}");
+        let stored = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_workflow(conn, "wf-edit-child"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.steps.len(), 1, "the edit was not saved");
+    }
 }

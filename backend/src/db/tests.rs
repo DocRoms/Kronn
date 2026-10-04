@@ -3402,6 +3402,51 @@ fn workflow_runs_count_active() {
 }
 
 #[test]
+fn a_paused_run_holds_its_concurrency_slot_and_a_resume_does_not_count_itself() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-paused");
+    workflow.concurrency_limit = Some(1);
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let mut paused = sample_run("r-paused", "w-paused");
+    paused.status = RunStatus::WaitingApproval;
+    crate::db::workflows::insert_run(&conn, &paused).unwrap();
+    let mut interrupted = sample_run("r-interrupted", "w-paused");
+    interrupted.status = RunStatus::Interrupted;
+    crate::db::workflows::insert_run(&conn, &interrupted).unwrap();
+
+    assert_eq!(
+        crate::db::workflows::count_active_runs(&conn, "w-paused").unwrap(),
+        1
+    );
+    let new_run = sample_run("r-new", "w-paused");
+    let refused =
+        crate::workflows::concurrency::insert_run_within_limit(&conn, &workflow, &new_run).unwrap();
+    assert!(refused.is_err(), "a paused run keeps the slot");
+
+    assert_eq!(
+        crate::workflows::concurrency::resume_within_limit(&conn, &workflow, &paused).unwrap(),
+        Ok(()),
+        "the paused run itself may resume"
+    );
+    assert!(
+        crate::workflows::concurrency::resume_within_limit(&conn, &workflow, &interrupted)
+            .unwrap()
+            .is_err(),
+        "an interrupted run may not resume over the paused one"
+    );
+
+    let mut keyed = workflow.clone();
+    keyed.concurrency_key = Some("{{ticket}}".into());
+    let mut other_key = sample_run("r-other-key", "w-paused");
+    other_key.concurrency_key = Some("EW-2".into());
+    assert_eq!(
+        crate::workflows::concurrency::resume_within_limit(&conn, &keyed, &other_key).unwrap(),
+        Ok(()),
+        "another key has its own slot"
+    );
+}
+
+#[test]
 fn has_running_run_false_when_no_runs() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();

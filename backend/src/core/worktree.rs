@@ -885,61 +885,40 @@ pub fn create_discussion_worktree(
     // Fix gitdir paths so the worktree works from the host too (not just inside Docker)
     fix_worktree_paths(repo_path, &worktree_path);
 
-    // Copy .mcp.json from repo root to worktree (it's gitignored)
-    let mcp_src = repo_path.join(".mcp.json");
-    if mcp_src.exists() {
-        let mcp_dst = worktree_path.join(".mcp.json");
-        if let Err(e) = std::fs::copy(&mcp_src, &mcp_dst) {
-            tracing::warn!("Failed to copy .mcp.json to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .mcp.json to worktree");
-        }
-    }
-
-    // Copy .vibe/config.toml if it exists (for Vibe agent)
-    let vibe_src = repo_path.join(".vibe").join("config.toml");
-    if vibe_src.exists() {
-        let vibe_dir = worktree_path.join(".vibe");
-        let _ = std::fs::create_dir_all(&vibe_dir);
-        let vibe_dst = vibe_dir.join("config.toml");
-        if let Err(e) = std::fs::copy(&vibe_src, &vibe_dst) {
-            tracing::warn!("Failed to copy .vibe/config.toml to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .vibe/config.toml to worktree");
-        }
-    }
-
-    // Copy .kiro/settings/mcp.json if it exists (for Kiro agent)
-    let kiro_src = repo_path.join(".kiro").join("settings").join("mcp.json");
-    if kiro_src.exists() {
-        let kiro_dir = worktree_path.join(".kiro").join("settings");
-        let _ = std::fs::create_dir_all(&kiro_dir);
-        let kiro_dst = kiro_dir.join("mcp.json");
-        if let Err(e) = std::fs::copy(&kiro_src, &kiro_dst) {
-            tracing::warn!("Failed to copy .kiro/settings/mcp.json to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .kiro/settings/mcp.json to worktree");
-        }
-    }
-
-    // Copy .gemini/settings.json if it exists (for Gemini CLI agent)
-    let gemini_src = repo_path.join(".gemini").join("settings.json");
-    if gemini_src.exists() {
-        let gemini_dir = worktree_path.join(".gemini");
-        let _ = std::fs::create_dir_all(&gemini_dir);
-        let gemini_dst = gemini_dir.join("settings.json");
-        if let Err(e) = std::fs::copy(&gemini_src, &gemini_dst) {
-            tracing::warn!("Failed to copy .gemini/settings.json to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .gemini/settings.json to worktree");
-        }
-    }
+    copy_agent_configs(repo_path, &worktree_path);
 
     Ok(WorktreeInfo {
         path: worktree_path.to_string_lossy().to_string(),
         branch,
         is_main_repo: false,
     })
+}
+
+/// The agents' project configs are gitignored, so a new worktree lacks them:
+/// without `.mcp.json` a Claude agent gets no `--strict-mcp-config` and
+/// inherits the host's personal MCP servers instead of the project's.
+pub(crate) fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
+    const FILES: [&[&str]; 4] = [
+        &[".mcp.json"],
+        &[".vibe", "config.toml"],
+        &[".kiro", "settings", "mcp.json"],
+        &[".gemini", "settings.json"],
+    ];
+    for parts in FILES {
+        let relative: PathBuf = parts.iter().collect();
+        let source = repo_path.join(&relative);
+        if !source.is_file() {
+            continue;
+        }
+        let target = worktree_path.join(&relative);
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::copy(&source, &target) {
+            Ok(_) => tracing::info!("Copied {} to worktree", relative.display()),
+            Err(e) => tracing::warn!("Failed to copy {} to worktree: {}", relative.display(), e),
+        }
+    }
 }
 
 /// Re-attach an existing branch to a new worktree path.
