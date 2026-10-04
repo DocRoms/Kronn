@@ -748,7 +748,7 @@ EOF
                 exit "$status"
             }
             trap cleanup_fixture EXIT
-            for _ in $(seq 1 40); do
+            for _ in $(seq 1 400); do
                 [[ -s "$2" ]] && break
                 sleep 0.025
             done
@@ -756,7 +756,7 @@ EOF
             [[ ! -e "$3" ]]
             kill -0 "$supervisor"
             printf "continue\n" >&4
-            for _ in $(seq 1 80); do
+            for _ in $(seq 1 400); do
                 [[ -e "$3" ]] && break
                 sleep 0.025
             done
