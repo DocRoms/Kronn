@@ -105,6 +105,12 @@ Release notes for 0.9.3 and earlier are available in the
   keeps its session. After a Claude or Codex turn exits normally, the
   processes it left behind (stdio MCP servers, background commands) are
   stopped with it instead of piling up.
+- When Ollama refused an unreadable tool call and Kronn replayed the request,
+  the text the refused attempt had already streamed (a preamble before the
+  call) appeared twice in the reply and in the saved message (KT-944). On an
+  Ollama turn that offers tools, the first 512 bytes of an attempt are now held
+  until the attempt ends: a replayed attempt's preamble is dropped, a
+  successful one is shown, and a longer answer streams live as before.
 
 ### Changed
 

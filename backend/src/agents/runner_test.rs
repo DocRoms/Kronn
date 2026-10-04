@@ -566,6 +566,7 @@ mod tests {
             &mut LeadingThinkingFilter::default(),
             &mut crate::agents::tools::ToolCallAccumulator::default(),
             &mut false,
+            &mut ReplayHold::default(),
         )
         .await
     }
@@ -5985,6 +5986,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replay_hold_keeps_a_preamble_and_lets_an_answer_stream() {
+        let mut inactive = ReplayHold::new(false);
+        assert_eq!(inactive.push("live".into()), "live");
+
+        let mut hold = ReplayHold::new(true);
+        assert_eq!(hold.push("Préambule ".into()), "");
+        assert_eq!(hold.push("🦀 ".into()), "");
+        hold.discard();
+        assert_eq!(hold.release(), "", "a replayed attempt shows nothing");
+
+        let mut hold = ReplayHold::new(true);
+        assert_eq!(hold.push("Je lis ".into()), "");
+        assert_eq!(hold.release(), "Je lis ");
+        assert_eq!(
+            hold.push("ensuite".into()),
+            "ensuite",
+            "released means live"
+        );
+
+        let mut hold = ReplayHold::new(true);
+        let long = "é".repeat(REPLAY_HOLD_MAX_BYTES / 2);
+        assert_eq!(hold.push(long.clone()), "");
+        assert_eq!(hold.push("x".into()), format!("{long}x"));
+        assert_eq!(hold.push(" live".into()), " live", "an answer streams live");
+    }
+
+    /// KT-944 — the refused attempt streamed a preamble before its unreadable
+    /// call; the replay writes its own. The reply carries it once.
+    #[tokio::test]
+    #[serial]
+    async fn a_replayed_unreadable_tool_call_does_not_repeat_its_preamble() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chats_for_mock = chats.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = chats_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    ResponseTemplate::new(200).set_body_string(format!(
+                        "{{\"message\":{{\"content\":\"Préambule : je lis le ticket.\"}},\"done\":false}}\n{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"Préambule : je lis le ticket.\"},\"done\":false}\n\
+                         {\"message\":{\"content\":\" Réponse.\"},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                    )
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(success, "{out:?}");
+        assert_eq!(chats.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(out, "Préambule : je lis le ticket. Réponse.");
+    }
+
     /// The replay is a pure model invocation: nothing ran for the refused call,
     /// and the results of earlier rounds are already in the request. A tool must
     /// therefore not run again, nor the turn be lost because one had run.
@@ -8172,6 +8263,7 @@ mod tests {
                     &mut thinking_filter,
                     &mut crate::agents::tools::ToolCallAccumulator::default(),
                     &mut false,
+                    &mut ReplayHold::default(),
                 )
                 .await
             );
@@ -8224,6 +8316,7 @@ mod tests {
                     &mut thinking_filter,
                     &mut pending_tools,
                     &mut false,
+                    &mut ReplayHold::default(),
                 )
                 .await
             );

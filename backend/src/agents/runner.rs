@@ -7394,6 +7394,51 @@ pub(crate) fn strip_leading_thinking_blocks(input: &str) -> String {
     visible
 }
 
+/// Bytes of an attempt's text held back while a replay may still follow. A
+/// preamble before a tool call fits; a longer text is an answer and streams live.
+pub(crate) const REPLAY_HOLD_MAX_BYTES: usize = 512;
+
+/// Text of an Ollama attempt that may be replayed after an unreadable tool call
+/// (KT-944). It is held until the attempt ends or outgrows a preamble, so a
+/// replayed attempt's text is dropped instead of shown twice.
+#[derive(Debug, Default)]
+pub(crate) struct ReplayHold {
+    held: String,
+    active: bool,
+}
+
+impl ReplayHold {
+    pub(crate) fn new(active: bool) -> Self {
+        Self {
+            held: String::new(),
+            active,
+        }
+    }
+
+    /// The part of `visible` that may be sent now.
+    pub(crate) fn push(&mut self, visible: String) -> String {
+        if !self.active {
+            return visible;
+        }
+        self.held.push_str(&visible);
+        if self.held.len() > REPLAY_HOLD_MAX_BYTES {
+            return self.release();
+        }
+        String::new()
+    }
+
+    /// The attempt stands: everything held is due, and later text streams live.
+    pub(crate) fn release(&mut self) -> String {
+        self.active = false;
+        std::mem::take(&mut self.held)
+    }
+
+    /// The attempt is replayed: what it held was never shown.
+    pub(crate) fn discard(&mut self) {
+        self.held.clear();
+    }
+}
+
 /// Apply one decoded stream line: forward the text delta, record errors, and
 /// on the terminal chunk stash token counts for `parse_token_usage`. The
 /// stderr lock is only held across synchronous work — never across
@@ -7428,6 +7473,7 @@ pub(crate) async fn forward_chat_line(
     // Set as soon as any visible text is forwarded, so the loop can tell a silent
     // finish from a real answer.
     emitted_any: &mut bool,
+    replay_hold: &mut ReplayHold,
 ) -> bool {
     let Some(chunk) = codec.parse_line(line) else {
         return true;
@@ -7462,7 +7508,7 @@ pub(crate) async fn forward_chat_line(
         *got_error = true;
     }
     if let Some(text) = chunk.delta {
-        let visible = thinking_filter.push(&text);
+        let visible = replay_hold.push(thinking_filter.push(&text));
         if !visible.is_empty() {
             *emitted_any = true;
         }
@@ -8609,6 +8655,16 @@ async fn start_ollama_http_with_idle(
             let mut emitted_this_turn = false;
             let mut pending_tools = ToolCallAccumulator::default();
             let mut thinking_filter = LeadingThinkingFilter::default();
+            // Only an Ollama turn offering tools can hit the replayed
+            // unreadable-tool-call failure.
+            let mut replay_hold = ReplayHold::new(
+                !is_openai_wire
+                    && !used_format_fallback
+                    && provider_attempt < HTTP_PROVIDER_MAX_ATTEMPTS
+                    && body["tools"]
+                        .as_array()
+                        .is_some_and(|tools| !tools.is_empty()),
+            );
 
             loop {
                 let chunk = tokio::select! {
@@ -8678,6 +8734,7 @@ async fn start_ollama_http_with_idle(
                         &mut thinking_filter,
                         &mut pending_tools,
                         &mut emitted_this_turn,
+                        &mut replay_hold,
                     )
                     .await
                     {
@@ -8705,10 +8762,11 @@ async fn start_ollama_http_with_idle(
                 &mut thinking_filter,
                 &mut pending_tools,
                 &mut emitted_this_turn,
+                &mut replay_hold,
             )
             .await;
 
-            let trailing = thinking_filter.finish();
+            let trailing = replay_hold.push(thinking_filter.finish());
             let had_trailing = !trailing.is_empty();
             if had_trailing && tx.send(trailing).await.is_err() {
                 finish(&mut lifeline, false).await;
@@ -8788,8 +8846,8 @@ async fn start_ollama_http_with_idle(
             // for it (calls run only after the stream ends, and never on an
             // error), so re-sending the same request is a pure model invocation
             // even when earlier rounds ran tools: their results are already in the
-            // request. Text the failed attempt streamed is the price of the
-            // replay, cheaper than losing the whole turn. Stochastic generation
+            // request. Text the failed attempt held back is dropped (KT-944);
+            // text past the hold already streamed stays. Stochastic generation
             // usually produces a valid call the second time; no instruction is
             // added to the prompt.
             let unreadable_tool_call = !is_openai_wire
@@ -8827,6 +8885,7 @@ async fn start_ollama_http_with_idle(
                         delay.as_millis()
                     ),
                 );
+                replay_hold.discard();
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => {
@@ -8887,6 +8946,15 @@ async fn start_ollama_http_with_idle(
                         provider_failure_label(None, detail)
                     ),
                 );
+            }
+            // No replay: the attempt stands, and so does what it held back.
+            let held = replay_hold.release();
+            if !held.is_empty() {
+                if tx.send(held).await.is_err() {
+                    finish(&mut lifeline, false).await;
+                    return;
+                }
+                emitted_text = true;
             }
             // Past the replay budget the failure stays visible, and says what it is.
             if unreadable_tool_call {
