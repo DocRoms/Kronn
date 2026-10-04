@@ -1819,6 +1819,9 @@ struct AgentUsage {
     input_tokens: u64,
     output_tokens: u64,
     prompt_cache: PromptCacheUsage,
+    /// Cost the provider or CLI reported itself, summed over the run's
+    /// responses, in micro-USD. `None` when never reported.
+    cost_usd_micros: Option<u64>,
     /// The last native tool an HTTP agent called (with its path when it has
     /// one) and how many it has called: what a CLI's stream-json shows.
     last_tool: Option<String>,
@@ -1918,6 +1921,12 @@ impl AgentProcess {
     /// an HTTP agent can call tools for minutes without a line of text.
     pub fn tool_activity_probe(&self) -> ToolActivityProbe {
         ToolActivityProbe(self.usage.clone())
+    }
+
+    /// The run's cost as the provider or CLI reported it (KT-997), in
+    /// micro-USD. `None` when nothing reported one: unknown, never zero.
+    pub fn reported_cost_usd_micros(&self) -> Option<u64> {
+        self.usage.lock().unwrap().cost_usd_micros
     }
 
     pub fn reported_usage_counters(&self) -> Option<ReportedUsage> {
@@ -2048,6 +2057,10 @@ pub trait AgentIo: Send {
     fn reported_usage_counters(&self) -> Option<ReportedUsage> {
         None
     }
+    /// Provider- or CLI-reported cost in micro-USD; `None` when unknown.
+    fn reported_cost_usd_micros(&self) -> Option<u64> {
+        None
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -2083,6 +2096,9 @@ impl AgentIo for AgentProcess {
     }
     fn reported_usage_counters(&self) -> Option<ReportedUsage> {
         AgentProcess::reported_usage_counters(self)
+    }
+    fn reported_cost_usd_micros(&self) -> Option<u64> {
+        AgentProcess::reported_cost_usd_micros(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -4892,12 +4908,17 @@ async fn run_acp_session(
                         output_tokens,
                         prompt_cache,
                     } => {
-                        *task_usage.lock().unwrap() = AgentUsage {
+                        let mut usage = task_usage.lock().unwrap();
+                        *usage = AgentUsage {
                             input_tokens,
                             output_tokens,
                             prompt_cache,
+                            cost_usd_micros: usage.cost_usd_micros,
                             ..AgentUsage::default()
                         };
+                    }
+                    AcpSessionEvent::Cost { usd_micros } => {
+                        task_usage.lock().unwrap().cost_usd_micros = Some(usd_micros);
                     }
                     AcpSessionEvent::NativeSessionId(conversation_id) => {
                         if let Some(store) = event_store.as_ref() {
@@ -6990,6 +7011,7 @@ pub(crate) struct TokenTally {
     cached_prompt: Option<u64>,
     cache_write_prompt: Option<u64>,
     eval: u64,
+    cost_usd_micros: Option<u64>,
     provenance: Option<AgentProvenanceCapture>,
 }
 
@@ -7084,6 +7106,14 @@ pub(crate) fn parse_ceiling_report(stderr_lines: &[String]) -> Option<CeilingRep
         .filter(|report| {
             report.version == 1 && (!report.tools.is_empty() || report.rounds.is_some())
         })
+}
+
+/// OpenRouter's usage accounting: its responses then carry `usage.cost`. Other
+/// OpenAI-compatible providers may reject an unknown field, so only there.
+pub(crate) fn request_provider_cost(base: &str, body: &mut serde_json::Value) {
+    if base.contains("openrouter.ai") {
+        body["usage"] = serde_json::json!({ "include": true });
+    }
 }
 
 /// Context budget a hosted step's pressure is measured on, whatever the model's
@@ -7551,6 +7581,9 @@ pub(crate) async fn forward_chat_line(
     }
     if chunk.eval_tokens > 0 {
         tally.eval = chunk.eval_tokens;
+    }
+    if chunk.cost_usd_micros.is_some() {
+        tally.cost_usd_micros = chunk.cost_usd_micros;
     }
     if chunk.done {
         *got_done = true;
@@ -8049,6 +8082,7 @@ async fn start_ollama_http_with_idle(
                 format.is_none(),
             );
             super::vision::attach_to_chat_body(&mut body, true, &prepared_images.sent);
+            request_provider_cost(&base, &mut body);
             tracing::info!(
                 target: "kronn::lite_llm",
                 model = %model,
@@ -8851,6 +8885,10 @@ async fn start_ollama_http_with_idle(
                             .unwrap_or(0)
                             .saturating_add(written),
                     );
+                }
+                if let Some(cost) = tally.cost_usd_micros {
+                    usage.cost_usd_micros =
+                        Some(usage.cost_usd_micros.unwrap_or(0).saturating_add(cost));
                 }
             }
             let worker_repair_stage_for_turn = worker_repair_stage;
@@ -12925,7 +12963,7 @@ pub(crate) fn try_spawn(
 ///
 /// The final result line contains cost/token info:
 /// ```json
-/// {"type":"result","subtype":"success","cost_usd":0.01,"duration_ms":1234,"session_id":"...","usage":{"input_tokens":100,"output_tokens":50}}
+/// {"type":"result","subtype":"success","total_cost_usd":0.01,"duration_ms":1234,"session_id":"...","usage":{"input_tokens":100,"output_tokens":50}}
 /// ```
 pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
     let trimmed = line.trim();
@@ -13018,8 +13056,10 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 
         // Final result line — contains token usage and cost
         "result" => {
+            // Current Claude Code names it `total_cost_usd`; older builds `cost_usd`.
             let cost = json
-                .get("cost_usd")
+                .get("total_cost_usd")
+                .or_else(|| json.get("cost_usd"))
                 .and_then(|v| v.as_f64())
                 .filter(|c| *c > 0.0);
             let input = json

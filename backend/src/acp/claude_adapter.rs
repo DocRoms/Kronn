@@ -394,7 +394,7 @@ impl AcpTransport for ClaudeAcpAdapter {
                             input_tokens,
                             output_tokens,
                             prompt_cache,
-                            ..
+                            cost_usd,
                         } => {
                             let _ = events
                                 .send(AcpSessionEvent::Usage {
@@ -403,6 +403,11 @@ impl AcpTransport for ClaudeAcpAdapter {
                                     prompt_cache,
                                 })
                                 .await;
+                            if let Some(usd_micros) =
+                                cost_usd.and_then(crate::agents::chat_codec::usd_to_micros)
+                            {
+                                let _ = events.send(AcpSessionEvent::Cost { usd_micros }).await;
+                            }
                         }
                         StreamJsonEvent::ToolStart(name) => {
                             tool_input = Some(String::new());

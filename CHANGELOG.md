@@ -120,6 +120,12 @@ Release notes for 0.9.3 and earlier are available in the
   deliverable once it has spent 1 500 000 input tokens. Both budgets can be
   set with `KRONN_HTTP_STEP_CTX_BUDGET` and
   `KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`.
+- The cost an agent reports itself is no longer lost (KT-997, backend part).
+  Claude Code names it `total_cost_usd`, which Kronn did not read, and the
+  default Claude route dropped it anyway; OpenRouter's `usage.cost` was never
+  read. Both now reach the run's usage as integer micro-USD, summed per
+  response, and stay unknown (never zero) when not reported. Showing it per
+  audit step comes later.
 
 ### Changed
 

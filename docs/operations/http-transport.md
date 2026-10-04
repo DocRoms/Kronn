@@ -39,6 +39,12 @@ provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
 [src: file: backend/src/agents/runner.rs:8380]
+A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
+`usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
+per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
+`None` means unknown, never zero (KT-997). Persisting it per audit step is not
+done yet.
+[src: file: backend/src/agents/chat_codec.rs:160]
 [src: file: backend/src/api/audit/full.rs:1276]
 [src: file: backend/src/api/audit/drift.rs:599]
 

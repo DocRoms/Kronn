@@ -481,6 +481,10 @@ pub enum AcpSessionEvent {
         output_tokens: u64,
         prompt_cache: crate::agents::runner::PromptCacheUsage,
     },
+    /// The turn's cost as the runtime itself reported it, in micro-USD.
+    Cost {
+        usd_micros: u64,
+    },
     /// A frame from the agent that carries nothing to show — a reasoning chunk,
     /// a plan, a status update. It is proof of life and nothing else: without
     /// it, a model thinking for ten minutes before it answers looks exactly like

@@ -869,6 +869,148 @@ mod tests {
 
     // ─── parse_claude_stream_line ─────────────────────────────────────────────
 
+    /// Claude Code's result line names its cost `total_cost_usd`; older builds
+    /// wrote `cost_usd`. Both reach the usage, on success and on failure.
+    #[test]
+    fn parse_stream_result_reads_total_cost_usd_and_the_legacy_name() {
+        let current = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4210,"num_turns":2,"result":"done","session_id":"s","total_cost_usd":0.0731,"usage":{"input_tokens":12,"cache_creation_input_tokens":900,"cache_read_input_tokens":4000,"output_tokens":340}}"#;
+        match parse_claude_stream_line(current) {
+            StreamJsonEvent::Usage { cost_usd, .. } => assert_eq!(cost_usd, Some(0.0731)),
+            other => panic!("expected usage, got {other:?}"),
+        }
+        let legacy = r#"{"type":"result","subtype":"success","cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":50}}"#;
+        match parse_claude_stream_line(legacy) {
+            StreamJsonEvent::Usage { cost_usd, .. } => assert_eq!(cost_usd, Some(0.01)),
+            other => panic!("expected usage, got {other:?}"),
+        }
+        let failed = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","total_cost_usd":0.002,"usage":{"input_tokens":3,"output_tokens":1}}"#;
+        match parse_claude_stream_line(failed) {
+            StreamJsonEvent::TerminalError(failure) => assert_eq!(failure.cost_usd, Some(0.002)),
+            other => panic!("expected terminal error, got {other:?}"),
+        }
+        let unpriced =
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        match parse_claude_stream_line(unpriced) {
+            StreamJsonEvent::Usage { cost_usd, .. } => assert_eq!(cost_usd, None),
+            other => panic!("expected usage, got {other:?}"),
+        }
+    }
+
+    /// KT-997 — on the default (adapter) route, the cost Claude Code reports
+    /// reaches the run's usage; a turn that reports none stays unknown.
+    #[tokio::test]
+    async fn claude_adapter_route_reports_the_cli_cost() {
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let priced = crate::acp::test_support::CLAUDE_TURN_WITH_CACHE.replace(
+            r#""is_error":false,"#,
+            r#""is_error":false,"total_cost_usd":0.123456,"#,
+        );
+        for (script, expected) in [
+            (priced.as_str(), Some(123_456)),
+            (crate::acp::test_support::CLAUDE_TURN_WITH_CACHE, None),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let fixture = crate::acp::test_support::write_fixture_script(project.path(), script);
+            let transport: Arc<dyn AcpTransport> =
+                Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                    fixture.to_string_lossy(),
+                    None,
+                    false,
+                ));
+            let mut process = start_agent_with_config(AgentStartConfig {
+                test_acp_transport: Some(transport),
+                ..AgentStartConfig::new(
+                    &AgentType::ClaudeCode,
+                    project.path().to_str().unwrap(),
+                    "orchestrate",
+                    &tokens,
+                )
+            })
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(process.reported_cost_usd_micros(), expected);
+            assert_eq!(process.reported_token_usage(), Some(48 + 21_545));
+        }
+    }
+
+    #[test]
+    fn provider_cost_is_requested_from_openrouter_only() {
+        let mut body = serde_json::json!({ "model": "m" });
+        request_provider_cost("https://openrouter.ai/api", &mut body);
+        assert_eq!(body["usage"], serde_json::json!({ "include": true }));
+        let mut body = serde_json::json!({ "model": "m" });
+        request_provider_cost("http://localhost:4000", &mut body);
+        assert!(body.get("usage").is_none());
+    }
+
+    /// KT-997 — an HTTP run sums the cost each response reports; one that never
+    /// reports a cost stays unknown rather than zero.
+    #[tokio::test]
+    async fn http_run_sums_the_reported_cost_of_each_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (cost_field, expected) in [(r#","cost":0.0015"#, Some(3_000)), ("", None)] {
+            let server = MockServer::start().await;
+            let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let requests_for_mock = requests.clone();
+            let usage = format!(
+                r#"{{"choices":[],"usage":{{"prompt_tokens":100,"completion_tokens":10{cost_field}}}}}"#
+            );
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let first = requests_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                    let frame = if first {
+                        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"mcp_list","arguments":"{}"}}]}}]}"#
+                    } else {
+                        r#"{"choices":[{"index":0,"delta":{"content":"2 servers"}}]}"#
+                    };
+                    ResponseTemplate::new(200).set_body_string(sse(&[frame, &usage]))
+                })
+                .mount(&server)
+                .await;
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut process = start_ollama_http(
+                &AgentType::LiteLlm,
+                "which servers?",
+                "",
+                "hosted-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(std::sync::Arc::new(FakeTools { seen })),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start");
+            let mut out = String::new();
+            while let Some(line) = process.next_line().await {
+                out.push_str(&line);
+            }
+            assert!(process.child.wait().await.unwrap().success(), "{out:?}");
+            assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(
+                process.reported_cost_usd_micros(),
+                expected,
+                "{cost_field:?}"
+            );
+        }
+    }
+
     #[test]
     fn parse_stream_empty_line() {
         assert!(matches!(
