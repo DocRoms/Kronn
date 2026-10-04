@@ -20,6 +20,12 @@ Release notes for 0.9.3 and earlier are available in the
   community server `@benborla29/mcp-server-mysql`: host, user and password,
   with an optional port and database, read-only unless a write flag is set on
   the server.
+- A skill can declare variables in the Claude Code format: an `arguments`
+  list used as `$name` in its body, an optional `argument-hint`, and Kronn's
+  label, default and control for each one as JSON under
+  `metadata.kronn-variables`. Kronn reads, validates and writes them back
+  unchanged, and such a skill shows a "Variabilisé" badge in every skill list,
+  its hover naming the placeholders (KT-906).
 
 - The project card says when the branch has lost its audit evidence while
   another commit still carries `docs/.kronn.json`, names that commit and its

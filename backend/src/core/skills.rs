@@ -233,6 +233,9 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
     let mut allowed_tools: Option<String> = None;
     let mut external = false;
     let mut source_url: Option<String> = None;
+    let mut arguments: Vec<String> = Vec::new();
+    let mut argument_hint: Option<String> = None;
+    let mut variables = Vec::new();
     let auto_triggers = parse_auto_triggers_block(yaml_str);
 
     for line in yaml_str.lines() {
@@ -301,6 +304,18 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
         }
         license = standard.license.or(license);
         allowed_tools = standard.allowed_tools.or(allowed_tools);
+        if let Err(error) = crate::core::agent_skill::validate_arguments(&standard.arguments) {
+            tracing::warn!("Skill '{}': {}", id, error);
+        }
+        if let Some(json) = kronn(crate::core::agent_skill::VARIABLES_KEY) {
+            // A bad description of the variables never hides the skill itself.
+            match crate::core::agent_skill::parse_variables(json, &standard.arguments) {
+                Ok(parsed) => variables = parsed,
+                Err(error) => tracing::warn!("Skill '{}': {}", id, error),
+            }
+        }
+        arguments = standard.arguments;
+        argument_hint = standard.argument_hint;
         if name.is_empty() {
             name = standard.name;
         }
@@ -328,6 +343,9 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
         auto_triggers,
         external,
         source_url,
+        arguments,
+        argument_hint,
+        variables,
     })
 }
 
@@ -620,6 +638,7 @@ fn render_skill_markdown(
     content: &str,
     license: Option<&str>,
     allowed_tools: Option<&str>,
+    arguments_block: &str,
 ) -> String {
     let cat_str = match category {
         SkillCategory::Language => "language",
@@ -644,15 +663,35 @@ fn render_skill_markdown(
         .map(|s| format!("allowed-tools: {}\n", q(s)))
         .unwrap_or_default();
     format!(
-        "---\nname: {}\n{}category: {}\nicon: {}\n{}{}builtin: false\n---\n{}",
+        "---\nname: {}\n{}category: {}\nicon: {}\n{}{}{}builtin: false\n---\n{}",
         q(name),
         desc_line,
         cat_str,
         q(icon),
         license_line,
         tools_line,
+        arguments_block,
         content
     )
+}
+
+/// The `arguments`, `argument-hint` and `metadata.kronn-variables` header
+/// lines of an existing custom skill file: the editor does not edit them yet,
+/// so an update must carry them over instead of dropping them.
+fn preserved_arguments_block(raw: &str) -> String {
+    let Ok(file) = crate::core::agent_skill::parse(raw) else {
+        return String::new();
+    };
+    let mut block =
+        crate::core::agent_skill::arguments_lines(&file.arguments, file.argument_hint.as_deref());
+    if let Some(json) = file.metadata.get(crate::core::agent_skill::VARIABLES_KEY) {
+        block.push_str(&format!(
+            "metadata:\n  {}: {}\n",
+            crate::core::agent_skill::VARIABLES_KEY,
+            crate::core::agent_skill::quoted(json)
+        ));
+    }
+    block
 }
 
 /// Find a filename stem for `name` that no existing custom skill file
@@ -698,6 +737,7 @@ pub fn save_custom_skill(
         content,
         license,
         allowed_tools,
+        "",
     );
 
     let path = dir.join(format!("{}.md", slug));
@@ -739,6 +779,9 @@ pub fn update_custom_skill(
         return Err(format!("Skill '{}' not found", id));
     }
 
+    let preserved = std::fs::read_to_string(&path)
+        .map(|raw| preserved_arguments_block(&raw))
+        .unwrap_or_default();
     let file_content = render_skill_markdown(
         name,
         description,
@@ -747,6 +790,7 @@ pub fn update_custom_skill(
         content,
         license,
         allowed_tools,
+        &preserved,
     );
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
@@ -1218,6 +1262,9 @@ mod tests {
             auto_triggers: None,
             external: false,
             source_url: None,
+            arguments: Vec::new(),
+            argument_hint: None,
+            variables: Vec::new(),
         }
     }
 
@@ -1327,6 +1374,7 @@ mod tests {
             "Body.",
             Some("MIT\nsource_url: https://evil.test"),
             None,
+            "",
         );
         let skill = parse_skill_markdown("custom-x", &raw, false).unwrap();
         assert_eq!(skill.allowed_tools, None);
@@ -1353,6 +1401,7 @@ mod tests {
             "Read the diff.",
             Some("Apache-2.0"),
             Some("Bash Read"),
+            "",
         );
         let skill = parse_skill_markdown("custom-revue", &raw, false).unwrap();
         assert_eq!(skill.name, "Revue: \"stricte\"");
@@ -1364,6 +1413,77 @@ mod tests {
         assert_eq!(skill.category, SkillCategory::Language);
         assert_eq!(skill.license.as_deref(), Some("Apache-2.0"));
         assert_eq!(skill.allowed_tools.as_deref(), Some("Bash Read"));
+    }
+
+    const VARIABILIZED: &str = "---\nname: ticket-review\ndescription: Review a ticket.\narguments:\n  - ticket\n  - focus-area\nargument-hint: \"[ticket] [focus-area]\"\nmetadata:\n  kronn-variables: '[{\"name\":\"ticket\",\"label\":\"Numéro du ticket 🎫\",\"default_value\":\"EW-1\"},{\"name\":\"focus-area\",\"required\":false}]'\n---\nReview $ticket, focus on $focus-area.\n";
+
+    #[test]
+    fn a_skill_with_arguments_exposes_them_and_its_variables() {
+        let skill = parse_skill_markdown("ticket-review", VARIABILIZED, false).unwrap();
+        assert_eq!(skill.arguments, vec!["ticket", "focus-area"]);
+        assert_eq!(
+            skill.argument_hint.as_deref(),
+            Some("[ticket] [focus-area]")
+        );
+        assert_eq!(skill.variables.len(), 2);
+        assert_eq!(skill.variables[0].label, "Numéro du ticket 🎫");
+        assert_eq!(skill.variables[0].default_value.as_deref(), Some("EW-1"));
+        assert!(skill.variables[0].required);
+        assert!(!skill.variables[1].required);
+        assert_eq!(skill.content, "Review $ticket, focus on $focus-area.");
+    }
+
+    #[test]
+    fn a_skill_without_arguments_has_no_variables() {
+        let raw = "---\nname: plain\ndescription: d\n---\nBody.\n";
+        let skill = parse_skill_markdown("plain", raw, false).unwrap();
+        assert!(skill.arguments.is_empty());
+        assert!(skill.variables.is_empty());
+        assert_eq!(skill.argument_hint, None);
+        let json = serde_json::to_value(&skill).unwrap();
+        assert!(json.get("arguments").is_none() && json.get("variables").is_none());
+    }
+
+    #[test]
+    fn malformed_variables_never_hide_the_skill() {
+        for bad in [
+            "'not json'",
+            "'[{\"label\":\"no name\"}]'",
+            "'[{\"name\":\"other\"}]'",
+        ] {
+            let raw = format!(
+                "---\nname: s\ndescription: d\narguments: [ticket]\nmetadata:\n  kronn-variables: {bad}\n---\nBody $ticket.\n"
+            );
+            let skill = parse_skill_markdown("s", &raw, false).unwrap();
+            assert_eq!(skill.arguments, vec!["ticket"], "{bad}");
+            assert!(skill.variables.is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn updating_a_custom_skill_keeps_its_arguments_and_variables() {
+        let before = parse_skill_markdown("custom-ticket-review", VARIABILIZED, false).unwrap();
+        let raw = render_skill_markdown(
+            "Ticket review",
+            "Review a ticket.",
+            "🎫",
+            &SkillCategory::Domain,
+            "Review $ticket, focus on $focus-area.",
+            None,
+            None,
+            &preserved_arguments_block(VARIABILIZED),
+        );
+        let after = parse_skill_markdown("custom-ticket-review", &raw, false).unwrap();
+        assert_eq!(after.arguments, before.arguments);
+        assert_eq!(after.argument_hint, before.argument_hint);
+        assert_eq!(after.variables, before.variables);
+        assert_eq!(after.name, "Ticket review");
+        assert_eq!(preserved_arguments_block("no header"), "");
+        assert_eq!(
+            preserved_arguments_block("---\nname: x\n---\nBody.\n"),
+            "",
+            "a skill without arguments gains no header line"
+        );
     }
 
     #[test]

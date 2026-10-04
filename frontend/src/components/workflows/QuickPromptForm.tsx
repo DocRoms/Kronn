@@ -20,6 +20,7 @@ import type {
   ModelTiersConfig,
 } from '../../types/generated';
 import { Plus, Save, X, Check, Zap, UserCircle, FileText, ChevronRight } from 'lucide-react';
+import { SkillVariablesBadge } from '../SkillVariablesBadge';
 
 /** Extract {{variable}} names from a template string (includes {{var}} and {{#var}}) */
 function extractVars(template: string): string[] {
@@ -367,6 +368,7 @@ export function QuickPromptForm({
                         title={skill.description || skill.name}
                       >
                         {selected && <Check size={9} />} {skill.name}
+                        <SkillVariablesBadge skill={skill} />
                       </button>
                     );
                   })}

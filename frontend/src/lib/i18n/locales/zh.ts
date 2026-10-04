@@ -5019,6 +5019,8 @@ const zh: TranslationDict = {
   "skills.language": "语言",
   "skills.domain": "领域",
   "skills.business": "业务",
+  "skills.variabilized": "含变量",
+  "skills.variabilizedHint": "以 Claude Code 技能格式声明变量：{0}。Claude Code 用调用技能时传入的参数填充；其他智能体按原样读取占位符。",
   "skills.noSkills": "未选择技能",
   "skills.selectSkills": "选择技能...",
   "skills.createCustom": "创建自定义技能",

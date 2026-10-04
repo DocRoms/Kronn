@@ -823,6 +823,22 @@ fn standard_skill_file(document: &RepositoryDocument, slug: &str) -> Result<Vec<
         keep(KRONN_EXTERNAL_KEY, "true");
     }
     keep(KRONN_SOURCE_URL_KEY, resource_text(resource, "source_url"));
+    let arguments: Vec<String> = resource
+        .get("arguments")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let variables: Vec<crate::models::SkillVariable> = resource
+        .get("variables")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    if let Some(json) = crate::core::agent_skill::variables_json(&variables) {
+        metadata.insert(crate::core::agent_skill::VARIABLES_KEY.to_string(), json);
+    }
+    let argument_hint = Some(resource_text(resource, "argument_hint"))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let file = crate::core::agent_skill::AgentSkillFile {
         name: slug.to_string(),
         description: description
@@ -832,6 +848,8 @@ fn standard_skill_file(document: &RepositoryDocument, slug: &str) -> Result<Vec<
         license: Some(resource_text(resource, "license").to_string()),
         compatibility: None,
         allowed_tools: Some(resource_text(resource, "allowed_tools").to_string()),
+        arguments,
+        argument_hint,
         metadata,
         body: resource_text(resource, "content").to_string(),
     };
@@ -2352,6 +2370,24 @@ mod tests {
     fn skill_with(name: &str, description: &str, body: &str) -> Skill {
         let raw = format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n");
         crate::core::skills::parse_skill_markdown("review", &raw, false).unwrap()
+    }
+
+    #[test]
+    fn a_variabilized_skill_keeps_its_arguments_through_the_repository() {
+        let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let raw = "---\nname: review\ndescription: d\narguments: [ticket, zone]\nargument-hint: \"[ticket]\"\nmetadata:\n  kronn-name: Revue\n  kronn-variables: '[{\"name\":\"zone\",\"label\":\"Zone à relire\"}]'\n---\nReview $ticket in $zone.\n";
+        let skill = crate::core::skills::parse_skill_markdown("review", raw, false).unwrap();
+        let rendered = render_skill(&skill, timestamp, "review").unwrap();
+        let text =
+            String::from_utf8(rendered.files[".agents/skills/review/SKILL.md"].clone()).unwrap();
+        let file = crate::core::agent_skill::parse(&text).unwrap();
+        crate::core::agent_skill::validate(&file, "review")
+            .unwrap_or_else(|error| panic!("{error}\n{text}"));
+        let back = crate::core::skills::parse_skill_markdown("review", &text, false).unwrap();
+        assert_eq!(back.arguments, skill.arguments);
+        assert_eq!(back.argument_hint, skill.argument_hint);
+        assert_eq!(back.variables, skill.variables);
+        assert_eq!(back.variables[0].label, "Zone à relire");
     }
 
     #[test]

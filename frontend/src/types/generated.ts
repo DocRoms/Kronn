@@ -6921,7 +6921,21 @@ external?: boolean,
  * (clickable in the UI for attribution). Set via the `source_url`
  * frontmatter field.
  */
-source_url?: string | null, };
+source_url?: string | null,
+/**
+ * Named positional arguments in the Claude Code skills format
+ * (`arguments:` header, `$name` in the body). Non-empty = "Variabilisé".
+ */
+arguments?: Array<string>,
+/**
+ * Claude Code `argument-hint`: what autocomplete shows after the name.
+ */
+argument_hint?: string | null,
+/**
+ * Kronn's own description of the arguments (label, default, control),
+ * read from the `metadata.kronn-variables` JSON string.
+ */
+variables?: Array<SkillVariable>, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
 
@@ -7025,6 +7039,20 @@ paths: Array<string>,
  * there.
  */
 at_target: boolean, };
+
+/**
+ * Kronn's description of one skill argument. Stored as JSON under the flat
+ * `kronn-variables` metadata key: the Agent Skills `metadata` is a string map.
+ */
+export type SkillVariable = {
+/**
+ * One of the names declared in `arguments`.
+ */
+name: string, label?: string, description?: string | null, required: boolean, default_value?: string | null,
+/**
+ * How Kronn asks for the value; a plain text field when absent.
+ */
+control?: PromptVariableControl | null, };
 
 /**
  * One extracted `[src: …]` marker plus its mechanical verdict.

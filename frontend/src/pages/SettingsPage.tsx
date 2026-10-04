@@ -75,6 +75,7 @@ import { MatrixText } from '../components/MatrixText';
 import { KronnMark } from '../components/KronnMark';
 import './SettingsPage.css';
 import { safeGetItem } from '../lib/safeStorage';
+import { SkillVariablesBadge } from '../components/SkillVariablesBadge';
 
 const KRONN_REPOSITORY_URL = 'https://github.com/DocRoms/Kronn';
 const KRONN_RELEASES_URL = `${KRONN_REPOSITORY_URL}/releases`;
@@ -739,6 +740,7 @@ export function SettingsPage({
                   <span className="set-cat-badge" data-cat={skill.category}>
                     {t(`skills.${skill.category.toLowerCase()}`)}
                   </span>
+                  <SkillVariablesBadge skill={skill} />
                   {skill.token_estimate > 0 && (
                     <span className="set-token-cost-badge" title={t('config.tokenCostHint')}>
                       ~{skill.token_estimate} tok

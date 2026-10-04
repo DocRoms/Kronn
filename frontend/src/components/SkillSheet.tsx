@@ -8,6 +8,7 @@ import { CopyIdPill } from './CopyIdPill';
 import { FileText } from './RepositoryResourceContent';
 import './RepositoryResourceSheets.css';
 import './SkillSheet.css';
+import { SkillVariablesBadge } from './SkillVariablesBadge';
 
 type TextView = 'rendered' | 'source';
 
@@ -54,6 +55,7 @@ function SkillBadges({ skill, repository }: { skill: Skill; repository?: Pick<Re
           <span className="skill-sheet-badge" data-origin={skillOrigin(skill)}>{t(ORIGIN_LABEL[skillOrigin(skill)])}</span>
         </>
       )}
+      <SkillVariablesBadge skill={skill} />
       {skill.token_estimate > 0 && (
         <span className="skill-sheet-badge" title={t('config.tokenCostHint')}>~{skill.token_estimate} tok</span>
       )}

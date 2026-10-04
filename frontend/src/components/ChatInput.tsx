@@ -68,6 +68,7 @@ import {
 } from '../lib/messageTargets';
 import { findAgentMentionQuery, mentionMatchRank, type AgentMentionQuery } from '../lib/mention-autocomplete';
 import { externalAgentTargets } from '../lib/externalAgentIdentity';
+import { SkillVariablesBadge } from './SkillVariablesBadge';
 
 let sttWorker: Worker | null = null;
 function getSttWorker(): Worker {
@@ -1991,6 +1992,7 @@ export function ChatInput({
                               >
                                 {active && <Check size={8} />}
                                 {skill.name}
+                                <SkillVariablesBadge skill={skill} />
                               </button>
                             );
                           })}

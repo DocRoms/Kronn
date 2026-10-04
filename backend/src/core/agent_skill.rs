@@ -8,6 +8,10 @@
 //! specification reserves for exactly that. [`parse`] reads such a file back —
 //! and any other skill found in the repository — and [`validate`] states
 //! whether a header meets the specification.
+//!
+//! Claude Code adds `arguments` and `argument-hint` to the header for skills
+//! that take values (<https://code.claude.com/docs/en/skills.md>); Kronn's own
+//! description of those values is JSON under the flat [`VARIABLES_KEY`].
 
 use std::collections::BTreeMap;
 
@@ -17,6 +21,12 @@ pub const NAME_MAX: usize = 64;
 pub const DESCRIPTION_MAX: usize = 1024;
 /// `compatibility`, when present, is at most this many characters.
 pub const COMPATIBILITY_MAX: usize = 500;
+/// An argument name is at most this many characters.
+pub const ARGUMENT_NAME_MAX: usize = 64;
+/// The `metadata` key holding Kronn's [`SkillVariable`] list as a JSON string.
+pub const VARIABLES_KEY: &str = "kronn-variables";
+
+use crate::models::SkillVariable;
 
 /// A skill file split into the header fields the specification defines and its
 /// Markdown body.
@@ -27,6 +37,10 @@ pub struct AgentSkillFile {
     pub license: Option<String>,
     pub compatibility: Option<String>,
     pub allowed_tools: Option<String>,
+    /// Claude Code named positional arguments, substituted as `$name`.
+    pub arguments: Vec<String>,
+    /// Claude Code `argument-hint`, shown during autocomplete.
+    pub argument_hint: Option<String>,
     /// Free-form string map the specification leaves to the client.
     pub metadata: BTreeMap<String, String>,
     pub body: String,
@@ -43,6 +57,66 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Whether `name` can be a `$name` placeholder: an ASCII letter or `_`, then
+/// letters, digits, `_` or `-` (Claude Code's own example uses `from-lang`).
+/// A leading digit would read as the positional `$0`, `$1`…
+pub fn valid_argument_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().count() <= ARGUMENT_NAME_MAX
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// Checks a declared argument list: valid names, none twice.
+pub fn validate_arguments(arguments: &[String]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for name in arguments {
+        if !valid_argument_name(name) {
+            return Err(format!(
+                "skill argument `{name}` must start with a letter or `_` and hold only ASCII letters, digits, `_` and `-` (at most {ARGUMENT_NAME_MAX})"
+            ));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(format!("skill argument `{name}` is declared twice"));
+        }
+    }
+    Ok(())
+}
+
+/// Reads the `kronn-variables` JSON: a list of [`SkillVariable`] whose names
+/// are declared in `arguments`, each described once.
+pub fn parse_variables(json: &str, arguments: &[String]) -> Result<Vec<SkillVariable>, String> {
+    let variables: Vec<SkillVariable> = serde_json::from_str(json).map_err(|error| {
+        format!("`metadata.{VARIABLES_KEY}` is not a valid variable list: {error}")
+    })?;
+    let mut seen = std::collections::BTreeSet::new();
+    for variable in &variables {
+        if !arguments.iter().any(|name| name == &variable.name) {
+            return Err(format!(
+                "`metadata.{VARIABLES_KEY}` describes `{}`, which `arguments` does not declare",
+                variable.name
+            ));
+        }
+        if !seen.insert(variable.name.as_str()) {
+            return Err(format!(
+                "`metadata.{VARIABLES_KEY}` describes `{}` twice",
+                variable.name
+            ));
+        }
+    }
+    Ok(variables)
+}
+
+/// The `kronn-variables` value for `variables`, `None` when there is none.
+pub fn variables_json(variables: &[SkillVariable]) -> Option<String> {
+    if variables.is_empty() {
+        return None;
+    }
+    serde_json::to_string(variables).ok()
 }
 
 /// Whether `file` meets the specification for a skill stored in a folder named
@@ -75,6 +149,10 @@ pub fn validate(file: &AgentSkillFile, folder: &str) -> Result<(), String> {
         return Err(format!(
             "skill compatibility must be at most {COMPATIBILITY_MAX} characters"
         ));
+    }
+    validate_arguments(&file.arguments)?;
+    if let Some(json) = file.metadata.get(VARIABLES_KEY) {
+        parse_variables(json, &file.arguments)?;
     }
     Ok(())
 }
@@ -140,6 +218,10 @@ pub fn render(file: &AgentSkillFile) -> String {
     if let Some(tools) = file.allowed_tools.as_deref().filter(|v| !v.is_empty()) {
         header.push_str(&format!("allowed-tools: {}\n", quoted(tools)));
     }
+    header.push_str(&arguments_lines(
+        &file.arguments,
+        file.argument_hint.as_deref(),
+    ));
     if !file.metadata.is_empty() {
         header.push_str("metadata:\n");
         // A key is written bare, so one that could break the line is dropped.
@@ -148,6 +230,51 @@ pub fn render(file: &AgentSkillFile) -> String {
         }
     }
     format!("---\n{header}---\n\n{}\n", file.body.trim_end_matches('\n'))
+}
+
+/// The `arguments` and `argument-hint` header lines, empty when there are none.
+/// The list is written as a JSON array, which YAML reads as a flow sequence.
+pub(crate) fn arguments_lines(arguments: &[String], hint: Option<&str>) -> String {
+    let mut lines = String::new();
+    if !arguments.is_empty() {
+        let list = serde_json::to_string(arguments).unwrap_or_else(|_| "[]".to_string());
+        lines.push_str(&format!("arguments: {list}\n"));
+    }
+    if let Some(hint) = hint.filter(|value| !value.is_empty()) {
+        lines.push_str(&format!("argument-hint: {}\n", quoted(hint)));
+    }
+    lines
+}
+
+/// Reads an `arguments` value: a flow list (`[a, b]`), a space-separated
+/// string, or — when `raw` is empty — the block list (`- a`) that follows.
+/// Returns the names and the index of the first line after them.
+fn arguments_value(lines: &[&str], index: usize, raw: &str) -> (Vec<String>, usize) {
+    if raw.is_empty() {
+        let mut next = index;
+        let mut names = Vec::new();
+        while let Some(line) = lines.get(next) {
+            let Some(item) = line.trim_start().strip_prefix('-') else {
+                break;
+            };
+            names.push(decode_scalar(item));
+            next += 1;
+        }
+        return (names, next);
+    }
+    let names = if let Some(inner) = raw.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        inner
+            .split(',')
+            .map(decode_scalar)
+            .filter(|name| !name.is_empty())
+            .collect()
+    } else {
+        decode_scalar(raw)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    (names, index)
 }
 
 /// Splits a `SKILL.md` into its header lines and its body, `None` without a
@@ -234,6 +361,12 @@ pub fn parse(text: &str) -> Result<AgentSkillFile, String> {
             }
             continue;
         }
+        if key == "arguments" {
+            let (names, next) = arguments_value(&header, index, raw);
+            file.arguments = names;
+            index = next;
+            continue;
+        }
         let value = if raw.starts_with('|') || raw.starts_with('>') {
             let (value, next) = block_scalar(&header, index - 1, raw);
             index = next;
@@ -247,6 +380,7 @@ pub fn parse(text: &str) -> Result<AgentSkillFile, String> {
             "license" if !value.is_empty() => file.license = Some(value),
             "compatibility" if !value.is_empty() => file.compatibility = Some(value),
             "allowed-tools" if !value.is_empty() => file.allowed_tools = Some(value),
+            "argument-hint" if !value.is_empty() => file.argument_hint = Some(value),
             _ => {}
         }
     }
@@ -264,6 +398,8 @@ mod tests {
             license: Some("MIT".into()),
             compatibility: None,
             allowed_tools: Some("Bash Read".into()),
+            arguments: Vec::new(),
+            argument_hint: None,
             metadata: BTreeMap::from([
                 ("kronn-name".to_string(), "Rust Best Practices".to_string()),
                 ("kronn-icon".to_string(), "🦀".to_string()),
@@ -343,6 +479,114 @@ mod tests {
         assert_eq!(file.metadata["author"], "a b");
         assert_eq!(file.metadata["version"], "2");
         assert_eq!(file.body, "Body.");
+    }
+
+    fn variabilized() -> AgentSkillFile {
+        let variables = vec![
+            SkillVariable {
+                name: "ticket".into(),
+                label: "Numéro du ticket 🎫".into(),
+                description: Some("Clé « Jira », ex. EW-1".into()),
+                required: true,
+                default_value: Some("EW-1".into()),
+                control: None,
+            },
+            SkillVariable {
+                name: "from-lang".into(),
+                label: String::new(),
+                description: None,
+                required: false,
+                default_value: None,
+                control: Some(crate::models::PromptVariableControl::Textarea),
+            },
+        ];
+        let mut file = sample();
+        file.arguments = vec!["ticket".into(), "from-lang".into()];
+        file.argument_hint = Some("[ticket] [from-lang]".into());
+        file.metadata.insert(
+            VARIABLES_KEY.to_string(),
+            variables_json(&variables).unwrap(),
+        );
+        file.body = "Migrate $ticket from $from-lang.".into();
+        file
+    }
+
+    #[test]
+    fn a_skill_with_arguments_reads_back_unchanged_and_is_valid() {
+        let text = render(&variabilized());
+        assert!(
+            text.contains(
+                "arguments: [\"ticket\",\"from-lang\"]\nargument-hint: \"[ticket] [from-lang]\"\n"
+            ),
+            "{text}"
+        );
+        let parsed = parse(&text).unwrap();
+        assert_eq!(parsed, variabilized());
+        validate(&parsed, "rust").unwrap();
+        assert_eq!(render(&parsed), text, "render is stable");
+        let variables =
+            parse_variables(&parsed.metadata[VARIABLES_KEY], &parsed.arguments).unwrap();
+        assert_eq!(variables[0].label, "Numéro du ticket 🎫");
+        assert_eq!(
+            variables[1].control,
+            Some(crate::models::PromptVariableControl::Textarea)
+        );
+    }
+
+    #[test]
+    fn every_claude_code_arguments_shape_is_read() {
+        for header in [
+            "arguments: [issue, branch]",
+            "arguments: [\"issue\", 'branch']",
+            "arguments: issue branch",
+            "arguments: \"issue branch\"",
+            "arguments:\n  - issue\n  - branch",
+            "arguments:\n- issue\n- \"branch\"",
+        ] {
+            let text =
+                format!("---\nname: m\ndescription: d\n{header}\nlicense: MIT\n---\nBody.\n");
+            let file = parse(&text).unwrap();
+            assert_eq!(file.arguments, vec!["issue", "branch"], "{header}");
+            assert_eq!(file.license.as_deref(), Some("MIT"), "{header}");
+        }
+        let file = parse("---\nname: m\ndescription: d\narguments: []\n---\nB\n").unwrap();
+        assert!(file.arguments.is_empty());
+    }
+
+    #[test]
+    fn bad_argument_names_are_refused_with_a_clear_error() {
+        for bad in ["1st", "a b", "é", "$x", "", &"a".repeat(65)] {
+            let error = validate_arguments(&[bad.to_string()]).unwrap_err();
+            assert!(error.contains("skill argument"), "{bad}: {error}");
+        }
+        for good in ["x", "_x", "from-lang", "a1_b-2"] {
+            validate_arguments(&[good.to_string()]).unwrap();
+        }
+        let error = validate_arguments(&["a".into(), "a".into()]).unwrap_err();
+        assert!(error.contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn a_bad_variable_list_is_refused_with_a_clear_error() {
+        let arguments = vec!["ticket".to_string()];
+        for (json, expected) in [
+            ("not json", "not a valid variable list"),
+            ("{\"name\":\"ticket\"}", "not a valid variable list"),
+            ("[{\"label\":\"no name\"}]", "not a valid variable list"),
+            ("[{\"name\":\"other\"}]", "does not declare"),
+            ("[{\"name\":\"ticket\"},{\"name\":\"ticket\"}]", "twice"),
+        ] {
+            let error = parse_variables(json, &arguments).unwrap_err();
+            assert!(error.contains(expected), "{json}: {error}");
+            assert!(error.contains(VARIABLES_KEY), "{json}: {error}");
+        }
+        assert!(parse_variables("[]", &[]).unwrap().is_empty());
+        let mut file = variabilized();
+        file.metadata.insert(VARIABLES_KEY.into(), "[".into());
+        assert!(validate(&file, "rust").unwrap_err().contains(VARIABLES_KEY));
+        file.metadata.remove(VARIABLES_KEY);
+        file.arguments.push("1bad".into());
+        assert!(validate(&file, "rust").unwrap_err().contains("1bad"));
     }
 
     #[test]
