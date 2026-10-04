@@ -191,6 +191,12 @@ Release notes for 0.9.3 and earlier are available in the
   cleaned at startup. A sub-workflow pinned to another project now runs in that
   project's repository instead of the parent's worktree; as a foreach child it
   is refused, since it would have to share the parent's worktree.
+- One failing workflow no longer cancels the scheduler's tick (KT-1016): a
+  missing variable or an unreachable tracker stopped the loop, and every cron
+  occurrence of the workflows after it was lost for good. A tracker issue is
+  now marked processed only once its run is admitted, so an issue refused by
+  the concurrency limit or the preflight is polled again instead of never
+  running.
 
 ### Changed
 
