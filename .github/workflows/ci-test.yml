@@ -249,6 +249,8 @@ jobs:
         run: |
           python3 scripts/ci/test_mcp_surface_budget.py
           python3 scripts/ci/mcp_surface_budget.py
+      - name: Release body generator — links match attached installers
+        run: python3 scripts/ci/test_release_notes.py
       - name: Agent task matrix — every task still reaches its content
         run: python3 scripts/ci/agent_task_matrix.py
 

@@ -11,6 +11,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Changed
+
+- The release notes are now generated from the installers a release really
+  carries (KT-1004): one direct download link per attached file, the version's
+  CHANGELOG section above the install table, and the AppImage advice only when
+  an AppImage is attached. A missing platform or CHANGELOG section fails the
+  release job instead of publishing a draft that names absent files.
+
 ## [0.14.2] - 2026-10-03
 
 ### Added
