@@ -142,19 +142,41 @@ impl KeyVault for SidecarFile {
         std::fs::create_dir_all(dir).context("create data dir for sidecar")?;
         // Temp in the SAME dir so the rename stays on one filesystem (atomic).
         let tmp = dir.join(format!(".{}.tmp", SIDECAR_FILENAME));
-        std::fs::write(&tmp, secret.as_bytes()).context("write sidecar temp")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .context("chmod sidecar 0600 before rename")?;
-        }
+        write_private_temp(&tmp, secret.as_bytes()).context("write sidecar temp")?;
         std::fs::rename(&tmp, &self.path).context("atomic rename sidecar into place")?;
         Ok(())
     }
 }
 
-/// The ordered ladder of writable vaults (keychain → sidecar), plus the
+/// Create `tmp` owner-only from the first byte and write `bytes` to it.
+///
+/// A leftover entry at `tmp` (stale file or planted symlink) is removed first
+/// and `create_new` never follows one, so the secret cannot land elsewhere or
+/// sit briefly under the umask's 0644.
+pub(crate) fn write_private_temp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Ok(meta) = std::fs::symlink_metadata(tmp) {
+        if !meta.is_dir() {
+            std::fs::remove_file(tmp)?;
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(tmp)?;
+    if let Err(e) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// The ordered ladder of writable vaults/// The ordered ladder of writable vaults (keychain → sidecar), plus the
 /// read-only env override checked first.
 pub struct KeyStore {
     vaults: Vec<Box<dyn KeyVault>>,
@@ -513,6 +535,43 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("create data dir for sidecar"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_store_never_follows_a_symlink_planted_at_the_temp_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(
+            &victim,
+            dir.path().join(format!(".{}.tmp", SIDECAR_FILENAME)),
+        )
+        .unwrap();
+
+        SidecarFile::in_dir(dir.path()).store("cafebabe").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(SIDECAR_FILENAME)).unwrap(),
+            "cafebabe"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_temp_is_owner_only_at_creation_even_over_a_stale_0644_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join(".x.tmp");
+        std::fs::write(&tmp, "stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private_temp(&tmp, b"secret").unwrap();
+
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "secret");
     }
 
     #[test]

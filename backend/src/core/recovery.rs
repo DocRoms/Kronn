@@ -132,12 +132,7 @@ pub fn save_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(RECOVERY_FILENAME);
     let tmp = dir.join(format!(".{}.tmp", RECOVERY_FILENAME));
-    std::fs::write(&tmp, to_code(blob).as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::core::keyvault::write_private_temp(&tmp, to_code(blob).as_bytes())?;
     std::fs::rename(&tmp, &path)
 }
 
@@ -245,6 +240,29 @@ mod tests {
             wrapped: good.wrapped,
         };
         assert!(unwrap_key(&frankenstein, "pp").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_blob_never_follows_a_symlink_planted_at_the_temp_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(
+            &victim,
+            dir.path().join(format!(".{}.tmp", RECOVERY_FILENAME)),
+        )
+        .unwrap();
+
+        let blob = wrap_key(&a_key(), "pp").unwrap();
+        save_blob(dir.path(), &blob).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        let saved = dir.path().join(RECOVERY_FILENAME);
+        assert_eq!(load_blob(dir.path()).unwrap(), blob);
+        let mode = std::fs::metadata(saved).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

@@ -1018,59 +1018,84 @@ pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<O
 /// Write or remove the OpenAI key from ~/.codex/auth.json
 fn sync_codex_auth(key: Option<&str>) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let codex_dir = std::path::PathBuf::from(home).join(".codex");
-    let codex_auth_path = codex_dir.join("auth.json");
+    let codex_auth_path = std::path::PathBuf::from(home)
+        .join(".codex")
+        .join("auth.json");
+    if let Err(e) = sync_codex_auth_at(&codex_auth_path, key) {
+        tracing::warn!("{e}");
+    }
+}
 
-    // MERGE into the existing auth.json — never wholesale-replace it. A user
-    // logged into Codex via ChatGPT-subscription OAuth has refresh/access
-    // tokens in this file that Kronn didn't write; replacing (or deleting)
-    // the file destroyed that login. We only own two fields.
-    let existing: serde_json::Map<String, serde_json::Value> =
-        match std::fs::read_to_string(&codex_auth_path) {
-            Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(serde_json::Value::Object(m)) => m,
-                Ok(_) | Err(_) if key.is_some() => {
-                    // Corrupt/non-object file and we're about to write: don't
-                    // merge garbage, but say what we're replacing.
-                    tracing::warn!(
-                        "{} was not valid JSON — rewriting it",
-                        codex_auth_path.display()
-                    );
-                    serde_json::Map::new()
-                }
-                _ => {
-                    tracing::warn!(
-                        "{} unreadable as JSON — leaving it untouched",
-                        codex_auth_path.display()
-                    );
-                    return;
-                }
-            },
-            Err(_) => serde_json::Map::new(), // missing file: start fresh
-        };
+/// Merge Kronn's OpenAI key into (or out of) a Codex `auth.json`.
+///
+/// Never wholesale-replaces the file: a ChatGPT-subscription login keeps its
+/// tokens and its `auth_mode` (switching it to `apikey` would silently move the
+/// user to API billing). Writes are atomic, owner-only, and refused when the
+/// file changed under us, so a crash cannot truncate the refresh token.
+fn sync_codex_auth_at(codex_auth_path: &std::path::Path, key: Option<&str>) -> Result<(), String> {
+    let observed = match std::fs::read(codex_auth_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(format!(
+                "{} unreadable ({e}) — leaving it untouched",
+                codex_auth_path.display()
+            ))
+        }
+    };
+    let existing: serde_json::Map<String, serde_json::Value> = match &observed {
+        None => serde_json::Map::new(),
+        Some(bytes) => match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Ok(serde_json::Value::Object(m)) => m,
+            _ if key.is_some() => {
+                // Corrupt/non-object file and we're about to write: don't
+                // merge garbage, but say what we're replacing.
+                tracing::warn!(
+                    "{} was not valid JSON — rewriting it",
+                    codex_auth_path.display()
+                );
+                serde_json::Map::new()
+            }
+            _ => {
+                return Err(format!(
+                    "{} unreadable as JSON — leaving it untouched",
+                    codex_auth_path.display()
+                ))
+            }
+        },
+    };
+
+    let write = |merged: serde_json::Map<String, serde_json::Value>| -> Result<(), String> {
+        // Safety: serializing a serde_json::Value cannot fail
+        let content = serde_json::to_string_pretty(&serde_json::Value::Object(merged))
+            .expect("JSON Value serialization cannot fail");
+        crate::core::mcp_scanner::atomic_write_if_unchanged(
+            codex_auth_path,
+            &content,
+            observed.as_deref(),
+        )
+    };
 
     match key {
         Some(k) => {
-            let _ = std::fs::create_dir_all(&codex_dir);
-            let mut merged = existing;
-            merged.insert(
-                "auth_mode".into(),
-                serde_json::Value::String("apikey".into()),
-            );
-            merged.insert("OPENAI_API_KEY".into(), serde_json::Value::String(k.into()));
-            let content = serde_json::Value::Object(merged);
-            // Safety: serializing a serde_json::Value cannot fail
-            match std::fs::write(
-                &codex_auth_path,
-                serde_json::to_string_pretty(&content)
-                    .expect("JSON Value serialization cannot fail"),
-            ) {
-                Ok(_) => tracing::info!(
-                    "Synced OpenAI key into {} (other fields preserved)",
-                    codex_auth_path.display()
-                ),
-                Err(e) => tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e),
+            if let Some(dir) = codex_auth_path.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
             }
+            let mut merged = existing;
+            // Only a file with no login mode yet becomes an API-key login.
+            if !merged.contains_key("auth_mode") {
+                merged.insert(
+                    "auth_mode".into(),
+                    serde_json::Value::String("apikey".into()),
+                );
+            }
+            merged.insert("OPENAI_API_KEY".into(), serde_json::Value::String(k.into()));
+            write(merged)?;
+            tracing::info!(
+                "Synced OpenAI key into {} (other fields preserved)",
+                codex_auth_path.display()
+            );
         }
         None => {
             // Remove ONLY our fields; other credentials (OAuth tokens) stay.
@@ -1079,40 +1104,35 @@ fn sync_codex_auth(key: Option<&str>) {
             if merged.remove("OPENAI_API_KEY").is_none()
                 && merged.get("auth_mode").and_then(|v| v.as_str()) != Some("apikey")
             {
-                return; // nothing of ours in there
+                return Ok(()); // nothing of ours in there
             }
             if merged.get("auth_mode").and_then(|v| v.as_str()) == Some("apikey") {
                 merged.remove("auth_mode");
             }
             if merged.is_empty() {
-                match std::fs::remove_file(&codex_auth_path) {
+                match std::fs::remove_file(codex_auth_path) {
                     Ok(_) => tracing::info!(
                         "Removed {} (Codex will use local auth)",
                         codex_auth_path.display()
                     ),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => {
-                        tracing::warn!("Failed to remove {}: {}", codex_auth_path.display(), e)
+                        return Err(format!(
+                            "Failed to remove {}: {e}",
+                            codex_auth_path.display()
+                        ))
                     }
                 }
             } else {
-                let content = serde_json::Value::Object(merged);
-                match std::fs::write(
-                    &codex_auth_path,
-                    serde_json::to_string_pretty(&content)
-                        .expect("JSON Value serialization cannot fail"),
-                ) {
-                    Ok(_) => tracing::info!(
-                        "Removed Kronn's API-key fields from {} (other credentials preserved)",
-                        codex_auth_path.display()
-                    ),
-                    Err(e) => {
-                        tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e)
-                    }
-                }
+                write(merged)?;
+                tracing::info!(
+                    "Removed Kronn's API-key fields from {} (other credentials preserved)",
+                    codex_auth_path.display()
+                );
             }
         }
     }
+    Ok(())
 }
 
 /// POST /api/config/sync-agent-tokens
@@ -1588,6 +1608,8 @@ fn build_export_config(config: &AppConfig) -> AppConfig {
     export_cfg.server.auth_token = None;
     export_cfg.server.auth_enabled = false;
     export_cfg.encryption_secret = None;
+    // A Slack/Teams webhook URL is a bearer credential.
+    export_cfg.server.failure_notify_url = None;
     // Strip API key values (keep metadata for reference)
     for key in &mut export_cfg.tokens.keys {
         key.value = String::new();
@@ -2601,6 +2623,90 @@ mod tests {
     use crate::core::config;
     use serial_test::serial;
 
+    // ─── Codex auth.json sync ───────────────────────────────────
+
+    fn codex_auth_json(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join(".codex").join("auth.json")
+    }
+
+    #[test]
+    fn codex_sync_keeps_a_chatgpt_login_mode_and_its_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_auth_json(&dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"rt-é"}}"#,
+        )
+        .unwrap();
+
+        sync_codex_auth_at(&path, Some("sk-test")).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["auth_mode"], "chatgpt");
+        assert_eq!(v["tokens"]["refresh_token"], "rt-é");
+        assert_eq!(v["OPENAI_API_KEY"], "sk-test");
+
+        // Removing our key leaves the login exactly as the user had it.
+        sync_codex_auth_at(&path, None).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["auth_mode"], "chatgpt");
+        assert!(v.get("OPENAI_API_KEY").is_none());
+    }
+
+    #[test]
+    fn codex_sync_creates_an_owner_only_apikey_file_and_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_auth_json(&dir);
+
+        sync_codex_auth_at(&path, Some("sk-test")).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["auth_mode"], "apikey");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers.len(), 1, "no temp file left: {leftovers:?}");
+
+        sync_codex_auth_at(&path, None).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_sync_failure_leaves_the_original_byte_identical() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_auth_json(&dir);
+        let codex_dir = path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let original = br#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"keep"}}"#;
+        std::fs::write(&path, original).unwrap();
+        // A read-only directory makes the temp file impossible to create.
+        std::fs::set_permissions(&codex_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::write(codex_dir.join("probe"), b"x").is_ok() {
+            // Running as root: permissions are not enforced, nothing to prove.
+            std::fs::set_permissions(&codex_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+
+        let result = sync_codex_auth_at(&path, Some("sk-test"));
+        let after = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&codex_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(after, original);
+    }
+
     // ─── Directory browser ──────────────────────────────────────
 
     /// A mount is a top-level directory like any other. This is what makes
@@ -3224,12 +3330,14 @@ mod tests {
             active: true,
         });
         cfg.server.pseudo = Some("TestUser".into());
+        cfg.server.failure_notify_url = Some("https://hooks.slack.com/services/T/B/secret".into());
         cfg.language = "fr".into();
 
         let exported = build_export_config(&cfg);
 
         // Secrets stripped
         assert!(exported.server.auth_token.is_none());
+        assert!(exported.server.failure_notify_url.is_none());
         assert!(exported.encryption_secret.is_none());
         assert!(!exported.server.auth_enabled);
 

@@ -613,7 +613,7 @@ fn request_is_local_ip(headers: &HeaderMap, request: &axum::extract::Request) ->
 /// We previously matched "localhost" defensively, but that opened a
 /// tiny attack surface where a misconfigured nginx could forge
 /// `X-Real-IP: localhost` to bypass auth. Numeric-only is safer.
-fn is_local_ip(ip: &str) -> bool {
+pub(crate) fn is_local_ip(ip: &str) -> bool {
     if ip == "127.0.0.1" || ip == "::1" {
         return true;
     }

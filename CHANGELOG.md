@@ -56,6 +56,18 @@ Release notes for 0.9.3 and earlier are available in the
   command line and as values in the Claude process's own environment, never in
   argv, ACP payloads or events. A credential passed in `args` still leaves its
   server out.
+- Security hardening (KT-1009). The WebSocket no longer streams every live
+  event to any private-network peer: without the API token only loopback (or,
+  under Docker, the gateway's local clients) counts as the local UI, and
+  `X-Real-IP` is honoured only from the Docker gateway (`X-Forwarded-For`
+  never). The container no longer writes the GitHub token into `.netrc` for
+  gitlab.com (a `GITLAB_TOKEN` feeds that entry, and a stale one is removed).
+  Saving an OpenAI key rewrites `~/.codex/auth.json` atomically, owner-only,
+  and keeps a ChatGPT login's mode. Key and recovery temp files are created
+  owner-only and never follow a planted symlink, scheduled backups are created
+  0600, masked values no longer panic on accented or emoji edges, the agent
+  read guard also refuses Kronn's key, config, database, `.mcp.json` and MCP
+  backups, and exports drop the failure webhook URL.
 
 ### Changed
 
