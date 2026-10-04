@@ -681,14 +681,8 @@ pub async fn set_agent_access(
     Json(req): Json<SetAgentAccessRequest>,
 ) -> Json<ApiResponse<()>> {
     let mut config = state.config.write().await;
-    match req.agent {
-        AgentType::ClaudeCode => config.agents.claude_code.full_access = req.full_access,
-        AgentType::Codex => config.agents.codex.full_access = req.full_access,
-        AgentType::OpenCode => config.agents.open_code.full_access = req.full_access,
-        AgentType::GeminiCli => config.agents.gemini_cli.full_access = req.full_access,
-        AgentType::Kiro => config.agents.kiro.full_access = req.full_access,
-        AgentType::Vibe => config.agents.vibe.full_access = req.full_access,
-        _ => return Json(ApiResponse::err("Agent does not support access flags")),
+    if let Err(message) = config.agents.set_full_access(&req.agent, req.full_access) {
+        return Json(ApiResponse::err(message));
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),

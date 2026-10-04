@@ -13,6 +13,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Full access is now a visible, accessible switch on each agent card, with a
+  risk dialog before it is enabled, and the setup wizard has an Access step
+  that offers it agent by agent, off by default (KT-975).
 - The plugin catalogue offers MySQL / MariaDB (KT-996, #217), through the
   community server `@benborla29/mcp-server-mysql`: host, user and password,
   with an optional port and database, read-only unless a write flag is set on
@@ -29,6 +32,9 @@ Release notes for 0.9.3 and earlier are available in the
   the dependency review and the full CI gate (label-gated jobs included) run
   on it, and the release waits for that gate (KT-1023).
 
+- Turning on full access for GitHub Copilot CLI failed with "Agent does not
+  support access flags", and Vibe and Kiro accepted a flag they ignore. The
+  backend now accepts exactly the five agents that honor it (KT-975).
 - A guarded action (save, create, toggle) now always runs with the current
   props and translations instead of the ones from the first render, and a
   browser with disabled or full storage no longer crashes the Discussions,

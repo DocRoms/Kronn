@@ -211,6 +211,8 @@ renormalizes only over present ratings instead of hiding missing evidence.
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Planification → Plugins → Workflows → Pages (after activation) → Config. **"?" button** in nav replays the guided tour.
 
+**Full access (KT-975):** one control, `AgentFullAccessSwitch`, on the agent card (Settings) and in the setup wizard's Access step; enabling asks first with the shared risk text (`config.fullAccessRisk`), off by default. Agents offered are listed once in `lib/agentFullAccess.ts`, mirroring the backend `AgentsConfig::set_full_access` (Vibe and Kiro ignore the flag, so they are refused).
+
 **Guided tour (0.3.6)**: 17-step interactive onboarding auto-launched on first visit. 5 acts (Projets → Plugins → Discussions → Automatisation → Config). 4 interactive steps with `waitForClick` (user must click the real UI element — pulse animation, "Next" blocked). Spotlight via box-shadow cutout, tooltip auto-positioned. Ends on Discussions page. Persistence: `kronn:tour-completed` in localStorage. Components: `TourProvider` (context + state machine), `TourOverlay` (portal), `tourSteps.ts` (declarative step definitions), `useTourPositioning.ts` (placement + MutationObserver).
 
 ### Project Bootstrap (create from scratch)

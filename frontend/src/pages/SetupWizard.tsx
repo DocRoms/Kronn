@@ -1,13 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { setup as setupApi, agents as agentsApi, projects as projectsApi } from '../lib/api';
+import { setup as setupApi, agents as agentsApi, projects as projectsApi, config as configApi } from '../lib/api';
 import type { SetupStatus, AgentDetection, DetectedRepo } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { userError } from '../lib/userError';
 import {
   Cpu, FolderSearch, Scan, ChevronRight, Check, Download, Loader2, RefreshCw,
-  GitBranch, FolderOpen, Eye, Copy,
+  GitBranch, FolderOpen, Eye, Copy, ShieldAlert,
 } from 'lucide-react';
 import { KronnMark } from '../components/KronnMark';
 import { FolderPicker } from '../components/setup/FolderPicker';
+import { AgentFullAccessSwitch } from '../components/settings/AgentFullAccessSwitch';
+import { FULL_ACCESS_AGENTS, supportsFullAccess } from '../lib/agentFullAccess';
 import './SetupWizard.css';
 
 interface Props {
@@ -24,6 +27,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
 
   const STEPS = [
     { id: 'agents', label: t('setup.step.agents'), icon: Cpu },
+    { id: 'access', label: t('setup.step.access'), icon: ShieldAlert },
     { id: 'repos', label: t('setup.step.repos'), icon: FolderSearch },
     { id: 'done', label: t('setup.step.done'), icon: Check },
   ] as const;
@@ -49,6 +53,10 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
   );
 
   const installedCount = agents.filter(a => a.installed || a.runtime_available).length;
+  const accessAgents = agents.filter(a =>
+    (a.installed || a.runtime_available) && a.enabled && supportsFullAccess(a.agent_type));
+  // Missing entries mean "off": the backend default, and the cautious one.
+  const [fullAccess, setFullAccess] = useState<Record<string, boolean>>({});
 
   const refreshAgents = useCallback(async () => {
     setDetecting(true);
@@ -92,8 +100,22 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
     }
   };
 
-  const handleGoToRepos = async () => {
+  const handleAfterAgents = async () => {
+    if (accessAgents.length === 0) return handleGoToRepos();
     setStep(1);
+    try {
+      const current = await configApi.getAgentAccess();
+      setFullAccess(Object.fromEntries(accessAgents.map(a => {
+        const support = FULL_ACCESS_AGENTS[a.agent_type];
+        return [a.agent_type, support ? current[support.key]?.full_access ?? false : false];
+      })));
+    } catch {
+      // Unknown state reads as off, which is also what the backend holds by default.
+    }
+  };
+
+  const handleGoToRepos = async () => {
+    setStep(2);
     if (repos.length === 0) {
       await handleScan();
     }
@@ -366,7 +388,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
 
               <button
                 className="setup-btn-primary"
-                onClick={handleGoToRepos}
+                onClick={handleAfterAgents}
               >
                 {installedCount > 0
                   ? <>{t('setup.continue')} <ChevronRight size={16} /></>
@@ -377,8 +399,46 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
             </div>
           )}
 
-          {/* ── STEP 1: Repos ── */}
-          {step === 1 && (() => {
+          {/* ── STEP 1: Access ── */}
+          {step === 1 && (
+            <div>
+              <h2 className="setup-h2">{t('setup.accessTitle')}</h2>
+              <p className="setup-desc">{t('setup.accessIntro')}</p>
+              <p className="setup-desc">{t('config.fullAccessRisk')}</p>
+              <div className="setup-agent-list">
+                {accessAgents.map(agent => (
+                  <div key={agent.agent_type} className="setup-agent-row">
+                    <div className="flex-1">
+                      <span className="setup-agent-name">{agent.name}</span>
+                      {FULL_ACCESS_AGENTS[agent.agent_type]?.flag && (
+                        <code className="code"> {FULL_ACCESS_AGENTS[agent.agent_type]?.flag}</code>
+                      )}
+                    </div>
+                    <AgentFullAccessSwitch
+                      agentName={agent.name}
+                      checked={fullAccess[agent.agent_type] ?? false}
+                      testId={`setup-full-access-${agent.agent_type}`}
+                      onChange={async next => {
+                        try {
+                          await configApi.setAgentAccess({ agent: agent.agent_type, full_access: next });
+                          setFullAccess(prev => ({ ...prev, [agent.agent_type]: next }));
+                        } catch (e) {
+                          setError(t('common.actionFailed', userError(e)));
+                        }
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+              <p className="setup-desc">{t('setup.accessDefaultOff')}</p>
+              <button className="setup-btn-primary" onClick={handleGoToRepos}>
+                {t('setup.continue')} <ChevronRight size={16} />
+              </button>
+            </div>
+          )}
+
+          {/* ── STEP 2: Repos ── */}
+          {step === 2 && (() => {
             const visibleRepos = repos.filter(r => !r.hidden);
             const hiddenRepos = repos.filter(r => r.hidden);
             const displayRepos = showHidden ? repos : visibleRepos;
@@ -490,7 +550,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
 
               <button
                 className="setup-btn-primary"
-                onClick={() => setStep(2)}
+                onClick={() => setStep(3)}
               >
                 {visibleRepos.length > 0
                   ? <>{t('setup.continue')} <ChevronRight size={16} /></>
@@ -500,8 +560,8 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
             );
           })()}
 
-          {/* ── STEP 2: Done ── */}
-          {step === 2 && (
+          {/* ── STEP 3: Done ── */}
+          {step === 3 && (
             <div className="text-center py-8">
               {completing ? (
                 <>
