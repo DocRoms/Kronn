@@ -3419,7 +3419,12 @@ export type ImportPluginBundleReport = { bundle_id: string, already_imported: bo
  */
 imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
 
-export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
+export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
+/**
+ * Explicit consent to apply bundled custom arguments. They replace the
+ * plugin's whole command line, so they are dropped unless this is true.
+ */
+accept_args_override?: boolean, };
 
 export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
 /**

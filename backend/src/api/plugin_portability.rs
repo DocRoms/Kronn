@@ -89,6 +89,11 @@ pub struct ImportPluginBundleRequest {
     pub content: String,
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// Explicit consent to apply bundled custom arguments. They replace the
+    /// plugin's whole command line, so they are dropped unless this is true.
+    #[serde(default)]
+    #[ts(optional)]
+    pub accept_args_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -408,7 +413,12 @@ fn build_export(
             label: config.label.clone(),
             env_keys: config.env_keys.clone(),
             values,
-            args_override: config.args_override.clone(),
+            // Arguments may embed tokens: only the encrypted payload carries them.
+            args_override: if request.include_values {
+                config.args_override.clone()
+            } else {
+                None
+            },
             was_global: config.is_global,
             include_general: config.include_general,
             preferred_interface: *preference,
@@ -582,6 +592,47 @@ fn allowed_import_env_keys(server: &McpServer) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Built-in catalogue ids use these prefixes; a manual server must not take
+/// one, or a later catalogue refresh would overwrite it.
+fn has_reserved_registry_prefix(server_id: &str) -> bool {
+    server_id.starts_with("mcp-") || server_id.starts_with("api-")
+}
+
+/// The custom arguments an import may apply: none unless the importer gave
+/// explicit consent, since they replace the trusted command's arguments.
+/// Arguments equal to the server's own are a no-op and are dropped silently.
+fn import_args_override(
+    server: &McpServer,
+    portable: &PortablePluginConfig,
+    accept_args_override: bool,
+    conflicts: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    let requested = portable.args_override.as_ref()?;
+    let own_args = match &server.transport {
+        McpTransport::Stdio { args, .. } => Some(args),
+        _ => None,
+    };
+    if own_args == Some(requested) {
+        return None;
+    }
+    if own_args.is_none() {
+        conflicts.push(format!(
+            "{}: custom arguments do not apply to this plugin and were discarded",
+            portable.label
+        ));
+        return None;
+    }
+    if accept_args_override {
+        return Some(requested.clone());
+    }
+    conflicts.push(format!(
+        "{}: {} custom argument(s) were not applied because they replace the plugin's command line; review them and set them by hand, or import again with explicit consent",
+        portable.label,
+        requested.len()
+    ));
+    None
+}
+
 fn resolve_import_server(
     conn: &rusqlite::Connection,
     portable: &PortablePluginConfig,
@@ -597,6 +648,14 @@ fn resolve_import_server(
             ));
         }
         return Ok(Some(registry_server));
+    }
+
+    if has_reserved_registry_prefix(&portable.server.id) {
+        conflicts.push(format!(
+            "{}: server id `{}` is reserved for the built-in catalogue and is not in it; skipped",
+            portable.label, portable.server.id
+        ));
+        return Ok(None);
     }
 
     if !is_safe_manual_server(&portable.server) {
@@ -633,6 +692,7 @@ fn import_payload(
     payload: PluginBundlePayload,
     instance_secret: &str,
     fingerprint: &str,
+    accept_args_override: bool,
 ) -> anyhow::Result<ImportPluginBundleReport> {
     if let Some((existing_hash, report_json)) = conn
         .query_row(
@@ -669,6 +729,8 @@ fn import_payload(
             skipped_plugins += 1;
             continue;
         };
+        let args_override =
+            import_args_override(&server, &portable, accept_args_override, &mut conflicts);
         let allowed_env_keys = allowed_import_env_keys(&server);
         let env_keys = portable
             .env_keys
@@ -706,7 +768,7 @@ fn import_payload(
                 label: portable.label.clone(),
                 env_keys: env_keys.clone(),
                 env_encrypted: String::new(),
-                args_override: portable.args_override.clone(),
+                args_override: args_override.clone(),
                 is_global: false,
                 include_general: portable.include_general,
                 config_hash: String::new(),
@@ -745,7 +807,7 @@ fn import_payload(
             ));
         }
 
-        let hash = db::mcps::compute_config_hash(&server, &env, portable.args_override.as_ref());
+        let hash = db::mcps::compute_config_hash(&server, &env, args_override.as_ref());
         if existing_configs
             .iter()
             .any(|config| config.config_hash == hash)
@@ -767,7 +829,7 @@ fn import_payload(
             label: portable.label.clone(),
             env_keys,
             env_encrypted: encrypted,
-            args_override: portable.args_override,
+            args_override,
             // Never broaden project/host exposure during import: `is_global`
             // is reset above, and `host_sync` below is the documented
             // default — `PortablePluginConfig` never carries a host_sync
@@ -978,10 +1040,18 @@ pub async fn import_plugin_bundle(
         Some(secret) => secret,
         None => return Json(ApiResponse::err("No encryption secret configured")),
     };
+    let accept_args_override = request.accept_args_override.unwrap_or(false);
     match state
         .db
         .with_conn(move |conn| {
-            import_payload(conn, &envelope, payload, &instance_secret, &fingerprint)
+            import_payload(
+                conn,
+                &envelope,
+                payload,
+                &instance_secret,
+                &fingerprint,
+                accept_args_override,
+            )
         })
         .await
     {
@@ -1231,6 +1301,7 @@ mod tests {
                     payload,
                     &target_secret_for_import,
                     &fingerprint,
+                    false,
                 )
             })
             .await
@@ -1290,6 +1361,7 @@ mod tests {
                     replay_payload,
                     &target_secret,
                     &replay_fingerprint,
+                    false,
                 )
             })
             .await
@@ -1309,10 +1381,189 @@ mod tests {
                     changed_payload,
                     &crypto::generate_secret(),
                     &changed_fingerprint,
+                    false,
                 )
             })
             .await
             .unwrap_err();
         assert!(conflict.to_string().starts_with("IMPORT_CONFLICT:"));
+    }
+
+    fn clear_envelope(plugins: Vec<PortablePluginConfig>) -> PluginBundleEnvelope {
+        PluginBundleEnvelope {
+            kind: PLUGIN_BUNDLE_KIND.into(),
+            version: 1,
+            bundle_id: Uuid::new_v4().to_string(),
+            exported_at: Utc::now(),
+            includes_values: false,
+            encrypted: false,
+            plugin_labels: Vec::new(),
+            value_manifest: Vec::new(),
+            payload: Some(PluginBundlePayload { plugins }),
+            encrypted_payload: None,
+            wrapped_key: None,
+        }
+    }
+
+    fn portable(server: McpServer, args_override: Option<Vec<String>>) -> PortablePluginConfig {
+        PortablePluginConfig {
+            source_config_id: Uuid::new_v4().to_string(),
+            label: format!("{} bundle", server.id),
+            server,
+            env_keys: Vec::new(),
+            values: None,
+            args_override,
+            was_global: false,
+            include_general: true,
+            preferred_interface: PluginInterface::Mcp,
+        }
+    }
+
+    fn import_clear(
+        conn: &rusqlite::Connection,
+        plugins: Vec<PortablePluginConfig>,
+        accept_args_override: bool,
+    ) -> ImportPluginBundleReport {
+        let envelope = clear_envelope(plugins);
+        let payload = envelope.payload.clone().unwrap();
+        let fingerprint = semantic_fingerprint(&envelope).unwrap();
+        import_payload(
+            conn,
+            &envelope,
+            payload,
+            &crypto::generate_secret(),
+            &fingerprint,
+            accept_args_override,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bundled_args_override_on_a_registry_server_needs_explicit_consent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let github = current_registry_server("mcp-github").unwrap();
+        let evil = vec!["-y".to_string(), "evil-package".to_string()];
+
+        let report = import_clear(
+            &conn,
+            vec![portable(github.clone(), Some(evil.clone()))],
+            false,
+        );
+        assert_eq!(report.imported_config_ids.len(), 1);
+        assert!(report
+            .conflicts
+            .iter()
+            .any(|c| c.contains("custom argument(s) were not applied")));
+        let config = db::mcps::get_config(&conn, &report.imported_config_ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.args_override, None);
+
+        let mut consented = portable(github, Some(evil.clone()));
+        consented.label = "consented".into();
+        let report = import_clear(&conn, vec![consented], true);
+        let config = db::mcps::get_config(&conn, &report.imported_config_ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.args_override, Some(evil));
+    }
+
+    #[test]
+    fn args_override_equal_to_the_registry_args_is_a_silent_no_op() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let github = current_registry_server("mcp-github").unwrap();
+        let McpTransport::Stdio { args, .. } = github.transport.clone() else {
+            panic!("mcp-github is a stdio server");
+        };
+        let report = import_clear(&conn, vec![portable(github, Some(args))], false);
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+        let config = db::mcps::get_config(&conn, &report.imported_config_ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.args_override, None);
+    }
+
+    #[test]
+    fn reserved_catalogue_ids_are_refused_for_manual_servers() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let report = import_clear(
+            &conn,
+            vec![
+                portable(test_server("mcp-not-in-catalogue", ApiAuthKind::None), None),
+                portable(test_server("api-not-in-catalogue", ApiAuthKind::None), None),
+            ],
+            false,
+        );
+        assert!(report.imported_config_ids.is_empty());
+        assert_eq!(report.skipped_plugins, 2);
+        assert!(report.conflicts.iter().all(|c| c.contains("reserved")));
+        assert!(db::mcps::list_servers(&conn)
+            .unwrap()
+            .iter()
+            .all(|server| !server.id.ends_with("-not-in-catalogue")));
+    }
+
+    #[test]
+    fn args_override_travels_only_in_the_encrypted_payload() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let secret = crypto::generate_secret();
+        let server = current_registry_server("mcp-github").unwrap();
+        db::mcps::upsert_server(&conn, &server).unwrap();
+        let env = HashMap::from([("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), String::new())]);
+        let args = vec!["--token".to_string(), "abc-secret-arg".to_string()];
+        db::mcps::insert_config(
+            &conn,
+            &McpConfig {
+                id: "with-args".into(),
+                server_id: server.id.clone(),
+                label: "GitHub with args".into(),
+                env_keys: vec!["GITHUB_PERSONAL_ACCESS_TOKEN".into()],
+                env_encrypted: db::mcps::encrypt_env(&env, &secret).unwrap(),
+                args_override: Some(args.clone()),
+                is_global: false,
+                include_general: true,
+                config_hash: db::mcps::compute_config_hash(&server, &env, Some(&args)),
+                project_ids: Vec::new(),
+                host_sync: HostSyncMode::None,
+            },
+        )
+        .unwrap();
+
+        let (clear, _) = build_export(
+            &conn,
+            ExportPluginBundleRequest {
+                config_ids: vec!["with-args".into()],
+                include_values: false,
+                passphrase: None,
+                confirmation: None,
+            },
+            &secret,
+        )
+        .unwrap();
+        assert!(!serde_json::to_string(&clear)
+            .unwrap()
+            .contains("abc-secret-arg"));
+        assert_eq!(clear.payload.unwrap().plugins[0].args_override, None);
+
+        let (encrypted, _) = build_export(
+            &conn,
+            ExportPluginBundleRequest {
+                config_ids: vec!["with-args".into()],
+                include_values: true,
+                passphrase: Some("portable-passphrase".into()),
+                confirmation: Some(SECRET_CONFIRMATION.into()),
+            },
+            &secret,
+        )
+        .unwrap();
+        assert!(!serde_json::to_string(&encrypted)
+            .unwrap()
+            .contains("abc-secret-arg"));
+        let payload = decode_payload(&encrypted, Some("portable-passphrase")).unwrap();
+        assert_eq!(payload.plugins[0].args_override, Some(args));
     }
 }

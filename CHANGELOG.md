@@ -68,6 +68,12 @@ Release notes for 0.9.3 and earlier are available in the
   0600, masked values no longer panic on accented or emoji edges, the agent
   read guard also refuses Kronn's key, config, database, `.mcp.json` and MCP
   backups, and exports drop the failure webhook URL.
+- A plugin bundle can no longer change the command a trusted plugin runs
+  (KT-1010): custom arguments in a bundle replace the plugin's whole command
+  line, so an import now drops them, and says so, unless the importer gives
+  explicit consent (`accept_args_override`). Custom arguments, which may hold
+  tokens, now travel only in the encrypted bundle, and a manual import can no
+  longer claim a `mcp-` or `api-` id reserved for the built-in catalogue.
 
 ### Changed
 
