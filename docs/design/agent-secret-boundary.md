@@ -126,7 +126,12 @@ be revealed or exported (one may be the recovery passphrase).
    directory yields nothing usable. This is the only factor that stays sound
    on Linux and Windows natively. To verify before committing (spike): WebAuthn
    needs a domain as relying party, not an IP, so the UI must be served on
-   `http://localhost:<port>`; support in the Tauri webview on macOS is unknown.
+   `http://localhost:<port>`. In the macOS desktop app, WKWebView only handles
+   WebAuthn with the restricted `com.apple.developer.web-browser.public-key-credential`
+   entitlement or with Associated Domains served from a real domain, neither of
+   which fits a local app; the desktop build therefore uses factor 4 instead
+   (sources: Apple developer forums thread 774904, public Tauri/WKWebView
+   passkey PRs, found 2026-10-04, not reproduced here).
 2. **TOTP authenticator app** (RFC 6238), as a fallback. Kronn must keep the
    seed to verify codes; an agent that reads the seed computes every future
    code. The seed is therefore stored like the key (Keychain on macOS) and the
