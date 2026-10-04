@@ -1,6 +1,6 @@
-# Agent secret boundary (0.14.3 design note, v3)
+# Agent secret boundary (0.14.3 design note, v3.1)
 
-Status: **proposal v3, awaiting validation by Romu and Codex** (KT-1006,
+Status: **proposal v3.1, awaiting validation by Romu and Codex** (KT-1006,
 KT-1007, KT-990, KT-969). v1 `7e721fc6`, v2 `9261bfa7`.
 Sources: the 0.14.3 security audit (room `c3a5311c`, SEC-1 to SEC-15), Codex's
 reviews (room messages `060744b2`, `8b2bd770`, `e0163229`), an independent
@@ -244,15 +244,50 @@ DoD items, each with a test:
 
 ### 4.5 GitHub connection per project (D2)
 
-- A project shows its GitHub connection: source (`gh` login or stored token),
-  the **scope actually established** (repositories and permissions read from the
-  API), or "scope not verified" when the token type cannot be introspected.
-- Off by default for new projects. Turning it off stops giving the token to new
-  launches; agents already running keep what they received until they stop, and
-  the UI says so.
-- An agent can still reach GitHub through the user's local `gh` login (its
-  config is in the user's home). Natively this is not closable by Kronn and is
-  stated; under Docker the `gh` config is not mounted unless enabled.
+Goal (Romu, card `0143-secu-d2-gh-token`): turning GitHub on for a project is
+one click, and the UI says what it gives and what it risks.
+
+- **Where:** a "GitHub" row on the project card (Overview), and the same state
+  as a chip in the discussion header of that project.
+- **States, always shown with their meaning:**
+  - *Not connected*: agents of this project get no GitHub token. Button
+    "Connect GitHub".
+  - *Connected via your gh login* or *via a stored token*: the scope actually
+    established is listed (repositories, permissions, read from the GitHub API
+    when the token type allows it), or "scope not verified" with the reason.
+  - *Available but off*: a token exists on this machine, the project does not
+    use it.
+- **One click:** "Connect GitHub" reuses the existing `gh` login (no copy-paste)
+  after a confirmation dialog stating the risk in plain words: "Agents working on
+  this project will be able to act on GitHub with this token, within the scope
+  shown." A fine-grained token restricted to the project's repositories can be
+  pasted instead, and the dialog recommends it when the `gh` token is broad.
+- **Existing projects on upgrade:** projects whose remote is on GitHub keep
+  receiving the token (nothing breaks silently), and show a one-time notice with
+  the state and a "Turn off" button. New projects start *Not connected*.
+- **Turning it off** stops giving the token to new launches; agents already
+  running keep what they received until they stop, and the UI says so.
+- **Limits stated in the dialog and the matrix:** natively an agent can still
+  reach GitHub through the user's local `gh` login in their home directory;
+  Kronn cannot close that. Under Docker the `gh` configuration is not mounted
+  unless the project is connected.
+
+### 4.2b Verifiable human proofs (Codex review `17b0883b`)
+
+The backend never trusts a boolean from a client:
+- **OS user presence (desktop):** the backend issues the action challenge; the
+  Tauri native side asks LocalAuthentication / Windows Hello and signs the
+  challenge with a per-install key generated in the OS secure store at
+  enrolment (Secure Enclave on macOS when available). The backend holds the
+  public key and verifies the signature over `(challenge, action digest)`.
+- **WebAuthn:** the challenge embeds the action digest; the server checks
+  origin, RP ID, `userVerification` and the signature counter.
+- **TOTP:** the accepted time step is consumed atomically with the action
+  nonce; a code is never accepted twice, even for another action.
+- **Passkeys:** the guarantee is that Kronn never receives the private key
+  (synced passkeys exist; Kronn does not rely on device-bound keys).
+- An agent able to modify Kronn's code or authentication records defeats any
+  of these; that is the residual risk of the native lines of section 2.
 
 ## 5. Order and rollout
 
@@ -301,7 +336,8 @@ DoD items, each with a test:
   factors enrolled, bootstrap code at first enrolment, no privilege-preserving
   reset (4.2, 4.3). A WebAuthn spike on `localhost` and in the Tauri webview
   comes first.
-- **D2** (updated): GitHub connection per project, off by default, scope shown
-  or marked unverified (4.5).
+- **D2** (v3.1): one-click GitHub connection per project, risk dialog, scope
+  shown or marked unverified, existing GitHub projects kept connected with a
+  one-time notice, new projects not connected (4.5).
 - **D3:** KT-968 in 0.15.2 with the residual risk in the advisory (already
   tagged by the 0143-scope decision).
