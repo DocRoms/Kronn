@@ -139,6 +139,124 @@ mod tests {
         );
     }
 
+    struct RestoreAdapterToggles([(&'static str, Option<std::ffi::OsString>); 2]);
+    impl RestoreAdapterToggles {
+        fn capture() -> Self {
+            Self(
+                ["KRONN_ACP_ADAPTER_CLAUDE", "KRONN_ACP_ADAPTER_CODEX"]
+                    .map(|name| (name, std::env::var_os(name))),
+            )
+        }
+    }
+    impl Drop for RestoreAdapterToggles {
+        fn drop(&mut self) {
+            for (name, previous) in &self.0 {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial(acp_adapter_env_toggle)]
+    fn task_worker_route_policy_covers_every_launch_route() {
+        let _restore = RestoreAdapterToggles::capture();
+        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        // Native ACP: refused as a worker, an ordinary turn keeps its setting.
+        for agent in [
+            AgentType::GeminiCli,
+            AgentType::CopilotCli,
+            AgentType::Kiro,
+            AgentType::OpenCode,
+            AgentType::Vibe,
+        ] {
+            assert_eq!(
+                task_worker_route_policy(&agent, true, true),
+                Err(NATIVE_ACP_TASK_WORKER_REFUSAL),
+                "{agent:?}"
+            );
+            assert_eq!(task_worker_route_policy(&agent, true, false), Ok(true));
+        }
+        // Adapted ACP: the worker never inherits the global bypass.
+        for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+            assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
+            assert_eq!(task_worker_route_policy(&agent, true, false), Ok(true));
+        }
+        // HTTP model providers.
+        for agent in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
+            assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
+        }
+        // Direct CLI compatibility route.
+        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
+        assert_eq!(
+            crate::acp::resolve_acp_route(&AgentType::Codex),
+            crate::acp::AcpProductionRoute::DirectCliMigration
+        );
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Codex, true, true),
+            Ok(false)
+        );
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Codex, true, false),
+            Ok(true)
+        );
+    }
+
+    /// A worker launch that reaches the runner on a native ACP agent is refused
+    /// before any session starts, even with the discussion's full access on.
+    #[tokio::test]
+    async fn native_acp_task_worker_is_refused_before_any_session_starts() {
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let worker = TaskWorkerBridgeContext {
+            execution_id: "exec".into(),
+            discussion_id: "disc".into(),
+            agent_type: "GeminiCli".into(),
+            dispatch_job_id: "job".into(),
+            source_message_id: "msg".into(),
+        };
+        for agent in [
+            AgentType::GeminiCli,
+            AgentType::CopilotCli,
+            AgentType::Kiro,
+            AgentType::OpenCode,
+        ] {
+            let fixture = Arc::new(NativeRouteFixture {
+                created: std::sync::atomic::AtomicUsize::new(0),
+                resumed: std::sync::atomic::AtomicUsize::new(0),
+                prompts: Mutex::new(Vec::new()),
+            });
+            let result = start_agent_with_config(AgentStartConfig {
+                full_access: true,
+                task_worker_context: Some(&worker),
+                test_acp_transport: Some(fixture.clone()),
+                ..AgentStartConfig::new(
+                    &agent,
+                    project.path().to_str().unwrap(),
+                    "do the task",
+                    &tokens,
+                )
+            })
+            .await;
+            let error = result.err().expect("a native ACP worker must be refused");
+            assert!(
+                error.contains(NATIVE_ACP_TASK_WORKER_REFUSAL),
+                "{agent:?}: {error}"
+            );
+            assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(fixture.prompts.lock().unwrap().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
         let fixture = Arc::new(NativeRouteFixture {

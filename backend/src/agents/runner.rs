@@ -3397,6 +3397,31 @@ pub async fn start_agent(
     .await
 }
 
+/// Why a task worker cannot run on a native ACP agent: that route carries
+/// neither the delivery context nor the worker permission scope.
+pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
+    "this agent runs on its native ACP transport, which cannot carry the task-worker delivery context or permission scope; use Claude Code, Codex, an HTTP model or an exact joined CLI session";
+
+/// The worker policy shared by every launch route and by worker preparation.
+/// Returns the `full_access` the launch may use, or why a task worker cannot
+/// run on this agent's resolved transport. A worker never inherits the
+/// discussion's global bypass.
+pub fn task_worker_route_policy(
+    agent: &AgentType,
+    full_access: bool,
+    task_worker: bool,
+) -> Result<bool, &'static str> {
+    if !task_worker {
+        return Ok(full_access);
+    }
+    match crate::acp::resolve_acp_route(agent) {
+        crate::acp::AcpProductionRoute::NativeAcp => Err(NATIVE_ACP_TASK_WORKER_REFUSAL),
+        crate::acp::AcpProductionRoute::AdaptedAcp
+        | crate::acp::AcpProductionRoute::DirectCliMigration
+        | crate::acp::AcpProductionRoute::HttpModelProvider => Ok(false),
+    }
+}
+
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
     if config.task_worker_context.is_some() && !config.read_only_repos.is_empty() {
@@ -3419,6 +3444,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.reasoning_effort_override,
         config.max_tokens_override,
     )?;
+    let launch_full_access = task_worker_route_policy(
+        config.agent_type,
+        config.full_access,
+        config.task_worker_context.is_some(),
+    )
+    .map_err(|reason| format!("Task worker refused: {reason}"))?;
     // Read MCP context: use override if provided (general discussions),
     // otherwise read from project filesystem.
     let mcp_context = if let Some(override_ctx) = config.mcp_context_override {
@@ -3935,7 +3966,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(request, transport).await;
             }
-            return start_native_acp(request, config.full_access).await;
+            return start_native_acp(request, launch_full_access).await;
         }
         crate::acp::AcpProductionRoute::AdaptedAcp => {
             tracing::info!(
@@ -4016,9 +4047,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
             };
+            // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
                 request,
-                config.full_access && !task_worker && read_only_repos.is_none(),
+                launch_full_access && read_only_repos.is_none(),
                 launch,
             )
             .await;
@@ -4029,7 +4061,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_command_with_task_worker_policy(
             config.agent_type,
             config.prompt,
-            config.full_access,
+            launch_full_access,
             &extra_context,
             model_flag.as_deref(),
             reasoning_effort.as_deref(),

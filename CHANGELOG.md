@@ -90,6 +90,13 @@ Release notes for 0.9.3 and earlier are available in the
   single-quoted word. `{{run.id}}` and `{{time.now…}}` stay allowed. Saved
   workflows keep running unchanged until they are next edited.
 
+- A task delegated to Gemini, Copilot, Kiro or OpenCode as a launched worker
+  ran with the discussion's full access and without its delivery context, so
+  it could act beyond the worker scope and never deliver (KT-1012). These
+  native ACP agents are now refused as launched workers with a clear reason,
+  at preparation and at launch; one worker policy now decides every route, and
+  an exact joined CLI session of the same agent stays eligible.
+
 ### Changed
 
 - Plugins page: one export and one import flow, the plugin bundle, where each
