@@ -1,5 +1,5 @@
 import {
-  Puzzle, Plus, Check, X, Key, ExternalLink, Plug, Globe, Upload, Download,
+  Puzzle, Plus, Check, X, Key, ExternalLink, Plug, Globe, Download,
   Terminal, Eye,
 } from 'lucide-react';
 import { pluginKind } from '../../lib/pluginKind';
@@ -98,8 +98,7 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
     addMcpHostSync, setAddMcpHostSync,
     addVisibleFields, setAddVisibleFields,
     selectedDef, mcpOverview, projects,
-    importJsonText, setImportJsonText, importJsonError, setImportJsonError, importJsonLoading,
-    handlePasteImportJson, handleImportFromFile, handleImportCustomPlugin,
+    setPortabilityMode,
     handleAddMcpFromRegistry,
   } = state;
 
@@ -251,10 +250,10 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
                       key="api-import"
                       className="mcp-registry-card mcp-registry-card-custom"
                       onClick={() => {
-                        setAddMcpSelected('api-import');
-                        setAddMcpLabel('');
+                        resetAddMcp();
+                        setPortabilityMode('import');
                       }}
-                      data-testid="mcp-import-json-tile"
+                      data-testid="mcp-import-bundle-tile"
                     >
                       <div className="mcp-registry-card-top">
                         <div className="mcp-registry-card-icon">
@@ -373,68 +372,6 @@ export function AddPluginModal({ state }: { state: McpPageState }) {
               </>
             );
           })()}
-        </>
-      ) : addMcpSelected === 'api-import' ? (
-        <>
-          {/* 0.8.6 (#33) — Import-from-JSON form. Paste the export
-              payload from another Kronn install, validate light
-              (name + base_url required), then POST. Credentials are
-              NEVER imported even if the JSON contains values. */}
-          <div className="mb-5" data-testid="mcp-import-json-form">
-            <label className="mcp-field-label">{t('mcp.custom.importPasteLabel')} *</label>
-            <textarea
-              className="input mcp-input-mono"
-              rows={12}
-              value={importJsonText}
-              onChange={e => { setImportJsonText(e.target.value); if (importJsonError) setImportJsonError(null); }}
-              placeholder={t('mcp.custom.importPlaceholder')}
-              autoFocus
-              data-testid="mcp-import-json-textarea"
-            />
-          </div>
-          <div className="flex-row gap-3 mb-5">
-            <button
-              type="button"
-              className="mcp-btn-action"
-              onClick={handlePasteImportJson}
-              data-testid="mcp-import-paste-clipboard"
-            >
-              <Download size={12} /> {t('mcp.custom.importPasteFromClipboard')}
-            </button>
-            {/* 0.8.6 (#63) — Path B file upload. Hidden input
-                triggered by a styled button so the UX matches the
-                other action buttons. */}
-            <label className="mcp-btn-action" style={{ cursor: 'pointer', display: 'inline-flex' }}>
-              <Upload size={12} /> {t('mcp.custom.importFromFile')}
-              <input
-                type="file"
-                accept=".json,application/json"
-                style={{ display: 'none' }}
-                onChange={e => {
-                  const f = e.target.files?.[0];
-                  if (f) handleImportFromFile(f);
-                  // Reset so re-picking the same file fires onChange again.
-                  e.target.value = '';
-                }}
-                data-testid="mcp-import-file-input"
-              />
-            </label>
-            <button
-              type="button"
-              className="mcp-btn-action mcp-btn-action-primary"
-              onClick={handleImportCustomPlugin}
-              disabled={importJsonLoading || !importJsonText.trim()}
-              data-testid="mcp-import-submit"
-            >
-              <Plus size={12} /> {t('mcp.custom.importSubmit')}
-            </button>
-          </div>
-          {importJsonError && (
-            <div className="mcp-form-error" data-testid="mcp-import-error">
-              {importJsonError}
-            </div>
-          )}
-          <p className="mcp-form-hint">{t('mcp.custom.importSecretsHint')}</p>
         </>
       ) : addMcpSelected === 'api-custom' ? (
         <CustomApiForm state={state} />

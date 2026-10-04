@@ -16534,6 +16534,10 @@ async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates
     assert_eq!(dry["success"], true, "{dry:?}");
     assert_eq!(dry["data"]["dry_run"], true);
     assert_eq!(dry["data"]["configs_created"], 1, "{dry:?}");
+    assert_eq!(
+        dry["data"]["projects_affected"], 1,
+        "a preview names how many projects the scan would touch: {dry:?}"
+    );
     assert!(
         dry["data"]["projects_rewritten"].is_null(),
         "a dry run never touches the filesystem, so this cannot be established: {dry:?}"
@@ -16566,6 +16570,7 @@ async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates
     assert_eq!(status, StatusCode::OK, "real refresh failed: {real:?}");
     assert_eq!(real["data"]["dry_run"], false);
     assert_eq!(real["data"]["configs_created"], 1, "{real:?}");
+    assert_eq!(real["data"]["projects_affected"], 1, "{real:?}");
     assert!(
         real["data"]["projects_rewritten"].is_number(),
         "a real run always establishes how many projects were rewritten: {real:?}"

@@ -4127,6 +4127,11 @@ configs_merged: number,
  */
 configs_deleted: number,
 /**
+ * Projects that gained a configuration in this scan (created or merged),
+ * so a preview can name the blast radius a dry run cannot measure in files.
+ */
+projects_affected: number,
+/**
  * Projects whose `.mcp.json` (or equivalent host file) was actually
  * rewritten. `None` for a `dry_run` — it never touches the filesystem,
  * so this count cannot be established without side effects.

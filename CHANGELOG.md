@@ -32,6 +32,10 @@ Release notes for 0.9.3 and earlier are available in the
   the dependency review and the full CI gate (label-gated jobs included) run
   on it, and the release waits for that gate (KT-1023).
 
+- Plugins page: the toolbar button that rescans the projects' `.mcp.json` files
+  is labelled as such instead of "Sync", the preview names how many projects
+  are affected, and the report after applying lists created, merged, rewritten
+  and removed counts (KT-833).
 - Turning on full access for GitHub Copilot CLI failed with "Agent does not
   support access flags", and Vibe and Kiro accepted a flag they ignore. The
   backend now accepts exactly the five agents that honor it (KT-975).
@@ -50,6 +54,10 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- Plugins page: one export and one import flow, the plugin bundle, where each
+  plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
+  export and the paste-a-spec import are gone, and a plugin is deleted from
+  its detail sheet only, behind its two-step confirmation (KT-833).
 - The release notes are now generated from the installers a release really
   carries (KT-1004): one direct download link per attached file, the version's
   CHANGELOG section above the install table, and the AppImage advice only when

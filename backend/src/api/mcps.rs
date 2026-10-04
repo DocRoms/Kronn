@@ -1535,6 +1535,8 @@ pub async fn refresh(
             // from a merge, which never removes a row.
             let mut configs_created = 0usize;
             let mut configs_merged = 0usize;
+            let mut projects_affected: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
 
             for project in &projects {
                 let parsed = match mcp_scanner::read_mcp_json(&project.path) {
@@ -1628,6 +1630,7 @@ pub async fn refresh(
                         if !existing.project_ids.contains(&project.id) {
                             db::mcps::link_config_project(&tx, &existing.id, &project.id)?;
                             configs_merged += 1;
+                            projects_affected.insert(project.id.clone());
                         }
                     } else {
                         // Create new config
@@ -1655,6 +1658,7 @@ pub async fn refresh(
                         };
                         db::mcps::insert_config(&tx, &config)?;
                         configs_created += 1;
+                        projects_affected.insert(project.id.clone());
                     }
                 }
             }
@@ -1723,6 +1727,7 @@ pub async fn refresh(
                 configs_created,
                 configs_merged,
                 configs_deleted,
+                projects_affected: projects_affected.len(),
                 projects_rewritten,
                 overview,
             })

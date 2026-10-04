@@ -111,7 +111,7 @@ export function PluginToolbarPanel({ state }: { state: McpPageState }) {
         <div className="mcp-collection-toolbar-actions">
           {totalConfigs > 0 && <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('export')} aria-label={t('mcp.portability.export')} title={t('mcp.portability.exportTitle')}><Download size={14} /></button>}
           <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('import')} aria-label={t('mcp.portability.import')} title={t('mcp.portability.importTitle')}><Upload size={14} /></button>
-          <button type="button" className="collection-shell-icon" disabled={syncing} onClick={() => { setSelectedConfigId(null); void handlePreviewRescan(); }} aria-label={t('mcp.detect')} title={t('mcp.detect')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
+          <button type="button" className="collection-shell-icon" disabled={syncing} onClick={() => { setSelectedConfigId(null); void handlePreviewRescan(); }} aria-label={t('mcp.rescan')} title={t('mcp.rescanTitle')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
         </div>
       </div>
     </>
