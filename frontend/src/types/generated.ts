@@ -296,6 +296,15 @@ runtime_warning?: string | null,
 shadowed_installs?: Array<ShadowedInstall>, };
 
 /**
+ * One agent's access as a launch will really apply it.
+ */
+export type AgentEffectiveAccess = { agent: AgentType, full_access: boolean,
+/**
+ * Why it differs from the stored setting, when it does.
+ */
+reason?: string, };
+
+/**
  * Where Kronn writes a project's agent files (KT-971).
  */
 export type AgentFilesPolicy = "repo" | "outside";

@@ -36,8 +36,8 @@ import type { AgentDetection, DetectedRepo, SetupStatus, Project } from '../../t
 
 const makeAgent = (overrides: Partial<AgentDetection> = {}): AgentDetection => ({
   name: 'Claude Code',
-  // Kiro has no full-access switch, so the default fixture skips the access step.
-  agent_type: 'Kiro',
+  // Ollama has no full-access switch, so the default fixture skips the access step.
+  agent_type: 'Ollama',
   installed: true,
   enabled: true,
   path: '/usr/bin/claude',
@@ -542,12 +542,12 @@ describe('SetupWizard — access step (KT-975)', () => {
   it('offers full access per supported agent, off by default, and skips agents it does not apply to', async () => {
     await toAccessStep([
       makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode' }),
-      makeAgent({ name: 'Kiro', agent_type: 'Kiro' }),
+      makeAgent({ name: 'Ollama', agent_type: 'Ollama' }),
     ]);
     const sw = document.body.querySelector('[data-testid="setup-full-access-ClaudeCode"]');
     expect(sw?.getAttribute('role')).toBe('switch');
     expect(sw?.getAttribute('aria-checked')).toBe('false');
-    expect(document.body.querySelector('[data-testid="setup-full-access-Kiro"]')).toBeNull();
+    expect(document.body.querySelector('[data-testid="setup-full-access-Ollama"]')).toBeNull();
     expect(configApi.setAgentAccess).not.toHaveBeenCalled();
   });
 

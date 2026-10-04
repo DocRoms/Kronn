@@ -369,7 +369,7 @@ fn mcp_transport_sse_roundtrip() {
 // ─── AgentsConfig::set_full_access ─────────────────────────────────────
 
 #[test]
-fn set_full_access_covers_every_agent_the_ui_offers_and_refuses_inert_ones() {
+fn set_full_access_covers_every_cli_agent_and_refuses_the_rest() {
     let off = || AgentConfig {
         full_access: false,
         ..Default::default()
@@ -393,6 +393,8 @@ fn set_full_access_covers_every_agent_the_ui_offers_and_refuses_inert_ones() {
         AgentType::OpenCode,
         AgentType::GeminiCli,
         AgentType::CopilotCli,
+        AgentType::Kiro,
+        AgentType::Vibe,
     ] {
         assert!(!config.full_access_for(&agent), "{agent:?} defaults to off");
         config
@@ -402,15 +404,65 @@ fn set_full_access_covers_every_agent_the_ui_offers_and_refuses_inert_ones() {
         config.set_full_access(&agent, false).unwrap();
         assert!(!config.full_access_for(&agent));
     }
-    for agent in [
-        AgentType::Vibe,
-        AgentType::Kiro,
-        AgentType::Ollama,
-        AgentType::Custom,
-    ] {
+    for agent in [AgentType::Ollama, AgentType::Custom] {
         assert!(config.set_full_access(&agent, true).is_err(), "{agent:?}");
         assert!(!config.full_access_for(&agent), "{agent:?} stays off");
     }
+}
+
+#[test]
+fn effective_full_access_forces_codex_in_a_container_only() {
+    let off = || AgentConfig {
+        full_access: false,
+        ..Default::default()
+    };
+    let mut config = AgentsConfig {
+        claude_code: off(),
+        codex: off(),
+        open_code: off(),
+        gemini_cli: off(),
+        kiro: off(),
+        vibe: off(),
+        copilot_cli: off(),
+        ollama: off(),
+        lite_llm: off(),
+        nvidia: off(),
+        model_tiers: Default::default(),
+    };
+    let agents = [
+        AgentType::ClaudeCode,
+        AgentType::GeminiCli,
+        AgentType::CopilotCli,
+        AgentType::OpenCode,
+        AgentType::Kiro,
+        AgentType::Vibe,
+    ];
+    for agent in &agents {
+        assert_eq!(config.effective_full_access(agent, false), (false, None));
+        assert_eq!(
+            config.effective_full_access(agent, true),
+            (false, None),
+            "{agent:?}"
+        );
+    }
+    assert_eq!(
+        config.effective_full_access(&AgentType::Codex, false),
+        (false, None)
+    );
+    assert_eq!(
+        config.effective_full_access(&AgentType::Codex, true),
+        (true, Some("forced_in_container"))
+    );
+    config.codex.full_access = true;
+    assert_eq!(
+        config.effective_full_access(&AgentType::Codex, true),
+        (true, None)
+    );
+    config.claude_code.full_access = true;
+    assert_eq!(
+        config.effective_full_access(&AgentType::ClaudeCode, true),
+        (true, None)
+    );
 }
 
 // ─── AgentsConfig::full_access_for ─────────────────────────────────────

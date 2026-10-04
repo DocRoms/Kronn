@@ -87,6 +87,7 @@ import type {
   SetAgentAccessRequest,
   SetAgentMentionColorRequest,
   AgentsConfig,
+  AgentEffectiveAccess,
   McpContextEntry,
   DiscoveredHostMcp,
   AdoptHostMcpRequest,
@@ -842,6 +843,7 @@ export const config = {
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
+  getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>

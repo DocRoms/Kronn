@@ -13,6 +13,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Under Docker, Codex always runs without its own sandbox, which cannot start
+  inside the container; the full-access switch now shows that state as locked
+  and always on instead of "Restricted" (KT-975).
 - Full access is now a visible, accessible switch on each agent card, with a
   risk dialog before it is enabled, and the setup wizard has an Access step
   that offers it agent by agent, off by default (KT-975).
@@ -80,8 +83,8 @@ Release notes for 0.9.3 and earlier are available in the
   are affected, and the report after applying lists created, merged, rewritten
   and removed counts (KT-833).
 - Turning on full access for GitHub Copilot CLI failed with "Agent does not
-  support access flags", and Vibe and Kiro accepted a flag they ignore. The
-  backend now accepts exactly the five agents that honor it (KT-975).
+  support access flags". The backend now accepts every CLI agent the interface
+  offers, and each one describes what it really widens (KT-975).
 - A guarded action (save, create, toggle) now always runs with the current
   props and translations instead of the ones from the first render, and a
   browser with disabled or full storage no longer crashes the Discussions,

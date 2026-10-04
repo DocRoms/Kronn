@@ -16468,6 +16468,34 @@ async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
 }
 
 #[tokio::test]
+async fn agent_access_effective_lists_every_cli_agent_with_its_real_state() {
+    let app = build_router_with_auth(test_state(), false);
+    let (status, body) = get_json(app, "/api/config/agent-access/effective").await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let rows = body["data"].as_array().expect("rows");
+    let agents: Vec<&str> = rows.iter().filter_map(|r| r["agent"].as_str()).collect();
+    for expected in [
+        "ClaudeCode",
+        "Codex",
+        "GeminiCli",
+        "CopilotCli",
+        "OpenCode",
+        "Kiro",
+        "Vibe",
+    ] {
+        assert!(agents.contains(&expected), "{expected} missing: {body:?}");
+    }
+    let codex = rows.iter().find(|r| r["agent"] == "Codex").unwrap();
+    // Outside a container nothing overrides the stored (default off) setting.
+    if !kronn::core::env::is_docker() {
+        assert_eq!(codex["full_access"], false);
+        assert!(codex["reason"].is_null());
+    } else {
+        assert_eq!(codex["reason"], "forced_in_container");
+    }
+}
+
+#[tokio::test]
 async fn mcp_refresh_dry_run_previews_without_persisting_then_a_real_run_creates_it() {
     // KT-829 — `?dry_run=true` must report exactly what a real scan would do
     // (via the returned counts + preview overview) while leaving the

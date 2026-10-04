@@ -294,6 +294,7 @@ export function AgentsSection({
   const [updateModalFor, setUpdateModalFor] = useState<AgentDetection | null>(null);
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
+  const { data: effectiveAccess } = useApi(() => configApi.getAgentAccessEffective(), [agentAccess]);
   const { data: providerQuotaStates, refetch: refetchProviderQuotaStates } = useApi(() => agentsApi.quotaStates(), []);
   const [rearmingProvider, setRearmingProvider] = useState<AgentType | null>(null);
 
@@ -1023,6 +1024,9 @@ export function AgentsSection({
                 <AgentFullAccessSwitch
                   agentName={agent.name}
                   checked={isAgentFullAccess}
+                  locked={!isAgentFullAccess && (effectiveAccess ?? []).some(
+                    row => row.agent === agent.agent_type && row.full_access && row.reason === 'forced_in_container',
+                  )}
                   testId={`agent-full-access-${agent.agent_type}`}
                   onChange={async next => {
                     try {

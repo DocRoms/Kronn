@@ -177,6 +177,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getScanIgnore: resolve([]),
       getScanDepth: resolve(2),
       getAgentAccess: resolve({ agents: {} }),
+      getAgentAccessEffective: resolve([]),
       getModelTiers: resolve({ tiers: {} }),
       getGlobalContext: resolve(''),
       saveGlobalContext: resolve(undefined),

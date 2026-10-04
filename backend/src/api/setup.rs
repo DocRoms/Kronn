@@ -674,6 +674,34 @@ pub async fn get_agent_access(State(state): State<AppState>) -> Json<ApiResponse
     Json(ApiResponse::ok(config.agents.clone()))
 }
 
+/// GET /api/config/agent-access/effective
+pub async fn get_agent_access_effective(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<AgentEffectiveAccess>>> {
+    let config = state.config.read().await;
+    let in_container = crate::core::env::is_docker();
+    let rows = [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::GeminiCli,
+        AgentType::CopilotCli,
+        AgentType::OpenCode,
+        AgentType::Kiro,
+        AgentType::Vibe,
+    ]
+    .into_iter()
+    .map(|agent| {
+        let (full_access, reason) = config.agents.effective_full_access(&agent, in_container);
+        AgentEffectiveAccess {
+            agent,
+            full_access,
+            reason: reason.map(str::to_string),
+        }
+    })
+    .collect();
+    Json(ApiResponse::ok(rows))
+}
+
 /// POST /api/config/agent-access
 /// Toggle full_access for an agent
 pub async fn set_agent_access(
