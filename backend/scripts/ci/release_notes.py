@@ -15,15 +15,16 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/DocRoms/Kronn"
 
-INSTALLER_SUFFIXES = (".exe", ".msi", ".dmg", ".deb", ".appimage")
+INSTALLER_SUFFIXES = (".exe", ".dmg", ".deb")
 
 # (label, min version, file-name endings in display order); mirrors
-# RELEASE_PLATFORMS in backend/sidecars/docs/verify_artifacts.py.
+# RELEASE_PLATFORMS in backend/sidecars/docs/verify_artifacts.py (Tauri targets
+# deb, nsis, dmg).
 PLATFORMS = (
-    ("Windows", "Windows 10+", (".exe", ".msi")),
+    ("Windows", "Windows 10+", (".exe",)),
     ("macOS Apple Silicon", "macOS 11+", ("_aarch64.dmg",)),
     ("macOS Intel", "macOS 11+", ("_x64.dmg",)),
-    ("Linux", "Ubuntu 22.04+ / Debian 12+ / Fedora 38+", (".deb", ".appimage")),
+    ("Linux", "Ubuntu 22.04+ / Debian 12+ / Fedora 38+", (".deb",)),
 )
 
 WEBKIT_NOTE = """### Linux — webkit2gtk-4.1 requirement
@@ -35,7 +36,7 @@ default on desktop installs). On minimal/server installs you may need:
 sudo add-apt-repository universe
 sudo apt update
 sudo apt install -y libwebkit2gtk-4.1-0
-sudo dpkg -i kronn_*.deb
+sudo dpkg -i Kronn_*_amd64.deb
 sudo apt-get -f install   # resolves any remaining deps
 ```
 On older distros (Ubuntu 20.04, RHEL 8) the `.deb` will not install"""
@@ -83,11 +84,7 @@ def build_body(tag: str, changelog: str, assets: list[str]) -> str:
     if missing:
         raise SystemExit("No installer attached for: " + ", ".join(missing))
 
-    linux = WEBKIT_NOTE
-    if any(n.lower().endswith(".appimage") for n in names):
-        linux += " —\nuse the AppImage instead, or upgrade."
-    else:
-        linux += ", so upgrade."
+    linux = WEBKIT_NOTE + ", so upgrade."
     return "\n".join(
         [
             changelog_section(changelog, version),

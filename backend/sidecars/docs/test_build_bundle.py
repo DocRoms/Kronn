@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -147,6 +148,22 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn("verify-installers:", workflow)
         self.assertIn("needs: [build-desktop, verify-installers]", workflow)
 
+    def test_version_gate_runs_first_and_checks_the_tag(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[3] / ".github" / "workflows" / "desktop-build.yml"
+        ).read_text(encoding="utf-8")
+        gate = workflow.index("  release-checks:")
+        self.assertLess(gate, workflow.index("  build-desktop:"))
+        self.assertIn("scripts/check-version-sync.sh", workflow)
+        self.assertIn("needs: release-checks", workflow)
+
+    def test_release_job_checks_out_the_requested_tag(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[3] / ".github" / "workflows" / "desktop-build.yml"
+        ).read_text(encoding="utf-8")
+        release_job = workflow[workflow.index("\n  release:\n"):]
+        self.assertIn("ref: ${{ inputs.release_tag || github.ref }}", release_job)
+
     def test_checkout_network_retry_is_bounded(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[3]
@@ -204,7 +221,7 @@ class DesktopArtifactTests(unittest.TestCase):
                 "kronn-windows": "Kronn.exe",
                 "kronn-macOS-arm64": "Kronn-arm64.dmg",
                 "kronn-macOS-x64": "Kronn-x64.dmg",
-                "kronn-linux": "Kronn.AppImage",
+                "kronn-linux": "Kronn.deb",
             }
             for artifact, filename in fixtures.items():
                 target = root / artifact / filename
@@ -232,15 +249,45 @@ class DesktopArtifactTests(unittest.TestCase):
         self.assertIn("kronn-linux", message)
 
 
+    def test_installers_tauri_does_not_build_do_not_satisfy_a_platform(self) -> None:
+        # tauri.conf.json bundles deb, nsis, dmg: an .msi or .AppImage alone
+        # must not hide a missing .exe or .deb.
+        for artifact, stray in (("kronn-windows", "Kronn.msi"), ("kronn-linux", "Kronn.AppImage")):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name, filename in (
+                    ("kronn-windows", "Kronn.exe"),
+                    ("kronn-macOS-arm64", "a.dmg"),
+                    ("kronn-macOS-x64", "b.dmg"),
+                    ("kronn-linux", "Kronn.deb"),
+                ):
+                    if name == artifact:
+                        filename = stray
+                    target = root / name / filename
+                    target.parent.mkdir(parents=True)
+                    target.write_bytes(b"installer")
+                with self.assertRaises(SystemExit) as raised:
+                    verify_artifacts.verify(root)
+            self.assertIn(artifact, str(raised.exception))
+
+    def test_expected_installers_are_the_configured_tauri_targets(self) -> None:
+        conf = json.loads(
+            (Path(__file__).resolve().parents[3] / "desktop" / "src-tauri" / "tauri.conf.json")
+            .read_text(encoding="utf-8")
+        )
+        suffix = {"deb": ".deb", "nsis": ".exe", "dmg": ".dmg"}
+        configured = {suffix[t] for t in conf["bundle"]["targets"]}
+        expected = {ext for exts in verify_artifacts.EXPECTED_ARTIFACTS.values() for ext in exts}
+        self.assertEqual(expected, configured)
+
+
 class ReleaseAssetTests(unittest.TestCase):
     # KT-970 — 0.12.0 to 0.14.1 were published with no installer at all.
     RELEASE = [
         "Kronn_0.14.2_aarch64.dmg",
         "Kronn_0.14.2_x64.dmg",
         "Kronn_0.14.2_x64-setup.exe",
-        "Kronn_0.14.2_x64_en-US.msi",
         "Kronn_0.14.2_amd64.deb",
-        "Kronn_0.14.2_amd64.AppImage",
     ]
 
     def test_a_complete_release_passes(self) -> None:
@@ -255,6 +302,12 @@ class ReleaseAssetTests(unittest.TestCase):
     def test_one_mac_build_does_not_stand_for_the_other(self) -> None:
         without_intel = [name for name in self.RELEASE if not name.endswith("_x64.dmg")]
         self.assertEqual(verify_artifacts.missing_release_platforms(without_intel), ["macOS Intel"])
+
+    def test_msi_and_appimage_do_not_stand_for_a_platform(self) -> None:
+        stray = [
+            name for name in self.RELEASE if not name.endswith((".exe", ".deb"))
+        ] + ["Kronn_0.14.2_x64_en-US.msi", "Kronn_0.14.2_amd64.AppImage"]
+        self.assertEqual(verify_artifacts.missing_release_platforms(stray), ["Windows", "Linux"])
 
     def test_the_release_job_runs_on_this_repository_s_tags(self) -> None:
         # Tags are `0.14.1`, never `v0.14.1`: a `v*`-only trigger never built

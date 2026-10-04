@@ -14,21 +14,23 @@ import sys
 from pathlib import Path
 
 
+# Exactly the bundle targets of desktop/src-tauri/tauri.conf.json (deb, nsis,
+# dmg): an installer Tauri is not configured to build must not satisfy a check.
 EXPECTED_ARTIFACTS = {
-    "kronn-windows": {".exe", ".msi"},
+    "kronn-windows": {".exe"},
     "kronn-macOS-arm64": {".dmg"},
     "kronn-macOS-x64": {".dmg"},
-    "kronn-linux": {".deb", ".appimage"},
+    "kronn-linux": {".deb"},
 }
 
 
 # What each platform needs among a release's assets, by Tauri's file names
 # (`Kronn_0.14.2_aarch64.dmg`, `Kronn_0.14.2_x64-setup.exe`, ...).
 RELEASE_PLATFORMS = {
-    "Windows": (".exe", ".msi"),
+    "Windows": (".exe",),
     "macOS Apple Silicon": ("_aarch64.dmg",),
     "macOS Intel": ("_x64.dmg",),
-    "Linux": (".appimage", ".deb"),
+    "Linux": (".deb",),
 }
 
 

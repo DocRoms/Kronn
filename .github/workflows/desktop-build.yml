@@ -16,12 +16,33 @@ permissions:
   contents: write
 
 jobs:
+  # Installers are named after the committed version, so a tag that differs
+  # from VERSION, or a tree with stale version markers, must fail before any
+  # runner builds.
+  release-checks:
+    name: Version and tag consistency
+    runs-on: ubuntu-latest
+    env:
+      # Tag push: the pushed tag. Dispatch: the requested release, or empty
+      # for a build-only dry run on the selected branch.
+      RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Check version consistency and the tag
+        run: scripts/check-version-sync.sh "$RELEASE_TAG"
+
   dependency-review:
     name: Pre-release dependency review
+    needs: release-checks
     uses: ./.github/workflows/dependency-review.yml
 
   build-desktop:
-    needs: dependency-review
+    needs: [release-checks, dependency-review]
     strategy:
       fail-fast: false
       matrix:
@@ -298,9 +319,7 @@ jobs:
           name: kronn-windows
           path: |
             desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
             target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
           if-no-files-found: error
 
       - name: Upload macOS artifacts
@@ -326,9 +345,7 @@ jobs:
           name: kronn-linux
           path: |
             desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
-            desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
             target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
   # ─── Prove that every matrix leg produced an installer ─────────────
@@ -366,6 +383,9 @@ jobs:
         uses: actions/checkout@v7
         timeout-minutes: 5
         with:
+          # On workflow_dispatch the default checkout is the selected branch;
+          # the CHANGELOG and checks must come from the release being attached.
+          ref: ${{ inputs.release_tag || github.ref }}
           sparse-checkout: |
             backend/sidecars/docs
             backend/scripts/ci
@@ -398,17 +418,15 @@ jobs:
           body_path: release-body.md
           files: |
             artifacts/**/*.exe
-            artifacts/**/*.msi
             artifacts/**/*.dmg
             artifacts/**/*.deb
-            artifacts/**/*.AppImage
 
       # A release published by hand, before this workflow fixed its trigger,
       # gets its installers attached without touching its notes or status.
       - name: Attach installers to an existing release
         if: inputs.release_tag != ''
         run: |
-          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0 \
+          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' \) -print0 \
             | xargs -0 gh release upload "$RELEASE_TAG" --clobber
 
       # Blocking: the release must carry an installer for every platform.

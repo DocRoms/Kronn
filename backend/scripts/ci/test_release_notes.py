@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
 import pathlib
 import re
@@ -17,13 +18,12 @@ _SPEC = importlib.util.spec_from_file_location(
 release_notes = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(release_notes)
 
+# Tauri targets deb, nsis, dmg (desktop/src-tauri/tauri.conf.json).
 FULL = [
     "Kronn_1.2.3_x64-setup.exe",
-    "Kronn_1.2.3_x64_en-US.msi",
     "Kronn_1.2.3_aarch64.dmg",
     "Kronn_1.2.3_x64.dmg",
     "Kronn_1.2.3_amd64.deb",
-    "Kronn_1.2.3_amd64.AppImage",
 ]
 CHANGELOG = """# Changelog
 
@@ -54,24 +54,31 @@ class ReleaseNotesTest(unittest.TestCase):
             self.assertIn(f"({release_notes.REPO_URL}/releases/download/1.2.3/{name})", found)
 
     def test_nothing_unattached_is_linked(self):
-        attached = [n for n in FULL if not n.endswith(".msi")]
-        body = release_notes.build_body("1.2.3", CHANGELOG, attached)
-        self.assertEqual(len(links(body)), len(attached))
+        extra = FULL + ["Kronn_1.2.3_x64_en-US.msi", "Kronn_1.2.3_amd64.AppImage"]
+        body = release_notes.build_body("1.2.3", CHANGELOG, extra)
+        self.assertEqual(len(links(body)), len(FULL))
         self.assertNotIn(".msi", body)
+        self.assertNotIn("AppImage", body)
 
-    def test_appimage_advice_only_when_attached(self):
-        without = release_notes.build_body(
-            "1.2.3", CHANGELOG, [n for n in FULL if not n.endswith(".AppImage")]
-        )
-        self.assertNotIn("AppImage", without)
-        self.assertIn("AppImage", release_notes.build_body("1.2.3", CHANGELOG, FULL))
+    def test_dpkg_command_matches_the_real_file_name(self):
+        body = release_notes.build_body("1.2.3", CHANGELOG, FULL)
+        pattern = re.search(r"dpkg -i (\S+)", body).group(1)
+        self.assertTrue(fnmatch.fnmatchcase("Kronn_1.2.3_amd64.deb", pattern), pattern)
+
+    def test_msi_or_appimage_alone_do_not_stand_for_a_platform(self):
+        for label, name in (("windows", "Kronn_1.2.3_x64-setup.exe"), ("linux", "Kronn_1.2.3_amd64.deb")):
+            attached = [n for n in FULL if n != name] + [
+                "Kronn_1.2.3_x64_en-US.msi", "Kronn_1.2.3_amd64.AppImage"
+            ]
+            with self.assertRaises(SystemExit, msg=label):
+                release_notes.build_body("1.2.3", CHANGELOG, attached)
 
     def test_missing_platform_fails(self):
         platforms = {
-            "windows": (".exe", ".msi"),
+            "windows": (".exe",),
             "arm": ("_aarch64.dmg",),
             "intel": ("_x64.dmg",),
-            "linux": (".deb", ".AppImage"),
+            "linux": (".deb",),
         }
         for label, suffixes in platforms.items():
             attached = [n for n in FULL if not n.endswith(suffixes)]
@@ -97,7 +104,7 @@ class ReleaseNotesTest(unittest.TestCase):
             (root / "CHANGELOG.md").write_text(CHANGELOG, encoding="utf-8")
             assets = root / "artifacts" / "kronn-linux"
             assets.mkdir(parents=True)
-            for name in FULL[:-1]:
+            for name in FULL:
                 (assets / name).write_text("x")
             cmd = [sys.executable, str(script), "--tag", "1.2.3",
                    "--changelog", str(root / "CHANGELOG.md"),
