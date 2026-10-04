@@ -57,6 +57,8 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
     (a.installed || a.runtime_available) && a.enabled && supportsFullAccess(a.agent_type));
   // Missing entries mean "off": the backend default, and the cautious one.
   const [fullAccess, setFullAccess] = useState<Record<string, boolean>>({});
+  // Agents whose launch forces full access whatever the setting (Codex in Docker).
+  const [forcedAccess, setForcedAccess] = useState<Set<string>>(() => new Set());
 
   const refreshAgents = useCallback(async () => {
     setDetecting(true);
@@ -111,6 +113,14 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
       })));
     } catch {
       // Unknown state reads as off, which is also what the backend holds by default.
+    }
+    try {
+      const effective = await configApi.getAgentAccessEffective();
+      setForcedAccess(new Set(effective
+        .filter(row => row.full_access && row.reason === 'forced_in_container')
+        .map(row => row.agent)));
+    } catch {
+      // Without it the switch simply shows the stored setting.
     }
   };
 
@@ -417,6 +427,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                     <AgentFullAccessSwitch
                       agentName={agent.name}
                       checked={fullAccess[agent.agent_type] ?? false}
+                      locked={forcedAccess.has(agent.agent_type) && !(fullAccess[agent.agent_type] ?? false)}
                       testId={`setup-full-access-${agent.agent_type}`}
                       onChange={async next => {
                         try {

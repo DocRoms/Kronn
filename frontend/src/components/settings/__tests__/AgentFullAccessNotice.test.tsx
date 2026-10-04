@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../../lib/I18nContext';
 import { AgentFullAccessNotice, FULL_ACCESS_NOTICE_KEY } from '../AgentFullAccessNotice';
+import { isSyncedKey } from '../../../lib/uiPreferences';
 import type { AgentEffectiveAccess } from '../../../types/generated';
 
 const rows: AgentEffectiveAccess[] = [
@@ -62,5 +63,9 @@ describe('AgentFullAccessNotice', () => {
     fireEvent.click(screen.getByRole('button', { name: /Revoir les interrupteurs/ }));
     expect(scroll).toHaveBeenCalled();
     target.remove();
+  });
+
+  it('is a server-synced preference, so the dismissal survives a new origin', () => {
+    expect(isSyncedKey(FULL_ACCESS_NOTICE_KEY, false)).toBe(true);
   });
 });
