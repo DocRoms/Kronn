@@ -39,6 +39,7 @@ const AGENT_CONCURRENCY: Partial<Record<AgentType, { key: AgentConfigKey; fallba
 import type { ToastFn } from '../../hooks/useToast';
 import { FULL_ACCESS_AGENTS, isFullAccess } from '../../lib/agentFullAccess';
 import { AgentFullAccessSwitch } from './AgentFullAccessSwitch';
+import { AgentFullAccessNotice } from './AgentFullAccessNotice';
 import { isUpdateAvailable } from '../../lib/version';
 import {
   AGENT_LABELS,
@@ -1605,6 +1606,8 @@ export function AgentsSection({
           <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
           {usagePanel}
         </div>
+
+        <AgentFullAccessNotice rows={effectiveAccess ?? []} />
 
         <div className="set-agent-list-head">
           <div>

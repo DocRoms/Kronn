@@ -13,6 +13,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The Agents page shows a one-time notice listing the agents that really run
+  with full access, whether by setting or forced in Docker, with the risks and a
+  link to the switches (KT-975).
 - Under Docker, Codex always runs without its own sandbox, which cannot start
   inside the container; the full-access switch now shows that state as locked
   and always on instead of "Restricted" (KT-975).

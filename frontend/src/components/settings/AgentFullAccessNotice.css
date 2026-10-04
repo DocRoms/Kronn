@@ -1,0 +1,18 @@
+.fa-notice {
+  display: flex;
+  gap: var(--kr-sp-6);
+  margin-bottom: var(--kr-sp-8);
+  padding: var(--kr-sp-7);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-lg);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  line-height: 1.5;
+}
+
+.fa-notice > svg { flex-shrink: 0; color: var(--kr-warning); }
+.fa-notice-body { display: grid; gap: var(--kr-sp-3); }
+.fa-notice-body p, .fa-notice-body ul { margin: 0; }
+.fa-notice-body ul { padding-left: var(--kr-sp-8); }
+.fa-notice-actions { display: flex; gap: var(--kr-sp-4); }
