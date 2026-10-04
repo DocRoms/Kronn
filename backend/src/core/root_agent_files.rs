@@ -341,6 +341,17 @@ fn render_block() -> String {
     )
 }
 
+/// True when `content` holds anything besides Kronn's managed block: the file
+/// carries human-written instructions Kronn must not rewrite.
+pub(crate) fn has_content_outside_managed_block(content: &str) -> bool {
+    match find_marker_zone(content) {
+        Some((start, end)) => {
+            !content[..start].trim().is_empty() || !content[end..].trim().is_empty()
+        }
+        None => !content.trim().is_empty(),
+    }
+}
+
 /// Find the marker zone `[start_idx, end_idx)` covering the full
 /// block including its trailing newlines, so a re-render replaces
 /// the EXACT range we wrote last time. Returns `None` when at least

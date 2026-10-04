@@ -168,6 +168,14 @@ pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> 
     }
 
     inspect_docs(project, &docs, &adapters, &budgets, &mut diagnostics);
+    for diagnostic in diagnostics.iter_mut().filter(|d| d.blocking) {
+        if !kronn_owns(project, &diagnostic.path) {
+            diagnostic.blocking = false;
+            diagnostic
+                .message
+                .push_str(" (human-owned document: reported, not blocking)");
+        }
+    }
     diagnostics.sort_by(|a, b| (&a.path, &a.code, &a.message).cmp(&(&b.path, &b.code, &b.message)));
     Ok(DocumentaryOptimizationReport {
         phase: "documentary_optimization".into(),
@@ -197,6 +205,25 @@ pub fn analyze_and_write(project: &Path) -> Result<DocumentaryOptimizationReport
     crate::core::mcp_scanner::atomic_write(&target, &format!("{body}\n"))
         .map_err(|e| format!("write {REPORT_FILE}: {e}"))?;
     Ok(report)
+}
+
+/// Legacy documents moved aside by the template install keep their author.
+const LEGACY_DOCS_PREFIX: &str = "docs/legacy/";
+
+/// Whether Kronn wrote `rel` and may block a run on it, or ask an agent to
+/// repair it. Moved legacy docs and root instruction files with human content
+/// outside Kronn's managed block belong to their authors: an audit reports
+/// their dead links but never fails on them.
+pub fn kronn_owns(project: &Path, rel: &str) -> bool {
+    if rel.starts_with(LEGACY_DOCS_PREFIX) {
+        return false;
+    }
+    if rel.starts_with("docs/") {
+        return true;
+    }
+    read(&project.join(rel)).is_ok_and(|content| {
+        !crate::core::root_agent_files::has_content_outside_managed_block(&content)
+    })
 }
 
 /// The same bounded, symlink-filtered surface used by the final audit gate.
@@ -348,6 +375,7 @@ fn inspect_docs(
         if rel != "docs/AGENTS.md"
             && !rel.starts_with("docs/tech-debt/")
             && !rel.starts_with("docs/reports/")
+            && !rel.starts_with(LEGACY_DOCS_PREFIX)
             && !linked.contains(&normalize(path))
         {
             out.push(diag(
@@ -817,6 +845,70 @@ mod tests {
     }
 
     #[test]
+    fn dead_links_in_human_documents_are_reported_but_never_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# Projet\n\nSee [guide](legacy/guide.md).\n",
+        );
+        // A hand-written guide whose relative link was valid before its move.
+        write(
+            &root.join("docs/legacy/guide.md"),
+            "# Guide é\n\n[code](../src/x.rs)\n",
+        );
+        write(
+            &root.join("CLAUDE.md"),
+            "# Team rules\n\n[old](docs/missing.md)\n\n<!-- KRONN-MANAGED-BLOCK:START -->\nx\n<!-- KRONN-MANAGED-BLOCK:END -->\n",
+        );
+        let report = analyze(root).unwrap();
+        let legacy = report
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "docs/legacy/guide.md" && d.code == "broken_link")
+            .expect("the dead link is still reported");
+        assert!(!legacy.blocking);
+        assert!(legacy.message.contains("not blocking"));
+        let adapter = report
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "CLAUDE.md" && d.code == "broken_link")
+            .expect("adapter dead link reported");
+        assert!(!adapter.blocking);
+        assert_eq!(report.blocking_diagnostics().count(), 0);
+        assert!(!report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "orphan_document" && d.path.starts_with("docs/legacy/")));
+
+        // The same dead link in a document Kronn owns still blocks.
+        write(
+            &root.join("docs/glossary.md"),
+            "# Glossary\n\n[x](../src/x.rs)\n",
+        );
+        let report = analyze(root).unwrap();
+        assert!(report
+            .blocking_diagnostics()
+            .any(|d| d.path == "docs/glossary.md"));
+    }
+
+    #[test]
+    fn ownership_follows_the_managed_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("AGENTS.md"),
+            "<!-- KRONN-MANAGED-BLOCK:START -->\nx\n<!-- KRONN-MANAGED-BLOCK:END -->\n",
+        );
+        write(&root.join("CLAUDE.md"), "Human rules only\n");
+        assert!(kronn_owns(root, "AGENTS.md"));
+        assert!(!kronn_owns(root, "CLAUDE.md"));
+        assert!(kronn_owns(root, "docs/repo-map.md"));
+        assert!(!kronn_owns(root, "docs/legacy/repo-map.md"));
+        assert!(!kronn_owns(root, "GEMINI.md"), "unreadable is not owned");
+    }
+
+    #[test]
     fn a_root_relative_link_says_which_link_to_write() {
         // Run O7, step 1: `[..](docs/AGENTS.md)` inside docs/AGENTS.md was
         // reported as a bare "broken link target" through two retries.
@@ -960,9 +1052,10 @@ mod tests {
     #[test]
     fn only_invented_paths_block_the_rest_warns() {
         let tmp = tempfile::tempdir().unwrap();
+        // Inside Kronn's managed block: Kronn owns this adapter.
         write(
             &tmp.path().join("AGENTS.md"),
-            "[entry](docs/AGENTS.md) [missing](docs/no.md)",
+            "<!-- KRONN-MANAGED-BLOCK:START -->\n[entry](docs/AGENTS.md) [missing](docs/no.md)\n<!-- KRONN-MANAGED-BLOCK:END -->\n",
         );
         write(
             &tmp.path().join("docs/AGENTS.md"),
