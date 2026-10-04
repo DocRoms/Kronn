@@ -510,7 +510,7 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 - `StepOutputFormat::TypedSchema` (JSON-schema-validated step output).
 - `Workflow.artifacts` + `---ARTIFACT:name---` envelope persisted to workspace files.
 - `StepType::Gate` (`WaitingApproval` + `POST /api/workflows/.../decide` + optional webhook).
-- `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c` by Kronn itself; an allowlisted interpreter's inline script, e.g. `bash -c`, refuses template placeholders at save time except `{{x|sh}}` outside quotes, `{{run.id}}` and `{{time.now…}}`).
+- `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c` by Kronn itself; an allowlisted interpreter's inline script, e.g. `bash -c`, refuses every template placeholder at save time except `{{run.id}}` and `{{time.now…}}`, attached forms like `-cCODE` and `--eval=CODE` included; values travel as later argv entries).
 - `ConditionAction::Goto { max_iterations }` loops + `WorkflowRun.state` (`---STATE:k=v---`, `{{state.X}}`, `{{iter.X}}`).
 - `Workflow.on_failure` rollback steps (only on `Failed`, not on `Cancelled`/`StoppedByGuard`/Gate-reject).
 - Per-item Export/Import for Workflows + Quick Prompts. Workflow bundle v2

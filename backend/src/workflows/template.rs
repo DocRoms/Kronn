@@ -3,7 +3,9 @@
 //! Supports `{{variable}}` syntax with nested access via dots. This is not a
 //! Liquid implementation. The only filters are the closed, vendor-neutral
 //! `time.now` grammar and `|sh`, which renders any value as one POSIX
-//! single-quoted shell word; arbitrary Liquid filters remain unsupported. Preview rendering keeps unresolved placeholders visible to the
+//! single-quoted shell word (a quoting helper, not a safety guarantee: an
+//! Exec inline script accepts no interpolated value at all); arbitrary
+//! Liquid filters remain unsupported. Preview rendering keeps unresolved placeholders visible to the
 //! author; execution rendering is strict so a typo can never be sent to an
 //! agent or an external command/API. `{{path ?? "text"}}` is the one explicit
 //! way to accept an absent (or JSON null) path, e.g. a step skipped by a Goto.

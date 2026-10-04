@@ -14,8 +14,9 @@
 //!      a previous step's output contains `; rm -rf /`, the OS
 //!      receives ONE argv string per `exec_args[i]` — not a shell
 //!      command line. The exception is an allowlisted interpreter's
-//!      inline script (`bash -c`, `python3 -c`): the save-time validator
-//!      refuses placeholders there except `{{x|sh}}` outside quotes.
+//!      inline code (`bash -c`, `python3 -c…`, `node --eval=…`): the
+//!      save-time validator refuses any placeholder there but
+//!      `{{run.id}}` / `{{time.now…}}`; values go in later argv entries.
 //!   4. **Workdir locked** to `work_dir` (the run's workspace). No
 //!      `cd /` possible from inside the step.
 //!   5. **Timeout-bounded** via `tokio::time::timeout`. Default
@@ -1247,9 +1248,9 @@ mod tests {
         );
     }
 
-    /// The documented recipes for templated values in a shell script: as a
-    /// positional argument, or through `|sh`. A hostile issue title must come
-    /// back verbatim and nothing in it may run.
+    /// The documented recipe for a templated value next to inline code: a
+    /// separate argv entry the interpreter never parses. A hostile issue
+    /// title must come back verbatim and nothing in it may run.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_hostile_issue_title_never_executes_through_the_documented_recipes() {
@@ -1261,7 +1262,12 @@ mod tests {
                 "_",
                 "{{issue.title}}",
             ],
-            vec!["-c", "printf -- '---STATE:title=%s---' {{issue.title|sh}}"],
+            vec![
+                "-ec",
+                "printf -- '---STATE:title=%s---' \"$1\"",
+                "_",
+                "{{issue.title}}",
+            ],
         ];
         for args in recipes {
             let dir = tempfile::tempdir().unwrap();

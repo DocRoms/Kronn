@@ -244,6 +244,16 @@ Release notes for 0.9.3 and earlier are available in the
   worktrees alone. A run still keeps a branch that holds commits no base has,
   whether it succeeded, failed or was cancelled.
 
+  Exec step (KT-1017). Saving a workflow now refuses any template value in an
+  interpreter's inline code (`bash -c`, `python3 -c`, `node -e`…, attached
+  forms like `-cCODE` or `--eval=CODE` included), except `{{run.id}}` and
+  `{{time.now…}}`, and says how to write it safely: pass the value as a later
+  argument the interpreter never parses
+  (`["-c", "echo \"$1\"", "_", "{{issue.title}}"]`). A new `{{value|sh}}`
+  filter renders one single-quoted shell word, but it is a quoting helper, not
+  a way into inline code. Saved workflows keep running unchanged until they
+  are next edited.
+
 ### Changed
 
 - Plugins page: one export and one import flow, the plugin bundle, where each
