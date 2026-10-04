@@ -114,18 +114,25 @@ fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> 
     }
 }
 
-/// Load state for a mutation: default for a missing file, `Err` (with a warn)
-/// for an unreadable/corrupt one so the caller aborts instead of clobbering.
+/// Load state for a mutation: the legacy evidence (or default) for a missing
+/// file, `Err` (with a warn) for an unreadable/corrupt one so the caller aborts
+/// instead of clobbering. Seeding from legacy evidence keeps a marker-only
+/// project's Validated/Bootstrapped state when its first state file is written.
 fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
     read_for_mutation(project_path)
-        .map(Option::unwrap_or_default)
+        .map(|state| {
+            state
+                .or_else(|| legacy_state(project_path))
+                .unwrap_or_default()
+        })
         .inspect_err(|e| {
             tracing::warn!("Refusing to rewrite Kronn state from default: {e}");
         })
 }
 
-/// Atomic-ish write of `docs/.kronn.json`. Always rewrites the `_readme`
-/// field on the in-memory state before serializing.
+/// Atomic write of `docs/.kronn.json` (temp file + rename), so a concurrent
+/// reader never sees a torn file. Always rewrites the `_readme` field on the
+/// in-memory state before serializing.
 pub fn write(project_path: &Path, state: &mut KronnState) -> Result<(), String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     std::fs::create_dir_all(&docs_dir)
@@ -136,8 +143,7 @@ pub fn write(project_path: &Path, state: &mut KronnState) -> Result<(), String> 
         serde_json::to_string_pretty(state).map_err(|e| format!("JSON serialize error: {e}"))?;
 
     let path = docs_dir.join(KRONN_STATE_FILENAME);
-    std::fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
-    Ok(())
+    crate::core::mcp_scanner::atomic_write(&path, &json)
 }
 
 fn today_iso() -> String {
@@ -259,51 +265,161 @@ pub fn backfill_from_legacy_state(project_path: &Path) -> Result<bool, String> {
         }
     }
 
-    let has_checksums = crate::core::checksums::read_checksums_file(project_path).is_some();
+    let Some(mut state) = legacy_state(project_path) else {
+        return Ok(false);
+    };
+    write(project_path, &mut state)?;
+    tracing::info!(
+        project = ?project_path,
+        "Kronn state backfilled from legacy markers",
+    );
+    Ok(true)
+}
 
-    // Read AGENTS.md (or whatever the project's docs entry is) once to
-    // probe for the two legacy HTML markers. Tolerant : missing file
-    // → no markers detected.
+/// The state the legacy evidence implies, computed in memory: `docs/checksums.json`
+/// seeds one `legacy` audit entry, the `KRONN:VALIDATED` / `KRONN:BOOTSTRAPPED`
+/// markers set their dates (today: markers carry none). `None` without any signal.
+/// Pure: read paths use it so a GET never writes into the checkout.
+pub fn legacy_state(project_path: &Path) -> Option<KronnState> {
+    let has_checksums = crate::core::checksums::read_checksums_file(project_path).is_some();
     let docs_entry = crate::core::scanner::detect_docs_entry(project_path);
     let agents_content = std::fs::read_to_string(&docs_entry).unwrap_or_default();
     let has_validated = agents_content.contains("KRONN:VALIDATED");
     let has_bootstrapped = agents_content.contains("KRONN:BOOTSTRAPPED");
-
-    // No legacy signal at all → nothing to backfill from. Return false so
-    // the caller can fall through to default state.
     if !has_checksums && !has_validated && !has_bootstrapped {
-        return Ok(false);
+        return None;
     }
-
     let now = today_iso();
     let mut state = KronnState::default();
-
-    // Always seed at least one audit entry so `has_any_audit()` is true
-    // and the project surfaces as `Audited` (or `Validated` /
-    // `Bootstrapped`) rather than `TemplateInstalled` on next scan.
+    // At least one entry, so the project reads as audited (or better).
     state.audits.push(AuditEntry {
         date: now.clone(),
         kronn_version: "legacy".to_string(),
         audit_type: "legacy".to_string(),
         provenance: AuditProvenance::LegacyEvidence,
     });
-
     if has_validated {
         state.validated_at = Some(now.clone());
     }
     if has_bootstrapped {
         state.bootstrapped_at = Some(now);
     }
+    Some(state)
+}
 
-    write(project_path, &mut state)?;
-    tracing::info!(
-        project = ?project_path,
-        checksums = has_checksums,
-        validated_marker = has_validated,
-        bootstrapped_marker = has_bootstrapped,
-        "Kronn state backfilled from legacy markers",
-    );
-    Ok(true)
+/// A state file absent from the checked-out branch but present in git history,
+/// e.g. committed on a feature branch only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
+pub struct StateInHistory {
+    /// Full sha of the newest commit that added or changed the file.
+    pub commit: String,
+    /// Committer date of that commit, ISO 8601.
+    pub committed_at: String,
+    /// Up to five branches that contain the commit (empty if none does).
+    pub branches: Vec<String>,
+    /// Path relative to the project root.
+    pub path: String,
+}
+
+const MAX_HISTORY_BRANCHES: usize = 5;
+
+fn state_rel_path(project_path: &Path) -> String {
+    let path = state_path(project_path);
+    path.strip_prefix(project_path)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn git_stdout(project_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let output = crate::core::cmd::sync_cmd("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+/// Look for the state file in the repository history when the working tree
+/// has none. Read-only; `None` outside git, when the file is present, or when
+/// no commit ever carried it.
+pub fn find_in_git_history(project_path: &Path) -> Option<StateInHistory> {
+    if state_path(project_path).exists() {
+        return None;
+    }
+    let rel = state_rel_path(project_path);
+    let pathspec = format!("./{rel}");
+    let log = git_stdout(
+        project_path,
+        &[
+            "log",
+            "--all",
+            "-1",
+            "--diff-filter=AMR",
+            "--format=%H%x1f%cI",
+            "--",
+            &pathspec,
+        ],
+    )?;
+    let log = String::from_utf8_lossy(&log);
+    let (commit, committed_at) = log.trim().split_once('\u{1f}')?;
+    if commit.is_empty() {
+        return None;
+    }
+    let branches = git_stdout(
+        project_path,
+        &[
+            "branch",
+            "-a",
+            "--contains",
+            commit,
+            "--format=%(refname:short)",
+        ],
+    )
+    .map(|out| {
+        String::from_utf8_lossy(&out)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(MAX_HISTORY_BRANCHES)
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default();
+    Some(StateInHistory {
+        commit: commit.to_string(),
+        committed_at: committed_at.to_string(),
+        branches,
+        path: rel,
+    })
+}
+
+/// Restore the state file from `commit` into the working tree, byte for byte.
+/// Refuses when a state file already exists, when the commit id is not a hex
+/// sha, or when the stored content is not a valid state file.
+pub fn restore_from_git_history(project_path: &Path, commit: &str) -> Result<(), String> {
+    let commit = commit.trim();
+    if !(7..=64).contains(&commit.len()) || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid commit id".to_string());
+    }
+    let target = state_path(project_path);
+    if target.exists() {
+        return Err(format!("{} already exists", target.display()));
+    }
+    let rel = state_rel_path(project_path);
+    let object = format!("{commit}:./{rel}");
+    let content = git_stdout(project_path, &["show", &object])
+        .ok_or_else(|| format!("{rel} not found in commit {commit}"))?;
+    serde_json::from_slice::<KronnState>(&content)
+        .map_err(|e| format!("{rel} in commit {commit} is not a valid state file: {e}"))?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+    }
+    crate::core::mcp_scanner::atomic_write_bytes(&target, &content)
 }
 
 #[cfg(test)]

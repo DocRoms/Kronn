@@ -551,6 +551,17 @@ pub(crate) fn has_unfilled_placeholder(content: &str) -> bool {
 
 /// Detect the AI audit status for a project based on filesystem state.
 pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
+    detect_audit_status_with_runs(project_path, false)
+}
+
+/// Same as `detect_audit_status`, plus the instance's own record: a filled docs
+/// entry with no evidence on this branch counts as Audited when this Kronn
+/// instance completed a Full audit of the project (`completed_full_run`).
+/// Never Validated: validation needs evidence the docs on this branch carry.
+pub fn detect_audit_status_with_runs(
+    project_path: &str,
+    completed_full_run: bool,
+) -> crate::models::AiAuditStatus {
     use crate::models::AiAuditStatus;
 
     let path = resolve_host_path(project_path);
@@ -593,31 +604,9 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
         return AiAuditStatus::TemplateInstalled;
     }
 
-    // 0.8.4 — canonical source of truth: `docs/.kronn.json`. Survives `git
-    // clone`, lives outside the agent-read path (no token cost), and can't
-    // be inferred by accident from the user's own `docs/AGENTS.md`.
-    //
-    // We still honour the legacy `KRONN:VALIDATED` / `KRONN:BOOTSTRAPPED`
-    // HTML markers and `docs/checksums.json` so projects audited before
-    // this release keep their badge — but we no longer fall through to
-    // `Audited` based on filesystem heuristics alone (the old bug:
-    // any project with a pre-existing `docs/AGENTS.md` was tagged green).
-    //
-    // 0.8.6 (#28) — Auto-backfill `.kronn.json` from legacy markers /
-    // checksums on first scan. Without this, projects audited in 0.7.x
-    // → 0.8.3 stay flagged as TemplateInstalled until the user re-runs
-    // a full audit (wasteful : ~30k tokens, rewrites AGENTS.md). The
-    // backfill is one-shot, idempotent, no-ops when there's nothing
-    // to migrate. Errors (e.g. read-only FS) fall through to the
-    // legacy detection paths below — never block scan.
-    if let Err(e) = crate::core::kronn_state::backfill_from_legacy_state(&path) {
-        tracing::warn!(
-            project = ?path,
-            error = %e,
-            "kronn_state backfill failed — falling through to legacy detection",
-        );
-    }
-
+    // Canonical source of truth: `docs/.kronn.json`. Legacy projects (markers,
+    // `docs/checksums.json`) are read by the fallbacks below without writing:
+    // the state file is backfilled only by the write paths (audit, validation).
     if let Some(state) = crate::core::kronn_state::read(&path) {
         if state.validated_at.is_some() {
             return AiAuditStatus::Validated;
@@ -667,7 +656,10 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
 
     // No marker, no checksums, no state file — `docs/AGENTS.md` exists
     // but Kronn never touched it. Treat as "template-ish": the docs dir
-    // is there but no Kronn audit has been recorded.
+    // is there but no Kronn audit has been recorded on this branch.
+    if completed_full_run {
+        return AiAuditStatus::Audited;
+    }
     AiAuditStatus::TemplateInstalled
 }
 

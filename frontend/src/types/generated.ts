@@ -607,7 +607,7 @@ kronn_version: string,
  */
 type: string, provenance: AuditProvenance, };
 
-export type AuditEvidenceKind = "no_documentation" | "incomplete_template" | "missing_evidence" | "corrupt_state" | "kronn_audit" | "human_attestation" | "legacy_evidence" | "bootstrap_only";
+export type AuditEvidenceKind = "no_documentation" | "incomplete_template" | "missing_evidence" | "corrupt_state" | "kronn_audit" | "human_attestation" | "legacy_evidence" | "bootstrap_only" | "recorded_run";
 
 export type AuditEvidenceResponse = { project_id: string, status: AiAuditStatus, kind: AuditEvidenceKind,
 /**
@@ -619,7 +619,12 @@ state_file: string, runtime_workspace: string, audit_runs: number, interrupted_r
  * Present only when the authoritative newest run passes the exact resume
  * gate. The next usable step is this checkpoint + 1.
  */
-resumable_after_step: number | null, };
+resumable_after_step: number | null,
+/**
+ * The evidence file is missing on this branch but another commit carries
+ * it: the card offers to restore it.
+ */
+state_in_history: StateInHistory | null, };
 
 export type AuditFileInfo = { path: string, filled: boolean, };
 
@@ -826,6 +831,24 @@ step_repaired_from_template: boolean, };
  * say what a step not yet run will produce.
  */
 export type AuditStepInfo = { index: number, target_file: string, };
+
+/**
+ * Everything the audit timeline draws, in one request.
+ */
+export type AuditTimelineData = {
+/**
+ * Latest runs of every kind, newest first.
+ */
+runs: Array<AuditRun>,
+/**
+ * Steps of the newest Full and Partial runs, grouped by run in `runs` order.
+ */
+steps: Array<AuditRunStep>,
+/**
+ * Audits the branch's `docs/.kronn.json` records (another instance, an
+ * attestation, legacy evidence), oldest first. Empty without the file.
+ */
+recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 
@@ -6068,6 +6091,12 @@ export type ResponseUsage = {
  */
 at: string, input: number | null, cache_creation: number | null, cache_read: number | null, output: number | null, };
 
+export type RestoreAuditStateRequest = {
+/**
+ * The commit `state_in_history` named.
+ */
+commit: string, };
+
 /**
  * What a fresh session needs to continue, and nothing else.
  */
@@ -7067,6 +7096,28 @@ connection_id?: string | null, };
 export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discussion_id: string, status: string, };
 
 export type StartBriefingResponse = { discussion_id: string, };
+
+/**
+ * A state file absent from the checked-out branch but present in git history,
+ * e.g. committed on a feature branch only.
+ */
+export type StateInHistory = {
+/**
+ * Full sha of the newest commit that added or changed the file.
+ */
+commit: string,
+/**
+ * Committer date of that commit, ISO 8601.
+ */
+committed_at: string,
+/**
+ * Up to five branches that contain the commit (empty if none does).
+ */
+branches: Array<string>,
+/**
+ * Path relative to the project root.
+ */
+path: string, };
 
 export type StaticContextInventory = { blocks: Array<ContextBlock>,
 /**

@@ -1033,6 +1033,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::context_audit::attest_project_documentation),
         )
         .route(
+            "/api/projects/{id}/audit-state/restore",
+            post(api::context_audit::restore_audit_state),
+        )
+        .route(
             "/api/projects/{id}/install-template",
             post(api::projects::install_template),
         )
@@ -1095,6 +1099,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/audit-history",
             get(api::audit::audit_history),
+        )
+        .route(
+            "/api/projects/{id}/audit-timeline",
+            get(api::audit::audit_timeline),
         )
         .route(
             "/api/audit-runs/{run_id}/steps",

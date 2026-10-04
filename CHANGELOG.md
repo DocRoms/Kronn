@@ -20,6 +20,14 @@ Release notes for 0.9.3 and earlier are available in the
   community server `@benborla29/mcp-server-mysql`: host, user and password,
   with an optional port and database, read-only unless a write flag is set on
   the server.
+- The project card says when the branch has lost its audit evidence while
+  another commit still carries `docs/.kronn.json`, names that commit and its
+  branches, and restores the file on request (KT-993). A Full audit completed
+  on this Kronn instance now counts as audited when the branch has no evidence
+  file, and the audit timeline lists the audits the file records (another
+  instance, an attestation, legacy evidence) with their date and provenance
+  instead of staying empty. The timeline loads in one request instead of up to
+  thirteen.
 
 ### Fixed
 
@@ -49,6 +57,10 @@ Release notes for 0.9.3 and earlier are available in the
   browser with disabled or full storage no longer crashes the Discussions,
   Dashboard, Workflows or Settings pages when they remember a preference
   (KT-1022).
+
+- Listing projects no longer writes `docs/.kronn.json` into a checkout that
+  only carries legacy audit markers (KT-993): the status is computed in memory
+  and the file is written by audits and validations only, atomically.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its

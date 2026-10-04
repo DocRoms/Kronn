@@ -140,6 +140,7 @@ import type {
   GitStatusResponse,
   DependencyUpdateSummary,
   AuditEvidenceResponse,
+  AuditTimelineData,
   ContextAuditResponse,
   ModelTier,
   ModelTiersConfig,
@@ -1011,6 +1012,11 @@ export const projects = {
   auditEvidence: (id: string) => api<AuditEvidenceResponse>('GET', `/projects/${id}/audit-evidence`),
   attestDocumentation: (id: string) =>
     api<AuditEvidenceResponse>('POST', `/projects/${id}/audit-attestation`, { confirmed: true }),
+  /** Bring back a `docs/.kronn.json` another commit carries (never overwrites). */
+  restoreAuditState: (id: string, commit: string) =>
+    api<AuditEvidenceResponse>('POST', `/projects/${id}/audit-state/restore`, { commit }),
+  /** Recent runs, their steps and the branch's recorded audits, in one request. */
+  auditTimeline: (id: string) => api<AuditTimelineData>('GET', `/projects/${id}/audit-timeline`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),

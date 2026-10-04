@@ -324,6 +324,77 @@ describe('ProjectCard — repository overview', () => {
     expect(screen.getByText('projects.writeAccess.copyExtra')).toBeInTheDocument();
   });
 
+  it('offers to restore audit evidence found on another branch (KT-993)', async () => {
+    const evidence = {
+      project_id: PROJECT.id,
+      status: 'TemplateInstalled' as const,
+      kind: 'missing_evidence' as const,
+      state_file: 'docs/.kronn.json',
+      runtime_workspace: '.kronn/',
+      audit_runs: 0,
+      interrupted_runs: 0,
+      interruption_rate_percent: 0,
+      resumable_after_step: null,
+    };
+    vi.mocked(projectsApi.auditEvidence).mockResolvedValueOnce({
+      ...evidence,
+      state_in_history: {
+        commit: 'bd89288124aabbccddeeff00112233445566778899',
+        committed_at: '2026-08-25T10:00:00+02:00',
+        branches: ['poc/outbrain', 'pr1932'],
+        path: 'docs/.kronn.json',
+      },
+    });
+    vi.mocked(projectsApi.restoreAuditState).mockResolvedValueOnce({
+      ...evidence, status: 'Audited', kind: 'human_attestation', state_in_history: null,
+    });
+    const confirm = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('confirm', confirm);
+    const toast = vi.fn();
+    const onRefetch = vi.fn();
+
+    render(
+      <ProjectCard
+        project={{ ...PROJECT, audit_status: 'TemplateInstalled' }}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={toast}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={onRefetch}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    const found = await screen.findByTestId('project-audit-state-history');
+    expect(found).toHaveTextContent('bd89288124');
+    expect(found).toHaveTextContent('2026-08-25');
+    expect(found).toHaveTextContent('poc/outbrain, pr1932');
+    const restore = within(found).getByRole('button', { name: /projects.contextAudit.history.restore/ });
+    fireEvent.click(restore);
+    fireEvent.click(restore);
+    await waitFor(() => expect(projectsApi.restoreAuditState).toHaveBeenCalledTimes(1));
+    expect(projectsApi.restoreAuditState).toHaveBeenCalledWith(
+      PROJECT.id, 'bd89288124aabbccddeeff00112233445566778899');
+    expect(confirm).toHaveBeenCalledWith('projects.contextAudit.history.restoreConfirm');
+    await waitFor(() => expect(screen.queryByTestId('project-audit-state-history')).toBeNull());
+    expect(onRefetch).toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith('projects.contextAudit.history.restored', 'success');
+    vi.unstubAllGlobals();
+  });
+
   it('summarizes context drift and reveals technical audit details on demand', async () => {
     vi.mocked(projectsApi.auditEvidence).mockResolvedValueOnce({
       project_id: PROJECT.id,
@@ -335,6 +406,7 @@ describe('ProjectCard — repository overview', () => {
       interrupted_runs: 1,
       interruption_rate_percent: 50,
       resumable_after_step: 4,
+      state_in_history: null,
     });
     vi.mocked(projectsApi.contextAudit).mockResolvedValueOnce({
       project_id: PROJECT.id,
@@ -360,6 +432,7 @@ describe('ProjectCard — repository overview', () => {
       interrupted_runs: 1,
       interruption_rate_percent: 50,
       resumable_after_step: 4,
+      state_in_history: null,
     });
     vi.mocked(projectsApi.acceptContextBaseline).mockResolvedValueOnce({
       project_id: PROJECT.id,

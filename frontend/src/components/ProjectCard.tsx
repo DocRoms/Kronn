@@ -24,7 +24,7 @@ import {
   FileCode, ShieldCheck, BookOpen, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
   Code2, GitBranch, Package, ListTodo,
-  CircleHelp,
+  CircleHelp, History, RotateCcw,
   Container,
   Copy,
 } from 'lucide-react';
@@ -225,6 +225,26 @@ export function ProjectCard({
       setAttestingDocumentation(false);
     }
   }, [onRefetch, proj.id, t, toast]);
+
+  const [restoringAuditState, setRestoringAuditState] = useState(false);
+  const restoreGuardRef = useRef(false);
+  const restoreAuditStateFromHistory = useCallback(async () => {
+    const found = auditEvidence?.state_in_history;
+    if (!found || restoreGuardRef.current) return;
+    if (!window.confirm(t('projects.contextAudit.history.restoreConfirm', found.path, found.commit.slice(0, 10)))) return;
+    restoreGuardRef.current = true;
+    setRestoringAuditState(true);
+    try {
+      setAuditEvidence(await projectsApi.restoreAuditState(proj.id, found.commit));
+      onRefetch();
+      toast(t('projects.contextAudit.history.restored'), 'success');
+    } catch {
+      toast(t('projects.contextAudit.history.restoreFailed'), 'error');
+    } finally {
+      restoreGuardRef.current = false;
+      setRestoringAuditState(false);
+    }
+  }, [auditEvidence, onRefetch, proj.id, t, toast]);
 
   const acceptCurrentContextBaseline = useCallback(async () => {
     if (acceptingContextBaseline) return;
@@ -1671,6 +1691,7 @@ export function ProjectCard({
                     <div className="project-context-audit-evidence" data-kind={auditEvidence.kind}>
                       <div>
                         {auditEvidence.kind === 'kronn_audit' || auditEvidence.kind === 'legacy_evidence'
+                          || auditEvidence.kind === 'recorded_run'
                           ? <ShieldCheck size={15} />
                           : auditEvidence.kind === 'human_attestation'
                             ? <Check size={15} />
@@ -1694,6 +1715,32 @@ export function ProjectCard({
                         </button>
                       )}
                     </div>
+                    {auditEvidence.state_in_history && (
+                      <div className="project-context-audit-evidence" data-kind="state_in_history" data-testid="project-audit-state-history">
+                        <div>
+                          <History size={15} />
+                          <p>
+                            <strong>{t('projects.contextAudit.history.found')}</strong>
+                            <span>
+                              <code>{auditEvidence.state_in_history.commit.slice(0, 10)}</code>
+                              {' · '}{auditEvidence.state_in_history.committed_at.slice(0, 10)}
+                              {' · '}{auditEvidence.state_in_history.branches.join(', ') || t('projects.contextAudit.history.noBranch')}
+                            </span>
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className="project-context-audit-attest"
+                          onClick={() => void restoreAuditStateFromHistory()}
+                          disabled={restoringAuditState}
+                        >
+                          {restoringAuditState
+                            ? <Loader2 size={12} className="spin" />
+                            : <RotateCcw size={12} aria-hidden="true" />}
+                          {t('projects.contextAudit.history.restore')}
+                        </button>
+                      </div>
+                    )}
                     <div
                       className="project-context-audit-summary"
                       data-tone={hasContextDriftSignals ? 'warning' : 'success'}

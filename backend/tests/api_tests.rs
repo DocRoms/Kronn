@@ -21657,6 +21657,15 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         audit_history_unknown_project,
         "/api/projects/nope/audit-history"
     );
+    envelope_get!(
+        audit_timeline_unknown_project,
+        "/api/projects/nope/audit-timeline"
+    );
+    envelope_post!(
+        audit_state_restore_unknown_project,
+        "/api/projects/nope/audit-state/restore",
+        serde_json::json!({ "commit": "abcdef1" })
+    );
     envelope_post!(
         audit_partial_unknown_project,
         "/api/projects/nope/partial-audit",

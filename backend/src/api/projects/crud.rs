@@ -14,19 +14,23 @@ use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
 
-use super::{enrich_audit_status, find_common_parent};
+use super::{enrich_audit_status, enrich_audit_status_with_runs, find_common_parent};
 
 /// GET /api/projects
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project>>> {
     // Read connection: a list must not queue behind a long write.
     match state
         .db
-        .with_read_conn(crate::db::projects::list_projects)
+        .with_read_conn(|conn| {
+            let projects = crate::db::projects::list_projects(conn)?;
+            let audited = crate::db::audit_runs::projects_with_completed_full(conn)?;
+            Ok((projects, audited))
+        })
         .await
     {
-        Ok(mut projects) => {
+        Ok((mut projects, audited)) => {
             let projects = tokio::task::spawn_blocking(move || {
-                enrich_all(&mut projects);
+                enrich_all(&mut projects, &audited);
                 projects
             })
             .await
@@ -42,12 +46,17 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project
 
 /// Each project's enrichment reads its own docs tree; one thread per project
 /// keeps the list as slow as the slowest project, not the sum of all of them.
-fn enrich_all(projects: &mut [Project]) {
+fn enrich_all(projects: &mut [Project], audited: &std::collections::HashSet<String>) {
     const MAX_THREADS: usize = 8;
     let chunk = projects.len().div_ceil(MAX_THREADS).max(1);
     std::thread::scope(|scope| {
         for group in projects.chunks_mut(chunk) {
-            scope.spawn(move || group.iter_mut().for_each(enrich_audit_status));
+            scope.spawn(move || {
+                for project in group.iter_mut() {
+                    let completed = audited.contains(&project.id);
+                    enrich_audit_status_with_runs(project, completed);
+                }
+            });
         }
     });
 }
@@ -60,11 +69,15 @@ pub async fn get(
     let pid = id.clone();
     match state
         .db
-        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .with_read_conn(move |conn| {
+            let project = crate::db::projects::get_project(conn, &pid)?;
+            let completed = crate::db::audit_runs::has_completed_full(conn, &pid)?;
+            Ok(project.map(|project| (project, completed)))
+        })
         .await
     {
-        Ok(Some(mut project)) => tokio::task::spawn_blocking(move || {
-            enrich_audit_status(&mut project);
+        Ok(Some((mut project, completed))) => tokio::task::spawn_blocking(move || {
+            enrich_audit_status_with_runs(&mut project, completed);
             project
         })
         .await
@@ -1234,13 +1247,34 @@ mod bidirectional_link_tests {
             ));
         }
 
-        enrich_all(&mut projects);
+        enrich_all(&mut projects, &std::collections::HashSet::new());
 
         for (index, project) in projects.iter().enumerate() {
             assert_eq!(project.path_exists, index % 2 == 0, "{}", project.id);
             let expected = if index % 2 == 0 { index as u32 } else { 0 };
             assert_eq!(project.tech_debt_count, expected, "{}", project.id);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_completed_full_run_marks_filled_docs_without_evidence_as_audited() {
+        let root = std::env::temp_dir().join(format!("kronn-enrich-runs-{}", Uuid::new_v4()));
+        let mut projects = Vec::new();
+        for id in ["recorded", "unrecorded"] {
+            let docs = root.join(id).join("docs");
+            std::fs::create_dir_all(&docs).unwrap();
+            std::fs::write(docs.join("AGENTS.md"), "# Projet été\nFilled\n").unwrap();
+            projects.push(make_project(id, id, root.join(id).to_str().unwrap(), None));
+        }
+        let audited = std::collections::HashSet::from(["recorded".to_string()]);
+
+        enrich_all(&mut projects, &audited);
+
+        assert_eq!(projects[0].audit_status, AiAuditStatus::Audited);
+        assert_eq!(projects[1].audit_status, AiAuditStatus::TemplateInstalled);
+        // The read path writes nothing into the checkout.
+        assert!(!root.join("recorded/docs/.kronn.json").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

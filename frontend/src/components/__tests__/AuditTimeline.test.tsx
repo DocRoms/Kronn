@@ -28,6 +28,18 @@ const step = (index: number, extra: Record<string, unknown> = {}) => ({
   step_repaired_from_template: false, ...extra,
 });
 
+type RunStub = { id: string; kind?: string; td_total?: number; status?: string; started_at?: string };
+
+/** The timeline's single request: runs, their steps, the branch's recorded audits. */
+function mockTimeline(runs: RunStub[], steps: unknown[], recorded: unknown[] = []) {
+  vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
+    runs: runs.map(r => ({
+      project_id: 'p1', agent_type: 'ClaudeCode', started_at: '', status: 'Completed', td_total: 0, kind: 'Full', ...r,
+    })),
+    steps, recorded_audits: recorded, recorded_validated_at: null,
+  } as never);
+}
+
 function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
   return {
     projectId: 'p1', auditStatus: 'TemplateInstalled', techDebtCount: 0,
@@ -45,8 +57,7 @@ describe('AuditTimeline', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     try { localStorage.clear(); } catch { /* jsdom */ }
-    vi.mocked(projectsApi.auditHistory).mockResolvedValue([]);
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue([]);
+    mockTimeline([], []);
     vi.mocked(externalApi.list).mockResolvedValue([]);
     vi.mocked(projectsApi.auditSteps).mockResolvedValue([]);
   });
@@ -55,7 +66,7 @@ describe('AuditTimeline', () => {
     const steps = Array.from({ length: 16 }, (_, i) => step(i + 1));
     steps[2] = step(3, { cli_success: false, step_warning: 'step did not fill `docs/step-3.md`: 4 raw `{{...}}` placeholders remain' });
     steps.pop();
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue(steps);
+    mockTimeline([], steps);
     const p = props({ resumable: { id: 'run-1', steps_to_redo: [3, 16], last_completed_step: 14 } });
     wrap(<AuditTimeline {...p} />);
 
@@ -66,7 +77,9 @@ describe('AuditTimeline', () => {
     // The technical warning becomes a readable reason, and stays as its title.
     expect(failed.querySelector('.audit-tl-reason')).toHaveAttribute('title', expect.stringContaining('placeholders remain'));
     expect(screen.getByTestId('audit-timeline-step-16')).toHaveClass('is-todo');
-    expect(projectsApi.auditRunSteps).toHaveBeenCalledWith('run-1');
+    // One request for the whole timeline (FE-12), not one per run.
+    expect(projectsApi.auditTimeline).toHaveBeenCalledWith('p1');
+    expect(projectsApi.auditRunSteps).not.toHaveBeenCalled();
   });
 
   it('shows each step its tokens, the live step its running count (KT-994)', async () => {
@@ -74,8 +87,7 @@ describe('AuditTimeline', () => {
       step(1, { started_at: '2026-10-03T09:46:30Z', step_tokens: 48_213, input_tokens: 40_000, output_tokens: 8_213, cache_read_tokens: 12_000 }),
       step(2, { ended_at: null, duration_ms: null, step_tokens: null, started_at: '2026-10-03T09:50:00Z' }),
     ];
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue(steps);
-    vi.mocked(projectsApi.auditHistory).mockResolvedValue([{ id: 'run-1', kind: 'Full', started_at: '2026-10-03T09:46:00Z' }] as never);
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-03T09:46:00Z' }], steps);
     const p = props({
       auditActive: true, liveStep: 2, liveTotal: 16, liveFile: 'docs/step-2.md',
       liveStartedAt: Date.parse('2026-10-03T09:46:00Z'), liveStepTokens: 1_310_000,
@@ -101,13 +113,14 @@ describe('AuditTimeline', () => {
   it('counts a finished partial run, newest result per step (KT-994)', async () => {
     // A partial audit of step 3 that succeeded used to vanish: only Full runs
     // were merged, so the card read "0 of 16" right after it.
-    vi.mocked(projectsApi.auditHistory).mockResolvedValue([
+    mockTimeline([
       { id: 'partial-2', kind: 'Partial', started_at: '2026-10-03T10:47:00Z' },
       { id: 'full-1', kind: 'Full', started_at: '2026-10-02T10:00:00Z' },
-    ] as never);
-    vi.mocked(projectsApi.auditRunSteps).mockImplementation(async (id: string) => (id === 'partial-2'
-      ? [step(3, { audit_run_id: 'partial-2', step_tokens: 328_708 })]
-      : [step(1, { audit_run_id: 'full-1' }), step(3, { audit_run_id: 'full-1', cli_success: false, step_warning: 'interrupted' })]) as never);
+    ], [
+      step(3, { audit_run_id: 'partial-2', step_tokens: 328_708 }),
+      step(1, { audit_run_id: 'full-1' }),
+      step(3, { audit_run_id: 'full-1', cli_success: false, step_warning: 'interrupted' }),
+    ]);
     const { container } = wrap(<AuditTimeline {...props()} />);
     await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
     container.querySelectorAll<HTMLElement>('.audit-tl-group-head').forEach(head => fireEvent.click(head));
@@ -121,8 +134,7 @@ describe('AuditTimeline', () => {
     // Progress counts the run's own steps: a partial audit of step 3 is at 1/1.
     vi.mocked(projectsApi.auditSteps).mockResolvedValue(
       Array.from({ length: 16 }, (_, i) => ({ index: i + 1, target_file: `docs/step-${i + 1}.md` })));
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue([step(1)]);
-    vi.mocked(projectsApi.auditHistory).mockResolvedValue([{ id: 'run-1', kind: 'Full', started_at: '2026-10-02T10:00:00Z' }] as never);
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-02T10:00:00Z' }], [step(1)]);
     const p = props({
       auditActive: true, liveStep: 1, liveTotal: 1, liveFile: 'docs/step-3.md',
       liveStartedAt: Date.parse('2026-10-03T10:47:00Z'),
@@ -172,7 +184,7 @@ describe('AuditTimeline', () => {
   it('resumes a failed step through the resume launcher and says consolidation reruns', async () => {
     const steps = Array.from({ length: 15 }, (_, i) => step(i + 1));
     steps[2] = step(3, { cli_success: false, step_warning: 'interrupted' });
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue(steps);
+    mockTimeline([], steps);
     // The note needs to know which step consolidates: the plan names it.
     vi.mocked(projectsApi.auditSteps).mockResolvedValue(
       Array.from({ length: 16 }, (_, i) => ({ index: i + 1, target_file: i === 15 ? 'docs/decisions.md' : `docs/step-${i + 1}.md` })));
@@ -227,16 +239,11 @@ describe('AuditTimeline', () => {
 
   it('merges a resumed run with the run it continued, step by step', async () => {
     // A resume records only the steps it reran (here 9-16); 1-8 are in the parent.
-    vi.mocked(projectsApi.auditHistory).mockResolvedValue([
-      { id: 'resumed', project_id: 'p1', kind: 'Full', agent_type: 'ClaudeCode', started_at: '', status: 'Completed', td_total: 0 },
-      { id: 'parent', project_id: 'p1', kind: 'Full', agent_type: 'ClaudeCode', started_at: '', status: 'Interrupted', td_total: 0 },
+    mockTimeline([{ id: 'resumed' }, { id: 'parent', status: 'Interrupted' }], [
+      ...Array.from({ length: 8 }, (_, i) => step(i + 9, { audit_run_id: 'resumed' })),
+      ...Array.from({ length: 8 }, (_, i) => step(i + 1, { audit_run_id: 'parent' })),
     ]);
-    vi.mocked(projectsApi.auditRunSteps).mockImplementation(async (id: string) =>
-      id === 'resumed'
-        ? Array.from({ length: 8 }, (_, i) => step(i + 9))
-        : Array.from({ length: 8 }, (_, i) => step(i + 1)));
     wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
-    await waitFor(() => expect(projectsApi.auditRunSteps).toHaveBeenCalledWith('parent'));
     const progress = await screen.findByRole('progressbar');
     await waitFor(() => expect(progress).toHaveAttribute('aria-valuenow', '16'));
   });
@@ -244,7 +251,7 @@ describe('AuditTimeline', () => {
   it('shows a step that never ended as interrupted when no audit runs', async () => {
     const steps = Array.from({ length: 16 }, (_, i) => step(i + 1));
     steps[5] = step(6, { ended_at: null, duration_ms: null });
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue(steps);
+    mockTimeline([], steps);
     wrap(<AuditTimeline {...props({ resumable: { id: 'run-1', steps_to_redo: [6, 16], last_completed_step: 14 } })} />);
     const interrupted = await screen.findByTestId('audit-timeline-step-6');
     expect(interrupted).toHaveClass('is-failed');
@@ -274,14 +281,14 @@ describe('AuditTimeline', () => {
   it('dates each step with its own last run', async () => {
     const steps = Array.from({ length: 16 }, (_, i) => step(i + 1));
     steps[2] = step(3, { cli_success: false, step_warning: 'interrupted', ended_at: '2026-09-30T19:45:00Z' });
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue(steps);
+    mockTimeline([], steps);
     wrap(<AuditTimeline {...props({ resumable: { id: 'run-1', steps_to_redo: [3], last_completed_step: 15 } })} />);
     const row = await screen.findByTestId('audit-timeline-step-3');
     expect(row.querySelector('time')).toHaveAttribute('dateTime', '2026-09-30T19:45:00Z');
   });
 
   it('does not count an older run as done while a fresh audit runs', async () => {
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue(Array.from({ length: 16 }, (_, i) => step(i + 1)));
+    mockTimeline([], Array.from({ length: 16 }, (_, i) => step(i + 1)));
     wrap(<AuditTimeline {...props({
       auditStatus: 'Audited', auditActive: true, liveStep: 2, liveTotal: 16, liveFile: 'docs/x.md',
       liveStartedAt: Date.parse('2026-10-03T08:00:00Z'),
@@ -292,12 +299,46 @@ describe('AuditTimeline', () => {
   });
 
   it('says how many debts the last audit produced', async () => {
-    vi.mocked(projectsApi.auditHistory).mockResolvedValue([
-      { id: 'r', project_id: 'p1', kind: 'Full', agent_type: 'ClaudeCode', started_at: '', status: 'Completed', td_total: 40 },
-    ]);
-    vi.mocked(projectsApi.auditRunSteps).mockResolvedValue(Array.from({ length: 16 }, (_, i) => step(i + 1)));
+    mockTimeline([{ id: 'r', td_total: 40 }], Array.from({ length: 16 }, (_, i) => step(i + 1, { audit_run_id: 'r' })));
     wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
     expect(await screen.findByTestId('audit-timeline-td-count')).toHaveTextContent('40');
+  });
+
+  it('shows audits known only from the state file, with date and provenance (KT-993)', async () => {
+    mockTimeline([], [], [
+      { date: '2026-08-13', kronn_version: '0.9.6', type: 'attested', provenance: 'human_attestation' },
+      { date: '2026-09-01', kronn_version: '0.14.1', type: 'full', provenance: 'kronn_audit' },
+      { date: '2026-05-17', kronn_version: 'legacy', type: 'legacy', provenance: 'legacy_evidence' },
+    ]);
+    wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+
+    const entries = await screen.findAllByTestId('audit-timeline-recorded-entry');
+    // Newest record first; each keeps its own date, provenance and version.
+    expect(entries).toHaveLength(3);
+    expect(entries[0]).toHaveTextContent('2026-05-17');
+    expect(entries[0]).toHaveTextContent(/Preuve héritée|Legacy evidence/);
+    expect(entries[0]).toHaveTextContent(/version inconnue|version unknown/);
+    expect(entries[1]).toHaveTextContent('2026-09-01');
+    expect(entries[1]).toHaveTextContent(/autre instance|another instance/);
+    expect(entries[1]).toHaveTextContent('Kronn 0.14.1');
+    expect(entries[2]).toHaveTextContent('2026-08-13');
+    expect(entries[2]).toHaveTextContent(/Attesté par une personne|Attested by a person/);
+    expect(screen.queryByText(/Aucun audit lancé|No audit launched/)).toBeNull();
+  });
+
+  it('keeps the recorded audits out of the way once this instance has runs', async () => {
+    mockTimeline([{ id: 'run-1' }], [step(1)], [
+      { date: '2026-08-13', kronn_version: '0.9.6', type: 'attested', provenance: 'human_attestation' },
+    ]);
+    wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    await screen.findByRole('progressbar');
+    expect(screen.queryByTestId('audit-timeline-recorded')).toBeNull();
+  });
+
+  it('says no audit ran when neither a run nor a record exists', async () => {
+    wrap(<AuditTimeline {...props()} />);
+    expect(await screen.findByText(/Aucun audit lancé|No audit launched/)).toBeInTheDocument();
+    expect(screen.queryByTestId('audit-timeline-recorded')).toBeNull();
   });
 
   it('saves the briefing without creating a discussion', async () => {

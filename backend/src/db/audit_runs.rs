@@ -30,6 +30,28 @@ pub fn insert_running(
     Ok(())
 }
 
+/// Projects for which this instance recorded a Completed Full audit. One query
+/// for the whole project list.
+pub fn projects_with_completed_full(
+    conn: &Connection,
+) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT project_id FROM audit_runs WHERE kind = 'Full' AND status = 'Completed'",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn has_completed_full(conn: &Connection, project_id: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audit_runs
+         WHERE project_id = ?1 AND kind = 'Full' AND status = 'Completed'",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 pub fn has_running_for_project(conn: &Connection, project_id: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM audit_runs WHERE project_id = ?1 AND status = 'Running'",
