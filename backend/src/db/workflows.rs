@@ -1078,6 +1078,20 @@ pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Runs that forbid deleting their workflow: the delete cascades to every run
+/// row, so a live, paused or resumable run would lose its row while its runner
+/// or worktree is still there (WF-9).
+pub fn runs_blocking_workflow_delete(conn: &Connection, workflow_id: &str) -> Result<u32> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM workflow_runs
+          WHERE workflow_id = ?1
+            AND (status IN ('Pending', 'Running', 'WaitingApproval')
+                 OR (status = 'Interrupted' AND workspace_path IS NOT NULL))",
+        params![workflow_id],
+        |row| row.get(0),
+    )?)
+}
+
 // ─── Workflow Runs CRUD ─────────────────────────────────────────────────────
 
 pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
@@ -1100,24 +1114,6 @@ pub const MAX_RUNS_UNPAGINATED: u32 = 500;
 
 pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun>> {
     list_runs_paginated(conn, workflow_id, Some(MAX_RUNS_UNPAGINATED), None)
-}
-
-/// 0.8.11 (B7) — auto-purge terminal workflow runs older than `days`. Preserves
-/// any run still referenced as a parent by a retained child (so provenance
-/// chains stay intact) and never touches non-terminal runs. Opt-in: the caller
-/// only invokes this when `run_retention_days > 0`. Returns rows deleted.
-pub fn purge_runs_older_than(conn: &Connection, days: u32) -> Result<usize> {
-    let n = conn.execute(
-        "DELETE FROM workflow_runs
-          WHERE status IN ('Success','Partial','Failed','Cancelled','StoppedByGuard','Interrupted')
-            AND finished_at IS NOT NULL
-            AND finished_at < datetime('now', ?1)
-            AND id NOT IN (
-                SELECT parent_run_id FROM workflow_runs WHERE parent_run_id IS NOT NULL
-            )",
-        params![format!("-{} days", days)],
-    )?;
-    Ok(n)
 }
 
 /// True when at least one workflow run is currently `Running` or `Pending`.

@@ -1,8 +1,8 @@
-import { useCallback, useMemo, useState } from 'react';
-import { BarChart3 } from 'lucide-react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { BarChart3, Minimize2 } from 'lucide-react';
 import { config } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
-import type { DbUsage } from '../../types/generated';
+import type { DbCompaction, DbUsage } from '../../types/generated';
 
 /** How many tables get their own bar. The tail is folded into one entry rather
  *  than dropped: a chart that silently omits rows would answer "what should I
@@ -36,6 +36,9 @@ export function DbUsageChart() {
   const [usage, setUsage] = useState<DbUsage | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [compaction, setCompaction] = useState<DbCompaction | null>(null);
+  const [compacting, setCompacting] = useState(false);
+  const compactingRef = useRef(false);
 
   // Never on mount: dbstat walks the b-trees (~1 s on a 7 GB database), and a
   // settings page that costs a second of disk to open is its own problem.
@@ -50,6 +53,25 @@ export function DbUsageChart() {
       setLoading(false);
     }
   }, []);
+
+  // Explicit and confirmed: the VACUUM holds every database write until it
+  // ends and needs about twice the live data in free disk space.
+  const compact = useCallback(async () => {
+    if (compactingRef.current) return;
+    if (!window.confirm(t('config.dbCompact.confirm'))) return;
+    compactingRef.current = true;
+    setCompacting(true);
+    setError(null);
+    try {
+      setCompaction(await config.dbCompact());
+      setUsage(await config.dbUsage());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      compactingRef.current = false;
+      setCompacting(false);
+    }
+  }, [t]);
 
   const slices = useMemo(() => {
     if (!usage) return [];
@@ -128,7 +150,26 @@ export function DbUsageChart() {
         <button className="set-action-btn" onClick={measure} disabled={loading}>
           {loading ? t('config.dbUsage.measuring') : t('config.dbUsage.remeasure')}
         </button>
+        <button
+          className="set-action-btn"
+          onClick={compact}
+          disabled={compacting || usage.free_bytes === 0}
+          title={usage.free_bytes === 0 ? t('config.dbCompact.nothingFree') : t('config.dbUsage.freeHint')}
+        >
+          <Minimize2 size={14} />
+          {compacting ? t('config.dbCompact.running') : t('config.dbCompact.action')}
+        </button>
       </div>
+      {compaction && (
+        <p className="text-sm text-muted" role="status">
+          {t(
+            'config.dbCompact.done',
+            formatBytes(compaction.file_bytes_before + compaction.wal_bytes_before),
+            formatBytes(compaction.file_bytes_after + compaction.wal_bytes_after),
+          )}
+        </p>
+      )}
+      {error && <p className="set-db-usage-error">{error}</p>}
     </div>
   );
 }

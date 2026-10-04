@@ -141,6 +141,7 @@ describe('api.config', () => {
   it('setModelTiers', async () => { await exec(config.setModelTiers({} as never), 'POST', '/config/model-tiers'); });
   it('dbInfo', async () => { await exec(config.dbInfo(), 'GET', '/config/db-info'); });
   it('dbBackup', async () => { await exec(config.dbBackup(), 'POST', '/db/backup'); });
+  it('dbCompact', async () => { await exec(config.dbCompact(), 'POST', '/db/compact'); });
   it('getServerConfig', async () => { await exec(config.getServerConfig(), 'GET', '/config/server'); });
   it('setServerConfig', async () => { await exec(config.setServerConfig({ pseudo: 'x' }), 'POST', '/config/server'); });
   it('regenerateAuthToken', async () => { await exec(config.regenerateAuthToken(), 'POST', '/config/auth-token/regenerate'); });

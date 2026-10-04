@@ -1761,6 +1761,11 @@ size_bytes: number,
  */
 taken_at: string, };
 
+/**
+ * What `POST /api/db/compact` changed, measured on disk around the VACUUM.
+ */
+export type DbCompaction = { file_bytes_before: number, wal_bytes_before: number, file_bytes_after: number, wal_bytes_after: number, duration_ms: number, };
+
 export type DbExport = { version: number, exported_at: string, projects: Array<Project>, discussions: Array<Discussion>, workflows: Array<Workflow>, mcp_servers: Array<McpServer>, mcp_configs: Array<McpConfig>, custom_skills: Array<Skill>, custom_directives: Array<Directive>, custom_profiles: Array<AgentProfile>, contacts: Array<Contact>, quick_prompts: Array<QuickPrompt>,
 /**
  * 0.8.9 — Quick APIs (reusable saved API calls). `#[serde(default)]` keeps
@@ -6591,13 +6596,17 @@ domain: string | null,
  */
 failure_notify_url: string | null,
 /**
- * 0.8.11 (B7) — auto-purge workflow runs older than N days at boot.
- * `0` (default) = DISABLED: never delete run history automatically (a fast
- * cron's run table is 76% of the DB, but silently dropping the user's
- * history is worse than size). Set to e.g. 90 to bound growth; parent runs
- * still referenced by a retained child are always preserved.
+ * Delete whole workflow runs older than N days. `0` (default) never
+ * deletes run history. Applies the same rules as the payload trim below
+ * (plain, terminal, unreferenced runs that own no worktree), in chunks.
  */
 run_retention_days: number,
+/**
+ * KT-984 — blank the step outputs of workflow runs finished more than N
+ * days ago, keeping every run row and its metadata. `0` keeps outputs
+ * forever. Default 30; see `db::run_retention` for what is never touched.
+ */
+run_payload_retention_days: number,
 /**
  * Encrypted execution-variable snapshot retention. `0` keeps metadata
  * but disables value retention. Product default: 30 days.
@@ -6802,7 +6811,11 @@ discussion_weight: DiscussionWeightConfig,
  * Default retention for encrypted execution-variable snapshots.
  * Zero purges values as soon as the run reaches a terminal state.
  */
-execution_variable_retention_days: number, };
+execution_variable_retention_days: number,
+/**
+ * Days a finished workflow run keeps its step outputs. Zero keeps them.
+ */
+run_payload_retention_days: number, };
 
 /**
  * Configurable ceilings for one CLI session.

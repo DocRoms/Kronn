@@ -51,6 +51,7 @@ pub mod resource_changes;
 pub mod resource_identities;
 pub mod review_ledger;
 pub mod run_outcome;
+pub mod run_retention;
 pub mod run_state;
 pub mod shared_runs;
 pub mod ui_preferences;
@@ -67,17 +68,22 @@ mod tests;
 #[cfg(test)]
 mod release_gate_tests;
 
+#[cfg(test)]
+mod large_db_measure;
+
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
 #[cfg(test)]
 pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut statement = conn
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
         .expect("query plan");
-    statement
-        .query_map([], |row| row.get::<_, String>(3))
-        .expect("query plan rows")
-        .collect::<rusqlite::Result<_>>()
-        .expect("query plan details")
+    // Parameters stay unbound: the plan does not depend on their values.
+    let mut rows = statement.raw_query();
+    let mut details = Vec::new();
+    while let Some(row) = rows.next().expect("query plan row") {
+        details.push(row.get::<_, String>(3).expect("query plan detail"));
+    }
+    details
 }
 
 /// Plan lines that read one of `aliases` from its table rather than from a

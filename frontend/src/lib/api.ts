@@ -85,6 +85,7 @@ import type {
   TokenUsageSummary,
   DbInfo,
   DbUsage,
+  DbCompaction,
   SetAgentAccessRequest,
   SetAgentMentionColorRequest,
   AgentsConfig,
@@ -859,6 +860,9 @@ export const config = {
    *  `<data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db`. Returns the
    *  resulting path so the Settings UI can toast it. */
   dbBackup: () => api<DbBackupResponse>('POST', '/db/backup'),
+  /** VACUUM: gives freed pages back to the disk. Pauses database writes for
+   *  its duration and is refused while a workflow run is in progress. */
+  dbCompact: () => api<DbCompaction>('POST', '/db/compact'),
   exportData: async (): Promise<Blob> => {
     const res = await fetch(`${_apiBase}/api/config/export`, {
       headers: authHeaders(),
@@ -899,7 +903,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 

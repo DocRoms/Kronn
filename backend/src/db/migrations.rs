@@ -819,6 +819,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "212_workflow_runs_summary_index",
         include_str!("sql/212_workflow_runs_summary_index.sql"),
     ),
+    (
+        "213_workflow_run_payload_retention",
+        include_str!("sql/213_workflow_run_payload_retention.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -981,7 +985,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
 /// full disk never replaces the previous good backup. A failed copy stops the
 /// upgrade: migrating without a way back is the user's call, made with
 /// `KRONN_MIGRATION_BACKUP=0`, never a warning in a log.
-fn backup_before_migration(
+pub(crate) fn backup_before_migration(
     path: &Path,
     available_space: impl Fn(&Path) -> std::io::Result<u64>,
 ) -> Result<()> {

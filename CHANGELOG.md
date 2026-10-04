@@ -19,6 +19,22 @@ Release notes for 0.9.3 and earlier are available in the
 - Under Docker, Codex always runs without its own sandbox, which cannot start
   inside the container; the full-access switch now shows that state as locked
   and always on instead of "Restricted" (KT-975).
+
+- Run retention is on by default (KT-984): every 6 hours, in chunks that
+  leave the database free between them, Kronn empties the step outputs of
+  workflow runs finished more than 30 days ago and keeps the runs, their
+  steps, statuses, timings and tokens. Runs in progress, paused or
+  interrupted, batch and compare runs, runs that still own a worktree and runs
+  referenced elsewhere (child runs, discussions, ratings, live pages, shared
+  views, questions, room activity) are never touched. The delay is set in
+  Settings → Database ("keep forever" turns it off). Settings → Database also
+  offers to compact the database, which gives the freed space back to the
+  disk and reports the size before and after; on a generated 4 GB base the
+  file went from 4.1 GB to 833 MB. The opt-in deletion of old runs
+  (`run_retention_days`) now follows the same rules in chunks instead of one
+  boot-time delete that also removed comparisons and their ratings, and
+  deleting a workflow is refused while one of its runs is live, paused or
+  interrupted with a worktree.
 - Full access is now a visible, accessible switch on each agent card, with a
   risk dialog before it is enabled, and the setup wizard has an Access step
   that offers it agent by agent, off by default (KT-975).

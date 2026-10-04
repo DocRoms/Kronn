@@ -1993,10 +1993,21 @@ pub async fn delete(
 ) -> Json<ApiResponse<()>> {
     match state
         .db
-        .with_conn(move |conn| crate::db::workflows::delete_workflow(conn, &id))
+        .with_conn(move |conn| {
+            let blocking = crate::db::workflows::runs_blocking_workflow_delete(conn, &id)?;
+            if blocking > 0 {
+                return Ok(Some(blocking));
+            }
+            crate::db::workflows::delete_workflow(conn, &id)?;
+            Ok(None)
+        })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(())),
+        Ok(None) => Json(ApiResponse::ok(())),
+        Ok(Some(blocking)) => Json(ApiResponse::err(format!(
+            "{blocking} run(s) of this workflow are in progress, paused or interrupted with a \
+             worktree; finish, cancel or discard them before deleting the workflow"
+        ))),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }

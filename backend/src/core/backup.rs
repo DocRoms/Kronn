@@ -181,6 +181,63 @@ pub fn snapshot_database(
     copied
 }
 
+/// The `.db` file and its WAL, in bytes.
+fn file_sizes(path: &Path) -> (u64, u64) {
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    (
+        size(path),
+        size(Path::new(&format!("{}-wal", path.display()))),
+    )
+}
+
+/// KT-984 — give the free pages back to the filesystem: `VACUUM`, then a
+/// truncating checkpoint. Deleting or trimming rows only grows the free list,
+/// so this is the step that makes the file smaller. It rewrites the live data
+/// while holding the write connection, so it is an explicit user action, never
+/// automatic, refused while a workflow run is active or when the disk lacks
+/// room for the rebuilt copy (temporary file plus WAL).
+pub async fn compact_database(db: &Database) -> anyhow::Result<crate::models::DbCompaction> {
+    compact_database_with(db, |path| fs2::available_space(path)).await
+}
+
+async fn compact_database_with(
+    db: &Database,
+    available_space: fn(&Path) -> std::io::Result<u64>,
+) -> anyhow::Result<crate::models::DbCompaction> {
+    if db.path().to_string_lossy() == ":memory:" {
+        anyhow::bail!("the database is in memory; there is nothing to compact");
+    }
+    let Ok(_maintenance) = MAINTENANCE_LOCK.try_lock() else {
+        anyhow::bail!("a backup or a compaction is already running; try again when it ends");
+    };
+    let path = db.path().clone();
+    db.with_conn(move |conn| {
+        if crate::db::workflows::has_running_run(conn)? {
+            anyhow::bail!("workflow runs are in progress; compact the database once they finish");
+        }
+        let live = live_bytes(conn)?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        // The rebuilt copy goes through the WAL beside the database.
+        ensure_free_space(dir, required_free_bytes(live), available_space(dir)?)?;
+        // SQLite builds it first in a temporary file.
+        let temp = std::env::temp_dir();
+        ensure_free_space(&temp, required_free_bytes(live), available_space(&temp)?)?;
+        let (file_bytes_before, wal_bytes_before) = file_sizes(&path);
+        let started = std::time::Instant::now();
+        conn.execute_batch("VACUUM;")?;
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        let (file_bytes_after, wal_bytes_after) = file_sizes(&path);
+        Ok(crate::models::DbCompaction {
+            file_bytes_before,
+            wal_bytes_before,
+            file_bytes_after,
+            wal_bytes_after,
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
+    })
+    .await
+}
+
 /// Run one backup now: copy the live DB into `dir`, then prune to `keep_n`.
 /// Returns the written path. Skips (Ok(None)) for an in-memory DB.
 pub async fn perform_backup(
@@ -318,6 +375,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial(db_maintenance)]
     async fn perform_backup_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::TempDir::new().unwrap();
@@ -333,6 +391,7 @@ mod tests {
         );
     }
     #[tokio::test]
+    #[serial(db_maintenance)]
     async fn backup_is_refused_without_enough_free_space() {
         // KT-1019 — 24 h × keep 7 of a 10 GB base filled disks unchecked.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -360,6 +419,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(db_maintenance)]
     async fn backup_does_not_wait_for_the_write_connection() {
         // KT-1019 — the copy ran inside with_conn: every writer waited for it.
         // Here the write connection stays held for the whole backup.
@@ -434,7 +494,99 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"previous");
     }
 
+    async fn database_with_trimmed_runs(dir: &Path) -> crate::db::Database {
+        let db = crate::db::Database::open_path(&dir.join("kronn.db")).expect("open db");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf', 'wf', '\"Manual\"', '[]', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                [],
+            )?;
+            let payload = serde_json::json!([{"step_name": "s", "status": "Success",
+                "output": "résultat ".repeat(40_000), "duration_ms": 1}])
+            .to_string();
+            for index in 0..40 {
+                conn.execute(
+                    "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json,
+                         started_at, finished_at, run_type)
+                     VALUES (?1, 'wf', 'Success', ?2, '2026-01-01T00:00:00+00:00',
+                             '2026-01-01T00:00:00+00:00', 'linear')",
+                    rusqlite::params![format!("run-{index}"), payload],
+                )?;
+            }
+            while crate::db::run_retention::compact_run_payloads_chunk(
+                conn,
+                "2026-06-01T00:00:00+00:00",
+                crate::db::run_retention::CHUNK_ROWS,
+            )? > 0
+            {}
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db
+    }
+
     #[tokio::test]
+    #[serial(db_maintenance)]
+    async fn trimming_frees_pages_and_compaction_shrinks_the_file() {
+        // KT-984 DAT-2 — a purge only grows the free list; the file keeps its
+        // size until a VACUUM gives the pages back.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = database_with_trimmed_runs(tmp.path()).await;
+        let free_pages: i64 = db
+            .with_conn(|conn| Ok(conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert!(free_pages > 1_000, "the trim left free pages: {free_pages}");
+
+        let report = compact_database(&db).await.unwrap();
+        assert!(
+            report.file_bytes_after * 4 < report.file_bytes_before,
+            "the file shrinks: {report:?}"
+        );
+        assert_eq!(report.wal_bytes_after, 0, "{report:?}");
+        let (runs, outputs): (i64, String) = db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*), MIN(step_results_json) FROM workflow_runs",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs, 40, "every run row is kept");
+        assert!(outputs.contains(crate::db::run_retention::REMOVED_OUTPUT));
+    }
+
+    #[tokio::test]
+    #[serial(db_maintenance)]
+    async fn compaction_is_refused_without_room_or_during_a_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = database_with_trimmed_runs(tmp.path()).await;
+        let error = compact_database_with(&db, |_| Ok(1024)).await.unwrap_err();
+        assert!(
+            error.to_string().contains("not enough free space"),
+            "{error}"
+        );
+
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE workflow_runs SET status = 'Running' WHERE id = 'run-0'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let error = compact_database(&db).await.unwrap_err();
+        assert!(error.to_string().contains("in progress"), "{error}");
+    }
+
+    #[tokio::test]
+    #[serial(db_maintenance)]
     async fn perform_backup_writes_a_readable_copy() {
         // End-to-end through the REAL copy path. This is the test that was
         // missing on 2026-07-09: `run_to_completion(-1, …)` type-checked but

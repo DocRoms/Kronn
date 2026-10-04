@@ -64,6 +64,7 @@ pub mod rtk_detect;
 pub mod rtk_state;
 pub mod run_eta;
 pub mod run_notify;
+pub mod run_retention;
 pub mod scanner;
 pub mod session_budget;
 pub mod skill_migration;

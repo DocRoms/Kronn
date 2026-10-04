@@ -11151,6 +11151,7 @@ async fn server_config_returns_defaults() {
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
     assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
     assert_eq!(json["data"]["execution_variable_retention_days"], 30);
+    assert_eq!(json["data"]["run_payload_retention_days"], 30);
     assert_eq!(
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])
@@ -11204,6 +11205,23 @@ async fn server_config_updates_execution_variable_retention_including_zero() {
 
         let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
         assert_eq!(persisted["data"]["execution_variable_retention_days"], days);
+    }
+}
+
+#[tokio::test]
+async fn server_config_updates_run_payload_retention_including_zero() {
+    // KT-984 — zero keeps every run's step outputs.
+    let app = test_app();
+    for days in [90, 0] {
+        let (_, updated) = post_json(
+            app.clone(),
+            "/api/config/server",
+            serde_json::json!({ "run_payload_retention_days": days }),
+        )
+        .await;
+        assert_eq!(updated["success"], true);
+        let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
+        assert_eq!(persisted["data"]["run_payload_retention_days"], days);
     }
 }
 
@@ -14307,6 +14325,16 @@ async fn db_backup_in_memory_db_returns_error() {
         "error should mention the in-memory DB; got: {}",
         err
     );
+}
+
+#[tokio::test]
+async fn db_compact_in_memory_db_returns_error() {
+    let app = test_app();
+    let (status, json) = post_json(app, "/api/db/compact", serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(err.contains("memory"), "got: {err}");
 }
 
 #[tokio::test]

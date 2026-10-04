@@ -2096,60 +2096,6 @@ fn workflow_run_page_keeps_the_boundary_parent_group_complete() {
 }
 
 #[test]
-fn purge_runs_older_than_deletes_old_terminal_but_preserves_parents_and_recent() {
-    use chrono::Duration;
-    let conn = test_db();
-    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
-    let old = || Utc::now() - Duration::days(100);
-
-    // A parent (old, terminal) referenced by a child → must be PRESERVED.
-    let mut parent = sample_run("parent", "w1");
-    parent.status = RunStatus::Success;
-    parent.finished_at = Some(old());
-    crate::db::workflows::insert_run(&conn, &parent).unwrap();
-
-    let mut child = sample_run("child", "w1");
-    child.status = RunStatus::Success;
-    child.parent_run_id = Some("parent".into());
-    child.finished_at = Some(old());
-    crate::db::workflows::insert_run(&conn, &child).unwrap();
-
-    // Old standalone terminal → DELETED.
-    let mut old_standalone = sample_run("old-standalone", "w1");
-    old_standalone.status = RunStatus::Failed;
-    old_standalone.finished_at = Some(old());
-    crate::db::workflows::insert_run(&conn, &old_standalone).unwrap();
-
-    // Recent terminal → kept (within window).
-    let mut recent = sample_run("recent", "w1");
-    recent.status = RunStatus::Success;
-    recent.finished_at = Some(Utc::now());
-    crate::db::workflows::insert_run(&conn, &recent).unwrap();
-
-    // Old but still Running (no finished_at) → never purged.
-    let mut running = sample_run("running", "w1");
-    running.status = RunStatus::Running;
-    running.started_at = old();
-    crate::db::workflows::insert_run(&conn, &running).unwrap();
-
-    let n = crate::db::workflows::purge_runs_older_than(&conn, 90).unwrap();
-    assert_eq!(
-        n, 2,
-        "old standalone terminal + the (unreferenced-after) child"
-    );
-
-    let exists = |id: &str| crate::db::workflows::get_run(&conn, id).unwrap().is_some();
-    assert!(
-        exists("parent"),
-        "parent referenced by a child is preserved"
-    );
-    assert!(!exists("old-standalone"), "old standalone terminal purged");
-    assert!(!exists("child"), "old terminal child purged");
-    assert!(exists("recent"), "recent run kept");
-    assert!(exists("running"), "non-terminal run never purged");
-}
-
-#[test]
 fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
     use chrono::Duration;
     let conn = test_db();
@@ -3785,6 +3731,47 @@ fn discussions_list_with_messages_batch_loads() {
     let d2 = discussions.iter().find(|d| d.id == "d2").unwrap();
     assert_eq!(d1.messages.len(), 2);
     assert_eq!(d2.messages.len(), 1);
+}
+
+#[test]
+fn workflow_delete_is_blocked_by_live_paused_or_resumable_runs() {
+    // WF-9 — the delete cascades to the run rows a runner or a worktree
+    // still depends on.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let blocking = |conn: &Connection| {
+        crate::db::workflows::runs_blocking_workflow_delete(conn, "w1").unwrap()
+    };
+    assert_eq!(blocking(&conn), 0);
+    let mut finished = sample_run("done", "w1");
+    finished.status = RunStatus::Success;
+    finished.workspace_path = Some("/repo/.kronn/worktrees/done".into());
+    crate::db::workflows::insert_run(&conn, &finished).unwrap();
+    let mut interrupted_clean = sample_run("interrupted-clean", "w1");
+    interrupted_clean.status = RunStatus::Interrupted;
+    crate::db::workflows::insert_run(&conn, &interrupted_clean).unwrap();
+    assert_eq!(
+        blocking(&conn),
+        0,
+        "finished runs and clean interruptions do not block"
+    );
+
+    for (id, status, workspace) in [
+        ("running", RunStatus::Running, None),
+        ("pending", RunStatus::Pending, None),
+        ("waiting", RunStatus::WaitingApproval, None),
+        (
+            "interrupted",
+            RunStatus::Interrupted,
+            Some("/repo/.kronn/worktrees/i".to_string()),
+        ),
+    ] {
+        let mut run = sample_run(id, "w1");
+        run.status = status;
+        run.workspace_path = workspace;
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    assert_eq!(blocking(&conn), 4);
 }
 
 #[test]

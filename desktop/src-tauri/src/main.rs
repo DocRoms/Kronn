@@ -746,6 +746,10 @@ async fn start_backend(
     ));
     tokio::spawn(async move { learning_sweep.start().await });
 
+    // KT-984 — periodic, chunked run retention. Mirror of the spawn in
+    // backend/src/main.rs (feature in the lib, spawn per-binary).
+    kronn::core::run_retention::spawn(state.db.clone(), state.config.clone());
+
     // Start WS client manager for multi-user sync
     let ws_state = state.clone();
     tokio::spawn(async move { kronn::core::ws_client::run(ws_state).await });

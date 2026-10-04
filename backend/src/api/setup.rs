@@ -847,6 +847,7 @@ pub async fn get_server_config(
         agent_handoff_blocked_agents: config.server.agent_handoff_blocked_agents.clone(),
         discussion_weight: config.server.discussion_weight,
         execution_variable_retention_days: config.server.execution_variable_retention_days,
+        run_payload_retention_days: config.server.run_payload_retention_days,
     }))
 }
 
@@ -869,6 +870,9 @@ pub async fn set_server_config(
     }
     if let Some(days) = req.execution_variable_retention_days {
         config.server.execution_variable_retention_days = days;
+    }
+    if let Some(days) = req.run_payload_retention_days {
+        config.server.run_payload_retention_days = days;
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {
@@ -1514,6 +1518,26 @@ pub async fn db_backup(State(state): State<AppState>) -> Json<ApiResponse<DbBack
             }))
         }
         Err(e) => Json(ApiResponse::err(format!("Backup failed: {}", e))),
+    }
+}
+
+/// `POST /api/db/compact` — KT-984: give the database's free pages back to the
+/// filesystem and report the size before and after. Explicit only: it holds
+/// the write connection for the whole rewrite.
+pub async fn db_compact(State(state): State<AppState>) -> Json<ApiResponse<DbCompaction>> {
+    match crate::core::backup::compact_database(&state.db).await {
+        Ok(report) => {
+            tracing::info!(
+                "Database compacted in {} ms: {} -> {} bytes (WAL {} -> {})",
+                report.duration_ms,
+                report.file_bytes_before,
+                report.file_bytes_after,
+                report.wal_bytes_before,
+                report.wal_bytes_after
+            );
+            Json(ApiResponse::ok(report))
+        }
+        Err(e) => Json(ApiResponse::err(format!("Compaction refused: {e}"))),
     }
 }
 
