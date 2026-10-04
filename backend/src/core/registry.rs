@@ -242,16 +242,12 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                 command: "npx".into(),
                 args: vec!["-y".into(), "@benborla29/mcp-server-mysql".into()],
             },
-            env_keys: vec![
-                "MYSQL_HOST".into(),
-                "MYSQL_PORT".into(),
-                "MYSQL_USER".into(),
-                "MYSQL_PASS".into(),
-                "MYSQL_DB".into(),
-            ],
+            // Every declared key is required (`find_incomplete_configs`): the
+            // port (3306) and the database (multi-database mode) are optional.
+            env_keys: vec!["MYSQL_HOST".into(), "MYSQL_USER".into(), "MYSQL_PASS".into()],
             tags: vec!["database".into(), "sql".into(), "mysql".into(), "mariadb".into()],
             token_url: None,
-            token_help: Some("Host, port (3306), user, password and database of a MySQL 5.7+ or MariaDB server. Use a read-only database user: writes stay off unless ALLOW_INSERT_OPERATION, ALLOW_UPDATE_OPERATION or ALLOW_DELETE_OPERATION is set to true.".into()),
+            token_help: Some("Host, user and password of a MySQL 5.7+ or MariaDB server. Optional: MYSQL_PORT (default 3306) and MYSQL_DB (left empty, the server works across databases). Use a read-only database user: writes stay off unless ALLOW_INSERT_OPERATION, ALLOW_UPDATE_OPERATION or ALLOW_DELETE_OPERATION is set to true.".into()),
             publisher: "benborla".into(),
             official: false,
             alt_packages: vec![],

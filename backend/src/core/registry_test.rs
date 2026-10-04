@@ -306,15 +306,9 @@ mod tests {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-mysql").unwrap();
         assert!(m.tags.contains(&"mariadb".to_string()));
-        for key in [
-            "MYSQL_HOST",
-            "MYSQL_PORT",
-            "MYSQL_USER",
-            "MYSQL_PASS",
-            "MYSQL_DB",
-        ] {
-            assert!(m.env_keys.contains(&key.to_string()), "missing {key}");
-        }
+        assert_eq!(m.env_keys, vec!["MYSQL_HOST", "MYSQL_USER", "MYSQL_PASS"]);
+        let help = m.token_help.as_deref().unwrap();
+        assert!(help.contains("MYSQL_PORT") && help.contains("MYSQL_DB"));
         let McpTransport::Stdio { command, args } = &m.transport else {
             panic!("MySQL runs over stdio");
         };

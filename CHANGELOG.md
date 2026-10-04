@@ -14,8 +14,9 @@ Release notes for 0.9.3 and earlier are available in the
 ### Added
 
 - The plugin catalogue offers MySQL / MariaDB (KT-996, #217), through the
-  community server `@benborla29/mcp-server-mysql`: host, port, user, password
-  and database, read-only unless a write flag is set on the server.
+  community server `@benborla29/mcp-server-mysql`: host, user and password,
+  with an optional port and database, read-only unless a write flag is set on
+  the server.
 
 ### Fixed
 
