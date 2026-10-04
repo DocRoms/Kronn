@@ -590,6 +590,42 @@ pub async fn delete_branch_at(repo_path: &Path, branch: &str, expected_sha: &str
     Ok(())
 }
 
+async fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> usize {
+    let (repo, parent) = (repo_path.to_path_buf(), parent.to_path_buf());
+    tokio::task::spawn_blocking(move || {
+        crate::core::worktree::remove_nested_worktrees(&repo, &parent)
+    })
+    .await
+    .unwrap_or(0)
+}
+
+async fn prune_kronn_worktrees(repo_path: &Path) -> usize {
+    let repo = repo_path.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::core::worktree::prune_kronn_worktrees(&repo))
+        .await
+        .unwrap_or(0)
+}
+
+/// Boot pass: drops the admin entries of Kronn worktrees whose checkout is
+/// gone, in every project repository. Returns how many were pruned.
+pub async fn prune_orphan_worktrees(db: &crate::db::Database) -> usize {
+    let projects = match db.with_conn(crate::db::projects::list_projects).await {
+        Ok(projects) => projects,
+        Err(error) => {
+            tracing::warn!("Orphan worktree prune skipped: {error}");
+            return 0;
+        }
+    };
+    let mut pruned = 0;
+    for project in projects {
+        let repo = crate::core::scanner::resolve_host_path(&project.path);
+        if repo.join(".kronn").is_dir() && repo.join(".git").exists() {
+            pruned += prune_kronn_worktrees(&repo).await;
+        }
+    }
+    pruned
+}
+
 /// Build a branch name for a workflow run: `kronn/<sanitized_name>/<run_id_prefix>`.
 pub(crate) fn build_branch_name(workflow_name: &str, run_id: &str) -> String {
     let sanitized = sanitize_name(workflow_name);
@@ -761,6 +797,8 @@ impl Workspace {
         // the worktree path is gone and `git -C <worktree>` calls fail.
         let preserve = check_branch_for_preservation(&self.path, &self.branch).await;
 
+        remove_nested_worktrees(&self.repo_path, &self.path).await;
+
         // Remove the worktree
         let output = async_cmd("git")
             .args(["worktree", "remove", "--force"])
@@ -781,6 +819,7 @@ impl Workspace {
                 let _ = std::fs::remove_dir_all(&self.path);
             }
         }
+        prune_kronn_worktrees(&self.repo_path).await;
 
         let outcome =
             if let Some(info) = preserve {
@@ -812,6 +851,7 @@ impl Workspace {
     /// branch ref: the original runner may already have persisted/pushed it,
     /// and boot recovery must remove discoverable checkout data only.
     pub async fn purge_terminal_checkout(repo_path: &Path, worktree_path: &Path) -> Result<()> {
+        remove_nested_worktrees(repo_path, worktree_path).await;
         let output = async_cmd("git")
             .args(["worktree", "remove", "--force"])
             .arg(worktree_path)
@@ -819,6 +859,7 @@ impl Workspace {
             .output()
             .await
             .context("Failed to purge terminal workflow worktree")?;
+        prune_kronn_worktrees(repo_path).await;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("git worktree remove failed: {}", stderr.trim());
@@ -1510,6 +1551,114 @@ mod tests {
             .expect("cleanup goes on after the hook timeout");
 
         assert!(!path.exists(), "the worktree is removed anyway");
+    }
+
+    async fn porcelain(repo: &std::path::Path) -> String {
+        let out = crate::core::cmd::async_cmd("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo)
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    async fn add_nested_pr_worktree(run_worktree: &std::path::Path) -> std::path::PathBuf {
+        let out = crate::core::cmd::async_cmd("git")
+            .args(["worktree", "add", "-q", "-b", "pr-1995", ".kronn/pr-1995"])
+            .current_dir(run_worktree)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        run_worktree.join(".kronn/pr-1995")
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_a_worktree_nested_in_the_run_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "pr-review", "0d9e49ec-run", None, None)
+            .await
+            .expect("create worktree");
+        let nested = add_nested_pr_worktree(&ws.path).await;
+        assert!(porcelain(&repo).await.contains("pr-1995"));
+
+        ws.cleanup().await.expect("cleanup");
+
+        let listed = porcelain(&repo).await;
+        assert!(!nested.exists());
+        assert!(!listed.contains("prunable"), "{listed}");
+        assert!(!listed.contains("pr-1995"), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn the_boot_purge_removes_a_worktree_nested_in_a_terminal_run() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "pr-review", "65b120da-run", None, None)
+            .await
+            .expect("create worktree");
+        add_nested_pr_worktree(&ws.path).await;
+        let path = ws.path.clone();
+        drop(ws);
+
+        Workspace::purge_terminal_checkout(&repo, &path)
+            .await
+            .expect("purge");
+
+        let listed = porcelain(&repo).await;
+        assert!(!path.exists());
+        assert!(!listed.contains("prunable"), "{listed}");
+        assert!(!listed.contains("pr-1995"), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn orphan_kronn_worktrees_are_pruned_at_startup_and_user_ones_are_kept() {
+        let (dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "orphan", "abcdef01-run", None, None)
+            .await
+            .expect("create worktree");
+        add_nested_pr_worktree(&ws.path).await;
+        // A user's own worktree outside `.kronn/`, on a drive not mounted now.
+        let outside = dir.path().join("été-outside");
+        let out = crate::core::cmd::async_cmd("git")
+            .args(["worktree", "add", "-q", "-b", "user-branch"])
+            .arg(&outside)
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_dir_all(&ws.path).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+        assert_eq!(porcelain(&repo).await.matches("prunable").count(), 3);
+
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let now = chrono::Utc::now();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "proj-orphans", "name": "Orphans",
+            "path": repo.to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        db.with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+
+        assert_eq!(prune_orphan_worktrees(&db).await, 2);
+        let listed = porcelain(&repo).await;
+        assert_eq!(listed.matches("prunable").count(), 1, "{listed}");
+        assert!(listed.contains("user-branch"), "{listed}");
+        assert_eq!(prune_orphan_worktrees(&db).await, 0, "idempotent");
     }
 
     #[tokio::test]

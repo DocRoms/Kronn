@@ -423,6 +423,14 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
   the checkout goes. Git-ignored files (build output) go with the checkout.
+- **Worktrees nested in a run worktree (KT-985).** A step may add its own
+  worktree inside the run's (`<run worktree>/.kronn/pr-N`). Deleting the run's
+  directory alone leaves that entry `prunable` in `git worktree list`, so
+  cleanup and the boot purge remove nested worktrees first, then drop the
+  prunable entries under `<repo>/.kronn/`. Boot repeats that prune for every
+  project. It never runs a blanket `git worktree prune`: that would also drop
+  a user's own worktree on an unmounted drive.
+  [src: file: backend/src/core/worktree.rs:898-978]
   Removal uses `git worktree remove` without `--force`; the run's own
   `kronn/…` branch is deleted only when fully integrated, by compare-and-swap
   on the commit that was checked. No workspace hook runs. The run keeps its

@@ -7565,6 +7565,159 @@ mod tests {
             .expect("the slot is free again");
         assert_eq!(interrupted.status, RunStatus::Running);
     }
+
+    // ─── KT-985 — a run's worktree goes at every end, its commits stay ───
+
+    fn commit_step(name: &str) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Exec;
+        step.exec_command = Some("git".into());
+        step.exec_args = [
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "work",
+        ]
+        .map(String::from)
+        .to_vec();
+        step
+    }
+
+    async fn assert_worktree_gone_and_commit_kept(repo: &std::path::Path, run: &WorkflowRun) {
+        let path = std::path::PathBuf::from(run.workspace_path.clone().expect("isolated"));
+        assert!(!path.exists(), "the worktree is removed");
+        let listed = git_in(repo, &["worktree", "list", "--porcelain"]).await;
+        assert!(!listed.contains("prunable"), "{listed}");
+        assert_eq!(
+            run.produced_branches.len(),
+            1,
+            "{:?}",
+            run.produced_branches
+        );
+        let branch = &run.produced_branches[0];
+        assert_eq!(branch.ahead, 1);
+        git_in(
+            repo,
+            &[
+                "show-ref",
+                "--verify",
+                &format!("refs/heads/{}", branch.branch_name),
+            ],
+        )
+        .await;
+    }
+
+    async fn run_to_end(state: &crate::AppState, workflow: &Workflow, run_id: &str) -> WorkflowRun {
+        let (_, tokens, agents) = test_state_and_configs();
+        let mut run = pending_run(run_id, &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        insert_wf_and_run(state, workflow, &run).await;
+        execute_run(
+            state.clone(),
+            workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        run
+    }
+
+    #[tokio::test]
+    async fn a_successful_run_removes_its_worktree_and_keeps_its_commits() {
+        let (state, _, _) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-success").await;
+        workflow.exec_allowlist = vec!["git".into()];
+        workflow.steps = vec![commit_step("commit")];
+        let run = run_to_end(&state, &workflow, "run-end-success").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_removes_its_worktree_and_keeps_its_commits() {
+        let (state, _, _) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-failed").await;
+        workflow.exec_allowlist = vec!["git".into()];
+        let mut broken = fake_step("broken");
+        broken.step_type = StepType::Exec;
+        broken.exec_command = Some("git".into());
+        broken.exec_args = vec!["no-such-subcommand".into()];
+        workflow.steps = vec![commit_step("commit"), broken];
+        let run = run_to_end(&state, &workflow, "run-end-failed").await;
+        assert_eq!(run.status, RunStatus::Failed, "{:?}", run.step_results);
+        assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_removes_its_worktree_and_keeps_its_commits() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-cancel").await;
+        workflow.exec_allowlist = vec!["git".into(), "sleep".into()];
+        let mut wait = fake_step("wait");
+        wait.step_type = StepType::Exec;
+        wait.exec_command = Some("sleep".into());
+        wait.exec_args = vec!["20".into()];
+        workflow.steps = vec![commit_step("commit"), wait];
+        let mut run = pending_run("run-end-cancel", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let canceller = {
+            let state = state.clone();
+            async move {
+                for _ in 0..500 {
+                    let committed = state
+                        .db
+                        .with_conn(|conn| crate::db::workflows::get_run(conn, "run-end-cancel"))
+                        .await
+                        .unwrap()
+                        .is_some_and(|run| !run.step_results.is_empty());
+                    if committed {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                crate::workflows::cancellation::cancel_run_tree(
+                    &state,
+                    "run-end-cancel",
+                    crate::workflows::cancellation::CancellationScope::RunTree,
+                    "cancelled_by_operator",
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let started = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None
+            ),
+            canceller,
+        );
+        result.expect("run");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "the sleep was cut short"
+        );
+        assert_eq!(run.status, RunStatus::Cancelled, "{:?}", run.step_results);
+        assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
 }
 
 #[cfg(test)]

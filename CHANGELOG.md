@@ -209,6 +209,12 @@ Release notes for 0.9.3 and earlier are available in the
   editor's save rules. Isolated workflow worktrees get the project's agent
   configs (`.mcp.json` and the others), so an Agent step keeps the project's
   MCP servers and its strict MCP config instead of the host's.
+- Workflow worktrees no longer pile up as `prunable` entries (KT-985). A
+  worktree a step created inside its run's worktree (`.kronn/pr-N`) is now
+  removed with it, and at startup Kronn drops the stale entries of its own
+  worktrees under `.kronn/` in every project, leaving the user's other
+  worktrees alone. A run still keeps a branch that holds commits no base has,
+  whether it succeeded, failed or was cancelled.
 
 ### Changed
 

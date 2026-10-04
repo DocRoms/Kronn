@@ -527,6 +527,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Checkouts deleted without git (or nested inside a removed run worktree)
+    // leave admin entries that slow every `git worktree` call.
+    let pruned = kronn::workflows::workspace::prune_orphan_worktrees(&state.db).await;
+    if pruned > 0 {
+        tracing::info!(pruned, "Orphan Kronn worktree entries pruned");
+    }
+
     // Partial-response recovery — agents whose `full_response` was being
     // checkpointed into discussions.partial_response when the previous
     // process died. Convert each into an Agent message with an "interrupted"
