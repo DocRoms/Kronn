@@ -614,7 +614,7 @@ pub async fn partial_audit(
                                         output: Some(output_tokens),
                                         cache_read: prompt_cache.cached_prompt_tokens,
                                         cache_write: prompt_cache.cache_write_prompt_tokens,
-                                    };
+                                    }.inclusive_for(&agent_type);
                                 }
                             }
                         }
@@ -626,7 +626,7 @@ pub async fn partial_audit(
                     if !is_stream_json {
                         let reading = crate::db::audit_runs::StepTokens::from_reported(
                             process.reported_usage_counters(),
-                        );
+                        ).inclusive_for(&agent_type);
                         if reading.total().is_some() {
                             step_usage = reading;
                         }

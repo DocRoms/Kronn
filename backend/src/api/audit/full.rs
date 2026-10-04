@@ -469,10 +469,54 @@ pub async fn full_audit(
                 .filter(|(step, _)| already_succeeded_steps.contains(step))
                 .collect();
             let run_id = audit_run_id.clone();
+            let from_run_id = resume_run_id_req.clone().unwrap_or_default();
             if let Err(e) = db.with_conn(move |conn| {
-                crate::db::audit_runs::carry_over_steps(conn, &run_id, &carried, Utc::now())
+                crate::db::audit_runs::carry_over_steps(conn, &run_id, &from_run_id, &carried, Utc::now())
             }).await {
-                tracing::error!("Failed to record the steps carried over by run {audit_run_id}: {e}");
+                // Unrecorded, the next resume would replay the whole chain.
+                yield Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": format!("Could not record the steps this resume inherits (db): {e} — launch refused.")
+                    }).to_string(),
+                );
+                return;
+            }
+        }
+
+        // KT-1021 — what this run audits; a resume says whether the sources
+        // moved since the run it continues.
+        {
+            let pp = project_path.clone();
+            let (head, branch, fingerprint) = tokio::task::spawn_blocking(move || {
+                let (head, branch) = crate::core::checksums::git_head_and_branch(&pp);
+                let fingerprint = crate::core::checksums::stable_source_tree_fingerprint(&pp)
+                    .ok()
+                    .flatten();
+                (head, branch, fingerprint)
+            }).await.unwrap_or_default();
+            let run_id = audit_run_id.clone();
+            let previous_id = resume_run_id_req.clone();
+            let (h, b, f) = (head.clone(), branch.clone(), fingerprint.clone());
+            let previous = db.with_conn(move |conn| {
+                crate::db::audit_runs::set_run_provenance(
+                    conn, &run_id, h.as_deref(), b.as_deref(), f.as_deref(), None,
+                )?;
+                match previous_id {
+                    Some(id) => crate::db::audit_runs::get_by_id(conn, &id),
+                    None => Ok(None),
+                }
+            }).await;
+            match previous {
+                Ok(Some(previous)) => {
+                    if let Some(message) = resume_drift_message(&previous, head.as_deref(), fingerprint.as_deref()) {
+                        tracing::warn!("{message}");
+                        yield Event::default().event("warning").data(
+                            serde_json::json!({ "message": message }).to_string(),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("Could not record the audit run's provenance: {e}"),
             }
         }
 
@@ -1287,7 +1331,7 @@ pub async fn full_audit(
                                             output: Some(output_tokens),
                                             cache_read: prompt_cache.cached_prompt_tokens,
                                             cache_write: prompt_cache.cache_write_prompt_tokens,
-                                        };
+                                        }.inclusive_for(&agent_type);
                                         usage_moved = true;
                                     }
                                 }
@@ -1328,7 +1372,7 @@ pub async fn full_audit(
                             // such step was recorded at 0.
                             let reading = crate::db::audit_runs::StepTokens::from_reported(
                                 process.reported_usage_counters(),
-                            );
+                            ).inclusive_for(&agent_type);
                             if reading.total().is_some() && reading != step_usage {
                                 step_usage = reading;
                                 usage_moved = true;
@@ -1367,7 +1411,7 @@ pub async fn full_audit(
                     if !is_stream_json {
                         let reading = crate::db::audit_runs::StepTokens::from_reported(
                             process.reported_usage_counters(),
-                        );
+                        ).inclusive_for(&agent_type);
                         if reading.total().is_some() {
                             step_usage = reading;
                         }
@@ -3257,6 +3301,35 @@ pub(crate) struct SeverityCounts {
     pub low: u32,
 }
 
+/// What changed in the sources between the run a resume continues and now,
+/// `None` when nothing did or when the earlier run recorded nothing to compare.
+pub(crate) fn resume_drift_message(
+    previous: &AuditRun,
+    head: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Option<String> {
+    let moved_fingerprint = matches!(
+        (previous.source_fingerprint.as_deref(), fingerprint),
+        (Some(before), Some(now)) if before != now
+    );
+    let moved_head = matches!(
+        (previous.head_sha.as_deref(), head),
+        (Some(before), Some(now)) if before != now
+    );
+    if !moved_fingerprint && !moved_head {
+        return None;
+    }
+    let short = |sha: Option<&str>| sha.map(|s| s.chars().take(10).collect::<String>());
+    let head_note = match (short(previous.head_sha.as_deref()), short(head)) {
+        (Some(before), Some(now)) if before != now => format!(" (HEAD {before} → {now})"),
+        _ => String::new(),
+    };
+    Some(format!(
+        "The sources changed since run {} that this audit resumes{head_note}: the steps it inherits describe the earlier sources.",
+        previous.id
+    ))
+}
+
 /// True when a TD detail file's `- **Status**: <value>` line (mirrors the
 /// latest `audit_history` entry — see `mod.rs`'s Step 8 template) is
 /// `Rejected`. The user explicitly dismissed the finding during validation
@@ -3870,6 +3943,30 @@ mod resume_resolution_tests {
     }
 
     #[test]
+    fn a_resume_reports_sources_that_moved_since_the_run_it_continues() {
+        let mut previous = run("Full", "Interrupted", "p1", 4);
+        assert_eq!(
+            super::resume_drift_message(&previous, Some("a"), Some("f")),
+            None,
+            "nothing recorded"
+        );
+        previous.head_sha = Some("1111111111aaaa".into());
+        previous.source_fingerprint = Some("fp-1".into());
+        assert_eq!(
+            super::resume_drift_message(&previous, Some("1111111111aaaa"), Some("fp-1")),
+            None
+        );
+        let moved =
+            super::resume_drift_message(&previous, Some("2222222222bbbb"), Some("fp-2")).unwrap();
+        assert!(moved.contains("r1"), "{moved}");
+        assert!(moved.contains("1111111111 → 2222222222"), "{moved}");
+        // Uncommitted edits: same HEAD, different fingerprint.
+        let dirty =
+            super::resume_drift_message(&previous, Some("1111111111aaaa"), Some("fp-2")).unwrap();
+        assert!(!dirty.contains("HEAD"), "{dirty}");
+    }
+
+    #[test]
     fn interrupted_row_yields_its_own_kind_and_checkpoint() {
         // #1/#3 — kind + checkpoint come from the row, never the client.
         let r = run("Full", "Interrupted", "p1", 12);
@@ -4428,6 +4525,7 @@ mod partial_run_tests {
                 crate::db::audit_runs::carry_over_steps(
                     conn,
                     "run-b",
+                    "run-a",
                     &carried,
                     chrono::Utc::now(),
                 )?;

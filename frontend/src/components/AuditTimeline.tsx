@@ -31,6 +31,7 @@ interface StepRow {
   input_tokens?: number | null;
   output_tokens?: number | null;
   cache_read_tokens?: number | null;
+  carried_from_run_id?: string | null;
 }
 
 export interface AuditTimelineProps {
@@ -477,14 +478,29 @@ export function AuditTimeline(props: AuditTimelineProps) {
                             {(() => {
                               // The running step reads its live count; a finished one its record.
                               const tokens = r.status === 'running' ? props.liveStepTokens : r.row?.step_tokens;
-                              if (tokens == null || tokens <= 0) return null;
+                              // A finished step whose agent reported nothing is unknown, not free.
+                              if (tokens == null && r.row?.ended_at && r.status !== 'running') {
+                                return (
+                                  <span
+                                    className="audit-tl-mono audit-tl-muted"
+                                    data-testid={`audit-timeline-step-tokens-${r.index}`}
+                                    title={t('auditTimeline.tokens.unknownTitle')}
+                                  >
+                                    {t('auditTimeline.tokens.unknown')}
+                                  </span>
+                                );
+                              }
+                              if (tokens == null || (r.status === 'running' && tokens <= 0)) return null;
                               const part = (v?: number | null) => (v == null ? '—' : v.toLocaleString(locale));
                               return (
                                 <span
                                   className="audit-tl-mono audit-tl-muted"
                                   data-testid={`audit-timeline-step-tokens-${r.index}`}
-                                  title={r.status === 'running' ? undefined : t('auditTimeline.tokens.detail',
-                                    part(r.row?.input_tokens), part(r.row?.output_tokens), part(r.row?.cache_read_tokens))}
+                                  title={r.status === 'running' ? undefined : [
+                                    t('auditTimeline.tokens.detail',
+                                      part(r.row?.input_tokens), part(r.row?.output_tokens), part(r.row?.cache_read_tokens)),
+                                    r.row?.carried_from_run_id ? t('auditTimeline.tokens.carried', r.row.carried_from_run_id.slice(0, 8)) : '',
+                                  ].filter(Boolean).join(' · ')}
                                 >
                                   {t('auditTimeline.tokens.short', formatTokens(tokens, locale))}
                                 </span>

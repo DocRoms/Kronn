@@ -97,6 +97,16 @@ Release notes for 0.9.3 and earlier are available in the
   placeholder or a `TODO:` marker, the final review skips the `TEMPLATE.md`
   gabarits like the document gate does, and no root redirector is written
   toward a missing `docs/AGENTS.md`.
+
+
+
+- A resumed audit keeps the tokens, duration and cost of the steps it inherits
+  and names the run that spent them, refuses to start when it cannot record
+  them, and warns when the sources moved since the run it continues (KT-1021):
+  each audit run now records its commit, branch and source fingerprint. Token
+  figures count cached prompt tokens the same way for every agent, and the
+  timeline shows a step whose agent reported nothing as unknown instead of
+  hiding it.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its

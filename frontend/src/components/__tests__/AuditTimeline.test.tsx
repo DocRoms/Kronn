@@ -341,6 +341,27 @@ describe('AuditTimeline', () => {
     expect(screen.queryByTestId('audit-timeline-recorded')).toBeNull();
   });
 
+  it('tells unknown tokens from zero and names the run a carried step came from (KT-1021)', async () => {
+    mockTimeline([{ id: 'run-1' }], [
+      step(1, { step_tokens: null, input_tokens: null, output_tokens: null }),
+      step(2, { step_tokens: 0, input_tokens: 0, output_tokens: 0 }),
+      step(3, { step_tokens: 5, input_tokens: 4, output_tokens: 1, carried_from_run_id: 'abcdef1234567890' }),
+    ]);
+    const { container } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
+    container.querySelectorAll<HTMLElement>('.audit-tl-group-head').forEach(head => {
+      if (head.getAttribute('aria-expanded') === 'false') fireEvent.click(head);
+    });
+
+    const unknown = await screen.findByTestId('audit-timeline-step-tokens-1');
+    expect(unknown).toHaveTextContent('?');
+    expect(unknown.getAttribute('title')).toMatch(/inconnu|unknown/);
+    expect(screen.getByTestId('audit-timeline-step-tokens-2')).toHaveTextContent(/^0 tk$/);
+    const carried = screen.getByTestId('audit-timeline-step-tokens-3');
+    expect(carried).toHaveTextContent('5 tk');
+    expect(carried.getAttribute('title')).toContain('abcdef12');
+  });
+
   it('saves the briefing without creating a discussion', async () => {
     const p = props();
     wrap(<AuditTimeline {...p} />);

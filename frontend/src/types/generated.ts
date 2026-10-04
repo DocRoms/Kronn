@@ -793,7 +793,15 @@ report_path?: string | null,
  * in the model to avoid forcing schema migrations on every
  * recommendation-shape tweak.
  */
-recommendations_json?: string | null, };
+recommendations_json?: string | null,
+/**
+ * Commit, branch and source fingerprint at the run's start (KT-1021).
+ */
+head_sha?: string | null, branch?: string | null, source_fingerprint?: string | null,
+/**
+ * The model the run's agent used, when known.
+ */
+model?: string | null, };
 
 /**
  * 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -824,7 +832,16 @@ cli_success: boolean, step_warning?: string | null,
 /**
  * Mirrors the `step_warning.repaired` field from #292.
  */
-step_repaired_from_template: boolean, };
+step_repaired_from_template: boolean,
+/**
+ * The step's cost in millionths of a dollar, when its agent reported one.
+ */
+cost_usd_micros?: number | null,
+/**
+ * For a step a resume inherited: the run that actually ran it. Its tokens,
+ * duration and cost are that run's, not spent again.
+ */
+carried_from_run_id?: string | null, };
 
 /**
  * KT-977 — one step of the Full audit, known before any run: lets the UI
