@@ -81,6 +81,14 @@ Release notes for 0.9.3 and earlier are available in the
   concurrent runs on one project no longer drop each other's entries from the
   ownership ledger, and "Migrate to .agents/skills" no longer offers the
   catalogue copies Kronn synced itself as repository skills.
+- A tracker issue title or a step output can no longer run as code in an
+  Exec step (KT-1017). Saving a workflow now refuses a template placeholder
+  inside an interpreter's inline script (`bash -c`, `python3 -c`, `node -e`…),
+  where it would be parsed as code, and says how to write it safely: pass the
+  value as a later argument (`["-c", "echo \"$1\"", "_", "{{issue.title}}"]`),
+  or, in a shell script, use the new `{{value|sh}}` filter, which renders one
+  single-quoted word. `{{run.id}}` and `{{time.now…}}` stay allowed. Saved
+  workflows keep running unchanged until they are next edited.
 
 ### Changed
 

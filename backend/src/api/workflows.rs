@@ -1007,6 +1007,124 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
 /// because the runner never invokes a shell. Validating the rendered
 /// content here would either be a false safety blanket (we'd reject
 /// legitimate values) or trivially bypassed.
+/// Shells whose `-c` argument is a script.
+const SCRIPT_SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "fish", "ksh", "ash"];
+
+/// The flags after which an interpreter reads inline code, per binary.
+fn inline_code_flags(cmd: &str) -> &'static [&'static str] {
+    let lower = cmd.to_ascii_lowercase();
+    if SCRIPT_SHELLS.contains(&lower.as_str())
+        || lower.starts_with("python")
+        || lower.starts_with("pypy")
+    {
+        &["-c"]
+    } else if matches!(lower.as_str(), "node" | "nodejs" | "bun") {
+        &["-e", "--eval", "-p", "--print"]
+    } else if matches!(lower.as_str(), "ruby" | "perl") {
+        &["-e", "-E"]
+    } else if lower == "php" {
+        &["-r"]
+    } else if matches!(lower.as_str(), "pwsh" | "powershell") {
+        &["-c", "-command"]
+    } else {
+        &[]
+    }
+}
+
+/// Index of the inline script in `args`, if `cmd` is an interpreter given
+/// inline code. Combined short shell flags count (`-ec`, `-lc`).
+fn inline_script_index(cmd: &str, args: &[String]) -> Option<usize> {
+    let flags = inline_code_flags(cmd);
+    if flags.is_empty() {
+        return None;
+    }
+    let shell = SCRIPT_SHELLS.contains(&cmd.to_ascii_lowercase().as_str());
+    args.iter()
+        .position(|arg| {
+            let lower = arg.to_ascii_lowercase();
+            flags.contains(&lower.as_str())
+                || (shell
+                    && !arg.starts_with("--")
+                    && arg.strip_prefix('-').is_some_and(|letters| {
+                        letters.len() > 1
+                            && letters.chars().all(|c| c.is_ascii_alphabetic())
+                            && letters.contains('c')
+                    }))
+        })
+        .map(|index| index + 1)
+        .filter(|index| *index < args.len())
+}
+
+/// Values Kronn produces itself; every other placeholder may carry text an
+/// outsider controls (tracker fields, step outputs, launch inputs).
+fn is_trusted_template_path(path: &str) -> bool {
+    path == "run.id" || path.starts_with("time.now")
+}
+
+/// Refuse an interpreter script that interpolates untrusted text: the value
+/// would be parsed as code (`$(…)`, `"; …`). Shells accept `{{x|sh}}` outside
+/// any quotes; every interpreter accepts the value as a later argv entry.
+fn inline_script_injection(step: &str, cmd: &str, args: &[String]) -> Option<String> {
+    let index = inline_script_index(cmd, args)?;
+    let script = &args[index];
+    let shell = SCRIPT_SHELLS.contains(&cmd.to_ascii_lowercase().as_str());
+    for (path, quoted, in_quotes) in script_placeholders(script) {
+        if is_trusted_template_path(&path) {
+            continue;
+        }
+        if shell && quoted && !in_quotes {
+            continue;
+        }
+        let reason = if shell && quoted {
+            "`|sh` doit être utilisé hors de tout guillemet"
+        } else {
+            "sa valeur serait interprétée comme du code"
+        };
+        let safe = if shell {
+            format!(
+                "Passe la valeur en argument positionnel : `exec_args=[\"-c\", \"… \\\"$1\\\" …\", \"_\", \"{{{{{path}}}}}\"]`, ou écris `{{{{{path}|sh}}}}` sans guillemets autour."
+            )
+        } else {
+            format!(
+                "Passe la valeur en argument séparé après le script (ex. `sys.argv[1]`, `process.argv[2]`) avec `\"{{{{{path}}}}}\"`, ou via `exec_stdin`."
+            )
+        };
+        return Some(format!(
+            "Step Exec « {step} » : le script inline de `{cmd}` interpole `{{{{{path}}}}}` — {reason}. {safe}"
+        ));
+    }
+    None
+}
+
+/// Placeholders of a shell-like script: (path, has `|sh`, inside quotes).
+fn script_placeholders(script: &str) -> Vec<(String, bool, bool)> {
+    let mut found = Vec::new();
+    let chars: Vec<char> = script.chars().collect();
+    let (mut single, mut double, mut i) = (false, false, 0);
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '{' && chars.get(i + 1) == Some(&'{') {
+            let rest: String = chars[i + 2..].iter().collect();
+            if let Some(end) = rest.find("}}") {
+                let inner = rest[..end].trim();
+                let path = inner.split_once("??").map_or(inner, |(p, _)| p).trim();
+                let (path, quoted) = crate::workflows::template::split_shell_filter(path);
+                found.push((path.to_string(), quoted, single || double));
+                i += 2 + rest[..end].chars().count() + 2;
+                continue;
+            }
+        }
+        match c {
+            '\\' if !single => i += 1,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            _ => {}
+        }
+        i += 1;
+    }
+    found
+}
+
 fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(), String> {
     const MAX_ARGS: usize = 64;
     const MAX_TIMEOUT_SECS: u32 = 1800;
@@ -1095,6 +1213,9 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                 MAX_ARGS
             ));
         }
+        if let Some(error) = inline_script_injection(&s.name, cmd, &s.exec_args) {
+            return Err(error);
+        }
         // 0.8.2 — Catch the "bash + multi-word arg" foot-gun. A user who
         // sets `exec_command=bash, exec_args=["make test"]` thinks they're
         // running `make test`, but bash treats the first positional arg
@@ -1115,7 +1236,8 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                      - Pour un binaire simple : `exec_command=<binaire>`, `exec_args=[<args…>]` \
                      (ex. `make` + `[\"test\"]` au lieu de `bash` + `[\"make test\"]`).\n\
                      - Pour une ligne shell : `exec_command=bash`, `exec_args=[\"-c\", \"<ta-commande>\"]` \
-                     (ex. `bash` + `[\"-c\", \"make test\"]`).",
+                     (ex. `bash` + `[\"-c\", \"make test\"]`). Une valeur de template va en argument \
+                     positionnel, jamais dans le script : `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{{{issue.title}}}}\"]`.",
                     step = s.name,
                     shell = cmd,
                     arg = first,
@@ -1147,6 +1269,9 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                     s.exec_setup_args.len(),
                     MAX_ARGS
                 ));
+            }
+            if let Some(error) = inline_script_injection(&s.name, setup_cmd, &s.exec_setup_args) {
+                return Err(format!("{error} (setup)"));
             }
             let setup_is_shell = matches!(setup_cmd, "bash" | "sh" | "zsh" | "dash" | "fish");
             if setup_is_shell && !s.exec_setup_args.is_empty() {
@@ -5694,6 +5819,63 @@ mod tests {
         s.exec_args = args.into_iter().map(String::from).collect();
         s.exec_timeout_secs = timeout;
         s
+    }
+
+    #[test]
+    fn an_untrusted_value_interpolated_into_an_inline_script_is_refused() {
+        for (cmd, args) in [
+            ("bash", vec!["-c", "echo {{issue.title}}"]),
+            ("bash", vec!["-c", "echo '{{issue.title}}'"]),
+            ("bash", vec!["-lc", "echo \"{{steps.fetch.data.stdout}}\""]),
+            ("sh", vec!["-ec", "echo {{previous_step.output}}"]),
+            ("bash", vec!["-c", "echo \"{{issue.title|sh}}\""]),
+            ("python3", vec!["-c", "print('{{issue.body}}')"]),
+            ("python3", vec!["-c", "print({{issue.body|sh}})"]),
+            ("node", vec!["-e", "console.log(`{{ticket}}`)"]),
+        ] {
+            let chain = vec![mk_exec_step("inline", Some(cmd), args.clone(), None)];
+            let err = validate_exec_steps(&chain, &[cmd.to_string()]).unwrap_err();
+            assert!(err.contains("script inline"), "{cmd} {args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_documented_safe_inline_script_forms_are_accepted() {
+        for (cmd, args) in [
+            ("bash", vec!["-c", "echo \"$1\"", "_", "{{issue.title}}"]),
+            (
+                "bash",
+                vec![
+                    "-c",
+                    "echo {{issue.title|sh}} && echo {{ steps.a.output | sh }}",
+                ],
+            ),
+            (
+                "bash",
+                vec!["-c", "echo run {{run.id}} at {{time.now|fmt:unix}}"],
+            ),
+            ("bash", vec!["-c", "make test && echo ok"]),
+            (
+                "python3",
+                vec!["-c", "import sys; print(sys.argv[1])", "{{issue.body}}"],
+            ),
+            ("echo", vec!["{{issue.title}}"]),
+        ] {
+            let chain = vec![mk_exec_step("inline", Some(cmd), args.clone(), None)];
+            assert!(
+                validate_exec_steps(&chain, &[cmd.to_string()]).is_ok(),
+                "{cmd} {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_value_in_an_inline_setup_script_is_refused() {
+        let mut step = mk_exec_step("inline", Some("make"), vec!["test"], None);
+        step.exec_setup_command = Some("bash".into());
+        step.exec_setup_args = vec!["-c".into(), "npm i {{issue.title}}".into()];
+        let err = validate_exec_steps(&[step], &["make".into(), "bash".into()]).unwrap_err();
+        assert!(err.contains("(setup)"), "{err}");
     }
 
     #[test]

@@ -13,7 +13,9 @@
 //!   3. **Args templated, but rendered values are literal**. Even if
 //!      a previous step's output contains `; rm -rf /`, the OS
 //!      receives ONE argv string per `exec_args[i]` — not a shell
-//!      command line.
+//!      command line. The exception is an allowlisted interpreter's
+//!      inline script (`bash -c`, `python3 -c`): the save-time validator
+//!      refuses placeholders there except `{{x|sh}}` outside quotes.
 //!   4. **Workdir locked** to `work_dir` (the run's workspace). No
 //!      `cd /` possible from inside the step.
 //!   5. **Timeout-bounded** via `tokio::time::timeout`. Default
@@ -1243,6 +1245,55 @@ mod tests {
             "exec_stdin must be template-rendered, not piped verbatim: {}",
             outcome.result.output
         );
+    }
+
+    /// The documented recipes for templated values in a shell script: as a
+    /// positional argument, or through `|sh`. A hostile issue title must come
+    /// back verbatim and nothing in it may run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hostile_issue_title_never_executes_through_the_documented_recipes() {
+        let title = "a'b\"c $(touch pwned1) ; touch pwned2 `touch pwned3` \\ é🦀";
+        let recipes: [Vec<&str>; 2] = [
+            vec![
+                "-c",
+                "printf -- '---STATE:title=%s---' \"$1\"",
+                "_",
+                "{{issue.title}}",
+            ],
+            vec!["-c", "printf -- '---STATE:title=%s---' {{issue.title|sh}}"],
+        ];
+        for args in recipes {
+            let dir = tempfile::tempdir().unwrap();
+            let step = exec_step("safe", Some("bash"), args.clone(), None);
+            let mut ctx = TemplateContext::new();
+            ctx.set_issue(title, "", "1", "https://tracker.test/1", &[]);
+            let outcome = execute_exec_step(
+                &step,
+                &["bash".to_string()],
+                &dir.path().to_string_lossy(),
+                &ctx,
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                RunStatus::Success,
+                "{args:?}: {}",
+                outcome.result.output
+            );
+            let (_, state) =
+                crate::workflows::template::extract_step_markers(&outcome.result.output);
+            assert_eq!(
+                state.get("title").map(String::as_str),
+                Some(title),
+                "{args:?}"
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "{args:?}: the title ran as code"
+            );
+        }
     }
 
     /// The envelope escapes stdout; markers must still come back as printed.
