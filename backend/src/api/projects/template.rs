@@ -582,11 +582,27 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(kronn_templates_env)]
     async fn fresh_docs_agents_md_never_carries_a_bootstrap_instruction() {
         // KT-841 — a "FIRST-RUN TASK" block used to be injected into
         // docs/AGENTS.md at install time; an interrupted first run left it in
         // the file every later agent reads. Exercised through the install
         // route itself, so a re-injection anywhere in it fails here.
+        struct RestoreTemplatesEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreTemplatesEnv {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                }
+            }
+        }
+        let _restore = RestoreTemplatesEnv(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        // This checkout's own templates, whatever another test left in the env.
+        std::env::set_var(
+            "KRONN_TEMPLATES_DIR",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
+        );
         let tmp = tempfile::TempDir::new().unwrap();
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         let config = std::sync::Arc::new(tokio::sync::RwLock::new(
