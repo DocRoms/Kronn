@@ -1,10 +1,15 @@
-# Agent secret boundary (0.14.3 design note, v2)
+# Agent secret boundary (0.14.3 design note, v3)
 
-Status: **proposal v2, awaiting validation by Romu and Codex** (KT-1006,
-KT-1007, KT-990, KT-969). v1 was `7e721fc6`.
+Status: **proposal v3, awaiting validation by Romu and Codex** (KT-1006,
+KT-1007, KT-990, KT-969). v1 `7e721fc6`, v2 `9261bfa7`.
 Sources: the 0.14.3 security audit (room `c3a5311c`, SEC-1 to SEC-15), Codex's
-review (room messages `060744b2`, `8b2bd770`) and an independent adversarial
-review (findings A1-A5, B1-B3 below).
+reviews (room messages `060744b2`, `8b2bd770`, `e0163229`), an independent
+adversarial review (findings A1-A5, B1-B3 below), and Romu's question on an
+authenticator factor (`0293365d`).
+
+v3 changes: no privilege-preserving reset (4.3), an execution boundary for any
+code an agent can influence (4.6), Windows downgraded to the Linux line of the
+matrix, a browser bootstrap path (4.2), passkeys as the primary human factor.
 
 ## 1. Threat model
 
@@ -24,13 +29,18 @@ never as the mechanism behind a guarantee.
 
 ## 2. Guarantees per platform (after the four layers ship)
 
-| Platform | Key | Admin token / decrypted secrets over the API | Secret files | Residual exposure |
-|---|---|---|---|---|
-| macOS native | OS Keychain only, after a verified restore test; no sidecar, nothing in `config.toml` | Agent env carries neither; secret-class routes need a per-action human proof; desktop can add OS user presence | `kronn.db` `0600`, but readable by the same user | Same-user process able to read the live UI session (browser memory or cookie store) can act as the UI; values of the agent's own project MCPs |
-| Windows native | Credential Manager only, same conditions | Same | Same | Same |
-| Linux / WSL native | **Sidecar file stays** (no keyring assumed) | Same | Sidecar + DB readable by the same user | An agent can read the sidecar and the DB and decrypt offline: layers A-B only stop the API path. Stated as a limit in the advisory |
-| Docker (Linux host) | Sidecar in `/data`, `0700` to the backend UID | Same; container spawn path uses the same env builder | Agents run under a second UID without access to `/data` (KT-969) | Repositories writable by agents; SSH agent socket usable while an agent runs |
-| Docker on macOS | Same as Docker | Same | Same, plus masks over the native data directory | Same; the native install is no longer readable from the container |
+| Platform | Key | Admin token / decrypted secrets over the API | Secret files | Code the agent influences (4.6) | Residual exposure |
+|---|---|---|---|---|---|
+| macOS native | OS Keychain only, after a verified restore test; no sidecar, nothing in `config.toml`. The Keychain item's ACL should make macOS prompt when another program reads it (to verify by probe, including `security find-generic-password` and Kronn's own binary run by an agent) | Agent env carries neither; secret-class routes need a per-action human proof | `kronn.db` `0600`, readable by the same user | Runs as the user: **no OS boundary** | A same-user process can read the DB and drive the live UI session; it cannot read the key without a Keychain prompt; values of the agent's own project MCPs |
+| Windows native | Credential Manager: **not a boundary** between processes of the same account (`CredRead` serves any process of the logon session) | Same as macOS | Same | No OS boundary | Same as Linux native: an agent can obtain the key and decrypt offline |
+| Linux / WSL native | **Sidecar file stays** (no keyring assumed) | Same as macOS | Sidecar + DB readable by the same user | No OS boundary | An agent can read the sidecar and the DB and decrypt offline: layers A-B only close the API path |
+| Docker (Linux host) | Sidecar in `/data`, `0700` to the backend UID | Same; the container spawn path uses the same env builder | Agents run under a second UID without access to `/data` (KT-969) | Second UID for every agent-influenced execution | Repositories writable by agents; SSH agent socket usable while an agent runs |
+| Docker on macOS | Same as Docker | Same | Same, plus masks over the native data directory | Same | Same; the native install is no longer readable from the container |
+
+Only the Docker lines give a boundary against an agent that reads files or runs
+code. The native lines close the API and environment paths and, on macOS, the
+key itself; the advisory states the rest plainly, and the UI shows the current
+platform's line (4.7).
 
 The evidence for every cell is a test or a real probe listed in section 7.
 
@@ -108,34 +118,89 @@ concurrent uses of one proof yield one success.
 
 ### 4.2 The human factor
 
-- **Desktop (macOS, Windows):** OS user presence through the Tauri IPC
-  (LocalAuthentication / Touch ID on macOS, Windows Hello where available).
-  This is the strong path.
-- **Browser, and desktop without user presence:** a **secrets passphrase**
-  typed in the UI for each action. It is stored as a slow hash (Argon2id) and
-  is never the encryption key.
-- Honest limit: in a browser on loopback, a same-user process that can read the
-  live UI session can still forge requests from it. The design raises the bar
-  from "one curl" to "read and drive another process's live session", and the
-  advisory says so.
+Factors, strongest first. A user enrols at least **two** before any secret can
+be revealed or exported (one may be the recovery passphrase).
 
-**Enrolment, replacement and recovery of the factor follow the same model.**
-Setting the first passphrase requires either OS user presence (desktop) or the
-recovery passphrase when one exists. Replacing it requires the current factor.
-A reset without any factor is possible but never exposes old values (4.3).
+1. **Passkey (WebAuthn)**: Touch ID, Windows Hello, a security key or a phone
+   passkey. Kronn stores only the public key, so reading the whole data
+   directory yields nothing usable. This is the only factor that stays sound
+   on Linux and Windows natively. To verify before committing (spike): WebAuthn
+   needs a domain as relying party, not an IP, so the UI must be served on
+   `http://localhost:<port>`; support in the Tauri webview on macOS is unknown.
+2. **TOTP authenticator app** (RFC 6238), as a fallback. Kronn must keep the
+   seed to verify codes; an agent that reads the seed computes every future
+   code. The seed is therefore stored like the key (Keychain on macOS) and the
+   matrix applies: on Linux and Windows natively it is no stronger than the
+   files it sits in.
+3. **Secrets passphrase**, last resort: an Argon2id hash, never the encryption
+   key. Reading the hash gives an offline guessing target, not the passphrase.
+4. **OS user presence on desktop** (LocalAuthentication, Windows Hello through
+   the Tauri IPC) can stand in for 1 when WebAuthn is unavailable in the
+   webview.
+
+Honest limit: in a browser on loopback, a same-user process that can read and
+drive the live UI session can still act through it while a human approves an
+action. Per-action binding (layer B) limits what it gains to that one action.
+
+**Enrolment, replacement and recovery follow the same model.**
+- *First enrolment (bootstrap).* A fresh install has no factor. The first
+  enrolment needs a **one-time bootstrap code** that the backend prints at
+  start-up on its terminal (`make start`, `kronn` CLI, desktop window) and never
+  serves over the API; it expires after 15 minutes or one use. On desktop, OS
+  user presence replaces it. Until a factor exists, secret-class routes are
+  closed (nothing to reveal is better than revealing to the first caller).
+  Limit: natively, an agent that reads the backend's terminal output or log
+  file can see the code; the log line is therefore written to the terminal
+  only, never to `kronn.log`.
+- *Existing install without any factor (upgrade).* Secret-class routes stay
+  closed until the user enrols through the bootstrap code; secrets keep
+  working server-side meanwhile.
+- *Replacement* of a factor requires another enrolled factor.
 
 ### 4.3 Lost device or forgotten access
 
-What can be recovered and what must be re-entered, without assuming a
-forgotten passphrase comes back:
+No reset ever keeps the privileges of the factors it replaces. What can be
+recovered and what must be reconfigured:
 
 | Situation | Outcome |
 |---|---|
 | New machine or Keychain reset, recovery passphrase known | Key restored from `recovery.key`; every secret works again |
-| Keychain lost, no recovery passphrase | Encrypted values cannot be recovered. Kronn **never mints a new key over existing ciphertext**: it lists each locked secret (provider keys, MCP tokens, connections) for re-entry, and discussions, workflows, tasks and settings stay intact (they are not encrypted) |
-| Secrets passphrase forgotten, recovery passphrase or OS user presence available | Replace the passphrase with that factor |
-| Secrets passphrase forgotten, no other factor | Reset allowed. Existing secrets keep working server-side (injection, API broker) but can **never be revealed or exported again**; the user re-enters a value to see it. An agent triggering this reset gains nothing and loses the user no function |
-| Recovery passphrase forgotten | Set a new one with the secrets factor; the old `recovery.key` is replaced only after that proof (B3) |
+| One factor lost, another enrolled | Replace the lost one with the remaining one |
+| Keychain lost, no recovery passphrase | Encrypted values cannot be recovered. Kronn **never mints a new key over existing ciphertext**: it lists each locked secret (provider keys, MCP tokens, connections) for re-entry; discussions, workflows, tasks and settings stay intact (not encrypted) |
+| Every factor lost, key still available | **Reconfiguration mode**: the user enrols new factors through the bootstrap code. Old secrets keep being used by their **current** consumers only. Forbidden in this mode, enforced server-side: revealing or exporting old values, re-wrapping or exporting the old key (`recovery/set`, config export), and changing where an old secret goes (connection URL, MCP command or args, workflow API binding). To change any of those, the user re-enters the secret, which then becomes a new, normally protected value |
+| Recovery passphrase forgotten | Set a new one with another factor; the old `recovery.key` is replaced only after that proof (B3) |
+
+Chain tests, not route tests: reset, then try `recovery/set`, config export,
+bundle export, and a connection URL change to an attacker host; each must fail
+for old secrets.
+
+### 4.6 Code an agent can influence runs behind the same boundary as the agent
+
+Removing variables does not stop a script from reading files. Any execution
+whose content an agent can influence runs with the agent's identity, never the
+backend's:
+- workflow Exec steps, QE runs, project setup and test/build hooks, the
+  project exec route, and their children;
+- under Docker, they run under the agents' UID (KT-969), without `/data`;
+- natively, there is no second identity: these executions are listed in the
+  matrix as unbounded, and an agent-triggered run (bridge token) of an Exec step
+  or QE requires the human proof of layer B unless the workflow was approved
+  with its current content (KT-918 fingerprint, 0.15).
+
+Test (Docker): an agent triggers a workflow of its own project whose script
+reads a fake secret outside the repository; the read fails with an empty
+environment and the agents' UID.
+
+### 4.7 Transparency in the UI
+
+Security only helps if the user can see it:
+- Settings show the current platform's line of the matrix: what is protected,
+  what is not, and why.
+- Every human proof dialog names the exact action, resource and parameters it
+  approves.
+- Locked secrets (4.3) and reconfiguration mode are shown on each affected
+  item, with the action that unlocks it.
+- The GitHub connection shows its real scope or "scope not verified" (4.5).
 
 ### Layer C — storage consolidation (KT-1007, before any file removal)
 
@@ -215,14 +280,22 @@ DoD items, each with a test:
 - Exec: `env` refused, `cat <absolute path outside project>` refused (tests).
 - Layer C: registry versus schema; denied Keychain at boot stops startup;
   migration from real 0.14.2 copies loses nothing (tests).
+- Factors: two required before any reveal; bootstrap code single-use, 15 min,
+  absent from the API and from `kronn.log`; replacement needs another factor.
+- Reconfiguration mode chain tests (4.3): reset, then `recovery/set`, config
+  export, bundle export and a connection URL change all fail for old secrets.
+- Execution boundary (Docker): an agent-triggered Exec step cannot read a fake
+  secret outside the repository (4.6).
 - Real probe per CLI (Claude two turns, Codex, one native ACP agent): asked to
   `env`, `curl` the reveal and exec routes and read the data directory, the
   agent gets nothing usable beyond what section 2 lists as residual.
 
 ## 8. Decisions requested
 
-- **D1** (updated): desktop OS user presence plus a per-action secrets
-  passphrase in the browser, with the reset rule of 4.3.
+- **D1** (v3): passkey first, TOTP fallback, passphrase last, at least two
+  factors enrolled, bootstrap code at first enrolment, no privilege-preserving
+  reset (4.2, 4.3). A WebAuthn spike on `localhost` and in the Tauri webview
+  comes first.
 - **D2** (updated): GitHub connection per project, off by default, scope shown
   or marked unverified (4.5).
 - **D3:** KT-968 in 0.15.2 with the residual risk in the advisory (already
