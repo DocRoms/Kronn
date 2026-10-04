@@ -1525,6 +1525,9 @@ pub struct AgentActivity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub at: DateTime<Utc>,
+    /// Tool calls the launch has started so far, this one included.
+    #[serde(default)]
+    pub calls: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

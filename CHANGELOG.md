@@ -35,9 +35,21 @@ Release notes for 0.9.3 and earlier are available in the
   instance, an attestation, legacy evidence) with their date and provenance
   instead of staying empty. The timeline loads in one request instead of up to
   thirteen.
+- The audit timeline shows what each step cost, as the agent reported it
+  (Claude Code's `total_cost_usd`, OpenRouter's `usage.cost`), summed over the
+  step's attempts, and the audit's total: exact when every step reported,
+  "≥ x $" naming the unknown steps otherwise. A step whose agent reported no
+  cost reads "cost ?", never 0. Each run records the model its agent served,
+  or the configured one labelled as such, and `step_done` carries the step's
+  cost (KT-997).
 
 ### Fixed
 
+- An audit step that only calls tools, without a word of text, now shows its
+  last tool, its call count and its tokens while it works, for HTTP agents and
+  ACP agents alike, through one probe; the counters no longer wait for a text
+  line. A silent audit stream sends keep-alive comments every 15 seconds,
+  which hold the connection without passing for model activity (KT-950).
 - The desktop release pipeline now fails before building when the pushed tag
   differs from `VERSION` or a version marker is stale, builds the release job
   from the requested tag on a manual run, and expects exactly the installers

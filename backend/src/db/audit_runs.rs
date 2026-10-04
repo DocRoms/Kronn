@@ -394,6 +394,16 @@ pub fn set_run_provenance(
     Ok(())
 }
 
+/// Record the model the run's agent served, or the configured one labelled as
+/// such (KT-997). Updated as steps observe more of them.
+pub fn set_run_model(conn: &Connection, id: &str, model: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET model = ?2 WHERE id = ?1",
+        params![id, model],
+    )?;
+    Ok(())
+}
+
 /// Record a step's cost when its agent reported one (KT-997). Never called with
 /// a guess: an unreported cost stays NULL.
 pub fn set_step_cost(

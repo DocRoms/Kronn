@@ -67,7 +67,11 @@ export type AgentActivity = { tool: string,
  * The call's most informative input (file, command, pattern or URL),
  * truncated. `None` until the input is complete or when it has none.
  */
-target?: string | null, at: string, };
+target?: string | null, at: string,
+/**
+ * Tool calls the launch has started so far, this one included.
+ */
+calls: number, };
 
 export type AgentApiCallRequest = {
 /**

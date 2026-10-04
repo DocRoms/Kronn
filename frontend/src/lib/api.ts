@@ -618,6 +618,9 @@ interface AuditSseEvent {
   step_tokens?: number;
   total_tokens_so_far?: number;
   tool?: string;
+  /** The step's tool-call count, sent by agents whose tools are read off the
+   *  run (HTTP, ACP) rather than off their stream (KT-950). */
+  calls?: number;
   // 0.8.3 root-cause fix — `step_warning` is emitted when the CLI
   // exited 0 but the step's target_file is empty / suspiciously
   // small (e.g. agent crashed mid-Write). The step FAILS honestly and
@@ -1396,7 +1399,7 @@ export const projects = {
        * the user knows what the agent is busy doing during the
        * step. Optional for backwards compat.
        */
-      onToolCall?: (step: number, tool: string) => void;
+      onToolCall?: (step: number, tool: string, calls?: number) => void;
       /**
        * 0.8.3 root-cause fix — backend detected that this step's
        * `target_file` is empty / truncated despite the CLI exiting 0.
@@ -1494,7 +1497,8 @@ export const projects = {
               break;
             case 'tool_call':
               if (typeof p.step === 'number' && typeof p.tool === 'string') {
-                handlers.onToolCall?.(p.step, p.tool);
+                if (typeof p.calls === 'number') handlers.onToolCall?.(p.step, p.tool, p.calls);
+                else handlers.onToolCall?.(p.step, p.tool);
               }
               break;
             case 'step_warning':

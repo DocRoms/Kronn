@@ -87,6 +87,7 @@ async fn run_step(state: &AppState, project: &Path, prompt: &str) -> (bool, Stri
             &tokens,
             None,
             "docs/AGENTS.md",
+            None,
         )
         .await
         .expect("an HTTP audit agent starts");
@@ -417,7 +418,8 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
                     } else {
                         text("The documentation is unchanged.")
                     },
-                    json!({"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":7}})
+                    // OpenRouter states the response's cost in `usage.cost`.
+                    json!({"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":7,"cost":0.000321}})
                         .to_string(),
                 ]))
             } else {
@@ -531,6 +533,12 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
         "a terminal launch error is finalized"
     );
     assert_eq!(failed.step_tokens, Some(20));
+    assert_eq!(
+        failed.cost_usd_micros,
+        Some(321),
+        "the provider-reported cost of the attempts that ran survives the failure"
+    );
+    assert_eq!(step_done[0]["cost_usd_micros"], 321, "{stream}");
     let warning = failed.step_warning.as_deref().unwrap();
     assert!(
         warning.contains(if after_write { "429" } else { "401" }),
@@ -651,6 +659,7 @@ async fn an_unreachable_provider_is_a_start_failure_never_a_clean_run() {
             &tokens,
             None,
             "docs/AGENTS.md",
+            None,
         )
         .await;
     assert!(
@@ -683,6 +692,7 @@ async fn a_missing_model_is_named_instead_of_guessed() {
             &tokens,
             None,
             "docs/AGENTS.md",
+            None,
         )
         .await
         .err()
@@ -762,6 +772,7 @@ async fn the_stop_token_reaches_an_http_agent_no_process_kill_can_reach() {
             &tokens,
             Some(cancel),
             "docs/AGENTS.md",
+            None,
         )
         .await
         .err()
@@ -1484,4 +1495,99 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
         run.validation_discussion_id.is_none(),
         "the run must link no validation discussion"
     );
+}
+
+#[test]
+fn a_step_cost_sums_its_attempts_and_one_silent_attempt_makes_it_unknown() {
+    assert_eq!(StepCost::default().usd_micros(), None, "no attempt ran");
+    let two = StepCost::default()
+        .with_attempt(Some(120))
+        .with_attempt(Some(300));
+    assert_eq!(two.usd_micros(), Some(420), "attempts are summed");
+    assert_eq!(
+        StepCost::default().with_attempt(Some(0)).usd_micros(),
+        Some(0),
+        "a reported zero is a real zero"
+    );
+    assert_eq!(two.with_attempt(None).usd_micros(), None);
+    assert_eq!(
+        StepCost::default()
+            .with_attempt(None)
+            .with_attempt(Some(5))
+            .usd_micros(),
+        None,
+        "a later report does not make the silent attempt free"
+    );
+    assert_eq!(
+        StepCost::Known(u64::MAX).with_attempt(Some(1)).usd_micros(),
+        Some(u64::MAX)
+    );
+}
+
+#[test]
+fn the_run_model_is_the_observed_one_else_the_configured_one_labelled() {
+    let observed = vec!["model-a".to_string(), "modèle-b".to_string()];
+    assert_eq!(
+        run_model_label(&observed, Some("cfg")).as_deref(),
+        Some("model-a / modèle-b")
+    );
+    assert_eq!(
+        run_model_label(&[], Some(" cfg-model ")).as_deref(),
+        Some("cfg-model (configured)")
+    );
+    assert_eq!(run_model_label(&[], Some("  ")), None);
+    assert_eq!(run_model_label(&[], None), None);
+}
+
+/// KT-950 DoD (fixture, fake clock) — ten logical minutes of tool turns without
+/// one line of text: every turn moves the tool chip, the call count and the
+/// tokens at the next tick; the ticks in between, a provider still thinking,
+/// move nothing, so silence is never dressed up as progress.
+#[tokio::test(start_paused = true)]
+async fn minutes_of_tool_turns_without_text_move_the_counters_at_each_tick() {
+    let http = runner::ToolActivityProbe::scripted();
+    let mut watch = StepActivityWatch::new(
+        AuditActivityProbe::new(http.clone(), None),
+        AgentType::LiteLlm,
+    );
+    let mut tick = tokio::time::interval(ACTIVITY_TICK);
+    let started = tokio::time::Instant::now();
+    const TURNS: u64 = 200;
+    for turn in 1..=TURNS {
+        // The provider takes three ticks per tool turn.
+        for _ in 0..2 {
+            tick.tick().await;
+            assert_eq!(watch.tool_moved(), None, "turn {turn}: nothing happened");
+            assert_eq!(watch.tokens_moved(), None, "turn {turn}: nothing happened");
+        }
+        http.record_turn(90, 10, Some(&format!("read_file · src/é{turn}.rs")));
+        tick.tick().await;
+        assert_eq!(
+            watch.tool_moved(),
+            Some((format!("read_file · src/é{turn}.rs"), turn as u32))
+        );
+        let tokens = watch.tokens_moved().expect("the turn's usage shows");
+        assert_eq!(tokens.total(), Some(100 * turn));
+    }
+    assert!(started.elapsed() >= ACTIVITY_TICK * 3 * (TURNS as u32 - 1));
+    assert!(
+        started.elapsed() >= Duration::from_secs(590),
+        "ten logical minutes"
+    );
+}
+
+/// AGT-11 — one probe reads both channels: an HTTP agent's run, an ACP agent's
+/// activity sink.
+#[test]
+fn the_activity_probe_reads_the_acp_sink_when_the_http_run_is_silent() {
+    let (sink, rx) = tokio::sync::watch::channel(None);
+    let http = runner::ToolActivityProbe::scripted();
+    let probe = AuditActivityProbe::new(http.clone(), Some(rx));
+    assert_eq!(probe.tool(), None);
+    crate::agents::activity::tool_started(Some(&sink), "Bash");
+    crate::agents::activity::tool_started(Some(&sink), "Read");
+    crate::agents::activity::tool_target(Some(&sink), "docs/é.md".into());
+    assert_eq!(probe.tool(), Some(("Read · docs/é.md".to_string(), 2)));
+    http.record_turn(1, 1, Some("write_file"));
+    assert_eq!(probe.tool(), Some(("write_file".to_string(), 1)));
 }

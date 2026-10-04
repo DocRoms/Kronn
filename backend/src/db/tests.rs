@@ -2962,6 +2962,7 @@ fn in_flight_step_activity_lands_only_on_the_running_step_it_names() {
         tool: "Edit".into(),
         target: Some("src/é.rs".into()),
         at: Utc::now(),
+        calls: 1,
     };
     let set = |index: usize, name: &str| {
         crate::db::workflows::set_in_flight_step_activity(&conn, "r1", index, name, &activity)

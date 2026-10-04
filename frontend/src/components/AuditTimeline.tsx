@@ -13,6 +13,7 @@ import { projects as projectsApi, externalApi, type ExternalApiConnectionView } 
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
+import { formatUsd, summarizeAuditCost } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
 import type { AgentDetection, AgentType, AuditEntry, ModelTier, ModelTiersConfig } from '../types/generated';
 import './AuditTimeline.css';
@@ -31,6 +32,8 @@ interface StepRow {
   input_tokens?: number | null;
   output_tokens?: number | null;
   cache_read_tokens?: number | null;
+  /** What the step's agent reported it cost; absent = unknown, never 0. */
+  cost_usd_micros?: number | null;
   carried_from_run_id?: string | null;
 }
 
@@ -245,6 +248,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
       .sort((a, b) => a.rows[0].index - b.rows[0].index);
   }, [rows, t]);
 
+  const cost = useMemo(() => summarizeAuditCost(rows.flatMap(r => (r.row ? [r.row] : []))), [rows]);
   const failed = rows.filter(r => r.status === 'failed' || r.status === 'todo').map(r => r.index);
   const done = rows.filter(r => r.status === 'done' || r.status === 'warned').length;
   const consolidationIndex = rows.find(r => stepGroup(r.file) === 'consolidation')?.index;
@@ -391,6 +395,13 @@ export function AuditTimeline(props: AuditTimelineProps) {
             {total > 0 && (
               <>
                 <p className="audit-tl-muted">{t('auditTimeline.audit.summary', done, total)}</p>
+                {cost.kind !== 'none' && (
+                  <p className="audit-tl-muted audit-tl-mono" data-testid="audit-timeline-cost-total" title={t('auditTimeline.cost.totalTitle')}>
+                    {cost.kind === 'exact' ? t('auditTimeline.cost.total', formatUsd(cost.usdMicros, locale))
+                      : cost.kind === 'floor' ? t('auditTimeline.cost.totalFloor', formatUsd(cost.usdMicros, locale), cost.unknownSteps)
+                        : t('auditTimeline.cost.totalUnknown')}
+                  </p>
+                )}
                 <div className="audit-tl-progress" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={done} aria-label={t('auditTimeline.audit.title')}>
                   <div style={{ width: `${Math.round((done / total) * 100)}%` }} />
                 </div>
@@ -506,6 +517,22 @@ export function AuditTimeline(props: AuditTimelineProps) {
                                 </span>
                               );
                             })()}
+                            {r.row?.ended_at && r.status !== 'running' && (
+                              // A finished step whose agent reported no cost is unknown, never free.
+                              typeof r.row.cost_usd_micros === 'number' ? (
+                                <span className="audit-tl-mono audit-tl-muted" data-testid={`audit-timeline-step-cost-${r.index}`}>
+                                  {t('auditTimeline.cost.short', formatUsd(r.row.cost_usd_micros, locale))}
+                                </span>
+                              ) : (
+                                <span
+                                  className="audit-tl-mono audit-tl-muted"
+                                  data-testid={`audit-timeline-step-cost-${r.index}`}
+                                  title={t('auditTimeline.cost.unknownTitle')}
+                                >
+                                  {t('auditTimeline.cost.unknown')}
+                                </span>
+                              )
+                            )}
                             <span className={`audit-tl-tag is-${r.status}`}>{t(`auditTimeline.status.${r.status}`)}</span>
                           </span>
                         </li>

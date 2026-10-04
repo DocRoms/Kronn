@@ -1796,6 +1796,35 @@ impl ToolActivityProbe {
         let usage = self.0.lock().ok()?;
         usage.last_tool.clone().map(|tool| (tool, usage.tool_calls))
     }
+
+    /// The run's usage so far: an HTTP agent adds each tool turn, an ACP session
+    /// each report, without any text line having to arrive.
+    pub fn usage(&self) -> Option<ReportedUsage> {
+        let usage = self.0.lock().ok()?;
+        (usage.input_tokens.saturating_add(usage.output_tokens) > 0).then_some(ReportedUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            prompt_cache: usage.prompt_cache,
+        })
+    }
+
+    /// A probe no run backs, fed by the test the way an HTTP tool loop feeds it.
+    #[cfg(test)]
+    pub fn scripted() -> Self {
+        Self(Arc::default())
+    }
+
+    /// One tool turn of a scripted run: its usage and, optionally, its tool.
+    #[cfg(test)]
+    pub fn record_turn(&self, input_tokens: u64, output_tokens: u64, tool: Option<&str>) {
+        let mut usage = self.0.lock().unwrap();
+        usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
+        usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
+        if let Some(tool) = tool {
+            usage.last_tool = Some(tool.to_owned());
+            usage.tool_calls = usage.tool_calls.saturating_add(1);
+        }
+    }
 }
 
 /// `read_file · src/main.rs`: the tool, and the path it works on when it has one.
