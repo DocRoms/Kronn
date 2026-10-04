@@ -25,7 +25,9 @@ Release notes for 0.9.3 and earlier are available in the
   from the requested tag on a manual run, and expects exactly the installers
   Tauri is configured to produce (`.exe`, `.dmg`, `.deb`) instead of accepting
   an `.msi` or `.AppImage` in their place; the release notes give the real
-  `.deb` file name (KT-1023).
+  `.deb` file name. The release commit is resolved once and the checkouts,
+  the dependency review and the full CI gate (label-gated jobs included) run
+  on it, and the release waits for that gate (KT-1023).
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its

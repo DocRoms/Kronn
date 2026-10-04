@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -146,7 +147,9 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertEqual(workflow.count("if-no-files-found: error"), 3)
         self.assertIn("verify_artifacts.py artifacts", workflow)
         self.assertIn("verify-installers:", workflow)
-        self.assertIn("needs: [build-desktop, verify-installers]", workflow)
+        self.assertIn(
+            "needs: [release-checks, build-desktop, verify-installers, quality-gates]", workflow
+        )
 
     def test_version_gate_runs_first_and_checks_the_tag(self) -> None:
         workflow = (
@@ -157,12 +160,77 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn("scripts/check-version-sync.sh", workflow)
         self.assertIn("needs: release-checks", workflow)
 
-    def test_release_job_checks_out_the_requested_tag(self) -> None:
+    @staticmethod
+    def _checkout_refs(name: str) -> list[tuple[str, str, str]]:
+        """(job, step, ref) for every actions/checkout of a workflow."""
+        lines = (
+            Path(__file__).resolve().parents[3] / ".github" / "workflows" / name
+        ).read_text(encoding="utf-8").splitlines()
+        found: list[tuple[str, str, str]] = []
+        job = ""
+        for index, line in enumerate(lines):
+            if re.match(r"^  [A-Za-z0-9_-]+:\s*$", line):
+                job = line.strip().rstrip(":")
+            if "uses: actions/checkout@" not in line:
+                continue
+            ref = ""
+            for following in lines[index + 1 :]:
+                if re.match(r"^\s*- (name|uses):", following) or re.match(r"^  \S", following):
+                    break
+                match = re.match(r"^\s+ref:\s*(.*)$", following)
+                if match:
+                    ref = match.group(1).strip()
+            found.append((job, line.strip(), ref))
+        return found
+
+    def test_every_checkout_uses_the_resolved_release_commit(self) -> None:
+        resolved = "${{ needs.release-checks.outputs.sha }}"
+        desktop = self._checkout_refs("desktop-build.yml")
+        self.assertGreaterEqual(len(desktop), 4)
+        for job, _step, ref in desktop:
+            if job == "release-checks":
+                # The one place the commit is resolved from the tag or branch.
+                self.assertEqual(ref, "${{ inputs.release_tag || github.ref }}")
+            else:
+                self.assertEqual(ref, resolved, job)
+        # The reusable workflows take the commit as an input and check it out.
+        for name in ("dependency-review.yml", "ci-test.yml"):
+            checkouts = self._checkout_refs(name)
+            self.assertTrue(checkouts, name)
+            for job, _step, ref in checkouts:
+                self.assertEqual(ref, "${{ inputs.ref }}", f"{name}:{job}")
+
+    def test_release_runs_the_reusable_checks_on_the_resolved_commit(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[3] / ".github" / "workflows" / "desktop-build.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn("sha: ${{ steps.resolve.outputs.sha }}", workflow)
+        # `with:` of the two reusable-workflow calls (job-level, 6 spaces).
+        self.assertEqual(
+            len(re.findall(
+                r"^      ref: \$\{\{ needs\.release-checks\.outputs\.sha \}\}$", workflow, re.M
+            )),
+            2,
+        )
+        self.assertIn("uses: ./.github/workflows/ci-test.yml", workflow)
+        self.assertIn("uses: ./.github/workflows/dependency-review.yml", workflow)
         release_job = workflow[workflow.index("\n  release:\n"):]
-        self.assertIn("ref: ${{ inputs.release_tag || github.ref }}", release_job)
+        self.assertIn("quality-gates", release_job.split("steps:")[0])
+        self.assertIn("release-checks", release_job.split("steps:")[0])
+
+    def test_ci_runs_every_gate_when_called_for_a_release(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci-test.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", workflow)
+        # Label-gated jobs run on a release call, not only on dispatch.
+        gated = re.findall(r"^    if: .*'ci-test'\)\)?$", workflow, re.MULTILINE)
+        self.assertGreaterEqual(len(gated), 10)
+        for condition in gated:
+            if "inputs.ref == ''" in condition:
+                continue  # the timing observer never runs for a release call
+            self.assertIn("inputs.ref != ''", condition)
+        self.assertIn('[ -n "$CI_REF" ]', workflow)
 
     def test_checkout_network_retry_is_bounded(self) -> None:
         workflow = (

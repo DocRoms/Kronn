@@ -7,6 +7,12 @@ on:
     - cron: '17 6 * * 1'
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: 'Commit SHA to review (empty = the triggering ref)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -17,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

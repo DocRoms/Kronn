@@ -22,6 +22,10 @@ jobs:
   release-checks:
     name: Version and tag consistency
     runs-on: ubuntu-latest
+    outputs:
+      # The commit every later job and check uses, resolved once: on a manual
+      # dispatch the selected branch and the requested tag can differ.
+      sha: ${{ steps.resolve.outputs.sha }}
     env:
       # Tag push: the pushed tag. Dispatch: the requested release, or empty
       # for a build-only dry run on the selected branch.
@@ -33,6 +37,10 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.ref }}
 
+      - name: Resolve the release commit
+        id: resolve
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Check version consistency and the tag
         run: scripts/check-version-sync.sh "$RELEASE_TAG"
 
@@ -40,6 +48,19 @@ jobs:
     name: Pre-release dependency review
     needs: release-checks
     uses: ./.github/workflows/dependency-review.yml
+    with:
+      ref: ${{ needs.release-checks.outputs.sha }}
+
+  # The full CI gate, label-gated jobs included, on the exact commit that is
+  # published. ci-test.yml has no push trigger, so a tag carries no check run.
+  quality-gates:
+    name: CI quality gates on the release commit
+    needs: release-checks
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      ref: ${{ needs.release-checks.outputs.sha }}
 
   build-desktop:
     needs: [release-checks, dependency-review]
@@ -75,8 +96,7 @@ jobs:
         uses: actions/checkout@v7
         timeout-minutes: 5
         with:
-          # Installers attached to an existing release are built from its tag.
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.release-checks.outputs.sha }}
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
@@ -351,13 +371,15 @@ jobs:
   # ─── Prove that every matrix leg produced an installer ─────────────
 
   verify-installers:
-    needs: build-desktop
+    needs: [release-checks, build-desktop]
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout verifier
         uses: actions/checkout@v7
         timeout-minutes: 5
+        with:
+          ref: ${{ needs.release-checks.outputs.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -370,7 +392,7 @@ jobs:
   # ─── Create GitHub Release on tag ─────────────────────────────────
 
   release:
-    needs: [build-desktop, verify-installers]
+    needs: [release-checks, build-desktop, verify-installers, quality-gates]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     env:
@@ -385,7 +407,7 @@ jobs:
         with:
           # On workflow_dispatch the default checkout is the selected branch;
           # the CHANGELOG and checks must come from the release being attached.
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ needs.release-checks.outputs.sha }}
           sparse-checkout: |
             backend/sidecars/docs
             backend/scripts/ci

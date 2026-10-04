@@ -20,11 +20,15 @@ and the update banner led users to empty release pages (KT-970).
    platform has no installer (`verify_artifacts.py --release-assets`).
 5. Review the notes and publish the draft.
 
-Tag only a commit whose pull request ran `ci-quality-gates` green. The CI Tests
-workflow runs on pull requests, not on pushes, so a merge commit carries no
-check run and a workflow cannot gate on it: require `ci-quality-gates` in the
-branch protection of `main` instead. A `workflow_dispatch` with an empty
-`release_tag` is a build-only dry run; do one before tagging.
+Desktop Build resolves the release commit once (`release-checks`, output
+`sha`) and every checkout, the dependency review and the CI gate use that SHA,
+so a manual dispatch whose branch and tag differ still tests what it ships.
+`ci-test.yml` has no push trigger, so a tag carries no check run; the release
+instead calls it as a reusable workflow (`quality-gates`) on that SHA, with
+every label-gated job enabled, and `release` needs it green. A
+`workflow_dispatch` with an empty `release_tag` runs the same gates as a
+build-only dry run; do one before tagging. The called `ci-test.yml` and
+`dependency-review.yml` are the versions of the tagged (or dispatched) ref.
 
 ## A release that already exists without installers
 
