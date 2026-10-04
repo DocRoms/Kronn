@@ -28,6 +28,12 @@ Release notes for 0.9.3 and earlier are available in the
   `.deb` file name. The release commit is resolved once and the checkouts,
   the dependency review and the full CI gate (label-gated jobs included) run
   on it, and the release waits for that gate (KT-1023).
+
+- A guarded action (save, create, toggle) now always runs with the current
+  props and translations instead of the ones from the first render, and a
+  browser with disabled or full storage no longer crashes the Discussions,
+  Dashboard, Workflows or Settings pages when they remember a preference
+  (KT-1022).
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its

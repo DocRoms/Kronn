@@ -178,9 +178,6 @@ export function AgentsSection({
   }>>({});
   const [savingTiers, setSavingTiers] = useState(false);
   const catalog = useModelCatalogSnapshot(true, [...expandedAgents].map(agent => modelRuntimeTargetId(agent as AgentType)));
-  // `useAsyncGuard` deliberately keeps its first callback. Keep the catalogue
-  // snapshot in a ref so a save after its asynchronous load validates against
-  // the current snapshot, not the mount-time `undefined` value.
   const catalogRef = useRef(catalog.catalog);
   useLayoutEffect(() => { catalogRef.current = catalog.catalog; }, [catalog.catalog]);
   const saveTierPreference = useAsyncGuard(async (
