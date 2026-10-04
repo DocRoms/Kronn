@@ -90,7 +90,7 @@ const PROJECTS = [
 ] as unknown as Project[];
 const WORKFLOW = {
   id: 'wf-nightly', name: 'Nightly report', project_id: 'p-alpha', project_name: 'Alpha',
-  trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+  trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
   enabled: true, pinned: false, last_run: null, created_at: '2026-03-01T00:00:00Z',
 } as WorkflowSummary;
 const PROMPT = {

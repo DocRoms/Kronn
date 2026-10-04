@@ -164,7 +164,7 @@
         "exec_timeout_secs",
         "exec_stdin (piped to stdin — use for LARGE input instead of a huge arg, no argv size limit)"
       ],
-      "note": "exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or via exec_stdin. Saving refuses anything else.",
+      "note": "exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or via exec_stdin. Saving refuses anything else, and a saved step that still does it is refused at run time.",
       "example": {
         "name": "Tests",
         "step_type": {

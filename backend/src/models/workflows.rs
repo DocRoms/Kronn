@@ -1736,12 +1736,37 @@ pub struct WorkflowSummary {
     /// AI-generated workflow that still needs wiring, without fetching its
     /// full step list. 0 = ready to run.
     pub misconfigured_step_count: u32,
+    /// Exec command lines (main or setup) that interpolate a value into
+    /// inline code: refused at run time until fixed (KT-1017).
+    #[serde(default)]
+    pub unsafe_step_count: u32,
     pub enabled: bool,
     /// User-pinned / favorite — the list surfaces pinned workflows first.
     #[serde(default)]
     pub pinned: bool,
     pub last_run: Option<WorkflowRunSummary>,
     pub created_at: DateTime<Utc>,
+}
+
+/// An Exec command line that interpolates a template value into inline code
+/// (`bash -c`, `python3 -c`…). It is refused at run time; `suggested_args`
+/// is a provably equivalent rewrite, `manual_fix` says why there is none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnsafeExecStep {
+    pub step_name: String,
+    /// The step belongs to the `on_failure` chain.
+    pub on_failure: bool,
+    /// `main` (`exec_command`) or `setup` (`exec_setup_command`).
+    pub phase: String,
+    pub command: String,
+    pub args: Vec<String>,
+    /// The offending placeholder, e.g. `{{issue.title}}` (empty when malformed).
+    pub placeholder: String,
+    /// `inline_code_interpolation` or `malformed_placeholder`.
+    pub reason: String,
+    pub suggested_args: Option<Vec<String>>,
+    pub manual_fix: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

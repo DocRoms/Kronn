@@ -1494,6 +1494,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .put(api::workflows::update)
                 .delete(api::workflows::delete),
         )
+        .route(
+            "/api/workflows/{id}/unsafe-steps",
+            get(api::workflows::unsafe_steps),
+        )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route(
             "/api/workflows/test-batch-step",

@@ -25106,3 +25106,110 @@ async fn discussion_poll_omits_an_unchanged_detail_and_returns_it_after_a_change
     let (_, missing) = get_json(app, "/api/discussions/nope/poll").await;
     assert_eq!(missing["success"], false);
 }
+
+/// KT-1017 — a saved Exec step that interpolates a value into inline code is
+/// flagged in the list and the report, an unrelated edit keeps working, a new
+/// unsafe line is refused, and the suggested rewrite clears the flag.
+#[tokio::test]
+async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
+    let state = test_state();
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(move |connection| {
+            let workflow = kronn::models::Workflow {
+                id: "workflow-unsafe".into(),
+                name: "Unsafe".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps: vec![kronn::models::WorkflowStep {
+                    name: "greet".into(),
+                    step_type: kronn::models::StepType::Exec,
+                    exec_command: Some("bash".into()),
+                    exec_args: vec!["-c".into(), "echo {{issue.title}}".into()],
+                    ..Default::default()
+                }],
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety {
+                    sandbox: false,
+                    max_files: None,
+                    max_lines: None,
+                    require_approval: false,
+                },
+                workspace_config: None,
+                concurrency_limit: None,
+                concurrency_key: None,
+                guards: None,
+                artifacts: Default::default(),
+                on_failure: vec![],
+                exec_allowlist: vec!["bash".into()],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, list) = get_json(app.clone(), "/api/workflows").await;
+    let summary = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wf| wf["id"] == "workflow-unsafe")
+        .unwrap();
+    assert_eq!(summary["unsafe_step_count"], 1);
+
+    let (status, report) =
+        get_json(app.clone(), "/api/workflows/workflow-unsafe/unsafe-steps").await;
+    assert_eq!(status, StatusCode::OK);
+    let issue = &report["data"][0];
+    assert_eq!(issue["step_name"], "greet");
+    assert_eq!(issue["placeholder"], "{{issue.title}}");
+    assert_eq!(
+        issue["suggested_args"],
+        serde_json::json!(["-c", "echo \"$1\"", "_", "{{issue.title}}"])
+    );
+
+    let mut steps = serde_json::json!([{
+        "name": "greet",
+        "step_type": {"type": "Exec"},
+        "exec_command": "bash",
+        "exec_args": ["-c", "echo {{issue.title}}"],
+    }]);
+    let (_, renamed) = put_json_root(
+        app.clone(),
+        "/api/workflows/workflow-unsafe",
+        serde_json::json!({"name": "Renamed", "steps": steps}),
+    )
+    .await;
+    assert_eq!(
+        renamed["success"], true,
+        "an unchanged unsafe step must not block an edit: {renamed}"
+    );
+
+    steps[0]["exec_args"] = serde_json::json!(["-c", "echo {{issue.body}}"]);
+    let (_, refused) = put_json_root(
+        app.clone(),
+        "/api/workflows/workflow-unsafe",
+        serde_json::json!({"steps": steps}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+
+    steps[0]["exec_args"] = issue["suggested_args"].clone();
+    let (_, fixed) = put_json_root(
+        app.clone(),
+        "/api/workflows/workflow-unsafe",
+        serde_json::json!({"steps": steps}),
+    )
+    .await;
+    assert_eq!(fixed["success"], true, "{fixed}");
+    let (_, report) = get_json(app, "/api/workflows/workflow-unsafe/unsafe-steps").await;
+    assert_eq!(report["data"], serde_json::json!([]));
+}

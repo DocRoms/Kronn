@@ -1069,115 +1069,6 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
     Ok(())
 }
 
-/// Inline-code options of an interpreter: the short option letters (also
-/// valid inside a cluster such as `-ec`, or with the code attached, as in
-/// `-cprint(1)`) and the long options (`--eval`, `--eval=<code>`).
-struct InlineCodeOptions {
-    letters: &'static [char],
-    long: &'static [&'static str],
-    /// PowerShell takes single-dash long names, abbreviated, any case.
-    case_insensitive: bool,
-}
-
-fn inline_code_options(cmd: &str) -> Option<InlineCodeOptions> {
-    let lower = cmd.to_ascii_lowercase();
-    let shell = ["bash", "sh", "zsh", "dash", "fish", "ksh", "ash"].contains(&lower.as_str());
-    let (letters, long, case_insensitive): (&[char], &[&str], bool) =
-        if shell || lower.starts_with("python") || lower.starts_with("pypy") {
-            (&['c'], &["--command"], false)
-        } else if matches!(lower.as_str(), "node" | "nodejs" | "bun" | "deno") {
-            (&['e', 'p'], &["--eval", "--print"], false)
-        } else if matches!(lower.as_str(), "ruby" | "perl") {
-            (&['e', 'E'], &[], false)
-        } else if lower == "php" {
-            (&['r'], &[], false)
-        } else if matches!(lower.as_str(), "pwsh" | "powershell") {
-            (&['c', 'e'], &[], true)
-        } else {
-            return None;
-        };
-    Some(InlineCodeOptions {
-        letters,
-        long,
-        case_insensitive,
-    })
-}
-
-/// The arguments that may hold inline code for `cmd`, scanning every option
-/// (Perl and Ruby repeat `-e`). In doubt an argument counts as code: a false
-/// refusal costs a rewrite, a miss runs a payload.
-fn inline_code_args<'a>(cmd: &str, args: &'a [String]) -> Vec<&'a str> {
-    let Some(options) = inline_code_options(cmd) else {
-        return Vec::new();
-    };
-    let mut code = Vec::new();
-    for (index, arg) in args.iter().enumerate() {
-        let next = args.get(index + 1).map(String::as_str);
-        let (is_code_option, attached) = if let Some(rest) = arg.strip_prefix("--") {
-            let (name, value) = rest
-                .split_once('=')
-                .map_or((rest, None), |(n, v)| (n, Some(v)));
-            let flag = format!("--{}", name.to_ascii_lowercase());
-            (options.long.contains(&flag.as_str()), value.is_some())
-        } else if let Some(cluster) = arg.strip_prefix('-') {
-            let hit = cluster.char_indices().find(|(_, c)| {
-                options.letters.contains(c)
-                    || (options.case_insensitive
-                        && options.letters.contains(&c.to_ascii_lowercase()))
-            });
-            match hit {
-                // PowerShell names are words (`-Command`), never attached code.
-                Some((at, c)) => (
-                    true,
-                    !options.case_insensitive && at + c.len_utf8() < cluster.len(),
-                ),
-                None => (false, false),
-            }
-        } else {
-            (false, false)
-        };
-        if !is_code_option {
-            continue;
-        }
-        code.push(arg.as_str());
-        if !attached {
-            code.extend(next);
-        }
-    }
-    code
-}
-
-/// Values Kronn produces itself; every other placeholder may carry text an
-/// outsider controls (tracker fields, step outputs, launch inputs).
-fn is_trusted_template_path(path: &str) -> bool {
-    path == "run.id" || path.starts_with("time.now")
-}
-
-/// Refuse inline code that interpolates any value but `{{run.id}}` and
-/// `{{time.now…}}`: inside code a value can always find a context where it
-/// runs (heredoc, eval, nested quotes), whatever filter it went through.
-/// Values belong in later argv entries, which the interpreter never parses.
-fn inline_script_injection(step: &str, cmd: &str, args: &[String]) -> Option<String> {
-    for code in inline_code_args(cmd, args) {
-        let Ok(paths) = crate::workflows::template::placeholder_paths(code) else {
-            return Some(format!(
-                "Step Exec « {step} » : le code inline de `{cmd}` contient un placeholder mal formé."
-            ));
-        };
-        if let Some(path) = paths.iter().find(|path| !is_trusted_template_path(path)) {
-            return Some(format!(
-                "Step Exec « {step} » : le script inline de `{cmd}` interpole `{{{{{path}}}}}` — \
-                 dans du code, une valeur peut toujours être exécutée (heredoc, eval, guillemets), \
-                 même filtrée par `|sh`. Passe-la en argument séparé après le script, que \
-                 l'interpréteur ne lit jamais comme du code : \
-                 `exec_args=[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{{{{path}}}}}\"]` pour un shell, \
-                 `sys.argv[1]` / `process.argv[2]` sinon, ou via `exec_stdin`."
-            ));
-        }
-    }
-    None
-}
-
 /// 0.7.0 Phase 5 — validate every `StepType::Exec` step in the list:
 ///   - `exec_command` is set, non-empty, and present in `allowlist`
 ///   - `exec_command` itself passes the same character-level safety
@@ -1192,6 +1083,32 @@ fn inline_script_injection(step: &str, cmd: &str, args: &[String]) -> Option<Str
 /// content here would either be a false safety blanket (we'd reject
 /// legitimate values) or trivially bypassed.
 fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(), String> {
+    validate_exec_steps_keeping(steps, allowlist, &[])
+}
+
+/// An unchanged command line already stored as unsafe: an unrelated edit of
+/// the workflow must not be blocked by it. It stays refused at run time and
+/// flagged until the user applies a fix.
+fn is_grandfathered(grandfathered: &[UnsafeExecStep], step: &WorkflowStep, phase: &str) -> bool {
+    let (cmd, args) = if phase == "setup" {
+        (step.exec_setup_command.as_deref(), &step.exec_setup_args)
+    } else {
+        (step.exec_command.as_deref(), &step.exec_args)
+    };
+    let cmd = cmd.map(str::trim).unwrap_or_default();
+    grandfathered.iter().any(|known| {
+        known.step_name == step.name
+            && known.phase == phase
+            && known.command == cmd
+            && &known.args == args
+    })
+}
+
+fn validate_exec_steps_keeping(
+    steps: &[WorkflowStep],
+    allowlist: &[String],
+    grandfathered: &[UnsafeExecStep],
+) -> Result<(), String> {
     const MAX_ARGS: usize = 64;
     const MAX_TIMEOUT_SECS: u32 = 1800;
     for s in steps {
@@ -1279,8 +1196,12 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                 MAX_ARGS
             ));
         }
-        if let Some(error) = inline_script_injection(&s.name, cmd, &s.exec_args) {
-            return Err(error);
+        if !is_grandfathered(grandfathered, s, "main") {
+            if let Some(error) =
+                crate::core::inline_code::validation_error(&s.name, cmd, &s.exec_args)
+            {
+                return Err(error);
+            }
         }
         // 0.8.2 — Catch the "bash + multi-word arg" foot-gun. A user who
         // sets `exec_command=bash, exec_args=["make test"]` thinks they're
@@ -1336,8 +1257,14 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                     MAX_ARGS
                 ));
             }
-            if let Some(error) = inline_script_injection(&s.name, setup_cmd, &s.exec_setup_args) {
-                return Err(format!("{error} (setup)"));
+            if !is_grandfathered(grandfathered, s, "setup") {
+                if let Some(error) = crate::core::inline_code::validation_error(
+                    &s.name,
+                    setup_cmd,
+                    &s.exec_setup_args,
+                ) {
+                    return Err(format!("{error} (setup)"));
+                }
             }
             let setup_is_shell = matches!(setup_cmd, "bash" | "sh" | "zsh" | "dash" | "fish");
             if setup_is_shell && !s.exec_setup_args.is_empty() {
@@ -1481,6 +1408,11 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Workflo
                         trigger_type,
                         step_count: wf.steps.len() as u32,
                         misconfigured_step_count: count_misconfigured_steps(&wf.steps),
+                        unsafe_step_count: crate::core::inline_code::classify_workflow(
+                            &wf.steps,
+                            &wf.on_failure,
+                        )
+                        .len() as u32,
                         enabled: wf.enabled,
                         pinned: wf.pinned,
                         last_run,
@@ -1509,6 +1441,29 @@ pub async fn get(
         .await
     {
         Ok(Some(wf)) => Json(ApiResponse::ok(wf)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Workflow not found",
+        )),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// GET /api/workflows/{id}/unsafe-steps — Exec command lines that interpolate
+/// a value into inline code, each with a suggested rewrite or the reason a
+/// manual fix is required. Read-only: nothing is applied here.
+pub async fn unsafe_steps(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<UnsafeExecStep>>> {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+        .await
+    {
+        Ok(Some(wf)) => Json(ApiResponse::ok(
+            crate::core::inline_code::classify_workflow(&wf.steps, &wf.on_failure),
+        )),
         Ok(None) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Workflow not found",
@@ -1870,8 +1825,11 @@ pub async fn update(
         .exec_allowlist
         .as_ref()
         .unwrap_or(&existing.exec_allowlist);
+    let stored_unsafe =
+        crate::core::inline_code::classify_workflow(&existing.steps, &existing.on_failure);
     if let Some(ref new_steps) = req.steps {
-        if let Err(e) = validate_exec_steps(new_steps, effective_allowlist) {
+        if let Err(e) = validate_exec_steps_keeping(new_steps, effective_allowlist, &stored_unsafe)
+        {
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_json_data_steps(new_steps) {
@@ -1886,7 +1844,9 @@ pub async fn update(
         }
     }
     if let Some(ref new_on_failure) = req.on_failure {
-        if let Err(e) = validate_exec_steps(new_on_failure, effective_allowlist) {
+        if let Err(e) =
+            validate_exec_steps_keeping(new_on_failure, effective_allowlist, &stored_unsafe)
+        {
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_json_data_steps(new_on_failure) {

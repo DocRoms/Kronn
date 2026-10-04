@@ -118,6 +118,11 @@ pub async fn execute_exec_step_with_output_limit(
             ),
         );
     }
+    // A saved step that interpolates a value into inline code never runs,
+    // whatever triggered the run (KT-1017); the editor offers the rewrite.
+    if let Some(refusal) = crate::core::inline_code::runtime_refusal(step) {
+        return fail(step, start, refusal);
+    }
 
     // Validate work_dir BEFORE spawn. When a workflow has no project
     // attached, `runner.rs` falls through to `work_dir = ""`. Passing
@@ -1298,6 +1303,50 @@ mod tests {
                 std::fs::read_dir(dir.path()).unwrap().count(),
                 0,
                 "{args:?}: the title ran as code"
+            );
+        }
+    }
+
+    /// A saved step that interpolates a value into inline code fails before
+    /// spawning anything, main command or setup, with the step, the
+    /// placeholder and the fix in its error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_step_interpolating_into_inline_code_is_refused_before_running() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue("$(touch pwned)", "", "1", "https://tracker.test/1", &[]);
+        let main = exec_step(
+            "greet",
+            Some("bash"),
+            vec!["-c", "touch ran; echo {{issue.title}}"],
+            None,
+        );
+        let mut setup = exec_step("greet", Some("bash"), vec!["-c", "touch ran"], None);
+        setup.exec_setup_command = Some("bash".into());
+        setup.exec_setup_args = vec!["-c".into(), "touch ran; echo {{issue.title}}".into()];
+        for step in [main, setup] {
+            let dir = tempfile::tempdir().unwrap();
+            let outcome = execute_exec_step(
+                &step,
+                &["bash".to_string()],
+                &dir.path().to_string_lossy(),
+                &ctx,
+            )
+            .await;
+            assert_eq!(outcome.result.status, RunStatus::Failed);
+            let output = &outcome.result.output;
+            assert!(
+                output.contains("greet") && output.contains("{{issue.title}}"),
+                "{output}"
+            );
+            assert!(
+                output.contains("applique la correction proposée"),
+                "{output}"
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "nothing ran"
             );
         }
     }

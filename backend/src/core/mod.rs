@@ -24,6 +24,7 @@ pub mod export_secrets;
 pub mod faithfulness;
 pub mod fs_guard;
 pub mod host_mcp_discovery;
+pub mod inline_code;
 pub mod key_discovery;
 pub mod keystore;
 pub mod keyvault;

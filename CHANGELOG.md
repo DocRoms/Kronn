@@ -43,6 +43,17 @@ Release notes for 0.9.3 and earlier are available in the
   or the configured one labelled as such, and `step_done` carries the step's
   cost (KT-997).
 
+- Saved workflows whose Exec step puts a value into inline code (`bash -c`,
+  `python3 -c`, `node -e`…) are now flagged with an "unsafe interpolation"
+  badge, and such a step no longer runs: the run stops at that step, after
+  the earlier steps, with an error naming the step, the value and the fix,
+  whatever started the run (KT-1017). In the workflow, "Suggest a fix" shows
+  the rewrite as a diff, the value moved into a separate argument (`$1`,
+  `sys.argv[1]`, `process.argv[1]`), and applies it only when you click
+  Apply. When no rewrite is provably equivalent (heredoc, single quotes,
+  part of a longer string), it says a manual fix is required and gives the
+  recipe. Editing something else in such a workflow keeps working.
+
 ### Fixed
 
 - An audit step that only calls tools, without a word of text, now shows its
@@ -251,8 +262,7 @@ Release notes for 0.9.3 and earlier are available in the
   argument the interpreter never parses
   (`["-c", "echo \"$1\"", "_", "{{issue.title}}"]`). A new `{{value|sh}}`
   filter renders one single-quoted shell word, but it is a quoting helper, not
-  a way into inline code. Saved workflows keep running unchanged until they
-  are next edited.
+  a way into inline code.
 
 ### Changed
 

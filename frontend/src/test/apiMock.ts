@@ -472,6 +472,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     workflows: {
       list: resolve([]),
       get: resolve(null),
+      unsafeSteps: resolve([]),
       create: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),

@@ -7914,6 +7914,29 @@ state?: Record<string, string>, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
+/**
+ * An Exec command line that interpolates a template value into inline code
+ * (`bash -c`, `python3 -c`…). It is refused at run time; `suggested_args`
+ * is a provably equivalent rewrite, `manual_fix` says why there is none.
+ */
+export type UnsafeExecStep = { step_name: string,
+/**
+ * The step belongs to the `on_failure` chain.
+ */
+on_failure: boolean,
+/**
+ * `main` (`exec_command`) or `setup` (`exec_setup_command`).
+ */
+phase: string, command: string, args: Array<string>,
+/**
+ * The offending placeholder, e.g. `{{issue.title}}` (empty when malformed).
+ */
+placeholder: string,
+/**
+ * `inline_code_interpolation` or `malformed_placeholder`.
+ */
+reason: string, suggested_args: Array<string> | null, manual_fix: string | null, };
+
 export type UpdateBatchCompareManualScoreRequest = {
 /**
  * `None` clears the human rating; otherwise the accepted range is 1..=5.
@@ -8995,7 +9018,12 @@ export type WorkflowSummary = { id: string, name: string, project_id: string | n
  * AI-generated workflow that still needs wiring, without fetching its
  * full step list. 0 = ready to run.
  */
-misconfigured_step_count: number, enabled: boolean,
+misconfigured_step_count: number,
+/**
+ * Exec command lines (main or setup) that interpolate a value into
+ * inline code: refused at run time until fixed (KT-1017).
+ */
+unsafe_step_count: number, enabled: boolean,
 /**
  * User-pinned / favorite — the list surfaces pinned workflows first.
  */
