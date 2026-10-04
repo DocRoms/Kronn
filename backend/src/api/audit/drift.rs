@@ -1046,11 +1046,7 @@ pub async fn partial_audit(
             let idx: Vec<String> = refreshed_files.iter()
                 .filter(|f| f.contains("inconsistencies-")).cloned().collect();
             tokio::task::spawn_blocking(move || {
-                idx.iter()
-                    .filter_map(|f| std::fs::read_to_string(pp.join(f)).ok())
-                    .flat_map(|c| super::reconciliation::parse_index_td_ids(&c))
-                    .collect::<std::collections::BTreeSet<String>>()
-                    .into_iter().collect::<Vec<String>>()
+                super::reconciliation::td_validation_scope(&pp, &idx).undecided
             }).await.unwrap_or_default()
         };
         // Exact partition (matrix v2): requested = succeeded ⊎ unchanged ⊎ failed.

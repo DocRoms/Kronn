@@ -1754,6 +1754,18 @@ mod prompt_tests {
     }
 
     #[test]
+    fn full_validation_after_a_resume_names_the_partial_validation() {
+        use super::helpers::{all_tds_decided_block, prior_partial_validation_block};
+        for lang in ["fr", "en", "es"] {
+            let block = prior_partial_validation_block("disc-42", lang);
+            assert!(block.contains("`disc-42`"), "{lang}");
+            assert!(block.contains("#discussion-disc-42"), "{lang}");
+            assert!(all_tds_decided_block(lang).contains("SCOPE"), "{lang}");
+        }
+        assert!(all_tds_decided_block("en").contains("emit no TD card"));
+    }
+
+    #[test]
     fn validation_scopes_to_the_run_td_ids() {
         // Codex r6 P0 — the validation phase read every TD-*.md on disk and
         // could re-open findings settled by previous validations. The scope

@@ -171,7 +171,11 @@ pub struct PriorDigest {
     /// First `# ` heading, with any leading `TD-...:` id prefix stripped.
     /// Falls back to the id when the file has no heading.
     pub title: String,
+    /// The human decision a validation card recorded on the sheet.
+    pub decision: Option<TdDecision>,
 }
+
+use crate::core::audit_validation::TdDecision;
 
 /// Read every TD detail file in `<docs>/tech-debt/` into a [`PriorDigest`].
 /// Mirrors [`snapshot_tech_debt_dir`]'s dir resolution + scaffolding skip,
@@ -244,6 +248,7 @@ fn digest_one(id: &str, content: &str) -> PriorDigest {
         id: id.to_string(),
         severity,
         title,
+        decision: crate::core::audit_validation::td_decision(content),
     }
 }
 
@@ -292,6 +297,9 @@ pub fn render_known_debt_block(priors: &[PriorDigest]) -> String {
     if priors.is_empty() {
         return String::new();
     }
+    let (settled_out, priors): (Vec<&PriorDigest>, Vec<&PriorDigest>) = priors
+        .iter()
+        .partition(|p| p.decision.is_some_and(TdDecision::leaves_index));
     let mut block = String::new();
     block.push_str("## RE-AUDIT MODE — fresh full pass, dedup against known debt\n\n");
     block.push_str(&format!(
@@ -320,9 +328,69 @@ Otherwise this step is INCOMPLETE — it means you re-read the existing files in
         } else {
             &p.severity
         };
-        block.push_str(&format!("- `{}` — {} — {}\n", p.id, sev, p.title));
+        let decided = match p.decision {
+            Some(TdDecision::Confirmed) => " — confirmed by the user",
+            Some(TdDecision::Deferred) => " — deferred by the user",
+            _ => "",
+        };
+        block.push_str(&format!("- `{}` — {} — {}{decided}\n", p.id, sev, p.title));
+    }
+    if !settled_out.is_empty() {
+        block.push_str(
+            "\n### Settled by the user — do NOT list these in the index, do NOT recreate them\n\
+The user rejected these findings or accepted them as intentional trade-offs (`docs/decisions.md`). \
+Leave their detail files as they are.\n",
+        );
+        for p in settled_out {
+            let why = if p.decision == Some(TdDecision::Rejected) {
+                "rejected"
+            } else {
+                "accepted decision"
+            };
+            block.push_str(&format!("- `{}` — {} — {why}\n", p.id, p.title));
+        }
     }
     block
+}
+
+/// TDs the freshly written `index_files` list, and those of them that still
+/// need a human decision: new, never decided, or deferred. Decisions live on
+/// the TD sheets (`docs/tech-debt/<id>.md`), whichever validation recorded them.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct TdValidationScope {
+    pub(crate) listed: usize,
+    pub(crate) undecided: Vec<String>,
+}
+
+impl TdValidationScope {
+    /// Listed TDs exist and every one of them is decided.
+    pub(crate) fn all_decided(&self) -> bool {
+        self.listed > 0 && self.undecided.is_empty()
+    }
+}
+
+pub(crate) fn td_validation_scope(
+    project_path: &Path,
+    index_files: &[String],
+) -> TdValidationScope {
+    let td_dir = project_path.join("docs").join("tech-debt");
+    let listed: std::collections::BTreeSet<String> = index_files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(project_path.join(f)).ok())
+        .flat_map(|c| parse_index_td_ids(&c))
+        .collect();
+    let undecided = listed
+        .iter()
+        .filter(|id| {
+            crate::core::audit_validation::read_td_decision(&td_dir, id)
+                .is_none_or(|decision| !decision.is_settled())
+        })
+        .cloned()
+        .collect();
+    TdValidationScope {
+        listed: listed.len(),
+        undecided,
+    }
 }
 
 /// Extract the set of `TD-<date>-<slug>` ids still referenced in the
@@ -1377,11 +1445,13 @@ also not interesting (this `path/that:1` should be ignored)
                 id: "TD-20260603-csp".into(),
                 severity: "Critical".into(),
                 title: "CSP relaxed".into(),
+                decision: None,
             },
             PriorDigest {
                 id: "TD-20260603-blank".into(),
                 severity: "Medium".into(),
                 title: "target=_blank".into(),
+                decision: None,
             },
         ];
         let block = render_known_debt_block(&priors);
@@ -1405,6 +1475,86 @@ also not interesting (this `path/that:1` should be ignored)
         assert!(block.contains("TD-20260603-csp"));
         assert!(block.contains("CSP relaxed"));
         assert!(block.contains("TD-20260603-blank"));
+    }
+
+    #[test]
+    fn known_debt_block_keeps_settled_tds_out_of_the_carry_list() {
+        let prior = |id: &str, decision| PriorDigest {
+            id: id.into(),
+            severity: "High".into(),
+            title: format!("title {id}"),
+            decision,
+        };
+        let block = render_known_debt_block(&[
+            prior("TD-20260901-open", None),
+            prior("TD-20260901-ok", Some(TdDecision::Confirmed)),
+            prior("TD-20260901-later", Some(TdDecision::Deferred)),
+            prior("TD-20260901-no", Some(TdDecision::Rejected)),
+            prior("TD-20260901-tradeoff", Some(TdDecision::AcceptedDecision)),
+        ]);
+        let (carry, settled) = block.split_once("### Settled by the user").unwrap();
+        for id in ["open", "ok", "later"] {
+            assert!(carry.contains(&format!("TD-20260901-{id}")), "{id}");
+            assert!(!settled.contains(&format!("TD-20260901-{id}`")), "{id}");
+        }
+        assert!(carry.contains("confirmed by the user"));
+        assert!(carry.contains("deferred by the user"));
+        assert!(settled.contains("`TD-20260901-no` — title TD-20260901-no — rejected"));
+        assert!(settled
+            .contains("TD-20260901-tradeoff` — title TD-20260901-tradeoff — accepted decision"));
+        assert!(!carry.contains("TD-20260901-no`"));
+        assert!(settled.contains("do NOT recreate"));
+    }
+
+    #[test]
+    fn only_new_undecided_or_deferred_tds_are_asked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let td_dir = tmp.path().join("docs/tech-debt");
+        std::fs::create_dir_all(&td_dir).unwrap();
+        let sheet = |id: &str, status: &str| {
+            std::fs::write(
+                td_dir.join(format!("{id}.md")),
+                format!("---\nname: {id}\n---\n\n# {id}\n\n- **Status**: {status}\n"),
+            )
+            .unwrap();
+        };
+        sheet("TD-20260901-confirmed", "Confirmed by user");
+        sheet("TD-20260901-rejected", "Rejected");
+        sheet("TD-20260901-accepted", "Accepted decision");
+        sheet("TD-20260901-deferred", "Deferred");
+        sheet("TD-20260901-verified", "Verified in source");
+        std::fs::write(
+            tmp.path().join("docs/inconsistencies-tech-debt.md"),
+            "| ID |\n|---|\n| TD-20260901-confirmed |\n| TD-20260901-rejected |\n\
+             | TD-20260901-accepted |\n| TD-20260901-deferred |\n| TD-20260901-verified |\n\
+             | TD-20260902-brand-new |\n",
+        )
+        .unwrap();
+        let index = ["docs/inconsistencies-tech-debt.md".to_string()];
+        let scope = td_validation_scope(tmp.path(), &index);
+        assert_eq!(scope.listed, 6);
+        assert!(!scope.all_decided());
+        assert_eq!(
+            scope.undecided,
+            vec![
+                "TD-20260901-deferred".to_string(),
+                "TD-20260901-verified".to_string(),
+                "TD-20260902-brand-new".to_string(),
+            ]
+        );
+
+        // Once the partial validation decided the rest, nothing is asked again.
+        sheet("TD-20260901-deferred", "Rejected");
+        sheet("TD-20260901-verified", "Confirmed by user");
+        std::fs::write(
+            td_dir.join("TD-20260902-brand-new.md"),
+            "# x\n- **Status**: Accepted decision\n",
+        )
+        .unwrap();
+        let scope = td_validation_scope(tmp.path(), &index);
+        assert!(scope.all_decided());
+        assert!(td_validation_scope(tmp.path(), &[]).undecided.is_empty());
+        assert!(!td_validation_scope(tmp.path(), &[]).all_decided());
     }
 
     #[test]

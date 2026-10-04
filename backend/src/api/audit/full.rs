@@ -21,8 +21,9 @@ use crate::models::*;
 use crate::AppState;
 
 use super::helpers::{
-    build_sub_audit_validation_prompt, build_validation_prompt, check_ai_dir_permissions,
-    compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills, partial_run_block,
+    all_tds_decided_block, build_sub_audit_validation_prompt, build_validation_prompt,
+    check_ai_dir_permissions, compute_audit_info_sync, detect_issue_tracker_mcp,
+    detect_project_skills, partial_run_block, prior_partial_validation_block,
     remove_bootstrap_block,
 };
 use super::{detach_sse_stream, SseStream};
@@ -2013,6 +2014,17 @@ pub async fn full_audit(
                     .filter_map(|f| std::fs::read_to_string(project_path_for_recon.join(f)).ok())
                     .flat_map(|c| parse_index_td_ids(&c))
                     .collect();
+                // Rejected findings and accepted trade-offs leave the index on
+                // purpose: they are not reconciliation candidates.
+                let snapshot: Vec<_> = snapshot
+                    .into_iter()
+                    .filter(|snap| {
+                        std::fs::read_to_string(&snap.path)
+                            .ok()
+                            .and_then(|c| crate::core::audit_validation::td_decision(&c))
+                            .is_none_or(|decision| !decision.leaves_index())
+                    })
+                    .collect();
                 let deltas = compute_delta_with_index(&snapshot, &still_listed);
                 let project_path_for_check = project_path_for_recon.clone();
                 let entries = classify(
@@ -2274,17 +2286,25 @@ pub async fn full_audit(
         // indices the run wrote. Injected into the validation prompt so
         // Phase 3 reviews THIS run's findings only, never re-opening TDs
         // settled by previous validation discussions.
-        let run_td_ids: Vec<String> = {
+        // A TD already decided by an earlier validation (a partial one before a
+        // resume included) is not asked again: its sheet records the decision.
+        let td_scope = {
             let pp = project_path.clone();
             let idx_files = freshly_written_indices.clone();
             tokio::task::spawn_blocking(move || {
-                idx_files.iter()
-                    .filter_map(|f| std::fs::read_to_string(pp.join(f)).ok())
-                    .flat_map(|c| super::reconciliation::parse_index_td_ids(&c))
-                    .collect::<std::collections::BTreeSet<String>>()
-                    .into_iter()
-                    .collect::<Vec<String>>()
+                super::reconciliation::td_validation_scope(&pp, &idx_files)
             }).await.unwrap_or_default()
+        };
+        let run_td_ids: Vec<String> = td_scope.undecided.clone();
+        // KT-938 — the resumed run's partial validation, named in the prompt.
+        let partial_validation_id: Option<String> = match resume_run_id_req.clone() {
+            Some(run_id) => db
+                .with_conn(move |conn| crate::db::audit_runs::get_by_id(conn, &run_id))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|run| run.validation_discussion_id),
+            None => None,
         };
 
         // 0.8.4 (#287) — Full keeps the 4-phase protocol; sub-audits
@@ -2297,6 +2317,18 @@ pub async fn full_audit(
             build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp, &run_td_ids)
         };
         // KT-931 — a partial run says which steps are NOT being validated.
+        let validation_prompt = if td_scope.all_decided() {
+            format!("{}{validation_prompt}", all_tds_decided_block(&language))
+        } else {
+            validation_prompt
+        };
+        let validation_prompt = match partial_validation_id.as_deref() {
+            Some(id) => format!(
+                "{}{validation_prompt}",
+                prior_partial_validation_block(id, &language)
+            ),
+            None => validation_prompt,
+        };
         let validation_prompt = if outcome == RunOutcome::Partial {
             let to_redo: Vec<(u32, String)> = steps_to_redo
                 .iter()
@@ -3230,17 +3262,8 @@ pub(crate) struct SeverityCounts {
 /// trail (its row is removed from the index, not the detail file itself),
 /// so it must not keep weighing on the health score or severity tallies.
 fn td_status_is_rejected(content: &str) -> bool {
-    content.lines().any(|l| {
-        let lc = l.trim().to_ascii_lowercase();
-        let Some(value) = lc
-            .strip_prefix("- **status**:")
-            .or_else(|| lc.strip_prefix("**status**:"))
-            .or_else(|| lc.strip_prefix("status:"))
-        else {
-            return false;
-        };
-        value.trim().starts_with("rejected")
-    })
+    crate::core::audit_validation::td_decision(content)
+        == Some(crate::core::audit_validation::TdDecision::Rejected)
 }
 
 /// Scan every `TD-*.md` file in the tech-debt directory (skipping

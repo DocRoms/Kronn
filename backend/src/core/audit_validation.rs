@@ -24,10 +24,10 @@ impl TdResolutionAction {
 
     fn status(self) -> &'static str {
         match self {
-            Self::Confirm => "Confirmed by user",
-            Self::Reject => "Rejected",
-            Self::AcceptDecision => "Accepted decision",
-            Self::Defer => "Deferred",
+            Self::Confirm => STATUS_CONFIRMED,
+            Self::Reject => STATUS_REJECTED,
+            Self::AcceptDecision => STATUS_ACCEPTED_DECISION,
+            Self::Defer => STATUS_DEFERRED,
         }
     }
 
@@ -41,6 +41,121 @@ impl TdResolutionAction {
             Self::Defer => "Deferred through an audit validation card.",
         }
     }
+}
+
+const STATUS_CONFIRMED: &str = "Confirmed by user";
+const STATUS_REJECTED: &str = "Rejected";
+const STATUS_ACCEPTED_DECISION: &str = "Accepted decision";
+const STATUS_DEFERRED: &str = "Deferred";
+
+/// A human decision a validation card wrote on a TD sheet. The sheet is the
+/// authority: re-audits and later validations read it back from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TdDecision {
+    Confirmed,
+    Rejected,
+    AcceptedDecision,
+    Deferred,
+}
+
+impl TdDecision {
+    /// Settled TDs are never asked again. A deferred TD is: the user postponed
+    /// the decision, they did not take it.
+    pub fn is_settled(self) -> bool {
+        !matches!(self, Self::Deferred)
+    }
+
+    /// Rejected findings and accepted trade-offs are not active debt: they
+    /// leave the index and are not re-emitted.
+    pub fn leaves_index(self) -> bool {
+        matches!(self, Self::Rejected | Self::AcceptedDecision)
+    }
+
+    fn from_status(value: &str) -> Option<Self> {
+        let value = value
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '*')
+            .trim()
+            .to_lowercase();
+        let starts = |status: &str| value.starts_with(&status.to_lowercase());
+        if starts(STATUS_CONFIRMED) || value == "confirmed" {
+            Some(Self::Confirmed)
+        } else if starts(STATUS_REJECTED) {
+            Some(Self::Rejected)
+        } else if starts(STATUS_ACCEPTED_DECISION) {
+            Some(Self::AcceptedDecision)
+        } else if starts(STATUS_DEFERRED) {
+            Some(Self::Deferred)
+        } else {
+            None
+        }
+    }
+}
+
+fn status_value(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    ["- **status**:", "**status**:", "status:"]
+        .iter()
+        .find(|prefix| lower.starts_with(*prefix))
+        .map(|prefix| &trimmed[prefix.len()..])
+}
+
+/// End of the YAML front matter (index of the closing `---`), if any.
+fn frontmatter_end(lines: &[&str]) -> Option<usize> {
+    if lines.first().is_none_or(|line| line.trim() != "---") {
+        return None;
+    }
+    lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, line)| (line.trim() == "---").then_some(index))
+}
+
+/// The decision recorded on a TD sheet, if any. Reads the body `Status` line
+/// (outside code fences) first, then a `status:` key of the front matter, then
+/// the last `audit_history` entry. Any other status (Verified in source,
+/// Inferred, ...) is no decision.
+pub fn td_decision(content: &str) -> Option<TdDecision> {
+    let lines: Vec<&str> = content.lines().collect();
+    let fm_end = frontmatter_end(&lines);
+    let body_start = fm_end.map_or(0, |end| end + 1);
+    let mut in_fence = false;
+    for line in &lines[body_start..] {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            if let Some(value) = status_value(line) {
+                return TdDecision::from_status(value);
+            }
+        }
+    }
+    let frontmatter = &lines[1..fm_end?];
+    let top_level = frontmatter.iter().find_map(|line| {
+        let indent = line.len() - line.trim_start().len();
+        (indent <= 2).then(|| status_value(line)).flatten()
+    });
+    if let Some(value) = top_level {
+        return TdDecision::from_status(value);
+    }
+    frontmatter
+        .iter()
+        .rev()
+        .find_map(|line| status_value(line))
+        .and_then(TdDecision::from_status)
+}
+
+/// `td_decision` of `<td_dir>/<id>.md`; `None` when the sheet is unreadable.
+pub(crate) fn read_td_decision(td_dir: &Path, td_id: &str) -> Option<TdDecision> {
+    if !valid_td_id(td_id) {
+        return None;
+    }
+    std::fs::read_to_string(td_dir.join(format!("{td_id}.md")))
+        .ok()
+        .and_then(|content| td_decision(&content))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +266,15 @@ fn replace_current_status(lines: &mut [String], status: &str) -> Result<()> {
                 .find(':')
                 .ok_or_else(|| anyhow!("malformed TD status line"))?;
             *line = format!("{}{} {}", &line[..indent_len], &trimmed[..=colon], status);
+            return Ok(());
+        }
+    }
+    // A sheet whose only current status is a front matter key.
+    for line in &mut lines[..body_start.saturating_sub(1)] {
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        if indent_len <= 2 && trimmed.to_ascii_lowercase().starts_with("status:") {
+            *line = format!("{}status: {}", &line[..indent_len], status);
             return Ok(());
         }
     }
@@ -371,6 +495,52 @@ mod tests {
             append_decision(&once, "TD-20260928-choice", Some("duplicate")),
             once
         );
+    }
+
+    #[test]
+    fn every_status_a_card_writes_reads_back_as_its_decision() {
+        let cases = [
+            (TdResolutionAction::Confirm, TdDecision::Confirmed),
+            (TdResolutionAction::Reject, TdDecision::Rejected),
+            (
+                TdResolutionAction::AcceptDecision,
+                TdDecision::AcceptedDecision,
+            ),
+            (TdResolutionAction::Defer, TdDecision::Deferred),
+        ];
+        for (action, decision) in cases {
+            let written = update_td(&td("Verified in source"), action).unwrap();
+            assert_eq!(td_decision(&written), Some(decision), "{action:?}");
+        }
+        assert_eq!(td_decision(&td("Verified in source")), None);
+        assert_eq!(td_decision(&td("Inferred")), None);
+        assert!(!TdDecision::Deferred.is_settled());
+        assert!(TdDecision::Confirmed.is_settled() && !TdDecision::Confirmed.leaves_index());
+        assert!(TdDecision::Rejected.leaves_index());
+        assert!(TdDecision::AcceptedDecision.leaves_index());
+    }
+
+    #[test]
+    fn the_current_body_status_wins_over_the_history() {
+        // An older rejection in the history does not outlive a later confirmation.
+        let content = "---\nmetadata:\n  audit_history:\n    - date: 2026-08-01\n      status: Rejected\n    - date: 2026-09-01\n      status: Confirmed by user\n---\n\n# TD\n\n- **Status**: Confirmed by user\n";
+        assert_eq!(td_decision(content), Some(TdDecision::Confirmed));
+        // A status quoted inside a code fence is an example, not the sheet's status.
+        let fenced = "# TD\n\n```\nStatus: Rejected\n```\n\n- **Status**: Inferred\n";
+        assert_eq!(td_decision(fenced), None);
+    }
+
+    #[test]
+    fn a_status_only_in_front_matter_is_read_and_written() {
+        let sheet = "---\nname: td-x\nstatus: Open\nmetadata:\n  type: tech-debt\n---\n\n# TD-x — café ☕\n";
+        assert_eq!(td_decision(sheet), None);
+        let written = update_td(sheet, TdResolutionAction::Reject).unwrap();
+        assert!(written.contains("\nstatus: Rejected\n"));
+        assert_eq!(td_decision(&written), Some(TdDecision::Rejected));
+        // Only history: its last entry is the current status.
+        let history = "---\nmetadata:\n  audit_history:\n    - date: 2026-09-01\n      status: Verified in source\n    - date: 2026-09-02\n      status: Deferred\n---\n# TD\n";
+        assert_eq!(td_decision(history), Some(TdDecision::Deferred));
+        assert_eq!(td_decision(""), None);
     }
 
     #[test]

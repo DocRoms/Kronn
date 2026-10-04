@@ -20,6 +20,7 @@ Release notes for 0.9.3 and earlier are available in the
   community server `@benborla29/mcp-server-mysql`: host, user and password,
   with an optional port and database, read-only unless a write flag is set on
   the server.
+
 - The project card says when the branch has lost its audit evidence while
   another commit still carries `docs/.kronn.json`, names that commit and its
   branches, and restores the file on request (KT-993). A Full audit completed
@@ -61,6 +62,17 @@ Release notes for 0.9.3 and earlier are available in the
 - Listing projects no longer writes `docs/.kronn.json` into a checkout that
   only carries legacy audit markers (KT-993): the status is computed in memory
   and the file is written by audits and validations only, atomically.
+
+
+
+- A validation no longer asks again about a TD already decided (KT-938): the
+  decision a card writes on the TD sheet (confirmed, rejected, accepted
+  decision) is read back, so the full validation after a resume asks only
+  about new or undecided TDs and names the partial validation it follows. A
+  deferred TD is asked again, since its decision was postponed. Re-audits stop
+  carrying rejected TDs and accepted trade-offs in the index, and no longer
+  report them as missed. A TD whose status sits only in its YAML front matter
+  is read and updated too.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its
