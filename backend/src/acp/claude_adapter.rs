@@ -29,7 +29,7 @@ use super::adapter_process::{AdapterProcess, StderrTail};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -360,7 +360,7 @@ impl AcpTransport for ClaudeAcpAdapter {
         }
         drop(stdin);
 
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = crate::agents::runner::lossy_lines(stdout);
         let mut failure: Option<String> = None;
         // Input of the tool call in progress, streamed as partial JSON.
         let mut tool_input: Option<String> = None;

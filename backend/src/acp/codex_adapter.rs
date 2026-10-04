@@ -37,7 +37,7 @@ use crate::agents::runner::{AdapterLaunchOptions, PromptCacheUsage, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -479,7 +479,7 @@ impl AcpTransport for CodexAcpAdapter {
         }
         drop(stdin);
 
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = crate::agents::runner::lossy_lines(stdout);
         let mut fatal: Option<String> = None;
         loop {
             match lines.next_line().await {

@@ -12133,6 +12133,177 @@ Suite de la réponse.";
         assert!(group_has_processes(1));
     }
 
+    #[test]
+    fn chunk_line_buffer_keeps_characters_split_across_chunks() {
+        let mut buffer = ChunkLineBuffer::default();
+        // "é" is C3 A9; "🦀" is F0 9F A6 80, here cut into three chunks.
+        buffer.push(b"{\"text\":\"caf\xC3");
+        assert_eq!(buffer.next_line(), None);
+        buffer.push(b"\xA9 \xF0\x9F");
+        buffer.push(b"\xA6");
+        buffer.push(b"\x80\"}\nsecond");
+        assert_eq!(
+            buffer.next_line().as_deref(),
+            Some("{\"text\":\"café 🦀\"}")
+        );
+        assert_eq!(buffer.next_line(), None);
+        // A truly invalid byte costs one replacement character, not the line.
+        buffer.push(b" line \xFF end\n\n");
+        assert_eq!(
+            buffer.next_line().as_deref(),
+            Some("second line \u{FFFD} end")
+        );
+        assert_eq!(buffer.next_line().as_deref(), Some(""));
+        buffer.push("{\"done\":tr".as_bytes());
+        buffer.push(b"ue}");
+        assert_eq!(buffer.take_rest(), "{\"done\":true}");
+        assert_eq!(buffer.take_rest(), "");
+    }
+
+    #[tokio::test]
+    async fn lossy_lines_keep_draining_past_a_non_utf8_byte() {
+        let mut input = b"\xFF\nh\xC3\xA9llo\r\n".to_vec();
+        let body = "x".repeat(1023);
+        for _ in 0..200 {
+            input.extend_from_slice(body.as_bytes());
+            input.push(b'\n');
+        }
+        input.extend_from_slice(b"last line without newline");
+        let mut lines = lossy_lines(input.as_slice());
+        assert_eq!(
+            lines.next_line().await.unwrap().as_deref(),
+            Some("\u{FFFD}")
+        );
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("héllo"));
+        let mut bulk = 0;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line == "last line without newline" {
+                break;
+            }
+            assert_eq!(line, body);
+            bulk += 1;
+        }
+        assert_eq!(bulk, 200, "every line after the invalid byte arrives");
+        assert_eq!(lines.next_line().await.unwrap(), None);
+    }
+
+    /// A stray byte ahead of Claude's stream-json must not stop the adapter's
+    /// reader: the turn's usage, printed after it, still arrives.
+    #[tokio::test]
+    async fn claude_adapter_reads_past_a_non_utf8_stdout_line() {
+        let project = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            project.path(),
+            &format!(
+                "printf '\\377 tool echo\\n'\n{}",
+                crate::acp::test_support::CLAUDE_TURN_WITH_CACHE
+            ),
+        );
+        let transport: Arc<dyn AcpTransport> = Arc::new(
+            crate::acp::ClaudeAcpAdapter::new_with_program(fixture.to_string_lossy(), None, false),
+        );
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let mut process = start_agent_with_config(AgentStartConfig {
+            test_acp_transport: Some(transport),
+            ..AgentStartConfig::new(
+                &AgentType::ClaudeCode,
+                project.path().to_str().unwrap(),
+                "orchestrate",
+                &tokens,
+            )
+        })
+        .await
+        .unwrap();
+        let mut text = String::new();
+        while let Some(line) = process.next_line().await {
+            text.push_str(&line);
+        }
+        assert!(text.contains("orchestrated"), "{text}");
+        assert_eq!(process.reported_token_usage(), Some(48 + 21_545));
+    }
+
+    /// Spawn `sh -c <script>` as its own process group, like production.
+    #[cfg(unix)]
+    fn spawn_group_leader(script: &str) -> (tokio::process::Child, i32) {
+        let mut cmd = crate::core::cmd::async_cmd("sh");
+        cmd.args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+        let child = cmd.spawn().expect("spawn group leader");
+        let pgid = child.id().expect("leader pid") as i32;
+        (child, pgid)
+    }
+
+    #[cfg(unix)]
+    async fn group_empties_within(pgid: i32, limit: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < limit {
+            if !group_has_processes(pgid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        !group_has_processes(pgid)
+    }
+
+    /// After a normal exit, whatever the agent left in its group (a stdio MCP
+    /// server, a background command) goes with the process, by drop or kill.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_process_clears_its_group_after_a_normal_exit() {
+        for explicit_kill in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (child, pgid) = spawn_group_leader("sleep 300 >/dev/null 2>&1 & exit 0");
+            let (tx, rx) = mpsc::channel(1);
+            drop(tx);
+            let mut process = AgentProcess {
+                child,
+                output_mode: OutputMode::Text,
+                work_dir: temp.path().to_path_buf(),
+                agent_type: AgentType::ClaudeCode,
+                rx,
+                stderr_capture: Arc::new(Mutex::new(Vec::new())),
+                usage: Arc::new(Mutex::new(AgentUsage::default())),
+                stderr_task: None,
+                http_cancel: None,
+                pgid: Some(pgid),
+                token_fragments: false,
+            };
+            let exit = process.wait().await.expect("leader exits");
+            assert!(exit.success);
+            assert!(process.child_id().is_none(), "the leader is reaped");
+            assert!(
+                group_has_processes(pgid),
+                "the background child outlives its leader until Kronn clears the group"
+            );
+            if explicit_kill {
+                process.kill().await;
+            } else {
+                drop(process);
+            }
+            assert!(
+                group_empties_within(pgid, Duration::from_secs(10)).await,
+                "group {pgid} must be empty (explicit_kill={explicit_kill})"
+            );
+        }
+    }
+
     /// Regression test for KT-418: the production process primitive must kill
     /// a CLI agent's whole Unix group without touching an unrelated process.
     #[cfg(unix)]

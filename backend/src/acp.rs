@@ -856,9 +856,12 @@ impl AcpJsonRpcTransport {
         broker: Arc<AcpPermissionBroker>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            let mut bytes = Vec::new();
             loop {
-                let mut line = String::new();
-                let read = match stdout.read_line(&mut line).await {
+                bytes.clear();
+                // A stray non-UTF-8 byte must not end the session: frames are
+                // decoded lossily and a malformed one is discarded below.
+                let read = match stdout.read_until(b'\n', &mut bytes).await {
                     Ok(read) => read,
                     Err(error) => {
                         fail_pending(
@@ -877,6 +880,7 @@ impl AcpJsonRpcTransport {
                     .await;
                     return;
                 }
+                let line = String::from_utf8_lossy(&bytes);
                 let message: Value = match serde_json::from_str(line.trim()) {
                     Ok(message) => message,
                     Err(error) => {
@@ -2747,6 +2751,33 @@ mod tests {
         assert_eq!(config["permission"]["read"]["*.env.*"], "deny");
         assert_eq!(config["permission"]["read"]["*.env.dist"], "allow");
         assert_eq!(config["permission"]["read"]["*.env.example"], "allow");
+    }
+
+    /// A non-UTF-8 byte on the agent's stdout costs one discarded frame, not
+    /// the session: the dispatcher keeps reading and answers the next request.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_non_utf8_stdout_line_does_not_end_the_session() {
+        let peer = r#"
+import json, sys
+sys.stdout.buffer.write(b"\xff not json\n")
+sys.stdout.flush()
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("method") == "initialize":
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1}}) + "\n")
+        sys.stdout.flush()
+"#;
+        let mut command = crate::core::cmd::async_cmd("python3");
+        command.args(["-c", peer]);
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        timeout(FIXTURE_GUARD, transport.initialize(request()))
+            .await
+            .expect("the dispatcher keeps reading after the invalid byte")
+            .expect("initialize succeeds");
+        transport.shutdown().await.unwrap();
     }
 
     /// KT-927 — stopping the agent stops what it started. Killing the ACP child

@@ -1609,6 +1609,68 @@ pub enum StreamJsonEvent {
     Skip,
 }
 
+/// Line reader that never stops on invalid UTF-8: each line is decoded
+/// lossily, so one stray byte cannot leave a child blocked on a full pipe.
+/// Like tokio's `Lines`, it strips the trailing `\n` or `\r\n`.
+pub(crate) struct LossyLines<R> {
+    reader: R,
+    buf: Vec<u8>,
+}
+
+pub(crate) fn lossy_lines<R: tokio::io::AsyncRead + Unpin>(reader: R) -> LossyLines<BufReader<R>> {
+    LossyLines {
+        reader: BufReader::new(reader),
+        buf: Vec::new(),
+    }
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> LossyLines<R> {
+    pub(crate) async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        self.buf.clear();
+        if self.reader.read_until(b'\n', &mut self.buf).await? == 0 {
+            return Ok(None);
+        }
+        if self.buf.last() == Some(&b'\n') {
+            self.buf.pop();
+            if self.buf.last() == Some(&b'\r') {
+                self.buf.pop();
+            }
+        }
+        Ok(Some(String::from_utf8_lossy(&self.buf).into_owned()))
+    }
+}
+
+/// Byte carry for a chunked stream: lines are decoded only once complete, so a
+/// character split across two network chunks is never cut in half.
+#[derive(Debug, Default)]
+pub(crate) struct ChunkLineBuffer {
+    pending: Vec<u8>,
+}
+
+impl ChunkLineBuffer {
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+    }
+
+    /// The next complete line, without its `\n`.
+    pub(crate) fn next_line(&mut self) -> Option<String> {
+        let newline = self.pending.iter().position(|byte| *byte == b'\n')?;
+        let rest = self.pending.split_off(newline + 1);
+        let mut line = std::mem::replace(&mut self.pending, rest);
+        line.pop();
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Whatever follows the last newline (a non-streamed body arrives whole).
+    pub(crate) fn take_rest(&mut self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned()
+    }
+}
+
 /// Joins the text of Claude's content blocks. `content_block_stop` ends every
 /// block (it reaches consumers as `ToolEnd`); the next block's text, from the
 /// same message, a message after a tool call or a turn a Stop hook relaunched,
@@ -1885,23 +1947,11 @@ impl Drop for AgentProcess {
         if let Some(cancel) = &self.http_cancel {
             cancel.cancel();
         }
-        // Kill the entire process group (CLI agents on Unix) to prevent zombies
-        // when dropped without explicit kill(). Only act if child is still running (id exists).
-        if self.child.id().is_some() {
-            if let Some(pgid) = self.pgid {
-                if pgid > 1 {
-                    #[cfg(unix)]
-                    {
-                        // Synchronous fast path: SIGKILL the entire group.
-                        // This is a best-effort cleanup; if the normal kill() path
-                        // was already called, this group no longer exists.
-                        unsafe {
-                            let _ = libc::kill(-pgid, libc::SIGKILL);
-                        }
-                    }
-                }
-            }
-        }
+        // Kill the whole process group (CLI agents on Unix), even after the
+        // leader exited and was reaped: its descendants (stdio MCP servers,
+        // background commands) would otherwise outlive the run.
+        #[cfg(unix)]
+        signal_group_after_exit(self.pgid);
     }
 }
 
@@ -1919,6 +1969,18 @@ impl AgentExit {
         Self {
             success: status.success(),
             code: status.code(),
+        }
+    }
+}
+
+/// Best-effort SIGKILL of a group recorded at spawn; an already-empty group
+/// (ESRCH) is the normal case.
+#[cfg(unix)]
+fn signal_group_after_exit(pgid: Option<i32>) {
+    if let Some(pgid) = pgid.filter(|pgid| *pgid > 1) {
+        // SAFETY: a plain signal to the group `setpgid(0, 0)` made at spawn.
+        unsafe {
+            let _ = libc::kill(-pgid, libc::SIGKILL);
         }
     }
 }
@@ -2204,7 +2266,9 @@ impl AgentIo for AgentProcess {
                 }
             }
         } else {
-            tracing::debug!("No PID available for agent process termination");
+            tracing::debug!("Agent leader already reaped; clearing its process group");
+            #[cfg(unix)]
+            signal_group_after_exit(self.pgid);
             let _ = self.child.kill().await;
         }
     }
@@ -4210,10 +4274,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         let provenance = config.provenance.clone();
         let observe_claude = *config.agent_type == AgentType::ClaudeCode;
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            // Don't conflate a read error (e.g. non-UTF-8 output) with EOF:
-            // the stream is truncated either way, but truncation must be
-            // visible in the logs.
+            let mut lines = lossy_lines(stdout);
+            // Don't conflate a read error with EOF: the stream is truncated
+            // either way, but truncation must be visible in the logs.
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
@@ -4244,7 +4307,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             StderrMode::Merge => {
                 let tx_err = tx;
                 tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
+                    let mut lines = lossy_lines(stderr);
                     loop {
                         match lines.next_line().await {
                             Ok(Some(line)) => {
@@ -4266,7 +4329,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // Capture it so we can show it on failure.
                 let capture = stderr_capture.clone();
                 stderr_handle = Some(tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
+                    let mut lines = lossy_lines(stderr);
                     loop {
                         match lines.next_line().await {
                             Ok(Some(line)) => {
@@ -8539,7 +8602,7 @@ async fn start_ollama_http_with_idle(
                 .unwrap_or(true)
                 .then_some(idle_limit);
             let mut received_chunks: usize = 0;
-            let mut buffer = String::new();
+            let mut buffer = ChunkLineBuffer::default();
             let mut got_done = false;
             let mut got_error = false;
             let mut provider_error: Option<String> = None;
@@ -8596,12 +8659,10 @@ async fn start_ollama_http_with_idle(
                     }
                 };
 
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                buffer.push(&bytes);
 
                 // Process complete JSON lines (newline-delimited stream chunks).
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
+                while let Some(line) = buffer.next_line() {
                     // Consumer gone (cancel) → stop reading the HTTP body.
                     if !forward_chat_line(
                         codec.as_ref(),
@@ -8629,10 +8690,11 @@ async fn start_ollama_http_with_idle(
             // Non-streaming responses (format-constrained / TypedSchema steps
             // set stream:false) arrive as a single JSON object with no trailing
             // newline, so the line loop above never fires — flush the remainder.
+            let rest = buffer.take_rest();
             let _ = forward_chat_line(
                 codec.as_ref(),
                 backend,
-                buffer.trim(),
+                rest.trim(),
                 &tx,
                 &stderr_clone,
                 &mut got_done,

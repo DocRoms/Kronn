@@ -15,19 +15,31 @@ use super::AcpError;
 
 /// Children come exclusively from the runner's group-owning launcher. Keeping
 /// the group guard with the Child covers dropped prompt/shutdown futures too.
-struct OwnedChild(Child);
+/// The group id is kept from spawn: once the leader is reaped `Child::id` is
+/// gone, and descendants (stdio MCP servers, background commands) must still go.
+struct OwnedChild(Child, Option<i32>);
 
 impl OwnedChild {
+    fn new(child: Child) -> Self {
+        let group = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid > 1);
+        Self(child, group)
+    }
+
     fn signal_group(&self) -> std::io::Result<()> {
         #[cfg(unix)]
-        if let Some(pid) = self.0.id().filter(|pid| *pid > 1) {
-            if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+        if let Some(pgid) = self.1 {
+            if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::ESRCH) {
                     return Err(error);
                 }
             }
         }
+        #[cfg(not(unix))]
+        let _ = self.1;
         Ok(())
     }
 
@@ -227,7 +239,7 @@ impl AdapterProcess {
         child: Child,
         cancel: &CancellationToken,
     ) -> Result<(), AcpError> {
-        let mut child = OwnedChild(child);
+        let mut child = OwnedChild::new(child);
         {
             let mut state = self.0.lock().unwrap();
             if !cancel.is_cancelled() {
@@ -325,6 +337,44 @@ mod tests {
         assert!(
             process.0.lock().unwrap().child.is_none(),
             "an abandoned prompt must not retain its running child in the adapter"
+        );
+    }
+
+    /// A turn that exits normally still takes its group with it: a stdio MCP
+    /// server or background command must not outlive the per-turn process.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_normal_exit_clears_the_turn_s_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = crate::agents::runner::try_spawn(
+            "sh",
+            None,
+            &["-c".into(), "sleep 300 >/dev/null 2>&1 & exit 0".into()],
+            dir.path(),
+            "",
+            None,
+            crate::agents::runner::SpawnIo::Adapter(&[]),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let pgid = child.id().unwrap() as i32;
+        let process = AdapterProcess::default();
+        let turn = process.begin_turn();
+        process.install(child, &turn).await.unwrap();
+        let status = process.wait(&turn).await.unwrap();
+        assert!(status.success());
+        drop(turn);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let group_alive = || unsafe { libc::kill(-pgid, 0) == 0 };
+        while group_alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            !group_alive(),
+            "group {pgid} must be empty after a normal exit"
         );
     }
 

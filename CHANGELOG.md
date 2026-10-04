@@ -96,6 +96,15 @@ Release notes for 0.9.3 and earlier are available in the
   native ACP agents are now refused as launched workers with a clear reason,
   at preparation and at launch; one worker policy now decides every route, and
   an exact joined CLI session of the same agent stays eligible.
+- Agent streams are sturdier (KT-1014). An accented letter or emoji split
+  across two network chunks of an HTTP model's reply (Ollama, LiteLLM,
+  OpenRouter, NVIDIA, Custom) is decoded intact instead of becoming two `�`,
+  which could also corrupt a file path in a tool call. A non-UTF-8 byte on a
+  CLI agent's output costs one replacement character instead of stopping the
+  reader and leaving the agent blocked until the watchdog; a native ACP agent
+  keeps its session. After a Claude or Codex turn exits normally, the
+  processes it left behind (stdio MCP servers, background commands) are
+  stopped with it instead of piling up.
 
 ### Changed
 
