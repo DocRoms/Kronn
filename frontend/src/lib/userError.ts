@@ -16,6 +16,9 @@ const BACKEND_PREFIXES = [
   'Invalid',
   'Workflow',
   'Quick prompt',
+  // KT-1017 — inline-code refusals are long and carry the fix: keep them whole.
+  'Quick Exec',
+  'Step Exec',
   'Recovery failed',
   'Discussion',
   'Unsupported',

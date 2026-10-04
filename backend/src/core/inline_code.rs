@@ -161,12 +161,30 @@ pub fn safe_recipe(path: &str) -> String {
 
 /// Save-time refusal for one command line (main or setup).
 pub fn validation_error(step: &str, cmd: &str, args: &[String]) -> Option<String> {
+    refusal(&format!("Step Exec « {step} »"), cmd, args)
+}
+
+/// Save-time refusal for a Quick Exec, with the same rule, message and
+/// recipe as a workflow step. When the rewrite is provably equivalent it is
+/// spelled out, so the fix is one copy away.
+pub fn quick_exec_validation_error(name: &str, cmd: &str, args: &[String]) -> Option<String> {
+    let message = refusal(&format!("Quick Exec « {name} »"), cmd, args)?;
+    Some(match suggest_args(cmd, args) {
+        Ok(fixed) => format!(
+            "{message} Arguments proposés : {}",
+            serde_json::to_string(&fixed).unwrap_or_default()
+        ),
+        Err(_) => message,
+    })
+}
+
+fn refusal(subject: &str, cmd: &str, args: &[String]) -> Option<String> {
     match first_unsafe_placeholder(cmd, args)? {
         InlineFinding::Malformed => Some(format!(
-            "Step Exec « {step} » : le code inline de `{cmd}` contient un placeholder mal formé."
+            "{subject} : le code inline de `{cmd}` contient un placeholder mal formé."
         )),
         InlineFinding::Untrusted(path) => Some(format!(
-            "Step Exec « {step} » : le script inline de `{cmd}` interpole `{{{{{path}}}}}` — \
+            "{subject} : le script inline de `{cmd}` interpole `{{{{{path}}}}}` — \
              dans du code, une valeur peut toujours être exécutée (heredoc, eval, guillemets), \
              même filtrée par `|sh`. {}.",
             safe_recipe(&path)

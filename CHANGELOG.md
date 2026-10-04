@@ -313,7 +313,10 @@ Release notes for 0.9.3 and earlier are available in the
   argument the interpreter never parses
   (`["-c", "echo \"$1\"", "_", "{{issue.title}}"]`). A new `{{value|sh}}`
   filter renders one single-quoted shell word, but it is a quoting helper, not
-  a way into inline code.
+  a way into inline code. Quick Exec applies the same rule when it is saved
+  (an unchanged stored line stays editable, and still does not run), and the
+  Quick Exec form and the workflow editor now show such a refusal in full,
+  with the suggested arguments, instead of a generic error.
 
 ### Changed
 

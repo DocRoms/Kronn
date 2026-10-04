@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Plus, Save, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
+import { userError } from '../../lib/userError';
 import type {
   CollectQuickExecOutputFormat,
   CreateQuickExecRequest,
@@ -42,10 +43,13 @@ export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExe
   );
   const [variables, setVariables] = useState<PromptVariable[]>(editExec?.variables ?? []);
   const [saving, setSaving] = useState(false);
+  // The save error is shown in place: a refusal carries the fix (KT-1017).
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const save = async () => {
     if (!name.trim() || !command.trim() || saving) return;
     setSaving(true);
+    setSaveError(null);
     try {
       await onSave({
         name: name.trim(),
@@ -64,6 +68,8 @@ export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExe
             label: variable.label.trim() || variable.name.trim(),
           })),
       });
+    } catch (error) {
+      setSaveError(userError(error));
     } finally {
       setSaving(false);
     }
@@ -202,6 +208,10 @@ export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExe
           </div>
         ))}
       </div>
+
+      {saveError && (
+        <div className="wf-apicall-error mb-2" role="alert">{saveError}</div>
+      )}
 
       <div className="qp-form-actions">
         <button className="wf-small-btn" type="button" onClick={onCancel}>{t('common.cancel')}</button>

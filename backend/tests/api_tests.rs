@@ -25269,3 +25269,92 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
     let (_, report) = get_json(app, "/api/workflows/workflow-unsafe/unsafe-steps").await;
     assert_eq!(report["data"], serde_json::json!([]));
 }
+
+/// KT-1017 — a Quick Exec that interpolates a value into inline code is
+/// refused at save time; a stored one stays editable while unchanged, and
+/// its suggested rewrite saves.
+#[tokio::test]
+async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let body = |name: &str, args: serde_json::Value| {
+        serde_json::json!({
+            "name": name,
+            "description": "",
+            "project_id": null,
+            "command": "python3",
+            "args": args,
+            "timeout_secs": 10,
+            "output_format": "text",
+            "variables": []
+        })
+    };
+    let (_, refused) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        body("Ticket", serde_json::json!(["-c", "print('{{ticket}}')"])),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    let error = refused["error"].as_str().unwrap();
+    assert!(
+        error.contains("{{ticket}}") && error.contains("sys.argv"),
+        "{error}"
+    );
+
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::quick_execs::insert_quick_exec(
+                conn,
+                &kronn::models::QuickExec {
+                    id: "qe-legacy".into(),
+                    name: "Legacy".into(),
+                    icon: "⌘".into(),
+                    description: String::new(),
+                    project_id: None,
+                    command: "python3".into(),
+                    args: vec!["-c".into(), "print('{{ticket}}')".into()],
+                    timeout_secs: 10,
+                    output_format: kronn::models::CollectQuickExecOutputFormat::Text,
+                    variables: vec![],
+                    pinned: false,
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+    let (_, renamed) = put_json_root(
+        app.clone(),
+        "/api/quick-execs/qe-legacy",
+        body("Renamed", serde_json::json!(["-c", "print('{{ticket}}')"])),
+    )
+    .await;
+    assert_eq!(
+        renamed["success"], true,
+        "an unchanged line stays editable: {renamed}"
+    );
+
+    let (_, changed) = put_json_root(
+        app.clone(),
+        "/api/quick-execs/qe-legacy",
+        body("Renamed", serde_json::json!(["-c", "print('{{other}}')"])),
+    )
+    .await;
+    assert_eq!(changed["success"], false, "{changed}");
+
+    let (_, fixed) = put_json_root(
+        app,
+        "/api/quick-execs/qe-legacy",
+        body(
+            "Renamed",
+            serde_json::json!(["-c", "import sys\nprint(sys.argv[1])", "{{ticket}}"]),
+        ),
+    )
+    .await;
+    assert_eq!(fixed["success"], true, "{fixed}");
+}
