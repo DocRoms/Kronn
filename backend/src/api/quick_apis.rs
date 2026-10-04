@@ -626,6 +626,7 @@ pub async fn run_qa(
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
+        read_only_repos: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     };
 
@@ -1094,6 +1095,7 @@ pub async fn batch_run_qa(
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
+        read_only_repos: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     };
 

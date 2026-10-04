@@ -426,6 +426,15 @@ where
     }
 }
 
+/// The checked-out commit and branch, each `None` outside git (or detached
+/// for the branch).
+pub fn git_head_and_branch(project_path: &Path) -> (Option<String>, Option<String>) {
+    let head = run_git(project_path, &["rev-parse", "HEAD"]).filter(|s| !s.is_empty());
+    let branch = run_git(project_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .filter(|s| !s.is_empty() && s != "HEAD");
+    (head, branch)
+}
+
 /// Freeze a source-tree fingerprint only after a bounded quiet period. This
 /// is a fail-closed guard, not a claim about the root cause of any particular
 /// drift incident.

@@ -37,6 +37,8 @@ const AGENT_CONCURRENCY: Partial<Record<AgentType, { key: AgentConfigKey; fallba
   Nvidia: { key: 'nvidia', fallback: null },
 };
 import type { ToastFn } from '../../hooks/useToast';
+import { FULL_ACCESS_AGENTS, isFullAccess } from '../../lib/agentFullAccess';
+import { AgentFullAccessSwitch } from './AgentFullAccessSwitch';
 import { isUpdateAvailable } from '../../lib/version';
 import {
   AGENT_LABELS,
@@ -178,9 +180,6 @@ export function AgentsSection({
   }>>({});
   const [savingTiers, setSavingTiers] = useState(false);
   const catalog = useModelCatalogSnapshot(true, [...expandedAgents].map(agent => modelRuntimeTargetId(agent as AgentType)));
-  // `useAsyncGuard` deliberately keeps its first callback. Keep the catalogue
-  // snapshot in a ref so a save after its asynchronous load validates against
-  // the current snapshot, not the mount-time `undefined` value.
   const catalogRef = useRef(catalog.catalog);
   useLayoutEffect(() => { catalogRef.current = catalog.catalog; }, [catalog.catalog]);
   const saveTierPreference = useAsyncGuard(async (
@@ -693,17 +692,7 @@ export function AgentsSection({
           // KT-339 — LiteLLM, NVIDIA and any other OpenAI-compatible service are
           // now named connections in the unified External API zone below, so the
           // fleet loop never renders them as their own cards.
-          const permFlag: Record<string, { flag?: string; descKey: string }> = {
-            ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
-            Codex: { flag: '--sandbox=danger-full-access', descKey: 'config.fullAccess' },
-            GeminiCli: { flag: '--yolo', descKey: 'config.fullAccess' },
-            CopilotCli: { flag: '--allow-all-tools', descKey: 'config.fullAccess' },
-            // OpenCode runs over ACP (`opencode acp`): full access widens the
-            // live AcpPermissionBroker's auto-approval scope instead of a
-            // static CLI flag, so there is no flag literal to show here.
-            OpenCode: { descKey: 'config.fullAccessAcp' },
-          };
-          const perm = permFlag[agent.agent_type];
+          const perm = FULL_ACCESS_AGENTS[agent.agent_type];
           const tokenField: Record<string, { key: string; hint: string; url: string }> = {
             ClaudeCode: { key: 'anthropic', hint: 'ANTHROPIC_API_KEY', url: 'https://console.anthropic.com/settings/keys' },
             Codex: { key: 'openai', hint: 'OPENAI_API_KEY', url: 'https://platform.openai.com/api-keys' },
@@ -719,19 +708,7 @@ export function AgentsSection({
           const quotaState = providerQuotaStates?.find(state => state.provider === agent.agent_type && state.blocked);
           const quotaBlocked = quotaState !== undefined;
           const quotaResetTime = formatQuotaResetTime(quotaState?.reset_at);
-          const isFullAccess = agent.agent_type === 'ClaudeCode'
-            ? agentAccess?.claude_code?.full_access ?? false
-            : agent.agent_type === 'Codex'
-              ? agentAccess?.codex?.full_access ?? false
-              : agent.agent_type === 'OpenCode'
-                ? agentAccess?.open_code?.full_access ?? false
-                : agent.agent_type === 'GeminiCli'
-                  ? agentAccess?.gemini_cli?.full_access ?? false
-                  : agent.agent_type === 'Vibe'
-                    ? agentAccess?.vibe?.full_access ?? false
-                    : agent.agent_type === 'CopilotCli'
-                      ? agentAccess?.copilot_cli?.full_access ?? false
-                      : false;
+          const isAgentFullAccess = isFullAccess(agentAccess, agent.agent_type);
 
           const configureButton = (agent.installed || agent.runtime_available) ? (
             <button
@@ -1041,6 +1018,24 @@ export function AgentsSection({
               </div>
             </div>
             {renderTierPreview(agent)}
+            {perm && (agent.installed || agent.runtime_available) && (
+              <div className="set-agent-access-row">
+                <AgentFullAccessSwitch
+                  agentName={agent.name}
+                  checked={isAgentFullAccess}
+                  testId={`agent-full-access-${agent.agent_type}`}
+                  onChange={async next => {
+                    try {
+                      await configApi.setAgentAccess({ agent: agent.agent_type, full_access: next });
+                    } catch (err) {
+                      console.warn('Settings action failed:', err);
+                      toast(t('common.actionFailed', userError(err)), 'error');
+                    }
+                    refetchAgentAccess();
+                  }}
+                />
+              </div>
+            )}
             {expandedAgents.has(agent.agent_type) && (
             <div className="set-agent-card-body" id={`agent-config-${agent.agent_type}`}>
             {perm && (agent.installed || agent.runtime_available) && (
@@ -1048,30 +1043,6 @@ export function AgentsSection({
                 <div className="set-agent-section-title">
                   <span>{t('config.fullAccessBadge')}</span>
                   {perm.flag && <code>{perm.flag}</code>}
-                </div>
-                <div
-                  role="switch"
-                  aria-checked={isFullAccess}
-                  tabIndex={0}
-                  className="set-agent-access-switch"
-                  onClick={async () => {
-                    try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
-                    refetchAgentAccess();
-                  }}
-                  onKeyDown={async (e) => {
-                    if (e.key === ' ' || e.key === 'Enter') {
-                      e.preventDefault();
-                      try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
-                      refetchAgentAccess();
-                    }
-                  }}
-                >
-                  <div className="set-toggle-track" data-on={isFullAccess}>
-                    <div className="set-toggle-thumb" data-on={isFullAccess} style={{ left: isFullAccess ? 16 : 1 }} />
-                  </div>
-                  <span className={isFullAccess ? 'text-accent' : 'text-muted'}>
-                    {isFullAccess ? t('config.enabled') : t('config.disabled')}
-                  </span>
                 </div>
                 <p>{t(perm.descKey)}</p>
               </div>

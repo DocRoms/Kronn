@@ -82,6 +82,7 @@ export function PluginProjectOverview({ state }: { state: McpPageState }) {
         <li>{t('mcp.rescanCreated', rescanPreview.configs_created)}</li>
         <li>{t('mcp.rescanMerged', rescanPreview.configs_merged)}</li>
         <li>{t('mcp.rescanDeleted', rescanPreview.configs_deleted)}</li>
+        <li>{t('mcp.rescanProjects', rescanPreview.projects_affected)}</li>
       </ul>
       <div className="mcp-rescan-preview-actions">
         <button type="button" className="mcp-btn-action mcp-btn-action-primary" disabled={syncing} onClick={handleApplyRescan}>{t('mcp.rescanApply')}</button>

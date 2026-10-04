@@ -47,6 +47,25 @@ teardown() {
     assert_output --partial "Release version 1.2.3 is synchronized everywhere"
 }
 
+@test "version sync accepts a release tag equal to VERSION, with or without v" {
+    run env KRONN_VERSION_ROOT="$TEST_TMPDIR" \
+        "$PROJECT_ROOT/scripts/check-version-sync.sh" 1.2.3
+    assert_success
+
+    run env KRONN_VERSION_ROOT="$TEST_TMPDIR" \
+        "$PROJECT_ROOT/scripts/check-version-sync.sh" v1.2.3
+    assert_success
+}
+
+@test "version sync rejects a release tag that differs from VERSION" {
+    for tag in 1.2.4 1.2.3-rc1 1.2.30; do
+        run env KRONN_VERSION_ROOT="$TEST_TMPDIR" \
+            "$PROJECT_ROOT/scripts/check-version-sync.sh" "$tag"
+        assert_failure
+        assert_output --partial "release tag '$tag' does not match VERSION '1.2.3'"
+    done
+}
+
 @test "version sync accepts a dated changelog release heading" {
     printf '## [1.2.3] - 2026-07-27\n' > "$TEST_TMPDIR/CHANGELOG.md"
 

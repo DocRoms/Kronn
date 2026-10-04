@@ -30,6 +30,28 @@ pub fn insert_running(
     Ok(())
 }
 
+/// Projects for which this instance recorded a Completed Full audit. One query
+/// for the whole project list.
+pub fn projects_with_completed_full(
+    conn: &Connection,
+) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT project_id FROM audit_runs WHERE kind = 'Full' AND status = 'Completed'",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn has_completed_full(conn: &Connection, project_id: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audit_runs
+         WHERE project_id = ?1 AND kind = 'Full' AND status = 'Completed'",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 pub fn has_running_for_project(conn: &Connection, project_id: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM audit_runs WHERE project_id = ?1 AND status = 'Running'",
@@ -196,7 +218,8 @@ pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Ve
                 td_critical, td_high, td_medium, td_low, td_total,
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
-                validation_discussion_id, step_outcomes_json
+                validation_discussion_id, step_outcomes_json,
+                head_sha, branch, source_fingerprint, model
          FROM audit_runs
          WHERE project_id = ?1
          ORDER BY started_at DESC, rowid DESC
@@ -219,7 +242,8 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
                 td_critical, td_high, td_medium, td_low, td_total,
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
-                validation_discussion_id, step_outcomes_json
+                validation_discussion_id, step_outcomes_json,
+                head_sha, branch, source_fingerprint, model
          FROM audit_runs
          WHERE project_id = ?1 AND status = 'Completed'
          ORDER BY ended_at DESC
@@ -296,7 +320,8 @@ pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<AuditRun>> {
                 td_critical, td_high, td_medium, td_low, td_total,
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
-                validation_discussion_id, step_outcomes_json
+                validation_discussion_id, step_outcomes_json,
+                head_sha, branch, source_fingerprint, model
          FROM audit_runs
          WHERE id = ?1
          LIMIT 1",
@@ -344,7 +369,45 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
         last_completed_step: row.get::<_, i64>(19).unwrap_or(0).max(0) as u32,
         validation_discussion_id: row.get(20).unwrap_or(None),
         step_outcomes_json: row.get(21).unwrap_or(None),
+        head_sha: row.get(22)?,
+        branch: row.get(23)?,
+        source_fingerprint: row.get(24)?,
+        model: row.get(25)?,
     })
+}
+
+/// What the run audits: commit, branch, source fingerprint and model at its
+/// start. Each is NULL when unknown (outside git, model not resolved).
+pub fn set_run_provenance(
+    conn: &Connection,
+    id: &str,
+    head_sha: Option<&str>,
+    branch: Option<&str>,
+    source_fingerprint: Option<&str>,
+    model: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET head_sha = ?2, branch = ?3, source_fingerprint = ?4, model = ?5
+         WHERE id = ?1",
+        params![id, head_sha, branch, source_fingerprint, model],
+    )?;
+    Ok(())
+}
+
+/// Record a step's cost when its agent reported one (KT-997). Never called with
+/// a guess: an unreported cost stays NULL.
+pub fn set_step_cost(
+    conn: &Connection,
+    audit_run_id: &str,
+    step_index: u32,
+    cost_usd_micros: u64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_run_steps SET cost_usd_micros = ?3
+         WHERE audit_run_id = ?1 AND step_index = ?2",
+        params![audit_run_id, step_index as i64, cost_usd_micros as i64],
+    )?;
+    Ok(())
 }
 
 /// 0.8.3 (#311) — bump `last_completed_step` on every successful
@@ -522,27 +585,55 @@ pub fn insert_audit_step_start(
 }
 
 /// KT-931 — a resumed run inherits the steps its predecessor completed
-/// cleanly: one finished row per inherited step (success, zero duration, no
-/// tokens — this run spent nothing on them) and the progress count seeded
+/// cleanly: one finished row per inherited step and the progress count seeded
 /// from them. Without those rows a second resume — of a run that skipped
 /// them — would find none of them succeeded and replay the whole chain, not
-/// just the step that failed again. Idempotent on `(audit_run_id,
-/// step_index)`, all-or-nothing.
+/// just the step that failed again. Each row keeps the dates, duration, tokens
+/// and cost of the run that really ran it (`from_run_id`, or the run it was
+/// itself carried from), named in `carried_from_run_id` (KT-1021). Idempotent
+/// on `(audit_run_id, step_index)`, all-or-nothing.
 pub fn carry_over_steps(
     conn: &Connection,
     audit_run_id: &str,
+    from_run_id: &str,
     steps: &[(u32, String)],
     at: DateTime<Utc>,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let at = at.to_rfc3339();
     for (step_index, file_label) in steps {
-        tx.execute(
+        let copied = tx.execute(
             "INSERT OR IGNORE INTO audit_run_steps
-                (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms, cli_success)
-             VALUES (?1, ?2, ?3, ?4, ?4, 0, 1)",
-            params![audit_run_id, *step_index as i64, file_label, at],
+                (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms,
+                 step_tokens, cli_success, input_tokens, output_tokens, cache_read_tokens,
+                 cache_write_tokens, cost_usd_micros, carried_from_run_id)
+             SELECT ?1, step_index, ?3, started_at, COALESCE(ended_at, ?4), duration_ms,
+                    step_tokens, 1, input_tokens, output_tokens, cache_read_tokens,
+                    cache_write_tokens, cost_usd_micros, COALESCE(carried_from_run_id, ?5)
+               FROM audit_run_steps WHERE audit_run_id = ?5 AND step_index = ?2",
+            params![
+                audit_run_id,
+                *step_index as i64,
+                file_label,
+                at,
+                from_run_id
+            ],
         )?;
+        if copied == 0 {
+            tx.execute(
+                "INSERT OR IGNORE INTO audit_run_steps
+                    (audit_run_id, step_index, file_label, started_at, ended_at, cli_success,
+                     carried_from_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5)",
+                params![
+                    audit_run_id,
+                    *step_index as i64,
+                    file_label,
+                    at,
+                    from_run_id
+                ],
+            )?;
+        }
     }
     update_last_completed_step(&tx, audit_run_id, steps.len() as u32)?;
     tx.commit()?;
@@ -596,6 +687,27 @@ impl StepTokens {
             output: Some(usage.output_tokens),
             cache_read: usage.prompt_cache.cached_prompt_tokens,
             cache_write: usage.prompt_cache.cache_write_prompt_tokens,
+        }
+    }
+
+    /// The same parts with `input` counted the same way for every agent: cached
+    /// prompt tokens included. Claude reports input without its cache reads and
+    /// writes, Codex and the OpenAI-compatible providers with them; without this
+    /// a Claude step's headline looked tiny next to the others' (KT-1021).
+    pub fn inclusive_for(self, agent_type: &crate::models::AgentType) -> Self {
+        if *agent_type != crate::models::AgentType::ClaudeCode {
+            return self;
+        }
+        let Some(input) = self.input else {
+            return self;
+        };
+        Self {
+            input: Some(
+                input
+                    .saturating_add(self.cache_read.unwrap_or(0))
+                    .saturating_add(self.cache_write.unwrap_or(0)),
+            ),
+            ..self
         }
     }
 
@@ -688,7 +800,8 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
         "SELECT audit_run_id, step_index, file_label, started_at, ended_at,
                 duration_ms, step_tokens, cumulative_tokens, cli_success,
                 step_warning, step_repaired_from_template,
-                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                cost_usd_micros, carried_from_run_id
          FROM audit_run_steps
          WHERE audit_run_id = ?1
          ORDER BY step_index ASC",
@@ -718,6 +831,8 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
             cli_success: row.get::<_, i64>(8)? != 0,
             step_warning: row.get(9)?,
             step_repaired_from_template: row.get::<_, i64>(10)? != 0,
+            cost_usd_micros: row.get::<_, Option<i64>>(15)?.map(|v| v.max(0) as u64),
+            carried_from_run_id: row.get(16)?,
         })
     })?;
     let mut out = Vec::new();
@@ -759,7 +874,11 @@ mod tests {
                 recommendations_json TEXT,
                 last_completed_step INTEGER NOT NULL DEFAULT 0,
                 validation_discussion_id TEXT,
-                step_outcomes_json TEXT
+                step_outcomes_json TEXT,
+                head_sha TEXT,
+                branch TEXT,
+                source_fingerprint TEXT,
+                model TEXT
             );
             CREATE TABLE audit_run_steps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -778,6 +897,8 @@ mod tests {
                 output_tokens INTEGER,
                 cache_read_tokens INTEGER,
                 cache_write_tokens INTEGER,
+                cost_usd_micros INTEGER,
+                carried_from_run_id TEXT,
                 FOREIGN KEY (audit_run_id) REFERENCES audit_runs(id) ON DELETE CASCADE
             );
             CREATE UNIQUE INDEX idx_audit_run_steps_run
@@ -825,6 +946,123 @@ mod tests {
             Some("docs/tech-debt/_reconciliation-2026-05-13.md")
         );
         assert!(runs[0].recommendations_json.is_some());
+    }
+
+    #[test]
+    fn a_resume_chain_keeps_each_step_s_tokens_duration_and_origin() {
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "run-a", "p1", "Full", "ClaudeCode", start).unwrap();
+        insert_audit_step_start(&conn, "run-a", 1, "docs/AGENTS.md", start).unwrap();
+        let tokens = StepTokens {
+            input: Some(1_000),
+            output: Some(200),
+            cache_read: Some(50),
+            cache_write: None,
+        };
+        finalize_audit_step(
+            &conn, "run-a", 1, start, 61_000, &tokens, None, true, None, false,
+        )
+        .unwrap();
+        set_step_cost(&conn, "run-a", 1, 12_345).unwrap();
+
+        insert_running(&conn, "run-b", "p1", "Full", "ClaudeCode", start).unwrap();
+        carry_over_steps(
+            &conn,
+            "run-b",
+            "run-a",
+            &[(1, "docs/AGENTS.md".into())],
+            Utc::now(),
+        )
+        .unwrap();
+        insert_running(&conn, "run-c", "p1", "Full", "ClaudeCode", start).unwrap();
+        carry_over_steps(
+            &conn,
+            "run-c",
+            "run-b",
+            &[(1, "docs/AGENTS.md".into())],
+            Utc::now(),
+        )
+        .unwrap();
+
+        let step = &list_audit_steps(&conn, "run-c").unwrap()[0];
+        assert_eq!(step.duration_ms, Some(61_000));
+        assert_eq!(step.step_tokens, Some(1_200));
+        assert_eq!(step.input_tokens, Some(1_000));
+        assert_eq!(step.cache_read_tokens, Some(50));
+        assert_eq!(step.cost_usd_micros, Some(12_345));
+        assert_eq!(
+            step.carried_from_run_id.as_deref(),
+            Some("run-a"),
+            "the run that spent it"
+        );
+        assert!(step.cli_success);
+
+        // A step the source run never recorded is still carried, of unknown cost.
+        carry_over_steps(
+            &conn,
+            "run-c",
+            "run-b",
+            &[(2, "docs/x.md".into())],
+            Utc::now(),
+        )
+        .unwrap();
+        let missing = &list_audit_steps(&conn, "run-c").unwrap()[1];
+        assert_eq!(missing.step_tokens, None);
+        assert_eq!(missing.cost_usd_micros, None);
+        assert_eq!(missing.carried_from_run_id.as_deref(), Some("run-b"));
+    }
+
+    #[test]
+    fn run_provenance_round_trips_and_stays_unknown_by_default() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r", "p1", "Full", "Codex", Utc::now()).unwrap();
+        let fresh = get_by_id(&conn, "r").unwrap().unwrap();
+        assert!(fresh.head_sha.is_none() && fresh.model.is_none());
+        set_run_provenance(
+            &conn,
+            "r",
+            Some("abc123"),
+            Some("feat/é"),
+            Some("fp"),
+            Some("gpt-x"),
+        )
+        .unwrap();
+        let run = get_by_id(&conn, "r").unwrap().unwrap();
+        assert_eq!(run.head_sha.as_deref(), Some("abc123"));
+        assert_eq!(run.branch.as_deref(), Some("feat/é"));
+        assert_eq!(run.source_fingerprint.as_deref(), Some("fp"));
+        assert_eq!(run.model.as_deref(), Some("gpt-x"));
+    }
+
+    #[test]
+    fn token_totals_count_the_cache_the_same_way_for_every_agent() {
+        use crate::models::AgentType;
+        // Claude reports input without its cache; Codex with it.
+        let claude = StepTokens {
+            input: Some(100),
+            output: Some(10),
+            cache_read: Some(900),
+            cache_write: Some(50),
+        };
+        let codex = StepTokens {
+            input: Some(1_050),
+            output: Some(10),
+            cache_read: Some(900),
+            cache_write: Some(50),
+        };
+        assert_eq!(
+            claude.inclusive_for(&AgentType::ClaudeCode).total(),
+            codex.inclusive_for(&AgentType::Codex).total()
+        );
+        assert_eq!(codex.inclusive_for(&AgentType::Codex), codex);
+        assert_eq!(
+            StepTokens::UNKNOWN
+                .inclusive_for(&AgentType::ClaudeCode)
+                .total(),
+            None,
+            "unknown stays unknown"
+        );
     }
 
     #[test]

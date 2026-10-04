@@ -7224,6 +7224,16 @@ fn worker_static_refusal(worker: &MessageTarget) -> Option<crate::models::Campai
             "this native runtime cannot acknowledge the typed delivery lifecycle; use an exact joined CLI session or another supported agent",
         ));
     }
+    if matches!(
+        worker.kind,
+        MessageTargetKind::DiscussionAgent | MessageTargetKind::Agent
+    ) {
+        if let Err(reason) =
+            crate::agents::runner::task_worker_route_policy(&worker.agent_type, false, true)
+        {
+            return Some(preparation_reason("worker_capability", reason));
+        }
+    }
     None
 }
 
@@ -12908,6 +12918,28 @@ mod tests {
             .unwrap();
         assert!(!entry.available);
         assert!(entry.reasons.iter().any(|r| r.code == "model_unconfigured"));
+    }
+
+    #[test]
+    fn native_acp_agents_are_refused_as_launched_workers_with_a_clear_reason() {
+        for agent in [
+            AgentType::GeminiCli,
+            AgentType::CopilotCli,
+            AgentType::Kiro,
+            AgentType::OpenCode,
+        ] {
+            let reason = worker_static_refusal(&MessageTarget::agent(agent.clone()))
+                .unwrap_or_else(|| panic!("{agent:?} launched worker must be refused"));
+            assert_eq!(reason.code, "worker_capability");
+            assert_eq!(
+                reason.detail,
+                crate::agents::runner::NATIVE_ACP_TASK_WORKER_REFUSAL
+            );
+            // An exact joined CLI session carries its own delivery context.
+            assert!(worker_static_refusal(&MessageTarget::cli(agent.clone(), 7)).is_none());
+        }
+        assert!(worker_static_refusal(&MessageTarget::agent(AgentType::ClaudeCode)).is_none());
+        assert!(worker_static_refusal(&MessageTarget::agent(AgentType::Codex)).is_none());
     }
 
     #[test]

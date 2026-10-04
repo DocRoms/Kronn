@@ -10,18 +10,32 @@ and the update banner led users to empty release pages (KT-970).
    (`make bump` leaves them), then run `scripts/check-version-sync.sh`
    directly.
 2. Merge, then tag the merge commit `x.y.z` (no `v`) and push the tag.
-3. Desktop Build builds the four installers (Windows, macOS Apple Silicon,
-   macOS Intel, Linux), checks that each is a real, non-empty file, and
+3. Desktop Build first runs `scripts/check-version-sync.sh <tag>`: the tag must
+   equal `VERSION` (a `-rc1` tag fails) and every version marker must agree.
+   It then builds the four installers (Windows `.exe`, macOS Apple Silicon and
+   Intel `.dmg`, Linux `.deb`: exactly the Tauri targets `deb`, `nsis`, `dmg`;
+   no `.msi` or `.AppImage`), checks that each is a real, non-empty file, and
    creates a **draft** release carrying them.
 4. Its last step reads the release's assets back from GitHub and fails if a
    platform has no installer (`verify_artifacts.py --release-assets`).
 5. Review the notes and publish the draft.
 
+Desktop Build resolves the release commit once (`release-checks`, output
+`sha`) and every checkout, the dependency review and the CI gate use that SHA,
+so a manual dispatch whose branch and tag differ still tests what it ships.
+`ci-test.yml` has no push trigger, so a tag carries no check run; the release
+instead calls it as a reusable workflow (`quality-gates`) on that SHA, with
+every label-gated job enabled, and `release` needs it green. A
+`workflow_dispatch` with an empty `release_tag` runs the same gates as a
+build-only dry run; do one before tagging. The called `ci-test.yml` and
+`dependency-review.yml` are the versions of the tagged (or dispatched) ref.
+
 ## A release that already exists without installers
 
 Run Desktop Build by hand (`workflow_dispatch`) with `release_tag` set to the
 tag. The installers are built from that tag, attached to the existing release
-without touching its notes or status, then verified the same way:
+without touching its notes or status, then verified the same way. The checks
+run from that tag, so it must already carry `scripts/check-version-sync.sh`:
 
 ```bash
 gh workflow run "Desktop Build" --ref feat/x.y.z -f release_tag=0.14.1

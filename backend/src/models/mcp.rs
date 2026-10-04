@@ -764,6 +764,9 @@ pub struct McpRescanReport {
     pub configs_merged: usize,
     /// Duplicate config rows removed by deduplication.
     pub configs_deleted: usize,
+    /// Projects that gained a configuration in this scan (created or merged),
+    /// so a preview can name the blast radius a dry run cannot measure in files.
+    pub projects_affected: usize,
     /// Projects whose `.mcp.json` (or equivalent host file) was actually
     /// rewritten. `None` for a `dry_run` — it never touches the filesystem,
     /// so this count cannot be established without side effects.

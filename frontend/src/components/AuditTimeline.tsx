@@ -14,7 +14,7 @@ import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
 import { BriefingForm } from './BriefingForm';
-import type { AgentDetection, AgentType, ModelTier, ModelTiersConfig } from '../types/generated';
+import type { AgentDetection, AgentType, AuditEntry, ModelTier, ModelTiersConfig } from '../types/generated';
 import './AuditTimeline.css';
 
 type StepStatus = 'done' | 'failed' | 'warned' | 'running' | 'pending' | 'todo';
@@ -31,6 +31,7 @@ interface StepRow {
   input_tokens?: number | null;
   output_tokens?: number | null;
   cache_read_tokens?: number | null;
+  carried_from_run_id?: string | null;
 }
 
 export interface AuditTimelineProps {
@@ -147,6 +148,8 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [connections, setConnections] = useState<ExternalApiConnectionView[]>([]);
   const [plan, setPlan] = useState<Map<number, string>>(new Map());
+  // Audits the branch's `.kronn.json` records: another instance, an attestation.
+  const [recorded, setRecorded] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -170,21 +173,26 @@ export function AuditTimeline(props: AuditTimelineProps) {
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      const history = await projectsApi.auditHistory(projectId);
-      const runs = history.filter(run => run.kind === 'Full' || run.kind === 'Partial').map(run => run.id);
-      const ids = [...new Set([...(resumable ? [resumable.id] : []), ...runs])].slice(0, 12);
+      // One request: the runs and their steps come together.
+      const data = await projectsApi.auditTimeline(projectId);
+      const runs = data.runs.filter(run => run.kind === 'Full' || run.kind === 'Partial').map(run => run.id);
+      const ids = [...new Set([...(resumable ? [resumable.id] : []), ...runs])];
+      const byRun = new Map<string, StepRow[]>();
+      for (const row of data.steps) byRun.set(row.audit_run_id, [...(byRun.get(row.audit_run_id) ?? []), row]);
       const merged = new Map<number, StepRow>();
       for (const id of ids) {
-        for (const row of await projectsApi.auditRunSteps(id)) {
+        for (const row of byRun.get(id) ?? []) {
           if (!merged.has(row.step_index)) merged.set(row.step_index, row);
         }
       }
-      const latest = history.find(run => run.kind === 'Full');
-      return { id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0 };
+      const latest = data.runs.find(run => run.kind === 'Full');
+      return { id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0, recorded: data.recorded_audits };
     };
     load()
-      .then(({ id, rows, td }) => { if (alive) { setRunId(id); setSteps(rows); setTdTotal(td); setStepsLoaded(true); } })
-      .catch(() => { if (alive) { setSteps([]); setStepsLoaded(true); } });
+      .then(({ id, rows, td, recorded: entries }) => {
+        if (alive) { setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries); setStepsLoaded(true); }
+      })
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setStepsLoaded(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep]);
 
@@ -470,14 +478,29 @@ export function AuditTimeline(props: AuditTimelineProps) {
                             {(() => {
                               // The running step reads its live count; a finished one its record.
                               const tokens = r.status === 'running' ? props.liveStepTokens : r.row?.step_tokens;
-                              if (tokens == null || tokens <= 0) return null;
+                              // A finished step whose agent reported nothing is unknown, not free.
+                              if (tokens == null && r.row?.ended_at && r.status !== 'running') {
+                                return (
+                                  <span
+                                    className="audit-tl-mono audit-tl-muted"
+                                    data-testid={`audit-timeline-step-tokens-${r.index}`}
+                                    title={t('auditTimeline.tokens.unknownTitle')}
+                                  >
+                                    {t('auditTimeline.tokens.unknown')}
+                                  </span>
+                                );
+                              }
+                              if (tokens == null || (r.status === 'running' && tokens <= 0)) return null;
                               const part = (v?: number | null) => (v == null ? '—' : v.toLocaleString(locale));
                               return (
                                 <span
                                   className="audit-tl-mono audit-tl-muted"
                                   data-testid={`audit-timeline-step-tokens-${r.index}`}
-                                  title={r.status === 'running' ? undefined : t('auditTimeline.tokens.detail',
-                                    part(r.row?.input_tokens), part(r.row?.output_tokens), part(r.row?.cache_read_tokens))}
+                                  title={r.status === 'running' ? undefined : [
+                                    t('auditTimeline.tokens.detail',
+                                      part(r.row?.input_tokens), part(r.row?.output_tokens), part(r.row?.cache_read_tokens)),
+                                    r.row?.carried_from_run_id ? t('auditTimeline.tokens.carried', r.row.carried_from_run_id.slice(0, 8)) : '',
+                                  ].filter(Boolean).join(' · ')}
                                 >
                                   {t('auditTimeline.tokens.short', formatTokens(tokens, locale))}
                                 </span>
@@ -492,7 +515,25 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               );
             })}
-            {runId === null && total === 0 && !auditActive && (
+            {runId === null && !auditActive && recorded.length > 0 && (
+              <div className="audit-tl-recorded" data-testid="audit-timeline-recorded">
+                <p className="audit-tl-muted">{t('auditTimeline.recorded.intro')}</p>
+                <ul>
+                  {[...recorded].reverse().map((entry, i) => (
+                    <li key={`${entry.date}-${i}`} data-testid="audit-timeline-recorded-entry">
+                      <time className="audit-tl-mono" dateTime={entry.date}>{entry.date}</time>
+                      <span>{t(`auditTimeline.recorded.provenance.${entry.provenance}`)}</span>
+                      <span className="audit-tl-muted">
+                        {entry.kronn_version === 'legacy'
+                          ? t('auditTimeline.recorded.legacyVersion')
+                          : t('auditTimeline.recorded.version', entry.kronn_version)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {runId === null && total === 0 && !auditActive && recorded.length === 0 && (
               <p className="audit-tl-muted">{t('auditTimeline.audit.notStarted')}</p>
             )}
           </Phase>

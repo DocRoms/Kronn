@@ -2,7 +2,7 @@ use axum::{
     extract::{
         connect_info::ConnectInfo,
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
     },
     http::HeaderMap,
     response::IntoResponse,
@@ -184,6 +184,14 @@ pub(crate) fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> b
     invite_code.is_empty() && !is_local
 }
 
+/// Query string of the WS upgrade. The frontend appends `?token=` when it holds
+/// the API token (browsers cannot set an `Authorization` header on a WebSocket).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct WsAuthQuery {
+    #[serde(default)]
+    token: Option<String>,
+}
+
 /// GET /api/ws — WebSocket upgrade handler.
 ///
 /// Accepts connections from:
@@ -204,60 +212,103 @@ pub async fn ws_handler(
     // underlying request extension still lives behind `Extension<…>`, which
     // does implement it, so we extract that instead.
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
-    // Behind the nginx gateway (the docker-compose deployment), the socket
-    // peer is ALWAYS the gateway's container IP — never the real client. The
-    // gateway sets `X-Real-IP` to the true client address; we trust it because
-    // in this topology only the gateway can reach the backend port. Without
-    // this, every browser looks like one non-loopback peer (the gateway), so
-    // the local frontend's empty-invite Presence is treated as brute-force and
-    // bans the gateway IP → ALL clients' WS get rejected (reconnect storm).
+    // Behind the nginx gateway (Docker) the socket peer is the gateway, and
+    // `X-Real-IP` carries the real client. See `resolve_client_ip`.
     headers: HeaderMap,
+    Query(query): Query<WsAuthQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let socket_ip = connect_info
         .map(|ext| ext.0 .0.ip())
         .unwrap_or_else(|| IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    let peer_ip = resolve_client_ip(&headers, socket_ip);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip))
+    let in_docker = crate::core::env::is_docker();
+    let peer_ip = resolve_client_ip(&headers, socket_ip, in_docker);
+
+    let config = state.config.read().await;
+    let auth_required = config.server.auth_enabled && config.server.auth_token.is_some();
+    let strict_localhost = config.server.auth_strict_localhost;
+    let has_valid_token = match config.server.auth_token.as_deref() {
+        Some(expected) => {
+            let bearer = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "));
+            bearer == Some(expected) || query.token.as_deref() == Some(expected)
+        }
+        None => false,
+    };
+    drop(config);
+
+    let is_local = ws_client_is_local(WsTrust {
+        client_ip: peer_ip,
+        in_docker,
+        auth_required,
+        strict_localhost,
+        has_valid_token,
+    });
+    ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip, is_local))
 }
 
-/// Resolve the real client IP for rate-limiting/ban decisions.
+/// Resolve the real client IP for rate-limiting, ban and trust decisions.
 ///
-/// Order: `X-Real-IP` (set by the nginx gateway) → first hop of
-/// `X-Forwarded-For` → the socket peer IP. Returns the socket IP when no
-/// proxy header is present or parseable (direct connection, e.g. the desktop
-/// app or tests). Pure + exported so the derivation is unit-tested directly —
-/// the bug it fixes (banning the gateway IP for everyone) had zero coverage
-/// precisely because the handler read `ConnectInfo` only.
-pub(crate) fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr) -> IpAddr {
-    if let Some(real) = headers
+/// `X-Real-IP` is honoured only under Docker AND when the TCP peer is itself
+/// on a private network (the bundled nginx overwrites the header with
+/// `$remote_addr`). Natively axum talks to clients directly, so the header is
+/// attacker-controlled and ignored. `X-Forwarded-For` is never read: the
+/// gateway does not set it, so it would pass through from the client as is.
+pub(crate) fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr, in_docker: bool) -> IpAddr {
+    if !in_docker || !is_trusted_client_ip(socket_ip) {
+        return socket_ip;
+    }
+    headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    {
-        return real;
-    }
-    if let Some(fwd) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    {
-        return fwd;
-    }
-    socket_ip
+        .unwrap_or(socket_ip)
 }
 
-/// Is `ip` a TRUSTED client — i.e. the local Kronn UI or a same-host/LAN
-/// caller — for the empty-invite-code shortcut and ban exemption?
+/// Inputs of the "is this the local frontend" decision for one WS upgrade.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WsTrust {
+    pub client_ip: IpAddr,
+    pub in_docker: bool,
+    /// `auth_enabled` and a token configured, as in `auth_middleware`.
+    pub auth_required: bool,
+    pub strict_localhost: bool,
+    pub has_valid_token: bool,
+}
+
+/// Whether the connection is the local frontend: it receives the full event
+/// bus and may use the empty-invite Presence shortcut.
 ///
-/// Trusted = loopback OR private-range (RFC1918 / IPv6 ULA / link-local).
-/// Rationale: the self-hosted topology is "Kronn behind its own reverse proxy
-/// on a private docker/LAN network". The owner's own browser reaches the
-/// backend through that private network, so its source IP is private, never
-/// loopback. Real cross-internet peers arrive with a PUBLIC IP (preserved via
-/// `resolve_client_ip` / X-Real-IP) → untrusted → must present a valid invite
-/// code, and brute-force attempts are still rate-limited per real IP.
+/// A valid token always qualifies. When auth is required, only the same local
+/// set as the HTTP bypass qualifies (loopback, plus the Docker bridge range
+/// under Docker), unless strict-localhost is on. When auth is off, natively
+/// only loopback qualifies; under Docker any private source does, because
+/// Docker Desktop NATs the host browser to a network gateway whose range
+/// varies, and the HTTP API is open in that mode anyway.
+pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
+    if t.has_valid_token {
+        return true;
+    }
+    let local_set = if t.in_docker {
+        crate::is_local_ip(&t.client_ip.to_string())
+    } else {
+        t.client_ip.is_loopback()
+    };
+    if t.auth_required {
+        return !t.strict_localhost && local_set;
+    }
+    if t.in_docker {
+        is_trusted_client_ip(t.client_ip)
+    } else {
+        t.client_ip.is_loopback()
+    }
+}
+
+/// Loopback OR private-range (RFC1918 / IPv6 ULA / link-local). Used for the
+/// Docker gateway check and the Docker auth-off trust; never on its own to
+/// grant trust natively.
 pub(crate) fn is_trusted_client_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
@@ -269,18 +320,12 @@ pub(crate) fn is_trusted_client_ip(ip: IpAddr) -> bool {
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
+async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr, is_local: bool) {
     // Reject up-front if this peer is currently banned for invite-code
-    // brute-force. TRUSTED clients (loopback OR private-range) are exempt:
-    // the local Kronn UI is the only legitimate caller of the empty-invite
-    // shortcut, and behind the docker/nginx gateway its connection arrives
-    // with a PRIVATE source IP (the bridge gateway, e.g. 172.x / 192.168.x),
-    // never loopback. Treating only loopback as trusted banned that shared
-    // gateway IP for everyone → all WS rejected → reconnect storm. Real
-    // external peers arrive with a PUBLIC IP (via X-Real-IP, see
-    // `resolve_client_ip`) → still untrusted → must send a valid invite, and
-    // brute-force from them is still rate-limited per real IP.
-    let is_local = is_trusted_client_ip(peer_ip);
+    // brute-force. The local frontend (see `ws_client_is_local`) is exempt: it
+    // is the only legitimate caller of the empty-invite shortcut, and behind
+    // the Docker gateway many browsers share one source IP, so banning it
+    // would reject every client (reconnect storm).
     if !is_local && rate_limit::is_banned(peer_ip) {
         tracing::warn!("WS: rejecting banned peer {}", peer_ip);
         return;
@@ -1055,6 +1100,7 @@ mod handshake_tests {
         use std::net::{IpAddr, Ipv4Addr};
 
         const GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 19, 0, 4));
+        const PUBLIC: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
 
         fn hdr(name: &'static str, val: &str) -> HeaderMap {
             let mut h = HeaderMap::new();
@@ -1063,39 +1109,120 @@ mod handshake_tests {
         }
 
         #[test]
-        fn x_real_ip_wins_over_socket() {
-            // The core regression: behind nginx the socket IP is the gateway,
-            // but X-Real-IP carries the real client (here loopback). Resolving
-            // to loopback is what makes the empty-invite Presence accepted and
-            // stops the gateway-ban reconnect storm.
-            let ip = resolve_client_ip(&hdr("x-real-ip", "127.0.0.1"), GATEWAY);
+        fn docker_gateway_x_real_ip_wins_over_socket() {
+            // Behind nginx the socket IP is the gateway; X-Real-IP carries the
+            // real client, so the gateway IP is never the one banned.
+            let ip = resolve_client_ip(&hdr("x-real-ip", "127.0.0.1"), GATEWAY, true);
             assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
-            assert!(ip.is_loopback());
         }
 
         #[test]
-        fn x_real_ip_carries_a_lan_peer() {
-            let ip = resolve_client_ip(&hdr("x-real-ip", "10.0.0.42"), GATEWAY);
+        fn docker_gateway_x_real_ip_carries_a_lan_peer() {
+            let ip = resolve_client_ip(&hdr("x-real-ip", "10.0.0.42"), GATEWAY, true);
             assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42)));
         }
 
         #[test]
-        fn falls_back_to_x_forwarded_for_first_hop() {
-            let ip = resolve_client_ip(&hdr("x-forwarded-for", "203.0.113.7, 172.19.0.4"), GATEWAY);
-            assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+        fn native_ignores_forged_x_real_ip() {
+            let ip = resolve_client_ip(&hdr("x-real-ip", "127.0.0.1"), PUBLIC, false);
+            assert_eq!(ip, PUBLIC);
+            let ip = resolve_client_ip(&hdr("x-real-ip", "127.0.0.1"), GATEWAY, false);
+            assert_eq!(ip, GATEWAY);
+        }
+
+        #[test]
+        fn docker_ignores_x_real_ip_from_a_public_peer() {
+            // A public socket peer is not the gateway: its header is forged.
+            let ip = resolve_client_ip(&hdr("x-real-ip", "127.0.0.1"), PUBLIC, true);
+            assert_eq!(ip, PUBLIC);
+        }
+
+        #[test]
+        fn x_forwarded_for_is_never_trusted() {
+            let h = hdr("x-forwarded-for", "127.0.0.1, 172.19.0.4");
+            assert_eq!(resolve_client_ip(&h, GATEWAY, true), GATEWAY);
+            assert_eq!(resolve_client_ip(&h, PUBLIC, false), PUBLIC);
         }
 
         #[test]
         fn falls_back_to_socket_when_no_proxy_header() {
-            // Direct connection (desktop app / tests) — keep the socket IP.
-            let ip = resolve_client_ip(&HeaderMap::new(), GATEWAY);
-            assert_eq!(ip, GATEWAY);
+            assert_eq!(resolve_client_ip(&HeaderMap::new(), GATEWAY, true), GATEWAY);
         }
 
         #[test]
         fn garbage_header_falls_through_to_socket() {
-            let ip = resolve_client_ip(&hdr("x-real-ip", "not-an-ip"), GATEWAY);
+            let ip = resolve_client_ip(&hdr("x-real-ip", "not-an-ip"), GATEWAY, true);
             assert_eq!(ip, GATEWAY);
+        }
+    }
+
+    mod ws_client_is_local {
+        use super::super::{ws_client_is_local, WsTrust};
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        fn trust(ip: IpAddr, in_docker: bool, auth_required: bool) -> WsTrust {
+            WsTrust {
+                client_ip: ip,
+                in_docker,
+                auth_required,
+                strict_localhost: false,
+                has_valid_token: false,
+            }
+        }
+        const LAN: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        const BRIDGE: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 18, 0, 1));
+        const LOOP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        #[test]
+        fn native_lan_peer_without_token_is_not_local() {
+            assert!(!ws_client_is_local(trust(LAN, false, true)));
+            assert!(!ws_client_is_local(trust(LAN, false, false)));
+            assert!(!ws_client_is_local(trust(BRIDGE, false, true)));
+        }
+
+        #[test]
+        fn native_loopback_is_local() {
+            assert!(ws_client_is_local(trust(LOOP, false, true)));
+            assert!(ws_client_is_local(trust(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                false,
+                false
+            )));
+        }
+
+        #[test]
+        fn valid_token_makes_a_lan_peer_local() {
+            let mut t = trust(LAN, false, true);
+            t.has_valid_token = true;
+            assert!(ws_client_is_local(t));
+        }
+
+        #[test]
+        fn strict_localhost_requires_the_token_even_on_loopback() {
+            let mut t = trust(LOOP, false, true);
+            t.strict_localhost = true;
+            assert!(!ws_client_is_local(t));
+            t.has_valid_token = true;
+            assert!(ws_client_is_local(t));
+        }
+
+        #[test]
+        fn docker_auth_on_trusts_only_the_http_local_set() {
+            assert!(ws_client_is_local(trust(BRIDGE, true, true)));
+            assert!(ws_client_is_local(trust(LOOP, true, true)));
+            assert!(!ws_client_is_local(trust(LAN, true, true)));
+        }
+
+        #[test]
+        fn docker_auth_off_keeps_private_sources_local() {
+            // Docker Desktop NATs the host browser to a gateway in a varying range.
+            assert!(ws_client_is_local(trust(LAN, true, false)));
+            assert!(ws_client_is_local(trust(BRIDGE, true, false)));
+            assert!(!ws_client_is_local(trust(
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                true,
+                false
+            )));
         }
     }
 

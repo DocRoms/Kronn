@@ -38,6 +38,9 @@ pub(crate) struct ChatChunk {
     /// bills them above the plain input rate). `None` when not reported.
     pub cache_write_prompt_tokens: Option<u64>,
     pub eval_tokens: u64,
+    /// Cost the provider itself reports for this response (OpenRouter's
+    /// `usage.cost`), in micro-USD. `None` when not reported, never zero.
+    pub cost_usd_micros: Option<u64>,
     /// Tool calls the model wants executed before it can answer. Ollama puts
     /// them on the terminal chunk; OpenAI streams them as indexed fragments
     /// and signals completion with `finish_reason: "tool_calls"`.
@@ -154,6 +157,7 @@ impl ChatCodec for OpenAiCodec {
                 .or_else(|| usage["cache_read_input_tokens"].as_u64());
             chunk.cache_write_prompt_tokens = usage["cache_creation_input_tokens"].as_u64();
             chunk.eval_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
+            chunk.cost_usd_micros = usage["cost"].as_f64().and_then(usd_to_micros);
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
             chunk.finish_reason = Some(reason.to_string());
@@ -164,6 +168,12 @@ impl ChatCodec for OpenAiCodec {
         }
         Some(chunk)
     }
+}
+
+/// A provider-reported USD amount as integer micro-USD, so usage stays `Eq`.
+/// Negative or non-finite amounts are not a cost.
+pub(crate) fn usd_to_micros(usd: f64) -> Option<u64> {
+    (usd.is_finite() && usd >= 0.0).then(|| (usd * 1_000_000.0).round() as u64)
 }
 
 /// Request body for an OpenAI-compatible endpoint. Mirrors
@@ -223,6 +233,30 @@ pub(crate) fn with_prompt_cache_hints(body: &Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn openrouter_usage_cost_is_read_as_micro_usd() {
+        use super::ChatCodec;
+        let parse = |line: &str| super::OpenAiCodec.parse_line(line).unwrap();
+        let chunk = parse(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":80,"cost":0.00042,"is_byok":false}}"#,
+        );
+        assert_eq!(chunk.cost_usd_micros, Some(420));
+        assert_eq!(chunk.prompt_tokens, 1200);
+        // A free model reports a real zero; no field means unknown.
+        assert_eq!(
+            parse(r#"data: {"choices":[],"usage":{"prompt_tokens":5,"cost":0}}"#).cost_usd_micros,
+            Some(0)
+        );
+        assert_eq!(
+            parse(r#"data: {"choices":[],"usage":{"prompt_tokens":5}}"#).cost_usd_micros,
+            None
+        );
+        assert_eq!(super::usd_to_micros(1.5), Some(1_500_000));
+        assert_eq!(super::usd_to_micros(-0.1), None);
+        assert_eq!(super::usd_to_micros(f64::NAN), None);
+        assert_eq!(super::usd_to_micros(f64::INFINITY), None);
+    }
+
     #[test]
     fn provider_model_observations_survive_both_wire_formats() {
         use super::ChatCodec;

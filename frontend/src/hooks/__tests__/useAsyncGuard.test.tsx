@@ -60,4 +60,32 @@ describe('useAsyncGuard', () => {
     });
     expect(inner).toHaveBeenCalledTimes(2);
   });
+
+  it('runs the latest callback, not the first-render one', async () => {
+    const first = vi.fn().mockResolvedValue('first');
+    const second = vi.fn().mockResolvedValue('second');
+    const { result, rerender } = renderHook(({ fn }) => useAsyncGuard(fn), { initialProps: { fn: first } });
+    const stable = result.current;
+    rerender({ fn: second });
+    expect(result.current).toBe(stable);
+    await act(async () => {
+      expect(await stable()).toBe('second');
+    });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it('still blocks double submits after the callback changed', async () => {
+    let release: (() => void) | undefined;
+    const slow = vi.fn(() => new Promise<void>(r => { release = r; }));
+    const { result, rerender } = renderHook(({ fn }) => useAsyncGuard(fn), { initialProps: { fn: vi.fn() } });
+    rerender({ fn: slow });
+    await act(async () => {
+      const p1 = result.current();
+      const p2 = result.current();
+      expect(slow).toHaveBeenCalledTimes(1);
+      release?.();
+      await Promise.all([p1, p2]);
+    });
+  });
 });

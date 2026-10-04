@@ -99,6 +99,7 @@ import {
 } from '../lib/automationSort';
 import './DiscussionsPage.css';
 import './WorkflowsPage.css';
+import { safeSetItem } from '../lib/safeStorage';
 
 type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
 type CompareTarget = {
@@ -796,7 +797,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     } catch { return {}; }
   });
   useEffect(() => {
-    localStorage.setItem('kronn:wfCollapsedGroups', JSON.stringify(collapsedGroups));
+    safeSetItem('kronn:wfCollapsedGroups', JSON.stringify(collapsedGroups));
   }, [collapsedGroups]);
 
   const groupedWorkflows = useMemo(() => {

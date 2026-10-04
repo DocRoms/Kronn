@@ -172,6 +172,12 @@ pub(crate) fn resolve_briefing_notes(
 /// but `docs/index.md` is missing, we drop one in. Idempotent and
 /// silent (best-effort write, debug-logs on failure).
 pub(crate) fn enrich_audit_status(project: &mut Project) {
+    enrich_audit_status_with_runs(project, false);
+}
+
+/// `completed_full_run`: this instance recorded a Completed Full audit of the
+/// project, which counts as audited when the branch carries no evidence file.
+pub(crate) fn enrich_audit_status_with_runs(project: &mut Project, completed_full_run: bool) {
     let resolved = scanner::resolve_host_path(&project.path);
     // A project whose directory is gone — e.g. after a cross-OS import where
     // absolute paths don't translate (WSL `/home/...` ⇄ macOS `/Users/...`) —
@@ -187,7 +193,8 @@ pub(crate) fn enrich_audit_status(project: &mut Project) {
         project.needs_docs_migration = false;
         return;
     }
-    project.audit_status = scanner::detect_audit_status(&project.path);
+    project.audit_status =
+        scanner::detect_audit_status_with_runs(&project.path, completed_full_run);
     project.ai_todo_count = scanner::count_ai_todos(&project.path);
     project.tech_debt_count = scanner::count_tech_debt(&project.path);
     project.needs_docs_migration = scanner::needs_docs_migration(&resolved);

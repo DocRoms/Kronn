@@ -183,7 +183,13 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
       const report = await mcpsApi.refresh(false);
       setRescanPreview(null);
       refetchMcps();
-      toast(t('mcp.rescanApplied', report.configs_created, report.configs_merged), 'success');
+      toast(t(
+        'mcp.rescanApplied',
+        report.configs_created,
+        report.configs_merged,
+        report.projects_rewritten ?? 0,
+        report.configs_deleted,
+      ), 'success');
     } catch (error) {
       console.warn('Failed to apply MCP rescan:', error);
       toast(t('mcp.rescanFailed', userError(error)), 'error');
@@ -216,14 +222,11 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     }
   };
 
-  const handleDeleteMcpConfig = async (configId: string, confirmed = false): Promise<boolean> => {
-    // Row-menu deletion keeps the native confirm. The detail sheet owns its
-    // two-step danger-zone confirmation and passes `confirmed=true`; either
-    // path returns success so the caller only closes UI after persistence.
-    // and the result is toasted so success/failure is visible.
+  // Single-plugin deletion lives only in the detail sheet, behind its two-step
+  // confirmation; it returns success so the caller closes the sheet after persistence.
+  const handleDeleteMcpConfig = async (configId: string): Promise<boolean> => {
     const cfg = mcpOverview.configs.find(c => c.id === configId);
     const label = cfg?.label ?? configId;
-    if (!confirmed && !confirm(t('mcp.deleteConfigConfirm', label))) return false;
     try {
       await mcpsApi.deleteConfig(configId);
       refetchMcps();

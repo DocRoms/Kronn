@@ -11,6 +11,192 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Full access is now a visible, accessible switch on each agent card, with a
+  risk dialog before it is enabled, and the setup wizard has an Access step
+  that offers it agent by agent, off by default (KT-975).
+- The plugin catalogue offers MySQL / MariaDB (KT-996, #217), through the
+  community server `@benborla29/mcp-server-mysql`: host, user and password,
+  with an optional port and database, read-only unless a write flag is set on
+  the server.
+
+- The project card says when the branch has lost its audit evidence while
+  another commit still carries `docs/.kronn.json`, names that commit and its
+  branches, and restores the file on request (KT-993). A Full audit completed
+  on this Kronn instance now counts as audited when the branch has no evidence
+  file, and the audit timeline lists the audits the file records (another
+  instance, an attestation, legacy evidence) with their date and provenance
+  instead of staying empty. The timeline loads in one request instead of up to
+  thirteen.
+
+### Fixed
+
+- The desktop release pipeline now fails before building when the pushed tag
+  differs from `VERSION` or a version marker is stale, builds the release job
+  from the requested tag on a manual run, and expects exactly the installers
+  Tauri is configured to produce (`.exe`, `.dmg`, `.deb`) instead of accepting
+  an `.msi` or `.AppImage` in their place; the release notes give the real
+  `.deb` file name. The release commit is resolved once and the checkouts,
+  the dependency review and the full CI gate (label-gated jobs included) run
+  on it, and the release waits for that gate (KT-1023).
+
+- Opening a project shows the last known Git and Dependencies results at once,
+  with their date, and refreshes them behind a discreet indicator. A failed
+  refresh keeps the previous result instead of blanking the block, and the
+  Git block renders local status before the pull-request lookup completes
+  (KT-989).
+- Plugins page: the toolbar button that rescans the projects' `.mcp.json` files
+  is labelled as such instead of "Sync", the preview names how many projects
+  are affected, and the report after applying lists created, merged, rewritten
+  and removed counts (KT-833).
+- Turning on full access for GitHub Copilot CLI failed with "Agent does not
+  support access flags", and Vibe and Kiro accepted a flag they ignore. The
+  backend now accepts exactly the five agents that honor it (KT-975).
+- A guarded action (save, create, toggle) now always runs with the current
+  props and translations instead of the ones from the first render, and a
+  browser with disabled or full storage no longer crashes the Discussions,
+  Dashboard, Workflows or Settings pages when they remember a preference
+  (KT-1022).
+
+- Listing projects no longer writes `docs/.kronn.json` into a checkout that
+  only carries legacy audit markers (KT-993): the status is computed in memory
+  and the file is written by audits and validations only, atomically.
+
+
+
+- A validation no longer asks again about a TD already decided (KT-938): the
+  decision a card writes on the TD sheet (confirmed, rejected, accepted
+  decision) is read back, so the full validation after a resume asks only
+  about new or undecided TDs and names the partial validation it follows. A
+  deferred TD is asked again, since its decision was postponed. Re-audits stop
+  carrying rejected TDs and accepted trade-offs in the index, and no longer
+  report them as missed. A TD whose status sits only in its YAML front matter
+  is read and updated too.
+
+
+
+- An audit of an already documented repository no longer fails on dead links
+  in documents Kronn does not own (KT-1020): moved `docs/legacy/` documents and
+  root instruction files with human content outside Kronn's block are
+  reported, not blocking, and the repair step never rewrites them.
+
+
+
+- Audits no longer receive the `kronn-internal` and Memory MCP servers
+  (KT-935): the `.mcp.json` filter and the ACP broker apply the same exclusion,
+  so an OpenCode, Claude or Codex audit gets neither Kronn's write tools nor a
+  knowledge graph shared across projects, and the refusal is logged instead of
+  appearing as a registry error. Discussions on the audited project keep
+  their tools.
+
+
+
+- The documentation template and audit are more consistent (KT-934): a
+  validation is refused while a document Kronn owns still carries a
+  placeholder or a `TODO:` marker, the final review skips the `TEMPLATE.md`
+  gabarits like the document gate does, and no root redirector is written
+  toward a missing `docs/AGENTS.md`.
+
+
+
+- A resumed audit keeps the tokens, duration and cost of the steps it inherits
+  and names the run that spent them, refuses to start when it cannot record
+  them, and warns when the sources moved since the run it continues (KT-1021):
+  each audit run now records its commit, branch and source fingerprint. Token
+  figures count cached prompt tokens the same way for every agent, and the
+  timeline shows a step whose agent reported nothing as unknown instead of
+  hiding it.
+- Natively, a Claude discussion kept none of its project's MCP servers once
+  one of them carried a credential in its environment (KT-1003): the whole
+  `.mcp.json` was refused. Each authorized server now stays on its own. Its
+  environment values reach Claude as `${KRONN_MCP_…}` references in the
+  command line and as values in the Claude process's own environment, never in
+  argv, ACP payloads or events. A credential passed in `args` still leaves its
+  server out.
+- Security hardening (KT-1009). The WebSocket no longer streams every live
+  event to any private-network peer: without the API token only loopback (or,
+  under Docker, the gateway's local clients) counts as the local UI, and
+  `X-Real-IP` is honoured only from the Docker gateway (`X-Forwarded-For`
+  never). The container no longer writes the GitHub token into `.netrc` for
+  gitlab.com (a `GITLAB_TOKEN` feeds that entry, and a stale one is removed).
+  Saving an OpenAI key rewrites `~/.codex/auth.json` atomically, owner-only,
+  and keeps a ChatGPT login's mode. Key and recovery temp files are created
+  owner-only and never follow a planted symlink, scheduled backups are created
+  0600, masked values no longer panic on accented or emoji edges, the agent
+  read guard also refuses Kronn's key, config, database, `.mcp.json` and MCP
+  backups, and exports drop the failure webhook URL.
+- A plugin bundle can no longer change the command a trusted plugin runs
+  (KT-1010): custom arguments in a bundle replace the plugin's whole command
+  line, so an import now drops them, and says so, unless the importer gives
+  explicit consent (`accept_args_override`). Custom arguments, which may hold
+  tokens, now travel only in the encrypted bundle, and a manual import can no
+  longer claim a `mcp-` or `api-` id reserved for the built-in catalogue.
+- Native skill and agent files are safer to write (KT-1011): nothing is
+  written through a symlinked folder such as a `.claude/skills` pointing
+  outside the repository, every front-matter value is quoted so a newline in
+  a skill description can no longer add a key like `allowed-tools`,
+  concurrent runs on one project no longer drop each other's entries from the
+  ownership ledger, and "Migrate to .agents/skills" no longer offers the
+  catalogue copies Kronn synced itself as repository skills.
+- A tracker issue title or a step output can no longer run as code in an
+  Exec step (KT-1017). Saving a workflow now refuses a template placeholder
+  inside an interpreter's inline script (`bash -c`, `python3 -c`, `node -e`…),
+  where it would be parsed as code, and says how to write it safely: pass the
+  value as a later argument (`["-c", "echo \"$1\"", "_", "{{issue.title}}"]`),
+  or, in a shell script, use the new `{{value|sh}}` filter, which renders one
+  single-quoted word. `{{run.id}}` and `{{time.now…}}` stay allowed. Saved
+  workflows keep running unchanged until they are next edited.
+
+- A task delegated to Gemini, Copilot, Kiro or OpenCode as a launched worker
+  ran with the discussion's full access and without its delivery context, so
+  it could act beyond the worker scope and never deliver (KT-1012). These
+  native ACP agents are now refused as launched workers with a clear reason,
+  at preparation and at launch; one worker policy now decides every route, and
+  an exact joined CLI session of the same agent stays eligible.
+- Agent streams are sturdier (KT-1014). An accented letter or emoji split
+  across two network chunks of an HTTP model's reply (Ollama, LiteLLM,
+  OpenRouter, NVIDIA, Custom) is decoded intact instead of becoming two `�`,
+  which could also corrupt a file path in a tool call. A non-UTF-8 byte on a
+  CLI agent's output costs one replacement character instead of stopping the
+  reader and leaving the agent blocked until the watchdog; a native ACP agent
+  keeps its session. After a Claude or Codex turn exits normally, the
+  processes it left behind (stdio MCP servers, background commands) are
+  stopped with it instead of piling up.
+- When Ollama refused an unreadable tool call and Kronn replayed the request,
+  the text the refused attempt had already streamed (a preamble before the
+  call) appeared twice in the reply and in the saved message (KT-944). On an
+  Ollama turn that offers tools, the first 512 bytes of an attempt are now held
+  until the attempt ends: a replayed attempt's preamble is dropped, a
+  successful one is shown, and a longer answer streams live as before.
+- An audit step on a hosted large-context model (OpenRouter, LiteLLM, NVIDIA,
+  Custom) could explore for hours, resending its whole history each round,
+  because context pressure was never measured on that wire and the write
+  window only opened at round 242 of 250 (KT-998). Pressure is now measured on
+  a bounded step budget (the smaller of the model's window and 128 000
+  tokens), for audits and HTTP workers alike, and an audit step writes its
+  deliverable once it has spent 1 500 000 input tokens. Both budgets can be
+  set with `KRONN_HTTP_STEP_CTX_BUDGET` and
+  `KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`.
+- The cost an agent reports itself is no longer lost (KT-997, backend part).
+  Claude Code names it `total_cost_usd`, which Kronn did not read, and the
+  default Claude route dropped it anyway; OpenRouter's `usage.cost` was never
+  read. Both now reach the run's usage as integer micro-USD, summed per
+  response, and stay unknown (never zero) when not reported. Showing it per
+  audit step comes later.
+
+### Changed
+
+- Plugins page: one export and one import flow, the plugin bundle, where each
+  plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
+  export and the paste-a-spec import are gone, and a plugin is deleted from
+  its detail sheet only, behind its two-step confirmation (KT-833).
+- The release notes are now generated from the installers a release really
+  carries (KT-1004): one direct download link per attached file, the version's
+  CHANGELOG section above the install table, and the AppImage advice only when
+  an AppImage is attached. A missing platform or CHANGELOG section fails the
+  release job instead of publishing a draft that names absent files.
+
 ## [0.14.2] - 2026-10-03
 
 ### Added

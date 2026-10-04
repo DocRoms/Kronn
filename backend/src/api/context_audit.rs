@@ -36,6 +36,8 @@ pub enum AuditEvidenceKind {
     HumanAttestation,
     LegacyEvidence,
     BootstrapOnly,
+    /// No evidence file on this branch, but this instance completed a Full audit.
+    RecordedRun,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -54,11 +56,21 @@ pub struct AuditEvidenceResponse {
     /// Present only when the authoritative newest run passes the exact resume
     /// gate. The next usable step is this checkpoint + 1.
     pub resumable_after_step: Option<u32>,
+    /// The evidence file is missing on this branch but another commit carries
+    /// it: the card offers to restore it.
+    pub state_in_history: Option<crate::core::kronn_state::StateInHistory>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AttestDocumentationRequest {
     pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct RestoreAuditStateRequest {
+    /// The commit `state_in_history` named.
+    pub commit: String,
 }
 
 async fn lookup_project(
@@ -107,6 +119,9 @@ fn evidence_kind(root: &std::path::Path, status: &AiAuditStatus) -> AuditEvidenc
     }
     if matches!(status, AiAuditStatus::TemplateInstalled) {
         AuditEvidenceKind::MissingEvidence
+    } else if matches!(status, AiAuditStatus::Audited) {
+        // Only the instance's run record can make a file-less tree Audited.
+        AuditEvidenceKind::RecordedRun
     } else {
         AuditEvidenceKind::IncompleteTemplate
     }
@@ -118,7 +133,7 @@ async fn build_evidence(
 ) -> Result<AuditEvidenceResponse, String> {
     let project_id = project.id.clone();
     let stats_id = project.id.clone();
-    let (audit_runs, interrupted_runs, resumable_after_step) = state
+    let (audit_runs, interrupted_runs, resumable_after_step, completed_full) = state
         .db
         .with_conn(move |conn| {
             let (total, interrupted): (i64, i64) = conn.query_row(
@@ -129,14 +144,34 @@ async fn build_evidence(
             )?;
             let resumable = crate::db::audit_runs::latest_resumable(conn, &stats_id)?
                 .map(|run| run.last_completed_step);
-            Ok((total.max(0) as u32, interrupted.max(0) as u32, resumable))
+            let completed_full = crate::db::audit_runs::has_completed_full(conn, &stats_id)?;
+            Ok((
+                total.max(0) as u32,
+                interrupted.max(0) as u32,
+                resumable,
+                completed_full,
+            ))
         })
         .await
         .map_err(|error| format!("audit reliability lookup failed: {error}"))?;
 
-    let root = crate::core::scanner::resolve_host_path(&project.path);
-    let status = crate::core::scanner::detect_audit_status(&project.path);
-    let kind = evidence_kind(&root, &status);
+    let project_path = project.path.clone();
+    let (root, status, kind, state_in_history) = tokio::task::spawn_blocking(move || {
+        let root = crate::core::scanner::resolve_host_path(&project_path);
+        let status =
+            crate::core::scanner::detect_audit_status_with_runs(&project_path, completed_full);
+        let kind = evidence_kind(&root, &status);
+        // Searched only when filled docs lack their evidence file on this branch.
+        let state_in_history = matches!(
+            kind,
+            AuditEvidenceKind::MissingEvidence | AuditEvidenceKind::RecordedRun
+        )
+        .then(|| crate::core::kronn_state::find_in_git_history(&root))
+        .flatten();
+        (root, status, kind, state_in_history)
+    })
+    .await
+    .map_err(|error| format!("audit evidence task failed: {error}"))?;
     let interruption_rate_percent = if audit_runs == 0 {
         0.0
     } else {
@@ -159,6 +194,7 @@ async fn build_evidence(
         interrupted_runs,
         interruption_rate_percent,
         resumable_after_step,
+        state_in_history,
     })
 }
 
@@ -203,6 +239,33 @@ pub async fn attest_project_documentation(
     })
     .await
     .unwrap_or_else(|error| Err(format!("attestation task failed: {error}")));
+    if let Err(error) = result {
+        return Json(ApiResponse::err(error));
+    }
+    match build_evidence(&state, &project).await {
+        Ok(evidence) => Json(ApiResponse::ok(evidence)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
+}
+
+/// `POST /api/projects/{id}/audit-state/restore` — bring back the evidence file
+/// another commit carries. Never overwrites an existing one.
+pub async fn restore_audit_state(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<RestoreAuditStateRequest>,
+) -> Json<ApiResponse<AuditEvidenceResponse>> {
+    let project = match lookup_project(&state, &project_id).await {
+        Ok(project) => project,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let project_path = project.path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let root = crate::core::scanner::resolve_host_path(&project_path);
+        crate::core::kronn_state::restore_from_git_history(&root, &request.commit)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("restore task failed: {error}")));
     if let Err(error) = result {
         return Json(ApiResponse::err(error));
     }
@@ -487,5 +550,181 @@ mod tests {
         assert_eq!(measured.interrupted_runs, 1);
         assert_eq!(measured.interruption_rate_percent, 50.0);
         assert_eq!(measured.resumable_after_step, Some(4));
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .expect("git runs")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    async fn complete_full_run(state: &AppState) {
+        state
+            .db
+            .with_conn(|conn| {
+                let start = chrono::Utc::now() - chrono::Duration::minutes(5);
+                crate::db::audit_runs::insert_running(conn, "full", "p1", "Full", "Codex", start)?;
+                crate::db::audit_runs::complete(
+                    conn,
+                    "full",
+                    start + chrono::Duration::minutes(1),
+                    "Completed",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    100,
+                    None,
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evidence_on_another_branch_is_offered_then_restored_once() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = state();
+        seed_project(&state, temp.path()).await;
+        let root = temp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "docs"]);
+        git(root, &["checkout", "-q", "-b", "feature/audit"]);
+        crate::core::kronn_state::attest_documentation(root).unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "evidence on a feature branch"]);
+        git(root, &["checkout", "-q", "main"]);
+        assert!(!root.join("docs/.kronn.json").exists());
+
+        let before = project_audit_evidence(State(state.clone()), AxPath("p1".to_string()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert!(matches!(before.kind, AuditEvidenceKind::MissingEvidence));
+        let found = before.state_in_history.expect("history lookup finds it");
+        assert_eq!(found.branches, vec!["feature/audit".to_string()]);
+        assert_eq!(found.path, "docs/.kronn.json");
+        // Reading the evidence never writes the file.
+        assert!(!root.join("docs/.kronn.json").exists());
+
+        let refused = restore_audit_state(
+            State(state.clone()),
+            AxPath("p1".to_string()),
+            Json(RestoreAuditStateRequest {
+                commit: "not-a-sha; rm -rf".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert!(!refused.success);
+
+        let restored = restore_audit_state(
+            State(state.clone()),
+            AxPath("p1".to_string()),
+            Json(RestoreAuditStateRequest {
+                commit: found.commit.clone(),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(matches!(restored.kind, AuditEvidenceKind::HumanAttestation));
+        assert_eq!(restored.status, AiAuditStatus::Audited);
+        assert!(restored.state_in_history.is_none());
+
+        let again = restore_audit_state(
+            State(state),
+            AxPath("p1".to_string()),
+            Json(RestoreAuditStateRequest {
+                commit: found.commit,
+            }),
+        )
+        .await
+        .0;
+        assert!(
+            !again.success,
+            "an existing state file is never overwritten"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_completed_full_run_is_evidence_when_the_branch_has_no_state_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = state();
+        seed_project(&state, temp.path()).await;
+        complete_full_run(&state).await;
+
+        let evidence = project_audit_evidence(State(state), AxPath("p1".to_string()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert!(matches!(evidence.kind, AuditEvidenceKind::RecordedRun));
+        assert_eq!(evidence.status, AiAuditStatus::Audited);
+        assert!(evidence.state_in_history.is_none(), "not a git repository");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeline_lists_runs_steps_and_audits_known_only_from_the_state_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = state();
+        seed_project(&state, temp.path()).await;
+        crate::core::kronn_state::attest_documentation(temp.path()).unwrap();
+
+        let empty = crate::api::audit::audit_timeline(State(state.clone()), AxPath("p1".into()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert!(empty.runs.is_empty() && empty.steps.is_empty());
+        assert_eq!(empty.recorded_audits.len(), 1);
+        assert_eq!(
+            empty.recorded_audits[0].provenance,
+            crate::core::kronn_state::AuditProvenance::HumanAttestation
+        );
+
+        complete_full_run(&state).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::audit_runs::insert_audit_step_start(
+                    conn,
+                    "full",
+                    1,
+                    "docs/AGENTS.md",
+                    chrono::Utc::now(),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let filled = crate::api::audit::audit_timeline(State(state.clone()), AxPath("p1".into()))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert_eq!(filled.runs.len(), 1);
+        assert_eq!(filled.steps.len(), 1);
+        assert_eq!(filled.steps[0].audit_run_id, "full");
+
+        let missing = crate::api::audit::audit_timeline(State(state), AxPath("nope".into()))
+            .await
+            .0;
+        assert!(!missing.success);
     }
 }

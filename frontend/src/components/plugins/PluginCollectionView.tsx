@@ -23,7 +23,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
     sidebarOpen, setSidebarOpen,
     isBuiltinConfig, driftBySlug, healthFor,
     collapsedMcpGroups, setCollapsedMcpGroups,
-    handleDeleteMcpConfig, showBuiltinFallback,
+    showBuiltinFallback,
     activeFilterCount, clearPluginFilters, pluginSearchLabel,
     setShowAddMcp, setAddMcpSelected, setAddMcpSearch, addMcpTriggerRef,
   } = state;
@@ -140,7 +140,6 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
                   menuLabel={t('collection.moreActions')}
                   copyId={config.id}
                   copyLabel={t('disc.copyId')}
-                  actions={[{ id: 'delete', label: t('mcp.deleteConfig'), icon: <Trash2 size={12} />, danger: true, onSelect: async () => { await handleDeleteMcpConfig(config.id); } }]}
                 />}
               </div>
             </div>;

@@ -21,8 +21,9 @@ use crate::models::*;
 use crate::AppState;
 
 use super::helpers::{
-    build_sub_audit_validation_prompt, build_validation_prompt, check_ai_dir_permissions,
-    compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills, partial_run_block,
+    all_tds_decided_block, build_sub_audit_validation_prompt, build_validation_prompt,
+    check_ai_dir_permissions, compute_audit_info_sync, detect_issue_tracker_mcp,
+    detect_project_skills, partial_run_block, prior_partial_validation_block,
     remove_bootstrap_block,
 };
 use super::{detach_sse_stream, SseStream};
@@ -468,10 +469,54 @@ pub async fn full_audit(
                 .filter(|(step, _)| already_succeeded_steps.contains(step))
                 .collect();
             let run_id = audit_run_id.clone();
+            let from_run_id = resume_run_id_req.clone().unwrap_or_default();
             if let Err(e) = db.with_conn(move |conn| {
-                crate::db::audit_runs::carry_over_steps(conn, &run_id, &carried, Utc::now())
+                crate::db::audit_runs::carry_over_steps(conn, &run_id, &from_run_id, &carried, Utc::now())
             }).await {
-                tracing::error!("Failed to record the steps carried over by run {audit_run_id}: {e}");
+                // Unrecorded, the next resume would replay the whole chain.
+                yield Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": format!("Could not record the steps this resume inherits (db): {e} — launch refused.")
+                    }).to_string(),
+                );
+                return;
+            }
+        }
+
+        // KT-1021 — what this run audits; a resume says whether the sources
+        // moved since the run it continues.
+        {
+            let pp = project_path.clone();
+            let (head, branch, fingerprint) = tokio::task::spawn_blocking(move || {
+                let (head, branch) = crate::core::checksums::git_head_and_branch(&pp);
+                let fingerprint = crate::core::checksums::stable_source_tree_fingerprint(&pp)
+                    .ok()
+                    .flatten();
+                (head, branch, fingerprint)
+            }).await.unwrap_or_default();
+            let run_id = audit_run_id.clone();
+            let previous_id = resume_run_id_req.clone();
+            let (h, b, f) = (head.clone(), branch.clone(), fingerprint.clone());
+            let previous = db.with_conn(move |conn| {
+                crate::db::audit_runs::set_run_provenance(
+                    conn, &run_id, h.as_deref(), b.as_deref(), f.as_deref(), None,
+                )?;
+                match previous_id {
+                    Some(id) => crate::db::audit_runs::get_by_id(conn, &id),
+                    None => Ok(None),
+                }
+            }).await;
+            match previous {
+                Ok(Some(previous)) => {
+                    if let Some(message) = resume_drift_message(&previous, head.as_deref(), fingerprint.as_deref()) {
+                        tracing::warn!("{message}");
+                        yield Event::default().event("warning").data(
+                            serde_json::json!({ "message": message }).to_string(),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("Could not record the audit run's provenance: {e}"),
             }
         }
 
@@ -640,10 +685,10 @@ pub async fn full_audit(
                     crate::core::root_agent_files::KRONN_ROOT_AGENT_FILES.contains(path)
                 }) {
                     let src = template_dir.join(filename);
-                    let dst = project_path.join(filename);
                     let template_body = std::fs::read_to_string(&src).ok();
-                    match crate::core::root_agent_files::inject_or_update(
-                        &dst,
+                    match crate::core::root_agent_files::inject_or_update_if_entry_exists(
+                        &project_path,
+                        filename,
                         template_body.as_deref(),
                     ) {
                         Ok(outcome) => {
@@ -705,6 +750,8 @@ pub async fn full_audit(
         // returns (success OR panic). Discussions / workflows that
         // would spawn during this window see the filtered set + a
         // banner explains; trade-off documented in the swap module.
+        // The ACP broker applies the same exclusions to Kronn's own bridge.
+        let _audit_session = crate::core::audit_mcp_filter::AuditSessionGuard::enter(&project_path);
         let _audit_mcp_swap = crate::core::audit_mcp_filter::AuditMcpSwap::install(&project_path)
             .ok()
             .flatten();
@@ -1284,7 +1331,7 @@ pub async fn full_audit(
                                             output: Some(output_tokens),
                                             cache_read: prompt_cache.cached_prompt_tokens,
                                             cache_write: prompt_cache.cache_write_prompt_tokens,
-                                        };
+                                        }.inclusive_for(&agent_type);
                                         usage_moved = true;
                                     }
                                 }
@@ -1325,7 +1372,7 @@ pub async fn full_audit(
                             // such step was recorded at 0.
                             let reading = crate::db::audit_runs::StepTokens::from_reported(
                                 process.reported_usage_counters(),
-                            );
+                            ).inclusive_for(&agent_type);
                             if reading.total().is_some() && reading != step_usage {
                                 step_usage = reading;
                                 usage_moved = true;
@@ -1364,7 +1411,7 @@ pub async fn full_audit(
                     if !is_stream_json {
                         let reading = crate::db::audit_runs::StepTokens::from_reported(
                             process.reported_usage_counters(),
-                        );
+                        ).inclusive_for(&agent_type);
                         if reading.total().is_some() {
                             step_usage = reading;
                         }
@@ -2013,6 +2060,17 @@ pub async fn full_audit(
                     .filter_map(|f| std::fs::read_to_string(project_path_for_recon.join(f)).ok())
                     .flat_map(|c| parse_index_td_ids(&c))
                     .collect();
+                // Rejected findings and accepted trade-offs leave the index on
+                // purpose: they are not reconciliation candidates.
+                let snapshot: Vec<_> = snapshot
+                    .into_iter()
+                    .filter(|snap| {
+                        std::fs::read_to_string(&snap.path)
+                            .ok()
+                            .and_then(|c| crate::core::audit_validation::td_decision(&c))
+                            .is_none_or(|decision| !decision.leaves_index())
+                    })
+                    .collect();
                 let deltas = compute_delta_with_index(&snapshot, &still_listed);
                 let project_path_for_check = project_path_for_recon.clone();
                 let entries = classify(
@@ -2274,17 +2332,25 @@ pub async fn full_audit(
         // indices the run wrote. Injected into the validation prompt so
         // Phase 3 reviews THIS run's findings only, never re-opening TDs
         // settled by previous validation discussions.
-        let run_td_ids: Vec<String> = {
+        // A TD already decided by an earlier validation (a partial one before a
+        // resume included) is not asked again: its sheet records the decision.
+        let td_scope = {
             let pp = project_path.clone();
             let idx_files = freshly_written_indices.clone();
             tokio::task::spawn_blocking(move || {
-                idx_files.iter()
-                    .filter_map(|f| std::fs::read_to_string(pp.join(f)).ok())
-                    .flat_map(|c| super::reconciliation::parse_index_td_ids(&c))
-                    .collect::<std::collections::BTreeSet<String>>()
-                    .into_iter()
-                    .collect::<Vec<String>>()
+                super::reconciliation::td_validation_scope(&pp, &idx_files)
             }).await.unwrap_or_default()
+        };
+        let run_td_ids: Vec<String> = td_scope.undecided.clone();
+        // KT-938 — the resumed run's partial validation, named in the prompt.
+        let partial_validation_id: Option<String> = match resume_run_id_req.clone() {
+            Some(run_id) => db
+                .with_conn(move |conn| crate::db::audit_runs::get_by_id(conn, &run_id))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|run| run.validation_discussion_id),
+            None => None,
         };
 
         // 0.8.4 (#287) — Full keeps the 4-phase protocol; sub-audits
@@ -2297,6 +2363,18 @@ pub async fn full_audit(
             build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp, &run_td_ids)
         };
         // KT-931 — a partial run says which steps are NOT being validated.
+        let validation_prompt = if td_scope.all_decided() {
+            format!("{}{validation_prompt}", all_tds_decided_block(&language))
+        } else {
+            validation_prompt
+        };
+        let validation_prompt = match partial_validation_id.as_deref() {
+            Some(id) => format!(
+                "{}{validation_prompt}",
+                prior_partial_validation_block(id, &language)
+            ),
+            None => validation_prompt,
+        };
         let validation_prompt = if outcome == RunOutcome::Partial {
             let to_redo: Vec<(u32, String)> = steps_to_redo
                 .iter()
@@ -3223,6 +3301,35 @@ pub(crate) struct SeverityCounts {
     pub low: u32,
 }
 
+/// What changed in the sources between the run a resume continues and now,
+/// `None` when nothing did or when the earlier run recorded nothing to compare.
+pub(crate) fn resume_drift_message(
+    previous: &AuditRun,
+    head: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Option<String> {
+    let moved_fingerprint = matches!(
+        (previous.source_fingerprint.as_deref(), fingerprint),
+        (Some(before), Some(now)) if before != now
+    );
+    let moved_head = matches!(
+        (previous.head_sha.as_deref(), head),
+        (Some(before), Some(now)) if before != now
+    );
+    if !moved_fingerprint && !moved_head {
+        return None;
+    }
+    let short = |sha: Option<&str>| sha.map(|s| s.chars().take(10).collect::<String>());
+    let head_note = match (short(previous.head_sha.as_deref()), short(head)) {
+        (Some(before), Some(now)) if before != now => format!(" (HEAD {before} → {now})"),
+        _ => String::new(),
+    };
+    Some(format!(
+        "The sources changed since run {} that this audit resumes{head_note}: the steps it inherits describe the earlier sources.",
+        previous.id
+    ))
+}
+
 /// True when a TD detail file's `- **Status**: <value>` line (mirrors the
 /// latest `audit_history` entry — see `mod.rs`'s Step 8 template) is
 /// `Rejected`. The user explicitly dismissed the finding during validation
@@ -3230,17 +3337,8 @@ pub(crate) struct SeverityCounts {
 /// trail (its row is removed from the index, not the detail file itself),
 /// so it must not keep weighing on the health score or severity tallies.
 fn td_status_is_rejected(content: &str) -> bool {
-    content.lines().any(|l| {
-        let lc = l.trim().to_ascii_lowercase();
-        let Some(value) = lc
-            .strip_prefix("- **status**:")
-            .or_else(|| lc.strip_prefix("**status**:"))
-            .or_else(|| lc.strip_prefix("status:"))
-        else {
-            return false;
-        };
-        value.trim().starts_with("rejected")
-    })
+    crate::core::audit_validation::td_decision(content)
+        == Some(crate::core::audit_validation::TdDecision::Rejected)
 }
 
 /// Scan every `TD-*.md` file in the tech-debt directory (skipping
@@ -3845,6 +3943,30 @@ mod resume_resolution_tests {
     }
 
     #[test]
+    fn a_resume_reports_sources_that_moved_since_the_run_it_continues() {
+        let mut previous = run("Full", "Interrupted", "p1", 4);
+        assert_eq!(
+            super::resume_drift_message(&previous, Some("a"), Some("f")),
+            None,
+            "nothing recorded"
+        );
+        previous.head_sha = Some("1111111111aaaa".into());
+        previous.source_fingerprint = Some("fp-1".into());
+        assert_eq!(
+            super::resume_drift_message(&previous, Some("1111111111aaaa"), Some("fp-1")),
+            None
+        );
+        let moved =
+            super::resume_drift_message(&previous, Some("2222222222bbbb"), Some("fp-2")).unwrap();
+        assert!(moved.contains("r1"), "{moved}");
+        assert!(moved.contains("1111111111 → 2222222222"), "{moved}");
+        // Uncommitted edits: same HEAD, different fingerprint.
+        let dirty =
+            super::resume_drift_message(&previous, Some("1111111111aaaa"), Some("fp-2")).unwrap();
+        assert!(!dirty.contains("HEAD"), "{dirty}");
+    }
+
+    #[test]
     fn interrupted_row_yields_its_own_kind_and_checkpoint() {
         // #1/#3 — kind + checkpoint come from the row, never the client.
         let r = run("Full", "Interrupted", "p1", 12);
@@ -4403,6 +4525,7 @@ mod partial_run_tests {
                 crate::db::audit_runs::carry_over_steps(
                     conn,
                     "run-b",
+                    "run-a",
                     &carried,
                     chrono::Utc::now(),
                 )?;

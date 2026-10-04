@@ -73,10 +73,13 @@ fi
 #      helper string and run arbitrary shell code.
 # ~/.netrc with 0600 is the standard mechanism git itself documents and is
 # scoped to the current user only.
-if [ -n "$GH_TOKEN" ]; then
-  NETRC="${HOME}/.netrc"
+# Each host gets only its own token: the GitHub token is never offered to
+# gitlab.com (GITLAB_TOKEN alone feeds that stanza).
+NETRC="${HOME}/.netrc"
+if [ -n "$GH_TOKEN" ] || [ -n "$GITLAB_TOKEN" ] || [ -f "$NETRC" ]; then
   # Remove any prior github.com/gitlab.com entries we previously wrote so
-  # rotating the token does not leave stale credentials behind.
+  # rotating the token does not leave stale credentials behind (including a
+  # gitlab.com entry that older images filled with the GitHub token).
   if [ -f "$NETRC" ]; then
     awk '
       /^machine (github\.com|gitlab\.com)$/ { skip=1; next }
@@ -84,21 +87,34 @@ if [ -n "$GH_TOKEN" ]; then
       skip != 1 { print }
     ' "$NETRC" > "${NETRC}.tmp" && mv "${NETRC}.tmp" "$NETRC"
   fi
-  {
-    echo "machine github.com"
-    echo "  login x-access-token"
-    echo "  password ${GH_TOKEN}"
-    echo "machine gitlab.com"
-    echo "  login oauth2"
-    echo "  password ${GH_TOKEN}"
-  } >> "$NETRC"
-  chmod 600 "$NETRC"
+  if [ -n "$GH_TOKEN" ]; then
+    {
+      echo "machine github.com"
+      echo "  login x-access-token"
+      echo "  password ${GH_TOKEN}"
+    } >> "$NETRC"
+  fi
+  if [ -n "$GITLAB_TOKEN" ]; then
+    {
+      echo "machine gitlab.com"
+      echo "  login oauth2"
+      echo "  password ${GITLAB_TOKEN}"
+    } >> "$NETRC"
+  fi
+  [ -f "$NETRC" ] && chmod 600 "$NETRC"
 
-  # Make HTTPS the canonical remote so SSH-style URLs are rewritten on the fly.
+  # Make HTTPS the canonical remote so SSH-style URLs are rewritten on the fly,
+  # only for a host we hold a token for (an SSH-only GitLab user keeps SSH).
   # The token is sourced from ~/.netrc, never inlined in the URL, so it does
   # not end up in `git config --list` or process listings.
-  git config --global url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
-  git config --global url."https://gitlab.com/".insteadOf "git@gitlab.com:" 2>/dev/null || true
+  if [ -n "$GH_TOKEN" ]; then
+    git config --global url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
+  fi
+  if [ -n "$GITLAB_TOKEN" ]; then
+    git config --global url."https://gitlab.com/".insteadOf "git@gitlab.com:" 2>/dev/null || true
+  else
+    git config --global --unset-all url."https://gitlab.com/".insteadOf 2>/dev/null || true
+  fi
 fi
 
 # Restore uv tool symlinks from persistent volume.

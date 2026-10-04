@@ -327,6 +327,9 @@ pub enum InjectOutcome {
     /// The audit caller logs + continues — partial install is
     /// better than aborting the whole audit on one stuck file.
     SkippedIoError,
+    /// The block's link target, `docs/AGENTS.md`, does not exist: no
+    /// redirector is written toward a missing file.
+    SkippedMissingEntry,
 }
 
 /// Build the full managed block as it appears on disk: opening
@@ -339,6 +342,17 @@ fn render_block() -> String {
         body = KRONN_BLOCK_BODY,
         end = KRONN_BLOCK_END,
     )
+}
+
+/// True when `content` holds anything besides Kronn's managed block: the file
+/// carries human-written instructions Kronn must not rewrite.
+pub(crate) fn has_content_outside_managed_block(content: &str) -> bool {
+    match find_marker_zone(content) {
+        Some((start, end)) => {
+            !content[..start].trim().is_empty() || !content[end..].trim().is_empty()
+        }
+        None => !content.trim().is_empty(),
+    }
 }
 
 /// Find the marker zone `[start_idx, end_idx)` covering the full
@@ -366,6 +380,20 @@ fn find_marker_zone(content: &str) -> Option<(usize, usize)> {
         0
     };
     Some((start_byte, end_byte + consume + consume2))
+}
+
+/// `inject_or_update` for `filename` under `project_root`, only when the
+/// block's target (`docs/AGENTS.md`) exists: a project documented under
+/// `doc/` or legacy `ai/` gets no redirector pointing at nothing.
+pub fn inject_or_update_if_entry_exists(
+    project_root: &Path,
+    filename: &str,
+    template_body: Option<&str>,
+) -> std::io::Result<InjectOutcome> {
+    if !project_root.join("docs/AGENTS.md").is_file() {
+        return Ok(InjectOutcome::SkippedMissingEntry);
+    }
+    inject_or_update(&project_root.join(filename), template_body)
 }
 
 /// Inject or update the Kronn block in `target_path`. If
@@ -977,5 +1005,24 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
             fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap(),
             user
         );
+    }
+
+    #[test]
+    fn no_redirector_is_written_toward_a_missing_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("doc")).unwrap();
+        std::fs::write(root.join("doc/AGENTS.md"), "# Entrée\n").unwrap();
+        let outcome = inject_or_update_if_entry_exists(root, "CLAUDE.md", Some("body")).unwrap();
+        assert_eq!(outcome, InjectOutcome::SkippedMissingEntry);
+        assert!(!root.join("CLAUDE.md").exists());
+
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# Entry\n").unwrap();
+        let outcome = inject_or_update_if_entry_exists(root, "CLAUDE.md", Some("body")).unwrap();
+        assert_eq!(outcome, InjectOutcome::Created);
+        assert!(std::fs::read_to_string(root.join("CLAUDE.md"))
+            .unwrap()
+            .contains("docs/AGENTS.md"));
     }
 }

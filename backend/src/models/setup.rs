@@ -535,6 +535,21 @@ impl HttpEndpoints {
 }
 
 impl AgentsConfig {
+    /// Set `full_access` for an agent whose launch honors it. Vibe and Kiro
+    /// ignore the flag (no narrower permission mode), so storing it would lie.
+    pub fn set_full_access(&mut self, agent: &AgentType, value: bool) -> Result<(), &'static str> {
+        let slot = match agent {
+            AgentType::ClaudeCode => &mut self.claude_code,
+            AgentType::Codex => &mut self.codex,
+            AgentType::OpenCode => &mut self.open_code,
+            AgentType::GeminiCli => &mut self.gemini_cli,
+            AgentType::CopilotCli => &mut self.copilot_cli,
+            _ => return Err("Agent does not support access flags"),
+        };
+        slot.full_access = value;
+        Ok(())
+    }
+
     /// Get the full_access setting for a given agent type.
     pub fn full_access_for(&self, agent: &AgentType) -> bool {
         match agent {

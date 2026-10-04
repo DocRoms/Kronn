@@ -10,7 +10,6 @@ import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { usePluginListState } from './usePluginListState';
 import { useAddPluginRegistryState } from './useAddPluginRegistryState';
 import { useCustomApiFormState } from './useCustomApiFormState';
-import { useCustomApiPortability } from './useCustomApiPortability';
 import { visibleToPluginProject } from './pluginHealth';
 
 export interface McpPageProps {
@@ -38,7 +37,7 @@ export interface McpPageProps {
  *  as its `state` prop rather than a hand-picked prop list — the page
  *  was a single closure before the KT-830 split, and this keeps every
  *  piece reachable exactly like before. Internally this composes 4
- *  smaller hooks (list/detail, add-registry, custom-form, portability)
+ *  smaller hooks (list/detail, add-registry, custom-form)
  *  kept under the page's per-file line budget; this file only owns the
  *  handful of handlers that genuinely cross those boundaries
  *  (`resetAddMcp`, `handleAddMcpFromRegistry`, the Escape-key effect). */
@@ -46,7 +45,6 @@ export type McpPageState =
   & ReturnType<typeof usePluginListState>
   & ReturnType<typeof useAddPluginRegistryState>
   & ReturnType<typeof useCustomApiFormState>
-  & ReturnType<typeof useCustomApiPortability>
   & {
     t: (key: string, ...args: (string | number)[]) => string;
     isMobile: boolean;
@@ -73,16 +71,6 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
   const addRegistry = useAddPluginRegistryState({ mcpOverview, mcpRegistry });
   const customForm = useCustomApiFormState();
 
-  // `resetAddMcp` resets fields owned by `customForm` + `addRegistry` +
-  // this hook itself (`useCustomApiPortability`'s import fields), so it
-  // can only be built once all 3 have returned their setters — but
-  // `useCustomApiPortability`'s import handlers also need to CALL
-  // `resetAddMcp` on success. A ref breaks the cycle: it's created
-  // before `resetAddMcp` exists, and kept pointed at the latest
-  // closure below.
-  const resetAddMcpRef = useRef<() => void>(() => {});
-  const portability = useCustomApiPortability({ t, toast, refetchMcps, resetAddMcpRef });
-
   const {
     setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv,
     setAddMcpGlobal, setAddMcpProjectIds, setAddMcpIncludeGeneral, setAddMcpHostSync, setAddMcpSearch, addMcpRef,
@@ -92,7 +80,6 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     setCustomFields, setCustomEndpoints, setEditingCustomServerId,
     setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
   } = customForm;
-  const { setImportJsonText, setImportJsonError } = portability;
 
   const resetAddMcp = useCallback(() => {
     setShowAddMcp(false);
@@ -115,20 +102,12 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     setEditingCustomOriginalScope(null);
     setCustomAuth('None');
     setReplacingFields(new Set());
-    setImportJsonText('');
-    setImportJsonError(null);
   }, [
     setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv, setAddMcpGlobal, setAddMcpProjectIds,
     setAddMcpIncludeGeneral, setAddMcpHostSync, setAddMcpSearch, setCustomName, setCustomBaseUrl, setCustomDescription,
     setCustomDocsUrl, setCustomFields, setCustomEndpoints, setEditingCustomServerId,
     setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
-    setImportJsonText, setImportJsonError,
   ]);
-  // Portability handlers are built before `resetAddMcp` exists; they reach it through this ref.
-  useEffect(() => {
-    resetAddMcpRef.current = resetAddMcp;
-  }, [resetAddMcp]);
-
   const handleAddMcpModalKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -429,7 +408,6 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     ...list,
     ...addRegistry,
     ...customForm,
-    ...portability,
     resetAddMcp, handleAddMcpModalKeyDown, handleAddMcpFromRegistry,
     showBuiltinFallback,
   };

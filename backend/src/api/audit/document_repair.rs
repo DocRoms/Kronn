@@ -32,6 +32,8 @@ pub(super) fn recovery_plan(
     steps: &[super::AnalysisStep],
 ) -> BTreeMap<u32, Vec<Diagnostic>> {
     let mut plan = BTreeMap::<u32, Vec<Diagnostic>>::new();
+    // Only blocking diagnostics, and `analyze` never marks a human-owned
+    // document blocking: no step is asked to rewrite one.
     for diagnostic in diagnostics.iter().filter(|d| d.blocking) {
         let owner = steps
             .iter()
@@ -218,6 +220,8 @@ pub(super) fn check_attempt(
         .map(|(path, _)| path.clone())
         .collect();
     targets.extend(recovery.iter().map(|d| d.path.clone()));
+    // Human-owned documents are never rewritten, even mechanically.
+    targets.retain(|path| document_optimization::kronn_owns(project, path));
     for path in &targets {
         let Some(content) = after.get(path) else {
             continue;
@@ -324,6 +328,32 @@ mod tests {
             "[src: file: code.rs:1, invented.rs:1]\n",
             "[src: file: code.rs:1, code.rs:2-1]\n",
         ] { assert!(split_verified_citations(dir.path(), text).is_none(), "{text}"); }
+    }
+
+    #[test]
+    fn repair_never_targets_a_document_kronn_does_not_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs/legacy")).unwrap();
+        std::fs::write(root.join("code.rs"), "first\nsecond\n").unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# P\n[g](legacy/guide.md)\n").unwrap();
+        let before = snapshot(root).unwrap();
+        // The human guide changed (an agent touched it) and carries both a
+        // bundle the mechanical repair would split and an invented path.
+        let human = "# Guide\n[src: file: code.rs:1, code.rs:2]\n[src: file: invented.rs:1]\n[x](../nope.md)\n";
+        std::fs::write(root.join("docs/legacy/guide.md"), human).unwrap();
+
+        let report = document_optimization::analyze(root).unwrap();
+        let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        assert!(recovery_plan(&report.diagnostics, &steps).is_empty());
+        let blocking = check_attempt(root, &before, &report.diagnostics).unwrap();
+        assert!(blocking.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/legacy/guide.md")).unwrap(),
+            human,
+            "the human document is left as written"
+        );
+        assert!(!root.join("docs/.kronn-citation-originals").exists());
     }
 
     #[test]

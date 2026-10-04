@@ -1049,6 +1049,16 @@ pub struct AuditRun {
     /// recommendation-shape tweak.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendations_json: Option<String>,
+    /// Commit, branch and source fingerprint at the run's start (KT-1021).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<String>,
+    /// The model the run's agent used, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -1097,6 +1107,13 @@ pub struct AuditRunStep {
     /// Mirrors the `step_warning.repaired` field from #292.
     #[serde(default)]
     pub step_repaired_from_template: bool,
+    /// The step's cost in millionths of a dollar, when its agent reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<u64>,
+    /// For a step a resume inherited: the run that actually ran it. Its tokens,
+    /// duration and cost are that run's, not spent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_from_run_id: Option<String>,
 }
 
 /// Recommendation emitted by the completion-time cluster detector. Lives in

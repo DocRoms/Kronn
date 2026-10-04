@@ -1,9 +1,9 @@
 //! Small, purpose-built template engine for workflow values.
 //!
 //! Supports `{{variable}}` syntax with nested access via dots. This is not a
-//! Liquid implementation. The only filter pipeline is the closed,
-//! vendor-neutral `time.now` grammar; arbitrary Liquid filters remain
-//! unsupported. Preview rendering keeps unresolved placeholders visible to the
+//! Liquid implementation. The only filters are the closed, vendor-neutral
+//! `time.now` grammar and `|sh`, which renders any value as one POSIX
+//! single-quoted shell word; arbitrary Liquid filters remain unsupported. Preview rendering keeps unresolved placeholders visible to the
 //! author; execution rendering is strict so a typo can never be sent to an
 //! agent or an external command/API. `{{path ?? "text"}}` is the one explicit
 //! way to accept an absent (or JSON null) path, e.g. a step skipped by a Goto.
@@ -274,7 +274,7 @@ impl TemplateContext {
 
                 let key = var_name.trim();
                 let (path, fallback) = match split_fallback(key) {
-                    Ok(parts) => parts,
+                    Ok((path, fallback)) => (path, fallback),
                     Err(error) if strict => return Err(error),
                     Err(_) => {
                         result.push_str("{{");
@@ -283,6 +283,7 @@ impl TemplateContext {
                         continue;
                     }
                 };
+                let (path, quote) = split_shell_filter(path);
                 let value = if fallback.is_some() && self.is_json_null(path) {
                     None
                 } else {
@@ -299,7 +300,11 @@ impl TemplateContext {
                     );
                 }
                 if let Some(value) = value.as_deref().or(fallback) {
-                    result.push_str(value);
+                    if quote {
+                        result.push_str(&shell_quote(value));
+                    } else {
+                        result.push_str(value);
+                    }
                 } else if strict {
                     anyhow::bail!("Unknown workflow template variable `{key}`");
                 } else {
@@ -535,10 +540,26 @@ pub fn placeholder_paths(template: &str) -> Result<Vec<String>> {
             )
         })?;
         let (path, _) = split_fallback(after[..end].trim())?;
-        paths.push(path.to_string());
+        paths.push(split_shell_filter(path).0.to_string());
         rest = &after[end + 2..];
     }
     Ok(paths)
+}
+
+/// Split the `|sh` filter off a path: `issue.title|sh` → (`issue.title`, true).
+pub(crate) fn split_shell_filter(path: &str) -> (&str, bool) {
+    match path.rsplit_once('|') {
+        Some((base, filter)) if filter.trim() == "sh" && !base.trim().is_empty() => {
+            (base.trim(), true)
+        }
+        _ => (path, false),
+    }
+}
+
+/// One POSIX shell word holding `value` literally: single-quoted, with each
+/// `'` closed, escaped and reopened. No expansion of any kind applies inside.
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
 /// Split `path ?? "text"` (or `'text'`) into the path and its fallback. The
@@ -677,7 +698,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
     // step that a Goto skips or that runs later, but the step must exist.
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
-            r#"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*)|previous_step\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*))\s*(\?\?\s*(?:"[^}]*"|'[^}]*')\s*)?\}\}"#
+            r#"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*)|previous_step\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*))(?:\s*\|\s*sh)?\s*(\?\?\s*(?:"[^}]*"|'[^}]*')\s*)?\}\}"#
         ).unwrap()
     });
     static PLACEHOLDER: std::sync::LazyLock<regex_lite::Regex> =
@@ -826,7 +847,7 @@ pub fn healable_producer_names(steps: &[crate::models::WorkflowStep]) -> Vec<Str
     use crate::models::StepOutputFormat;
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
-            r#"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(?:data|summary|status|data_json)|previous_step\.(?:data|summary|status|data_json))\s*(?:\?\?\s*(?:"[^}]*"|'[^}]*')\s*)?\}\}"#
+            r#"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(?:data|summary|status|data_json)|previous_step\.(?:data|summary|status|data_json))(?:\s*\|\s*sh)?\s*(?:\?\?\s*(?:"[^}]*"|'[^}]*')\s*)?\}\}"#
         ).unwrap()
     });
 
@@ -2363,6 +2384,7 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
+            read_only_repos: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -3197,6 +3219,35 @@ mod tests {
         ctx.set_step_output("r2", "---STATE:last_verdict=approved---");
         let rendered = ctx.render("{{state.last_verdict}}").unwrap();
         assert_eq!(rendered, "approved");
+    }
+
+    // ─── `|sh` shell-quoting filter ─────────────────────────────────────────
+
+    #[test]
+    fn sh_filter_renders_one_literal_shell_word() {
+        let mut ctx = TemplateContext::new();
+        ctx.set("title", "it's $(id) `x` \"q\" é");
+        assert_eq!(
+            ctx.render_strict("echo {{title|sh}}").unwrap(),
+            r#"echo 'it'\''s $(id) `x` "q" é'"#
+        );
+        assert_eq!(
+            ctx.render_strict("{{ title | sh }}").unwrap(),
+            r#"'it'\''s $(id) `x` "q" é'"#
+        );
+        assert_eq!(ctx.render_strict("{{absent|sh ?? \"\"}}").unwrap(), "''");
+        assert!(ctx.render_strict("{{absent|sh}}").is_err());
+        assert_eq!(ctx.render("{{absent|sh}}").unwrap(), "{{absent|sh}}");
+    }
+
+    #[test]
+    fn sh_filter_paths_strip_the_filter() {
+        assert_eq!(
+            placeholder_paths("{{ticket|sh}} {{run.id}}").unwrap(),
+            vec!["ticket".to_string(), "run.id".to_string()]
+        );
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("'"), r#"''\'''"#);
     }
 
     // ─── Explicit fallback `??` and Exec markers ─────────────────────────────

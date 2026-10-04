@@ -139,6 +139,124 @@ mod tests {
         );
     }
 
+    struct RestoreAdapterToggles([(&'static str, Option<std::ffi::OsString>); 2]);
+    impl RestoreAdapterToggles {
+        fn capture() -> Self {
+            Self(
+                ["KRONN_ACP_ADAPTER_CLAUDE", "KRONN_ACP_ADAPTER_CODEX"]
+                    .map(|name| (name, std::env::var_os(name))),
+            )
+        }
+    }
+    impl Drop for RestoreAdapterToggles {
+        fn drop(&mut self) {
+            for (name, previous) in &self.0 {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial(acp_adapter_env_toggle)]
+    fn task_worker_route_policy_covers_every_launch_route() {
+        let _restore = RestoreAdapterToggles::capture();
+        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        // Native ACP: refused as a worker, an ordinary turn keeps its setting.
+        for agent in [
+            AgentType::GeminiCli,
+            AgentType::CopilotCli,
+            AgentType::Kiro,
+            AgentType::OpenCode,
+            AgentType::Vibe,
+        ] {
+            assert_eq!(
+                task_worker_route_policy(&agent, true, true),
+                Err(NATIVE_ACP_TASK_WORKER_REFUSAL),
+                "{agent:?}"
+            );
+            assert_eq!(task_worker_route_policy(&agent, true, false), Ok(true));
+        }
+        // Adapted ACP: the worker never inherits the global bypass.
+        for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+            assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
+            assert_eq!(task_worker_route_policy(&agent, true, false), Ok(true));
+        }
+        // HTTP model providers.
+        for agent in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
+            assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
+        }
+        // Direct CLI compatibility route.
+        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
+        assert_eq!(
+            crate::acp::resolve_acp_route(&AgentType::Codex),
+            crate::acp::AcpProductionRoute::DirectCliMigration
+        );
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Codex, true, true),
+            Ok(false)
+        );
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Codex, true, false),
+            Ok(true)
+        );
+    }
+
+    /// A worker launch that reaches the runner on a native ACP agent is refused
+    /// before any session starts, even with the discussion's full access on.
+    #[tokio::test]
+    async fn native_acp_task_worker_is_refused_before_any_session_starts() {
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let worker = TaskWorkerBridgeContext {
+            execution_id: "exec".into(),
+            discussion_id: "disc".into(),
+            agent_type: "GeminiCli".into(),
+            dispatch_job_id: "job".into(),
+            source_message_id: "msg".into(),
+        };
+        for agent in [
+            AgentType::GeminiCli,
+            AgentType::CopilotCli,
+            AgentType::Kiro,
+            AgentType::OpenCode,
+        ] {
+            let fixture = Arc::new(NativeRouteFixture {
+                created: std::sync::atomic::AtomicUsize::new(0),
+                resumed: std::sync::atomic::AtomicUsize::new(0),
+                prompts: Mutex::new(Vec::new()),
+            });
+            let result = start_agent_with_config(AgentStartConfig {
+                full_access: true,
+                task_worker_context: Some(&worker),
+                test_acp_transport: Some(fixture.clone()),
+                ..AgentStartConfig::new(
+                    &agent,
+                    project.path().to_str().unwrap(),
+                    "do the task",
+                    &tokens,
+                )
+            })
+            .await;
+            let error = result.err().expect("a native ACP worker must be refused");
+            assert!(
+                error.contains(NATIVE_ACP_TASK_WORKER_REFUSAL),
+                "{agent:?}: {error}"
+            );
+            assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(fixture.prompts.lock().unwrap().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
         let fixture = Arc::new(NativeRouteFixture {
@@ -284,7 +402,7 @@ mod tests {
         )
         .unwrap();
 
-        let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let servers = acp_project_mcp_servers(project.path().to_str().unwrap(), false);
         // Kronn's own bridge rides along and is asserted on its own below;
         // what this test guards is which PROJECT servers survive the filter.
         let project_servers: Vec<_> = servers
@@ -297,6 +415,32 @@ mod tests {
         assert_eq!(project_servers[0].command, "safe-server");
         assert_eq!(project_servers[0].args, vec!["--project"]);
         assert!(project_servers[0].allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn acp_mcp_registry_keeps_an_env_credentialed_server_for_an_agent_resolving_references() {
+        // KT-1003: Claude turns env values into references it resolves from
+        // its own process, so only a credential in `args` drops a server.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{
+                "mcpServers": {
+                    "safe": {"command": "safe-server"},
+                    "credentialed": {"command": "private-server", "env": {"API_KEY": "secret"}},
+                    "leaky": {"command": "leaky-server", "args": ["--token", "secret"]}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let ids: Vec<String> = acp_project_mcp_servers(project.path().to_str().unwrap(), true)
+            .into_iter()
+            .map(|server| server.id)
+            .filter(|id| id != "kronn-internal")
+            .collect();
+
+        assert_eq!(ids, vec!["credentialed".to_string(), "safe".to_string()]);
     }
 
     #[test]
@@ -316,7 +460,7 @@ mod tests {
         )
         .unwrap();
 
-        let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let servers = acp_project_mcp_servers(project.path().to_str().unwrap(), false);
         let project_servers: Vec<_> = servers
             .iter()
             .filter(|server| server.id != "kronn-internal")
@@ -348,7 +492,7 @@ mod tests {
         let previous = std::env::var("KRONN_DISC_INTROSPECTION_MCP").ok();
         std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
 
-        let with_no_project = acp_project_mcp_servers("");
+        let with_no_project = acp_project_mcp_servers("", false);
         let bridge = with_no_project
             .iter()
             .find(|server| server.id == "kronn-internal")
@@ -378,7 +522,7 @@ mod tests {
             r#"{"mcpServers":{"kronn-internal":{"command":"project-spoof"}}}"#,
         )
         .unwrap();
-        let project_registry = acp_project_mcp_servers(project.path().to_str().unwrap());
+        let project_registry = acp_project_mcp_servers(project.path().to_str().unwrap(), false);
         let own: Vec<_> = project_registry
             .iter()
             .filter(|server| server.id == "kronn-internal")
@@ -422,6 +566,7 @@ mod tests {
             &mut LeadingThinkingFilter::default(),
             &mut crate::agents::tools::ToolCallAccumulator::default(),
             &mut false,
+            &mut ReplayHold::default(),
         )
         .await
     }
@@ -723,6 +868,148 @@ mod tests {
     }
 
     // ─── parse_claude_stream_line ─────────────────────────────────────────────
+
+    /// Claude Code's result line names its cost `total_cost_usd`; older builds
+    /// wrote `cost_usd`. Both reach the usage, on success and on failure.
+    #[test]
+    fn parse_stream_result_reads_total_cost_usd_and_the_legacy_name() {
+        let current = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":4210,"num_turns":2,"result":"done","session_id":"s","total_cost_usd":0.0731,"usage":{"input_tokens":12,"cache_creation_input_tokens":900,"cache_read_input_tokens":4000,"output_tokens":340}}"#;
+        match parse_claude_stream_line(current) {
+            StreamJsonEvent::Usage { cost_usd, .. } => assert_eq!(cost_usd, Some(0.0731)),
+            other => panic!("expected usage, got {other:?}"),
+        }
+        let legacy = r#"{"type":"result","subtype":"success","cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":50}}"#;
+        match parse_claude_stream_line(legacy) {
+            StreamJsonEvent::Usage { cost_usd, .. } => assert_eq!(cost_usd, Some(0.01)),
+            other => panic!("expected usage, got {other:?}"),
+        }
+        let failed = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","total_cost_usd":0.002,"usage":{"input_tokens":3,"output_tokens":1}}"#;
+        match parse_claude_stream_line(failed) {
+            StreamJsonEvent::TerminalError(failure) => assert_eq!(failure.cost_usd, Some(0.002)),
+            other => panic!("expected terminal error, got {other:?}"),
+        }
+        let unpriced =
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        match parse_claude_stream_line(unpriced) {
+            StreamJsonEvent::Usage { cost_usd, .. } => assert_eq!(cost_usd, None),
+            other => panic!("expected usage, got {other:?}"),
+        }
+    }
+
+    /// KT-997 — on the default (adapter) route, the cost Claude Code reports
+    /// reaches the run's usage; a turn that reports none stays unknown.
+    #[tokio::test]
+    async fn claude_adapter_route_reports_the_cli_cost() {
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let priced = crate::acp::test_support::CLAUDE_TURN_WITH_CACHE.replace(
+            r#""is_error":false,"#,
+            r#""is_error":false,"total_cost_usd":0.123456,"#,
+        );
+        for (script, expected) in [
+            (priced.as_str(), Some(123_456)),
+            (crate::acp::test_support::CLAUDE_TURN_WITH_CACHE, None),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let fixture = crate::acp::test_support::write_fixture_script(project.path(), script);
+            let transport: Arc<dyn AcpTransport> =
+                Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                    fixture.to_string_lossy(),
+                    None,
+                    false,
+                ));
+            let mut process = start_agent_with_config(AgentStartConfig {
+                test_acp_transport: Some(transport),
+                ..AgentStartConfig::new(
+                    &AgentType::ClaudeCode,
+                    project.path().to_str().unwrap(),
+                    "orchestrate",
+                    &tokens,
+                )
+            })
+            .await
+            .unwrap();
+            while process.next_line().await.is_some() {}
+            assert!(process.child.wait().await.unwrap().success());
+            assert_eq!(process.reported_cost_usd_micros(), expected);
+            assert_eq!(process.reported_token_usage(), Some(48 + 21_545));
+        }
+    }
+
+    #[test]
+    fn provider_cost_is_requested_from_openrouter_only() {
+        let mut body = serde_json::json!({ "model": "m" });
+        request_provider_cost("https://openrouter.ai/api", &mut body);
+        assert_eq!(body["usage"], serde_json::json!({ "include": true }));
+        let mut body = serde_json::json!({ "model": "m" });
+        request_provider_cost("http://localhost:4000", &mut body);
+        assert!(body.get("usage").is_none());
+    }
+
+    /// KT-997 — an HTTP run sums the cost each response reports; one that never
+    /// reports a cost stays unknown rather than zero.
+    #[tokio::test]
+    async fn http_run_sums_the_reported_cost_of_each_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (cost_field, expected) in [(r#","cost":0.0015"#, Some(3_000)), ("", None)] {
+            let server = MockServer::start().await;
+            let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let requests_for_mock = requests.clone();
+            let usage = format!(
+                r#"{{"choices":[],"usage":{{"prompt_tokens":100,"completion_tokens":10{cost_field}}}}}"#
+            );
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let first = requests_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                    let frame = if first {
+                        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"mcp_list","arguments":"{}"}}]}}]}"#
+                    } else {
+                        r#"{"choices":[{"index":0,"delta":{"content":"2 servers"}}]}"#
+                    };
+                    ResponseTemplate::new(200).set_body_string(sse(&[frame, &usage]))
+                })
+                .mount(&server)
+                .await;
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut process = start_ollama_http(
+                &AgentType::LiteLlm,
+                "which servers?",
+                "",
+                "hosted-model",
+                None,
+                Some(&server.uri()),
+                None,
+                Some(std::sync::Arc::new(FakeTools { seen })),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start");
+            let mut out = String::new();
+            while let Some(line) = process.next_line().await {
+                out.push_str(&line);
+            }
+            assert!(process.child.wait().await.unwrap().success(), "{out:?}");
+            assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(
+                process.reported_cost_usd_micros(),
+                expected,
+                "{cost_field:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_stream_empty_line() {
@@ -5841,6 +6128,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replay_hold_keeps_a_preamble_and_lets_an_answer_stream() {
+        let mut inactive = ReplayHold::new(false);
+        assert_eq!(inactive.push("live".into()), "live");
+
+        let mut hold = ReplayHold::new(true);
+        assert_eq!(hold.push("Préambule ".into()), "");
+        assert_eq!(hold.push("🦀 ".into()), "");
+        hold.discard();
+        assert_eq!(hold.release(), "", "a replayed attempt shows nothing");
+
+        let mut hold = ReplayHold::new(true);
+        assert_eq!(hold.push("Je lis ".into()), "");
+        assert_eq!(hold.release(), "Je lis ");
+        assert_eq!(
+            hold.push("ensuite".into()),
+            "ensuite",
+            "released means live"
+        );
+
+        let mut hold = ReplayHold::new(true);
+        let long = "é".repeat(REPLAY_HOLD_MAX_BYTES / 2);
+        assert_eq!(hold.push(long.clone()), "");
+        assert_eq!(hold.push("x".into()), format!("{long}x"));
+        assert_eq!(hold.push(" live".into()), " live", "an answer streams live");
+    }
+
+    /// KT-944 — the refused attempt streamed a preamble before its unreadable
+    /// call; the replay writes its own. The reply carries it once.
+    #[tokio::test]
+    #[serial]
+    async fn a_replayed_unreadable_tool_call_does_not_repeat_its_preamble() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let chats = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chats_for_mock = chats.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = chats_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    ResponseTemplate::new(200).set_body_string(format!(
+                        "{{\"message\":{{\"content\":\"Préambule : je lis le ticket.\"}},\"done\":false}}\n{}\n",
+                        serde_json::json!({ "error": UNREADABLE_TOOL_CALL })
+                    ))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(
+                        "{\"message\":{\"content\":\"Préambule : je lis le ticket.\"},\"done\":false}\n\
+                         {\"message\":{\"content\":\" Réponse.\"},\"done\":false}\n\
+                         {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+                    )
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::Ollama,
+            "read the ticket",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let (out, success) = drain(&mut process).await;
+
+        assert!(success, "{out:?}");
+        assert_eq!(chats.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(out, "Préambule : je lis le ticket. Réponse.");
+    }
+
     /// The replay is a pure model invocation: nothing ran for the refused call,
     /// and the results of earlier rounds are already in the request. A tool must
     /// therefore not run again, nor the turn be lost because one had run.
@@ -7523,6 +7900,188 @@ mod tests {
         assert!(captured.contains("audit write window opened"), "{captured}");
     }
 
+    #[test]
+    fn hosted_budgets_ignore_a_huge_window_and_honour_overrides() {
+        assert_eq!(
+            hosted_step_context_budget(None, None),
+            HOSTED_STEP_CTX_BUDGET
+        );
+        assert_eq!(
+            hosted_step_context_budget(Some(1_000_000), None),
+            HOSTED_STEP_CTX_BUDGET
+        );
+        assert_eq!(hosted_step_context_budget(Some(32_768), None), 32_768);
+        assert_eq!(
+            hosted_step_context_budget(Some(0), None),
+            HOSTED_STEP_CTX_BUDGET
+        );
+        assert_eq!(
+            hosted_step_context_budget(Some(1_000_000), Some(" 400000 ".into())),
+            400_000
+        );
+        for invalid in ["0", "-1", "lots", ""] {
+            assert_eq!(
+                hosted_step_context_budget(None, Some(invalid.into())),
+                HOSTED_STEP_CTX_BUDGET
+            );
+            assert_eq!(
+                hosted_audit_step_input_budget(Some(invalid.into())),
+                HOSTED_AUDIT_STEP_INPUT_BUDGET
+            );
+        }
+        assert_eq!(
+            hosted_audit_step_input_budget(Some("250000".into())),
+            250_000
+        );
+    }
+
+    /// Runs a hosted (OpenAI-wire) audit step whose model never stops
+    /// exploring, each request reporting `prompt_tokens` of input. Returns the
+    /// 1-based request that first offered only the writer, and the stderr.
+    async fn hosted_audit_that_keeps_exploring(
+        prompt_tokens: u64,
+        result_bytes: usize,
+    ) -> (Option<usize>, String) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let write_only_at = std::sync::Arc::new(Mutex::new(None::<usize>));
+        let (turn_for_mock, write_for_mock) = (turn.clone(), write_only_at.clone());
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let usage = format!(
+                    r#"{{"choices":[],"usage":{{"prompt_tokens":{prompt_tokens},"completion_tokens":5}}}}"#
+                );
+                let call = |name: &str, path: String| {
+                    let frame = format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"c{current}","function":{{"name":"{name}","arguments":"{{\"path\":\"{path}\"}}"}}}}]}}}}]}}"#
+                    );
+                    ResponseTemplate::new(200).set_body_string(sse(&[&frame, &usage]))
+                };
+                if names == ["write_file"] {
+                    let mut first = write_for_mock.lock().unwrap();
+                    if first.is_none() {
+                        *first = Some(current);
+                        return call("write_file", "docs/AGENTS.md".into());
+                    }
+                } else if !names.is_empty() {
+                    let tool = if current % 2 == 0 { "read_file" } else { "search_text" };
+                    return call(tool, format!("src/file-{current}.js"));
+                }
+                ResponseTemplate::new(200).set_body_string(sse(&[
+                    r#"{"choices":[{"index":0,"delta":{"content":"AGENTS.md written."}}]}"#,
+                    &usage,
+                ]))
+            })
+            .mount(&server)
+            .await;
+
+        struct HostedAuditTools(usize);
+        #[async_trait::async_trait]
+        impl crate::agents::tools::ToolExecutor for HostedAuditTools {
+            fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+                crate::agents::tools::ToolRunMode::Audit
+            }
+            fn catalogue(&self) -> Vec<serde_json::Value> {
+                ["read_file", "search_text", "write_file"]
+                    .into_iter()
+                    .map(|name| {
+                        serde_json::json!({"type": "function", "function": {
+                            "name": name, "description": name,
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                        }})
+                    })
+                    .collect()
+            }
+            async fn execute(
+                &self,
+                call: &crate::agents::tools::ToolCall,
+            ) -> crate::agents::tools::ToolOutcome {
+                let path = call.arguments["path"].as_str().unwrap_or_default();
+                crate::agents::tools::ToolOutcome {
+                    call: call.clone(),
+                    content: serde_json::json!({ "content": format!("ok {path} {}", "y".repeat(self.0)) }),
+                    ok: true,
+                }
+            }
+        }
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "fill docs/AGENTS.md",
+            "",
+            "hosted-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(HostedAuditTools(result_bytes))),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        while process.next_line().await.is_some() {}
+        let _ = process.child.wait().await;
+        let captured = process.stderr_capture.lock().unwrap().join("\n");
+        let first = *write_only_at.lock().unwrap();
+        (first, captured)
+    }
+
+    /// KT-998 — a hosted audit step that keeps exploring writes its
+    /// deliverable once its cumulative input budget is spent, whatever the
+    /// model's window. Counter-proof: the same step under the budget explores
+    /// until the round or per-tool limits, as before.
+    #[tokio::test]
+    #[serial]
+    async fn hosted_audit_step_converges_within_its_input_budget() {
+        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        let per_turn = 100_000;
+        let (budgeted, captured) = hosted_audit_that_keeps_exploring(per_turn, 0).await;
+        let opened = budgeted.expect("the write window must open");
+        let bound = (HOSTED_AUDIT_STEP_INPUT_BUDGET / per_turn) as usize + 2;
+        assert!(
+            opened <= bound,
+            "opened at request {opened}, bound {bound}: {captured}"
+        );
+        assert!(
+            captured.contains("audit step spent") && captured.contains("audit write window opened"),
+            "{captured}"
+        );
+
+        let (unbudgeted, captured) = hosted_audit_that_keeps_exploring(10, 0).await;
+        let late = unbudgeted.expect("the round or per-tool limit still ends exploration");
+        assert!(
+            late > 4 * bound,
+            "under the budget the step explores on (request {late}): {captured}"
+        );
+        assert!(!captured.contains("audit step spent"), "{captured}");
+    }
+
+    /// KT-998 — a hosted model's history is under context pressure against
+    /// the bounded step budget, not its (unknown or huge) window: large tool
+    /// results open the write window long before the round limit.
+    #[tokio::test]
+    #[serial]
+    async fn hosted_audit_history_pressure_uses_the_bounded_context_budget() {
+        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        let (opened, captured) = hosted_audit_that_keeps_exploring(10, 40_000).await;
+        let opened = opened.expect("the write window must open");
+        assert!(opened <= 30, "opened at request {opened}: {captured}");
+        assert!(!captured.contains("audit step spent"), "{captured}");
+    }
+
     /// KT-967 — on run O4, qwen3.8 wrote docs/AGENTS.md seven times in its
     /// write window and never stopped; the ceiling then failed a step whose
     /// file was complete. A written deliverable ends the step at the ceiling.
@@ -8028,6 +8587,7 @@ mod tests {
                     &mut thinking_filter,
                     &mut crate::agents::tools::ToolCallAccumulator::default(),
                     &mut false,
+                    &mut ReplayHold::default(),
                 )
                 .await
             );
@@ -8080,6 +8640,7 @@ mod tests {
                     &mut thinking_filter,
                     &mut pending_tools,
                     &mut false,
+                    &mut ReplayHold::default(),
                 )
                 .await
             );
@@ -9554,6 +10115,69 @@ Suite de la réponse.";
         assert!(!kept(Some(&worker), None, None));
         assert!(!kept(None, Some(&principal), None));
         assert!(!kept(None, None, Some(&step)));
+    }
+
+    #[test]
+    fn codex_project_trust_override_preserves_paths_and_host_alias() {
+        for (work_dir, host_home, expected) in [
+            (
+                "/Users/alice/probe.repo",
+                None,
+                vec!["/Users/alice/probe.repo"],
+            ),
+            (
+                "/Users/alice/probe.repo",
+                Some("/Users/alice"),
+                vec!["/Users/alice/probe.repo"],
+            ),
+            (
+                "/host-home/repo.v1 with é spaces",
+                Some("/Users/Alice Example"),
+                vec![
+                    "/host-home/repo.v1 with é spaces",
+                    "/Users/Alice Example/repo.v1 with é spaces",
+                ],
+            ),
+            ("/host-home/repo", None, vec!["/host-home/repo"]),
+            (
+                "/host-home/repo",
+                Some("/host-home"),
+                vec!["/host-home/repo"],
+            ),
+            (
+                "/host-home-other/repo",
+                Some("/Users/alice"),
+                vec!["/host-home-other/repo"],
+            ),
+            (
+                "/Users/Zoë/a.\"quoted\"\\path=repo",
+                None,
+                vec!["/Users/Zoë/a.\"quoted\"\\path=repo"],
+            ),
+            (r"C:\Users\Zoë\repo.v1", None, vec![r"C:\Users\Zoë\repo.v1"]),
+        ] {
+            let rendered = super::super::codex_project_trust_override(
+                std::path::Path::new(work_dir),
+                host_home,
+            );
+            assert!(rendered.starts_with("projects={"), "{rendered}");
+            let config: toml::Value = toml::from_str(&rendered).expect("valid TOML override");
+            let projects = config["projects"].as_table().unwrap();
+            assert_eq!(projects.len(), expected.len(), "{rendered}");
+            for path in expected {
+                assert!(
+                    projects
+                        .keys()
+                        .any(|key| std::path::Path::new(key) == std::path::Path::new(path)),
+                    "missing {path}: {rendered}"
+                );
+            }
+            for entry in projects.values() {
+                let entry = entry.as_table().unwrap();
+                assert_eq!(entry.len(), 1, "{rendered}");
+                assert_eq!(entry["trust_level"].as_str(), Some("trusted"), "{rendered}");
+            }
+        }
     }
 
     #[test]
@@ -11924,6 +12548,177 @@ Suite de la réponse.";
     fn process_group_probe_never_signals_the_callers_group_or_all_processes() {
         assert!(group_has_processes(0));
         assert!(group_has_processes(1));
+    }
+
+    #[test]
+    fn chunk_line_buffer_keeps_characters_split_across_chunks() {
+        let mut buffer = ChunkLineBuffer::default();
+        // "é" is C3 A9; "🦀" is F0 9F A6 80, here cut into three chunks.
+        buffer.push(b"{\"text\":\"caf\xC3");
+        assert_eq!(buffer.next_line(), None);
+        buffer.push(b"\xA9 \xF0\x9F");
+        buffer.push(b"\xA6");
+        buffer.push(b"\x80\"}\nsecond");
+        assert_eq!(
+            buffer.next_line().as_deref(),
+            Some("{\"text\":\"café 🦀\"}")
+        );
+        assert_eq!(buffer.next_line(), None);
+        // A truly invalid byte costs one replacement character, not the line.
+        buffer.push(b" line \xFF end\n\n");
+        assert_eq!(
+            buffer.next_line().as_deref(),
+            Some("second line \u{FFFD} end")
+        );
+        assert_eq!(buffer.next_line().as_deref(), Some(""));
+        buffer.push("{\"done\":tr".as_bytes());
+        buffer.push(b"ue}");
+        assert_eq!(buffer.take_rest(), "{\"done\":true}");
+        assert_eq!(buffer.take_rest(), "");
+    }
+
+    #[tokio::test]
+    async fn lossy_lines_keep_draining_past_a_non_utf8_byte() {
+        let mut input = b"\xFF\nh\xC3\xA9llo\r\n".to_vec();
+        let body = "x".repeat(1023);
+        for _ in 0..200 {
+            input.extend_from_slice(body.as_bytes());
+            input.push(b'\n');
+        }
+        input.extend_from_slice(b"last line without newline");
+        let mut lines = lossy_lines(input.as_slice());
+        assert_eq!(
+            lines.next_line().await.unwrap().as_deref(),
+            Some("\u{FFFD}")
+        );
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("héllo"));
+        let mut bulk = 0;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line == "last line without newline" {
+                break;
+            }
+            assert_eq!(line, body);
+            bulk += 1;
+        }
+        assert_eq!(bulk, 200, "every line after the invalid byte arrives");
+        assert_eq!(lines.next_line().await.unwrap(), None);
+    }
+
+    /// A stray byte ahead of Claude's stream-json must not stop the adapter's
+    /// reader: the turn's usage, printed after it, still arrives.
+    #[tokio::test]
+    async fn claude_adapter_reads_past_a_non_utf8_stdout_line() {
+        let project = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            project.path(),
+            &format!(
+                "printf '\\377 tool echo\\n'\n{}",
+                crate::acp::test_support::CLAUDE_TURN_WITH_CACHE
+            ),
+        );
+        let transport: Arc<dyn AcpTransport> = Arc::new(
+            crate::acp::ClaudeAcpAdapter::new_with_program(fixture.to_string_lossy(), None, false),
+        );
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let mut process = start_agent_with_config(AgentStartConfig {
+            test_acp_transport: Some(transport),
+            ..AgentStartConfig::new(
+                &AgentType::ClaudeCode,
+                project.path().to_str().unwrap(),
+                "orchestrate",
+                &tokens,
+            )
+        })
+        .await
+        .unwrap();
+        let mut text = String::new();
+        while let Some(line) = process.next_line().await {
+            text.push_str(&line);
+        }
+        assert!(text.contains("orchestrated"), "{text}");
+        assert_eq!(process.reported_token_usage(), Some(48 + 21_545));
+    }
+
+    /// Spawn `sh -c <script>` as its own process group, like production.
+    #[cfg(unix)]
+    fn spawn_group_leader(script: &str) -> (tokio::process::Child, i32) {
+        let mut cmd = crate::core::cmd::async_cmd("sh");
+        cmd.args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+        let child = cmd.spawn().expect("spawn group leader");
+        let pgid = child.id().expect("leader pid") as i32;
+        (child, pgid)
+    }
+
+    #[cfg(unix)]
+    async fn group_empties_within(pgid: i32, limit: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < limit {
+            if !group_has_processes(pgid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        !group_has_processes(pgid)
+    }
+
+    /// After a normal exit, whatever the agent left in its group (a stdio MCP
+    /// server, a background command) goes with the process, by drop or kill.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_process_clears_its_group_after_a_normal_exit() {
+        for explicit_kill in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (child, pgid) = spawn_group_leader("sleep 300 >/dev/null 2>&1 & exit 0");
+            let (tx, rx) = mpsc::channel(1);
+            drop(tx);
+            let mut process = AgentProcess {
+                child,
+                output_mode: OutputMode::Text,
+                work_dir: temp.path().to_path_buf(),
+                agent_type: AgentType::ClaudeCode,
+                rx,
+                stderr_capture: Arc::new(Mutex::new(Vec::new())),
+                usage: Arc::new(Mutex::new(AgentUsage::default())),
+                stderr_task: None,
+                http_cancel: None,
+                pgid: Some(pgid),
+                token_fragments: false,
+            };
+            let exit = process.wait().await.expect("leader exits");
+            assert!(exit.success);
+            assert!(process.child_id().is_none(), "the leader is reaped");
+            assert!(
+                group_has_processes(pgid),
+                "the background child outlives its leader until Kronn clears the group"
+            );
+            if explicit_kill {
+                process.kill().await;
+            } else {
+                drop(process);
+            }
+            assert!(
+                group_empties_within(pgid, Duration::from_secs(10)).await,
+                "group {pgid} must be empty (explicit_kill={explicit_kill})"
+            );
+        }
     }
 
     /// Regression test for KT-418: the production process primitive must kill

@@ -466,7 +466,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
 ## 6. Authorization, review limits, budgets, concurrency, escalation (DoD-6)
 
 - **Authorization (action-level, not tool-allowlist)** — no per-agent tool-authorization model exists
-  today `[src: file: core/audit_mcp_filter.rs:33-38]` and building one is out of scope. V1 enforces
+  today `[src: file: core/audit_mcp_filter.rs:32-36]` and building one is out of scope. V1 enforces
   authorization at the **action** boundary. A joined CLI worker is identified by its exact durable
   session, while a native HTTP worker is identified by the trusted executor's child discussion plus
   exact typed provider; model arguments carry neither identity. Principal review/cancel/reassign are

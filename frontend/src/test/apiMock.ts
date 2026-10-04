@@ -258,13 +258,13 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         project_id: '', status: 'NoTemplate', kind: 'no_documentation',
         state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
         audit_runs: 0, interrupted_runs: 0, interruption_rate_percent: 0,
-        resumable_after_step: null,
+        resumable_after_step: null, state_in_history: null,
       }),
       attestDocumentation: resolve({
         project_id: '', status: 'Audited', kind: 'human_attestation',
         state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
         audit_runs: 0, interrupted_runs: 0, interruption_rate_percent: 0,
-        resumable_after_step: null,
+        resumable_after_step: null, state_in_history: null,
       }),
       validateAudit: resolve('NoTemplate'),
       cancelAudit: resolve('NoTemplate'),
@@ -328,6 +328,13 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // 0.8.4 (#298) — recap chip strip. Default empty history; tests
       // override to seed the chip list.
       auditHistory: resolve([]),
+      auditTimeline: resolve({ runs: [], steps: [], recorded_audits: [], recorded_validated_at: null }),
+      restoreAuditState: resolve({
+        project_id: '', status: 'Audited', kind: 'kronn_audit',
+        state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
+        audit_runs: 0, interrupted_runs: 0, interruption_rate_percent: 0,
+        resumable_after_step: null, state_in_history: null,
+      }),
       auditRunSteps: resolve([]),
     auditSteps: resolve([]),
       // 0.8.4 (#294) — cross-agent memory bindings. Default "no

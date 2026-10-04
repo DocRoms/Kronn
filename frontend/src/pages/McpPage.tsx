@@ -1,4 +1,4 @@
-import { Upload, X, Download, FileText } from 'lucide-react';
+import { X, FileText } from 'lucide-react';
 import { RecoveryRestorePanel } from '../components/RecoveryRestorePanel';
 import { PluginPortabilityModal } from '../components/PluginPortabilityModal';
 import { AddPluginModal } from '../components/plugins/AddPluginModal';
@@ -10,8 +10,6 @@ export function McpPage(props: McpPageProps) {
   const state = useMcpPageState(props);
   const {
     t, toast, ToastContainer,
-    exportPayload, exportCopyState, exportTextareaRef,
-    closeExportModal, handleExportRetryCopy, handleExportDownloadFile,
     portabilityMode, setPortabilityMode, configs, projects, refetchMcps,
     mcpOverview, mcpRegistry, setSelectedConfigId,
     contextEditor, setContextEditor, contextSaving, handleSaveContext,
@@ -20,85 +18,6 @@ export function McpPage(props: McpPageProps) {
   return (
     <div className="mcp-page">
       <ToastContainer />
-      {/* 0.8.6 (#33 fix 2026-05-21) — Custom plugin export modal.
-          Renders unconditionally at the top so it survives navigation
-          inside McpPage (detail panel state can flip while the modal
-          is open). Surfaces the JSON in a readonly textarea + best-
-          effort clipboard write, with a copy-retry button when the
-          auto-copy failed (Tauri / sandboxed webview case). */}
-      {exportPayload && (
-        <div
-          className="mcp-export-modal-backdrop"
-          data-testid="mcp-export-modal"
-          onClick={closeExportModal}
-        >
-          <div
-            className="mcp-export-modal"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="mcp-export-modal-header">
-              <span>
-                <Upload size={13} style={{ marginRight: 6 }} />
-                {t('mcp.custom.exportTitle', exportPayload.name)}
-              </span>
-              <button
-                className="mcp-icon-btn"
-                onClick={closeExportModal}
-                aria-label={t('common.close')}
-                data-testid="mcp-export-modal-close"
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <p className="mcp-export-modal-hint">
-              {exportCopyState === 'copied'
-                ? t('mcp.custom.copied')
-                : exportCopyState === 'failed'
-                  ? t('mcp.custom.copyManualInstruction')
-                  : t('mcp.custom.exportHint')}
-            </p>
-            <textarea
-              ref={exportTextareaRef}
-              className="input mcp-input-mono"
-              data-testid="mcp-export-modal-textarea"
-              value={exportPayload.json}
-              readOnly
-              rows={14}
-              autoFocus
-              onFocus={e => e.currentTarget.select()}
-            />
-            <div className="flex-row gap-3 mt-3">
-              <button
-                type="button"
-                className="mcp-btn-action mcp-btn-action-primary"
-                onClick={handleExportRetryCopy}
-                data-testid="mcp-export-modal-copy"
-              >
-                <Upload size={12} /> {t('mcp.custom.copyAsJson')}
-              </button>
-              {/* 0.8.6 (#63) — Path B file download. Blob the JSON
-                  locally and trigger a download — no server round-trip,
-                  no Auth headers to plumb. Works inside Tauri too. */}
-              <button
-                type="button"
-                className="mcp-btn-action"
-                onClick={() => handleExportDownloadFile(exportPayload.name, exportPayload.json)}
-                data-testid="mcp-export-modal-download"
-              >
-                <Download size={12} /> {t('mcp.custom.downloadAsFile')}
-              </button>
-              <button
-                type="button"
-                className="mcp-btn-action"
-                onClick={closeExportModal}
-              >
-                {t('mcp.back')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {portabilityMode && (
         <PluginPortabilityModal
           mode={portabilityMode}

@@ -64,9 +64,45 @@ pub fn is_secret_file(path: &Path) -> bool {
         || name.starts_with("id_ed25519")
         || name == "credentials"
         || name == "credentials.json"
+        || KRONN_SECRET_NAMES.contains(&name.as_str())
+        || (name == "config.toml" && in_kronn_data_dir(path))
         || path.components().any(|component| {
             matches!(component, Component::Normal(part) if part == ".ssh" || part == ".aws")
         })
+        || path
+            .components()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| {
+                matches!(pair, [Component::Normal(a), Component::Normal(b)] if *a == ".kronn" && *b == "backups")
+            })
+}
+
+/// Files Kronn itself writes that hold the encryption key, credentials or
+/// decrypted MCP environments.
+const KRONN_SECRET_NAMES: [&str; 8] = [
+    "encryption_key",
+    "human-admin-secret",
+    "secrets.toml",
+    ".mcp.json",
+    "kronn.db",
+    "kronn.db-wal",
+    "kronn.db-shm",
+    "kronn.db-journal",
+];
+
+/// `config.toml` is an ordinary project name; it is a secret only as Kronn's
+/// own config (it holds provider keys), i.e. inside the Kronn data directory.
+fn in_kronn_data_dir(path: &Path) -> bool {
+    if let Ok(dir) = crate::core::config::config_dir() {
+        if path.starts_with(&dir) {
+            return true;
+        }
+    }
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "kronn" || name == "com.kronn.kronn")
 }
 
 /// The inline OpenCode configuration Kronn starts `opencode acp` with
@@ -143,6 +179,34 @@ mod tests {
             "home/.ssh/known_hosts",
         ] {
             assert!(secret(name), "{name} must stay refused");
+        }
+    }
+
+    #[test]
+    fn kronn_key_config_db_and_mcp_files_are_secrets() {
+        for name in [
+            "/home/u/.config/kronn/encryption_key",
+            "/home/u/.config/kronn/config.toml",
+            "/Users/u/Library/Application Support/com.kronn.kronn/config.toml",
+            "/data/human-admin-secret",
+            "/data/secrets.toml",
+            "/data/kronn.db",
+            "/data/kronn.db-wal",
+            "repo/.mcp.json",
+            "repo/.kronn/backups/mcp-configs/x.backup",
+        ] {
+            assert!(secret(name), "{name} must be refused");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_project_config_toml_stays_readable() {
+        for name in [
+            "repo/config.toml",
+            "repo/.cargo/config.toml",
+            "repo/backups/notes.md",
+        ] {
+            assert!(!secret(name), "{name}");
         }
     }
 

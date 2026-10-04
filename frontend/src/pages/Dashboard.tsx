@@ -52,6 +52,7 @@ import {
   MessageSquare, X,
   Rocket, Check, Workflow, FileText, ListTodo,
 } from 'lucide-react';
+import { safeSetItem } from '../lib/safeStorage';
 
 type Page = DashboardPage;
 
@@ -484,7 +485,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const markDiscussionSeen = useCallback((discId: string, msgCount: number) => {
     setLastSeenMsgCount(prev => {
       const next = { ...prev, [discId]: msgCount };
-      localStorage.setItem('kronn:lastSeenMsgCount', JSON.stringify(next));
+      safeSetItem('kronn:lastSeenMsgCount', JSON.stringify(next));
       return next;
     });
   }, []);
@@ -515,7 +516,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         // an `allDiscussions` snapshot that lags behind the cache.
         if ((next[d.id] ?? 0) < total) next[d.id] = total;
       }
-      localStorage.setItem('kronn:lastSeenMsgCount', JSON.stringify(next));
+      safeSetItem('kronn:lastSeenMsgCount', JSON.stringify(next));
       return next;
     });
   }, [allDiscussions]);

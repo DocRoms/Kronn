@@ -1609,6 +1609,68 @@ pub enum StreamJsonEvent {
     Skip,
 }
 
+/// Line reader that never stops on invalid UTF-8: each line is decoded
+/// lossily, so one stray byte cannot leave a child blocked on a full pipe.
+/// Like tokio's `Lines`, it strips the trailing `\n` or `\r\n`.
+pub(crate) struct LossyLines<R> {
+    reader: R,
+    buf: Vec<u8>,
+}
+
+pub(crate) fn lossy_lines<R: tokio::io::AsyncRead + Unpin>(reader: R) -> LossyLines<BufReader<R>> {
+    LossyLines {
+        reader: BufReader::new(reader),
+        buf: Vec::new(),
+    }
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> LossyLines<R> {
+    pub(crate) async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        self.buf.clear();
+        if self.reader.read_until(b'\n', &mut self.buf).await? == 0 {
+            return Ok(None);
+        }
+        if self.buf.last() == Some(&b'\n') {
+            self.buf.pop();
+            if self.buf.last() == Some(&b'\r') {
+                self.buf.pop();
+            }
+        }
+        Ok(Some(String::from_utf8_lossy(&self.buf).into_owned()))
+    }
+}
+
+/// Byte carry for a chunked stream: lines are decoded only once complete, so a
+/// character split across two network chunks is never cut in half.
+#[derive(Debug, Default)]
+pub(crate) struct ChunkLineBuffer {
+    pending: Vec<u8>,
+}
+
+impl ChunkLineBuffer {
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+    }
+
+    /// The next complete line, without its `\n`.
+    pub(crate) fn next_line(&mut self) -> Option<String> {
+        let newline = self.pending.iter().position(|byte| *byte == b'\n')?;
+        let rest = self.pending.split_off(newline + 1);
+        let mut line = std::mem::replace(&mut self.pending, rest);
+        line.pop();
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Whatever follows the last newline (a non-streamed body arrives whole).
+    pub(crate) fn take_rest(&mut self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned()
+    }
+}
+
 /// Joins the text of Claude's content blocks. `content_block_stop` ends every
 /// block (it reaches consumers as `ToolEnd`); the next block's text, from the
 /// same message, a message after a tool call or a turn a Stop hook relaunched,
@@ -1757,6 +1819,9 @@ struct AgentUsage {
     input_tokens: u64,
     output_tokens: u64,
     prompt_cache: PromptCacheUsage,
+    /// Cost the provider or CLI reported itself, summed over the run's
+    /// responses, in micro-USD. `None` when never reported.
+    cost_usd_micros: Option<u64>,
     /// The last native tool an HTTP agent called (with its path when it has
     /// one) and how many it has called: what a CLI's stream-json shows.
     last_tool: Option<String>,
@@ -1858,6 +1923,12 @@ impl AgentProcess {
         ToolActivityProbe(self.usage.clone())
     }
 
+    /// The run's cost as the provider or CLI reported it (KT-997), in
+    /// micro-USD. `None` when nothing reported one: unknown, never zero.
+    pub fn reported_cost_usd_micros(&self) -> Option<u64> {
+        self.usage.lock().unwrap().cost_usd_micros
+    }
+
     pub fn reported_usage_counters(&self) -> Option<ReportedUsage> {
         let usage = self.usage.lock().unwrap().clone();
         (usage.input_tokens.saturating_add(usage.output_tokens) > 0).then_some(ReportedUsage {
@@ -1885,23 +1956,11 @@ impl Drop for AgentProcess {
         if let Some(cancel) = &self.http_cancel {
             cancel.cancel();
         }
-        // Kill the entire process group (CLI agents on Unix) to prevent zombies
-        // when dropped without explicit kill(). Only act if child is still running (id exists).
-        if self.child.id().is_some() {
-            if let Some(pgid) = self.pgid {
-                if pgid > 1 {
-                    #[cfg(unix)]
-                    {
-                        // Synchronous fast path: SIGKILL the entire group.
-                        // This is a best-effort cleanup; if the normal kill() path
-                        // was already called, this group no longer exists.
-                        unsafe {
-                            let _ = libc::kill(-pgid, libc::SIGKILL);
-                        }
-                    }
-                }
-            }
-        }
+        // Kill the whole process group (CLI agents on Unix), even after the
+        // leader exited and was reaped: its descendants (stdio MCP servers,
+        // background commands) would otherwise outlive the run.
+        #[cfg(unix)]
+        signal_group_after_exit(self.pgid);
     }
 }
 
@@ -1919,6 +1978,18 @@ impl AgentExit {
         Self {
             success: status.success(),
             code: status.code(),
+        }
+    }
+}
+
+/// Best-effort SIGKILL of a group recorded at spawn; an already-empty group
+/// (ESRCH) is the normal case.
+#[cfg(unix)]
+fn signal_group_after_exit(pgid: Option<i32>) {
+    if let Some(pgid) = pgid.filter(|pgid| *pgid > 1) {
+        // SAFETY: a plain signal to the group `setpgid(0, 0)` made at spawn.
+        unsafe {
+            let _ = libc::kill(-pgid, libc::SIGKILL);
         }
     }
 }
@@ -1986,6 +2057,10 @@ pub trait AgentIo: Send {
     fn reported_usage_counters(&self) -> Option<ReportedUsage> {
         None
     }
+    /// Provider- or CLI-reported cost in micro-USD; `None` when unknown.
+    fn reported_cost_usd_micros(&self) -> Option<u64> {
+        None
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -2021,6 +2096,9 @@ impl AgentIo for AgentProcess {
     }
     fn reported_usage_counters(&self) -> Option<ReportedUsage> {
         AgentProcess::reported_usage_counters(self)
+    }
+    fn reported_cost_usd_micros(&self) -> Option<u64> {
+        AgentProcess::reported_cost_usd_micros(self)
     }
     async fn kill(&mut self) {
         self.rx.close();
@@ -2204,7 +2282,9 @@ impl AgentIo for AgentProcess {
                 }
             }
         } else {
-            tracing::debug!("No PID available for agent process termination");
+            tracing::debug!("Agent leader already reaped; clearing its process group");
+            #[cfg(unix)]
+            signal_group_after_exit(self.pgid);
             let _ = self.child.kill().await;
         }
     }
@@ -2770,6 +2850,7 @@ pub struct AgentStartConfig<'a> {
     pub project_path: &'a str,
     /// Working directory for the agent. If `None`, defaults to `project_path`.
     pub work_dir: Option<&'a str>,
+    pub read_only_repos: &'a [String],
     pub prompt: &'a str,
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
@@ -2936,6 +3017,7 @@ impl<'a> AgentStartConfig<'a> {
             prompt,
             tokens,
             work_dir: None,
+            read_only_repos: &[],
             full_access: false,
             skill_ids: &[],
             repository_skills: &[],
@@ -3395,13 +3477,59 @@ pub async fn start_agent(
     .await
 }
 
+/// Why a task worker cannot run on a native ACP agent: that route carries
+/// neither the delivery context nor the worker permission scope.
+pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
+    "this agent runs on its native ACP transport, which cannot carry the task-worker delivery context or permission scope; use Claude Code, Codex, an HTTP model or an exact joined CLI session";
+
+/// The worker policy shared by every launch route and by worker preparation.
+/// Returns the `full_access` the launch may use, or why a task worker cannot
+/// run on this agent's resolved transport. A worker never inherits the
+/// discussion's global bypass.
+pub fn task_worker_route_policy(
+    agent: &AgentType,
+    full_access: bool,
+    task_worker: bool,
+) -> Result<bool, &'static str> {
+    if !task_worker {
+        return Ok(full_access);
+    }
+    match crate::acp::resolve_acp_route(agent) {
+        crate::acp::AcpProductionRoute::NativeAcp => Err(NATIVE_ACP_TASK_WORKER_REFUSAL),
+        crate::acp::AcpProductionRoute::AdaptedAcp
+        | crate::acp::AcpProductionRoute::DirectCliMigration
+        | crate::acp::AcpProductionRoute::HttpModelProvider => Ok(false),
+    }
+}
+
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
+    if config.task_worker_context.is_some() && !config.read_only_repos.is_empty() {
+        return Err(
+            "read_only_repos is a workflow Agent policy, not a task-worker override".into(),
+        );
+    }
+    let read_only_repos = if config.read_only_repos.is_empty() {
+        None
+    } else {
+        let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
+        super::read_only_repos::ReadOnlyRepos::resolve(
+            config.agent_type,
+            &work_dir,
+            config.read_only_repos,
+        )?
+    };
     super::generation_settings::validate(
         config.agent_type,
         config.reasoning_effort_override,
         config.max_tokens_override,
     )?;
+    let launch_full_access = task_worker_route_policy(
+        config.agent_type,
+        config.full_access,
+        config.task_worker_context.is_some(),
+    )
+    .map_err(|reason| format!("Task worker refused: {reason}"))?;
     // Read MCP context: use override if provided (general discussions),
     // otherwise read from project filesystem.
     let mcp_context = if let Some(override_ctx) = config.mcp_context_override {
@@ -3918,7 +4046,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(request, transport).await;
             }
-            return start_native_acp(request, config.full_access).await;
+            return start_native_acp(request, launch_full_access).await;
         }
         crate::acp::AcpProductionRoute::AdaptedAcp => {
             tracing::info!(
@@ -3974,6 +4102,21 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     &work_dir,
                     config.project_path,
                 )?)
+            } else if let Some(policy) = &read_only_repos {
+                let (_, _, mut args, _, _, _) = agent_command_with_task_worker_policy(
+                    config.agent_type,
+                    "",
+                    false,
+                    "",
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                );
+                policy.apply(config.agent_type, &work_dir, &mut args);
+                args.pop();
+                Some(args)
             } else {
                 None
             };
@@ -3984,7 +4127,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
             };
-            return start_adapted_acp(request, config.full_access && !task_worker, launch).await;
+            // Read-only repositories need the adapter's restricted policy.
+            return start_adapted_acp(
+                request,
+                launch_full_access && read_only_repos.is_none(),
+                launch,
+            )
+            .await;
         }
         _ => {}
     }
@@ -3992,7 +4141,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_command_with_task_worker_policy(
             config.agent_type,
             config.prompt,
-            config.full_access,
+            launch_full_access,
             &extra_context,
             model_flag.as_deref(),
             reasoning_effort.as_deref(),
@@ -4002,6 +4151,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             // conversation starts with the task, not with a room's history.
             (!task_worker).then_some(config.cli_resume_id).flatten(),
         );
+
+    if let Some(policy) = &read_only_repos {
+        policy.apply(config.agent_type, &work_dir, &mut args);
+    }
 
     // Claude Code in --print mode does NOT auto-load .mcp.json from CWD.
     // Explicitly pass it via --mcp-config so MCP tools are available.
@@ -4137,10 +4290,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         let provenance = config.provenance.clone();
         let observe_claude = *config.agent_type == AgentType::ClaudeCode;
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            // Don't conflate a read error (e.g. non-UTF-8 output) with EOF:
-            // the stream is truncated either way, but truncation must be
-            // visible in the logs.
+            let mut lines = lossy_lines(stdout);
+            // Don't conflate a read error with EOF: the stream is truncated
+            // either way, but truncation must be visible in the logs.
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
@@ -4171,7 +4323,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             StderrMode::Merge => {
                 let tx_err = tx;
                 tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
+                    let mut lines = lossy_lines(stderr);
                     loop {
                         match lines.next_line().await {
                             Ok(Some(line)) => {
@@ -4193,7 +4345,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // Capture it so we can show it on failure.
                 let capture = stderr_capture.clone();
                 stderr_handle = Some(tokio::spawn(async move {
-                    let mut lines = BufReader::new(stderr).lines();
+                    let mut lines = lossy_lines(stderr);
                     loop {
                         match lines.next_line().await {
                             Ok(Some(line)) => {
@@ -4252,7 +4404,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 #[derive(Clone, Copy)]
 pub(crate) enum SpawnIo<'a> {
     Direct(Option<&'a str>),
-    Adapter,
+    /// Stdin left to the adapter, plus environment for this launch only.
+    Adapter(&'a [(String, String)]),
 }
 
 /// Per-launch secrets remain in process environment, never prompt/argv.
@@ -4261,6 +4414,7 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) worker_context: Option<TaskWorkerBridgeContext>,
     pub(crate) room_agent_context: Option<RoomAgentBridgeContext>,
     pub(crate) workflow_step_context: Option<WorkflowStepBridgeContext>,
+    /// Complete invocation policy for task workers or read-only workflow repos.
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
 }
@@ -4498,7 +4652,7 @@ async fn run_acp_session(
     use tokio::io::AsyncWriteExt;
 
     let mut host = AcpHost::new(1, transport);
-    let mcp_servers = acp_project_mcp_servers(project_path);
+    let mcp_servers = acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode);
     if let Err(error) = host
         .negotiate(AcpInitialize {
             protocol_version: 1,
@@ -4754,12 +4908,17 @@ async fn run_acp_session(
                         output_tokens,
                         prompt_cache,
                     } => {
-                        *task_usage.lock().unwrap() = AgentUsage {
+                        let mut usage = task_usage.lock().unwrap();
+                        *usage = AgentUsage {
                             input_tokens,
                             output_tokens,
                             prompt_cache,
+                            cost_usd_micros: usage.cost_usd_micros,
                             ..AgentUsage::default()
                         };
+                    }
+                    AcpSessionEvent::Cost { usd_micros } => {
+                        task_usage.lock().unwrap().cost_usd_micros = Some(usd_micros);
                     }
                     AcpSessionEvent::NativeSessionId(conversation_id) => {
                         if let Some(store) = event_store.as_ref() {
@@ -4907,7 +5066,14 @@ async fn acp_start_failure(host: &crate::acp::AcpHost, failure: String) -> Strin
 /// project registry. Values from an MCP `env` map can be credentials; keeping
 /// those entries out of the ACP payload preserves the server-side secret
 /// boundary until the broker can inject scoped credentials directly.
-fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
+///
+/// `env_by_reference`: the agent's adapter turns an entry's env values into
+/// references it resolves from its own process (Claude, KT-1003), so an entry
+/// is kept unless a credential sits in its `args`.
+fn acp_project_mcp_servers(
+    project_path: &str,
+    env_by_reference: bool,
+) -> Vec<crate::acp::AcpMcpServer> {
     // Kronn's own bridge first, and independently of any project: an ACP agent
     // that cannot call `disc_append` is mute in the room it was invited to.
     // Claude gets this through `--mcp-config` and Codex through its TOML
@@ -4945,9 +5111,15 @@ fn acp_project_mcp_servers(project_path: &str) -> Vec<crate::acp::AcpMcpServer> 
             // `args` (`["--token", "secret"]`) drops the whole server rather
             // than partially redacting it — the ACP no-secret promise covers
             // both shapes (KT-542 review).
-            (!command.trim().is_empty()
-                && !crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry))
-            .then_some(crate::acp::AcpMcpServer {
+            let leaks = if env_by_reference {
+                entry
+                    .args
+                    .as_deref()
+                    .is_some_and(crate::core::mcp_scanner::mcp_args_carry_secret)
+            } else {
+                crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry)
+            };
+            (!command.trim().is_empty() && !leaks).then_some(crate::acp::AcpMcpServer {
                 id,
                 command,
                 args: entry.args.unwrap_or_default(),
@@ -6839,6 +7011,7 @@ pub(crate) struct TokenTally {
     cached_prompt: Option<u64>,
     cache_write_prompt: Option<u64>,
     eval: u64,
+    cost_usd_micros: Option<u64>,
     provenance: Option<AgentProvenanceCapture>,
 }
 
@@ -6933,6 +7106,38 @@ pub(crate) fn parse_ceiling_report(stderr_lines: &[String]) -> Option<CeilingRep
         .filter(|report| {
             report.version == 1 && (!report.tools.is_empty() || report.rounds.is_some())
         })
+}
+
+/// OpenRouter's usage accounting: its responses then carry `usage.cost`. Other
+/// OpenAI-compatible providers may reject an unknown field, so only there.
+pub(crate) fn request_provider_cost(base: &str, body: &mut serde_json::Value) {
+    if base.contains("openrouter.ai") {
+        body["usage"] = serde_json::json!({ "include": true });
+    }
+}
+
+/// Context budget a hosted step's pressure is measured on, whatever the model's
+/// window: the smaller of the two, overridable by `KRONN_HTTP_STEP_CTX_BUDGET`.
+pub(crate) const HOSTED_STEP_CTX_BUDGET: u64 = 128_000;
+
+/// Cumulative input tokens after which a hosted audit step must write its
+/// deliverable, overridable by `KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`.
+pub(crate) const HOSTED_AUDIT_STEP_INPUT_BUDGET: u64 = 1_500_000;
+
+fn positive_u64(raw: Option<String>) -> Option<u64> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+}
+
+pub(crate) fn hosted_step_context_budget(window: Option<u64>, raw: Option<String>) -> u64 {
+    let budget = positive_u64(raw).unwrap_or(HOSTED_STEP_CTX_BUDGET);
+    window
+        .filter(|window| *window > 0)
+        .map_or(budget, |window| window.min(budget))
+}
+
+pub(crate) fn hosted_audit_step_input_budget(raw: Option<String>) -> u64 {
+    positive_u64(raw).unwrap_or(HOSTED_AUDIT_STEP_INPUT_BUDGET)
 }
 
 /// Scale discussion tool rounds with the context window; keep the default when unknown.
@@ -7243,6 +7448,51 @@ pub(crate) fn strip_leading_thinking_blocks(input: &str) -> String {
     visible
 }
 
+/// Bytes of an attempt's text held back while a replay may still follow. A
+/// preamble before a tool call fits; a longer text is an answer and streams live.
+pub(crate) const REPLAY_HOLD_MAX_BYTES: usize = 512;
+
+/// Text of an Ollama attempt that may be replayed after an unreadable tool call
+/// (KT-944). It is held until the attempt ends or outgrows a preamble, so a
+/// replayed attempt's text is dropped instead of shown twice.
+#[derive(Debug, Default)]
+pub(crate) struct ReplayHold {
+    held: String,
+    active: bool,
+}
+
+impl ReplayHold {
+    pub(crate) fn new(active: bool) -> Self {
+        Self {
+            held: String::new(),
+            active,
+        }
+    }
+
+    /// The part of `visible` that may be sent now.
+    pub(crate) fn push(&mut self, visible: String) -> String {
+        if !self.active {
+            return visible;
+        }
+        self.held.push_str(&visible);
+        if self.held.len() > REPLAY_HOLD_MAX_BYTES {
+            return self.release();
+        }
+        String::new()
+    }
+
+    /// The attempt stands: everything held is due, and later text streams live.
+    pub(crate) fn release(&mut self) -> String {
+        self.active = false;
+        std::mem::take(&mut self.held)
+    }
+
+    /// The attempt is replayed: what it held was never shown.
+    pub(crate) fn discard(&mut self) {
+        self.held.clear();
+    }
+}
+
 /// Apply one decoded stream line: forward the text delta, record errors, and
 /// on the terminal chunk stash token counts for `parse_token_usage`. The
 /// stderr lock is only held across synchronous work — never across
@@ -7277,6 +7527,7 @@ pub(crate) async fn forward_chat_line(
     // Set as soon as any visible text is forwarded, so the loop can tell a silent
     // finish from a real answer.
     emitted_any: &mut bool,
+    replay_hold: &mut ReplayHold,
 ) -> bool {
     let Some(chunk) = codec.parse_line(line) else {
         return true;
@@ -7311,7 +7562,7 @@ pub(crate) async fn forward_chat_line(
         *got_error = true;
     }
     if let Some(text) = chunk.delta {
-        let visible = thinking_filter.push(&text);
+        let visible = replay_hold.push(thinking_filter.push(&text));
         if !visible.is_empty() {
             *emitted_any = true;
         }
@@ -7330,6 +7581,9 @@ pub(crate) async fn forward_chat_line(
     }
     if chunk.eval_tokens > 0 {
         tally.eval = chunk.eval_tokens;
+    }
+    if chunk.cost_usd_micros.is_some() {
+        tally.cost_usd_micros = chunk.cost_usd_micros;
     }
     if chunk.done {
         *got_done = true;
@@ -7828,6 +8082,7 @@ async fn start_ollama_http_with_idle(
                 format.is_none(),
             );
             super::vision::attach_to_chat_body(&mut body, true, &prepared_images.sent);
+            request_provider_cost(&base, &mut body);
             tracing::info!(
                 target: "kronn::lite_llm",
                 model = %model,
@@ -8085,17 +8340,38 @@ async fn start_ollama_http_with_idle(
         }
         _ => crate::agents::tools::CeilingAllowance::default(),
     };
+    let remote_window = if is_openai_wire {
+        remote_context_window(&base, model, auth_key.as_deref()).await
+    } else {
+        None
+    };
     let round_cap = if tool_run_mode == crate::agents::tools::ToolRunMode::Worker {
         crate::agents::tools::MAX_TOOL_ITERATIONS
     } else {
-        let window = if is_openai_wire {
-            remote_context_window(&base, model, auth_key.as_deref()).await
+        round_cap_for_window(if is_openai_wire {
+            remote_window
         } else {
             Some(ctx_cap)
-        };
-        round_cap_for_window(window)
+        })
     }
     .saturating_add(ceiling_allowance.extra_rounds);
+    // A hosted model's window (often unknown or a million tokens) says nothing
+    // about what a step may spend: context pressure is measured on a bounded
+    // budget instead, and an audit step also stops exploring at a cumulative
+    // input budget (KT-998).
+    let pressure_ctx_cap = if is_openai_wire {
+        hosted_step_context_budget(
+            remote_window,
+            std::env::var("KRONN_HTTP_STEP_CTX_BUDGET").ok(),
+        )
+    } else {
+        ctx_cap
+    };
+    let audit_input_budget =
+        (is_openai_wire && tool_run_mode == crate::agents::tools::ToolRunMode::Audit).then(|| {
+            hosted_audit_step_input_budget(std::env::var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET").ok())
+        });
+    let mut step_input_tokens: u64 = 0;
     // A turn that declares tools will grow by whatever they return, and Ollama
     // fixes the window when it loads the model — it does not grow mid-run. Sizing
     // it on the prompt alone gives a one-line question a tiny slot that the first
@@ -8451,13 +8727,23 @@ async fn start_ollama_http_with_idle(
                 .unwrap_or(true)
                 .then_some(idle_limit);
             let mut received_chunks: usize = 0;
-            let mut buffer = String::new();
+            let mut buffer = ChunkLineBuffer::default();
             let mut got_done = false;
             let mut got_error = false;
             let mut provider_error: Option<String> = None;
             let mut emitted_this_turn = false;
             let mut pending_tools = ToolCallAccumulator::default();
             let mut thinking_filter = LeadingThinkingFilter::default();
+            // Only an Ollama turn offering tools can hit the replayed
+            // unreadable-tool-call failure.
+            let mut replay_hold = ReplayHold::new(
+                !is_openai_wire
+                    && !used_format_fallback
+                    && provider_attempt < HTTP_PROVIDER_MAX_ATTEMPTS
+                    && body["tools"]
+                        .as_array()
+                        .is_some_and(|tools| !tools.is_empty()),
+            );
 
             loop {
                 let chunk = tokio::select! {
@@ -8508,12 +8794,10 @@ async fn start_ollama_http_with_idle(
                     }
                 };
 
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                buffer.push(&bytes);
 
                 // Process complete JSON lines (newline-delimited stream chunks).
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
+                while let Some(line) = buffer.next_line() {
                     // Consumer gone (cancel) → stop reading the HTTP body.
                     if !forward_chat_line(
                         codec.as_ref(),
@@ -8529,6 +8813,7 @@ async fn start_ollama_http_with_idle(
                         &mut thinking_filter,
                         &mut pending_tools,
                         &mut emitted_this_turn,
+                        &mut replay_hold,
                     )
                     .await
                     {
@@ -8541,10 +8826,11 @@ async fn start_ollama_http_with_idle(
             // Non-streaming responses (format-constrained / TypedSchema steps
             // set stream:false) arrive as a single JSON object with no trailing
             // newline, so the line loop above never fires — flush the remainder.
+            let rest = buffer.take_rest();
             let _ = forward_chat_line(
                 codec.as_ref(),
                 backend,
-                buffer.trim(),
+                rest.trim(),
                 &tx,
                 &stderr_clone,
                 &mut got_done,
@@ -8555,10 +8841,11 @@ async fn start_ollama_http_with_idle(
                 &mut thinking_filter,
                 &mut pending_tools,
                 &mut emitted_this_turn,
+                &mut replay_hold,
             )
             .await;
 
-            let trailing = thinking_filter.finish();
+            let trailing = replay_hold.push(thinking_filter.finish());
             let had_trailing = !trailing.is_empty();
             if had_trailing && tx.send(trailing).await.is_err() {
                 finish(&mut lifeline, false).await;
@@ -8570,6 +8857,12 @@ async fn start_ollama_http_with_idle(
             emitted_text |= emitted_this_turn;
 
             let calls = pending_tools.finish();
+            // A provider that reports no usage is charged its estimated prompt.
+            step_input_tokens = step_input_tokens.saturating_add(if tally.prompt > 0 {
+                tally.prompt
+            } else {
+                estimated_chat_history_tokens(&body)
+            });
             // Each response reports cumulative usage; add it once per tool turn,
             // not once per usage frame. Audit consumers read this shared counter.
             if let Ok(mut usage) = task_usage.lock() {
@@ -8592,6 +8885,10 @@ async fn start_ollama_http_with_idle(
                             .unwrap_or(0)
                             .saturating_add(written),
                     );
+                }
+                if let Some(cost) = tally.cost_usd_micros {
+                    usage.cost_usd_micros =
+                        Some(usage.cost_usd_micros.unwrap_or(0).saturating_add(cost));
                 }
             }
             let worker_repair_stage_for_turn = worker_repair_stage;
@@ -8638,8 +8935,8 @@ async fn start_ollama_http_with_idle(
             // for it (calls run only after the stream ends, and never on an
             // error), so re-sending the same request is a pure model invocation
             // even when earlier rounds ran tools: their results are already in the
-            // request. Text the failed attempt streamed is the price of the
-            // replay, cheaper than losing the whole turn. Stochastic generation
+            // request. Text the failed attempt held back is dropped (KT-944);
+            // text past the hold already streamed stays. Stochastic generation
             // usually produces a valid call the second time; no instruction is
             // added to the prompt.
             let unreadable_tool_call = !is_openai_wire
@@ -8677,6 +8974,7 @@ async fn start_ollama_http_with_idle(
                         delay.as_millis()
                     ),
                 );
+                replay_hold.discard();
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => {
@@ -8737,6 +9035,15 @@ async fn start_ollama_http_with_idle(
                         provider_failure_label(None, detail)
                     ),
                 );
+            }
+            // No replay: the attempt stands, and so does what it held back.
+            let held = replay_hold.release();
+            if !held.is_empty() {
+                if tx.send(held).await.is_err() {
+                    finish(&mut lifeline, false).await;
+                    return;
+                }
+                emitted_text = true;
             }
             // Past the replay budget the failure stays visible, and says what it is.
             if unreadable_tool_call {
@@ -9313,7 +9620,11 @@ async fn start_ollama_http_with_idle(
             let mut worker_repair_prompt: Option<String> = None;
             let context_pressure_tokens = worker_run
                 .then(|| {
-                    worker_context_pressure(&body, ctx_cap, worker_policy.context_pressure_percent)
+                    worker_context_pressure(
+                        &body,
+                        pressure_ctx_cap,
+                        worker_policy.context_pressure_percent,
+                    )
                 })
                 .flatten();
             let worker_boundary = worker_run
@@ -10593,11 +10904,18 @@ async fn start_ollama_http_with_idle(
             // An audit that is still exploring when its rounds or context run out
             // fails at the ceiling with its file unwritten. Keep a few rounds in
             // reserve for the only output that counts: the deliverable.
+            let audit_budget_spent =
+                audit_input_budget.filter(|budget| step_input_tokens >= *budget);
             if !forced_synthesis
                 && !audit_writer_seed.is_empty()
                 && (turn.saturating_add(AUDIT_WRITE_RESERVE_ROUNDS) >= round_cap
-                    || worker_context_pressure(&body, ctx_cap, WORKER_CONTEXT_PRESSURE_PERCENT)
-                        .is_some())
+                    || worker_context_pressure(
+                        &body,
+                        pressure_ctx_cap,
+                        WORKER_CONTEXT_PRESSURE_PERCENT,
+                    )
+                    .is_some()
+                    || audit_budget_spent.is_some())
             {
                 withdraw_tools_for_convergence(&mut body, &audit_writer_seed, &withdrawn);
                 if body.get("tools").is_some() {
@@ -10622,6 +10940,11 @@ async fn start_ollama_http_with_idle(
                         se.push(format!(
                             "{backend} audit write window opened at turn {turn} of {round_cap}"
                         ));
+                        if let Some(budget) = audit_budget_spent {
+                            se.push(format!(
+                                "{backend} audit step spent {step_input_tokens} input tokens of its {budget} budget"
+                            ));
+                        }
                     }
                 }
             }
@@ -12240,10 +12563,32 @@ fn claude_auto_memory_kept(
         && workflow_step_context.is_none()
 }
 
+fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> String {
+    let mut paths = vec![work_dir.to_path_buf()];
+    if let (Ok(relative), Some(host_home)) = (work_dir.strip_prefix("/host-home"), host_home) {
+        paths.push(Path::new(host_home).join(relative));
+    }
+    let projects = paths
+        .into_iter()
+        .map(|path| {
+            (
+                path.display().to_string(),
+                toml::Value::Table(toml::Table::from_iter([(
+                    "trust_level".into(),
+                    toml::Value::String("trusted".into()),
+                )])),
+            )
+        })
+        .collect();
+    // Codex's strict override parser rejects quoted path keys in dotted syntax.
+    format!("projects={}", toml::Value::Table(projects))
+}
+
 /// Spawn an agent process. If npx_package is Some, uses npx to run.
 ///
 /// `SpawnIo::Direct(Some(payload))` writes and closes the child's stdin.
-/// `SpawnIo::Adapter` leaves that pipe for the adapter's awaited prompt write.
+/// `SpawnIo::Adapter(env)` leaves that pipe for the adapter's awaited prompt
+/// write and gives the child `env` on top of its inherited environment.
 /// stderr is piped in both modes; the caller must drain it concurrently or a
 /// verbose child blocks once the pipe buffer fills.
 ///
@@ -12270,40 +12615,37 @@ pub(crate) fn try_spawn(
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
-        SpawnIo::Adapter => None,
+        SpawnIo::Adapter(_) => None,
     };
     // Resolve the final command. We also remember whether the resolved binary
     // lives inside WSL (`via_wsl`) so we can pick the right exec strategy
     // below — sending a Linux path to a Windows-native spawn would just fail.
     let (cmd_name, mut cmd_args, resolved_via_wsl) =
         resolve_agent_invocation(binary, npx_package, args)?;
-    if task_worker_context.is_some()
-        && (binary == "claude" || npx_package == Some("@anthropic-ai/claude-code"))
+    let sandbox_required = task_worker_context.is_some()
+        || args.windows(2).any(|pair| {
+            pair[0] == "--settings"
+                && serde_json::from_str::<serde_json::Value>(&pair[1])
+                    .is_ok_and(|settings| settings["sandbox"]["failIfUnavailable"] == true)
+        });
+    if sandbox_required && (binary == "claude" || npx_package == Some("@anthropic-ai/claude-code"))
     {
         claude_task_worker_platform_check(cfg!(windows), resolved_via_wsl)?;
     }
 
-    // Force current workspace as trusted for Codex sessions inside Docker.
-    // This avoids path-style mismatch issues (/Users/... vs /host-home/...).
+    // Trust the workspace and its optional host alias in one inline table,
+    // including ordinary launches without --strict-config.
     let is_codex = binary == "codex" || npx_package == Some("@openai/codex");
     if is_codex {
         if let Some(exec_idx) = cmd_args.iter().position(|a| a == "exec") {
-            let workdir_s = work_dir.display().to_string();
-            let mut overrides = vec![
-                "-c".to_string(),
-                format!("projects.\"{}\".trust_level=\"trusted\"", workdir_s),
-            ];
-            if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
-                if let Some(relative) = workdir_s.strip_prefix("/host-home") {
-                    overrides.push("-c".to_string());
-                    let host_path = format!("{}{}", host_home, relative);
-                    overrides.push(format!(
-                        "projects.\"{}\".trust_level=\"trusted\"",
-                        host_path,
-                    ));
-                }
-            }
-            cmd_args.splice(exec_idx + 1..exec_idx + 1, overrides);
+            let host_home = std::env::var("KRONN_HOST_HOME").ok();
+            cmd_args.splice(
+                exec_idx + 1..exec_idx + 1,
+                [
+                    "-c".into(),
+                    codex_project_trust_override(work_dir, host_home.as_deref()),
+                ],
+            );
         }
     }
     // INFO never carries argv: prompts may contain user data and, historically,
@@ -12332,10 +12674,13 @@ pub(crate) fn try_spawn(
     let mut cmd = async_cmd(&final_cmd);
     // Under Docker, the MCP values the project's `.mcp.json` refers to (KT-964).
     crate::core::mcp_secret_refs::apply_to(&mut cmd, std::path::Path::new(&effective_work_dir));
+    if let SpawnIo::Adapter(env) = io {
+        cmd.envs(env.iter().map(|(name, value)| (name, value)));
+    }
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
         .stdin(
-            if stdin_payload.is_some() || matches!(io, SpawnIo::Adapter) {
+            if stdin_payload.is_some() || matches!(io, SpawnIo::Adapter(_)) {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -12487,7 +12832,7 @@ pub(crate) fn try_spawn(
     // and pretending an outer sandbox exists would undermine that guarantee.
     // Note: use CLAUDE_CODE_BUBBLEWRAP, not IS_SANDBOX — IS_SANDBOX also
     // suppresses 529 overloaded errors causing infinite silent retries.
-    if task_worker_context.is_none() {
+    if !sandbox_required {
         cmd.env("CLAUDE_CODE_BUBBLEWRAP", "1");
     } else {
         cmd.env_remove("CLAUDE_CODE_BUBBLEWRAP");
@@ -12618,7 +12963,7 @@ pub(crate) fn try_spawn(
 ///
 /// The final result line contains cost/token info:
 /// ```json
-/// {"type":"result","subtype":"success","cost_usd":0.01,"duration_ms":1234,"session_id":"...","usage":{"input_tokens":100,"output_tokens":50}}
+/// {"type":"result","subtype":"success","total_cost_usd":0.01,"duration_ms":1234,"session_id":"...","usage":{"input_tokens":100,"output_tokens":50}}
 /// ```
 pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
     let trimmed = line.trim();
@@ -12711,8 +13056,10 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 
         // Final result line — contains token usage and cost
         "result" => {
+            // Current Claude Code names it `total_cost_usd`; older builds `cost_usd`.
             let cost = json
-                .get("cost_usd")
+                .get("total_cost_usd")
+                .or_else(|| json.get("cost_usd"))
                 .and_then(|v| v.as_f64())
                 .filter(|c| *c > 0.0);
             let input = json

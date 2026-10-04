@@ -366,6 +366,53 @@ fn mcp_transport_sse_roundtrip() {
     }
 }
 
+// ─── AgentsConfig::set_full_access ─────────────────────────────────────
+
+#[test]
+fn set_full_access_covers_every_agent_the_ui_offers_and_refuses_inert_ones() {
+    let off = || AgentConfig {
+        full_access: false,
+        ..Default::default()
+    };
+    let mut config = AgentsConfig {
+        claude_code: off(),
+        codex: off(),
+        open_code: off(),
+        gemini_cli: off(),
+        kiro: off(),
+        vibe: off(),
+        copilot_cli: off(),
+        ollama: off(),
+        lite_llm: off(),
+        nvidia: off(),
+        model_tiers: Default::default(),
+    };
+    for agent in [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::OpenCode,
+        AgentType::GeminiCli,
+        AgentType::CopilotCli,
+    ] {
+        assert!(!config.full_access_for(&agent), "{agent:?} defaults to off");
+        config
+            .set_full_access(&agent, true)
+            .expect("supported agent");
+        assert!(config.full_access_for(&agent), "{agent:?} stored");
+        config.set_full_access(&agent, false).unwrap();
+        assert!(!config.full_access_for(&agent));
+    }
+    for agent in [
+        AgentType::Vibe,
+        AgentType::Kiro,
+        AgentType::Ollama,
+        AgentType::Custom,
+    ] {
+        assert!(config.set_full_access(&agent, true).is_err(), "{agent:?}");
+        assert!(!config.full_access_for(&agent), "{agent:?} stays off");
+    }
+}
+
 // ─── AgentsConfig::full_access_for ─────────────────────────────────────
 
 #[test]
@@ -760,6 +807,7 @@ fn workflow_step_api_call_roundtrip() {
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
+        read_only_repos: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     };
     let json = serde_json::to_string(&step).unwrap();

@@ -502,6 +502,33 @@ describe('AgentsSection — full-access switch', () => {
     };
   }
 
+  function confirmFullAccess() {
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByText('config.fullAccessConfirmEnable'));
+  }
+
+  it('shows the switch on the card without opening the configuration panel', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
+      agentAccess: accessConfig({ claude_code: { path: null, installed: true, version: null, full_access: true } }),
+    });
+    const sw = screen.getByRole('switch');
+    expect(sw.getAttribute('aria-checked')).toBe('true');
+    expect(sw.getAttribute('aria-label')).toBe('config.fullAccessSwitchAria');
+  });
+
+  it('offers a switch for Copilot but none for Vibe or Kiro, which ignore the flag', () => {
+    renderSection({
+      agents: [
+        makeAgent({ name: 'AgentCopilot', agent_type: 'CopilotCli', installed: true, enabled: true }),
+        makeAgent({ name: 'AgentVibe', agent_type: 'Vibe', installed: true, enabled: true }),
+        makeAgent({ name: 'AgentKiro', agent_type: 'Kiro', installed: true, enabled: true }),
+      ],
+      agentAccess: accessConfig(),
+    });
+    expect(screen.getAllByRole('switch')).toHaveLength(1);
+    expect(screen.getByTestId('agent-full-access-CopilotCli')).toBeTruthy();
+  });
+
   it('renders the permission switch reflecting full_access=false', () => {
     renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
@@ -548,9 +575,9 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentOpenCode', agent_type: 'OpenCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
-    openAgentConfig('OpenCode');
     expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('false');
     fireEvent.click(screen.getByRole('switch'));
+    confirmFullAccess();
     await waitFor(() =>
       expect(setAgentAccessMock).toHaveBeenCalledWith({ agent: 'OpenCode', full_access: true }),
     );
@@ -562,21 +589,22 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
-    openAgentConfig('ClaudeCode');
     fireEvent.click(screen.getByRole('switch'));
+    confirmFullAccess();
     await waitFor(() =>
       expect(setAgentAccessMock).toHaveBeenCalledWith({ agent: 'ClaudeCode', full_access: true }),
     );
     await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
   });
 
-  it('toggles full-access via keyboard (Space)', async () => {
+  it('turns full-access off without asking, and a native button handles Space/Enter', async () => {
     const { refetchAgentAccess } = renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig({ claude_code: { path: null, installed: true, version: null, full_access: true } }),
     });
-    openAgentConfig('ClaudeCode');
-    fireEvent.keyDown(screen.getByRole('switch'), { key: ' ' });
+    expect(screen.getByRole('switch').tagName).toBe('BUTTON');
+    fireEvent.click(screen.getByRole('switch'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
     await waitFor(() =>
       expect(setAgentAccessMock).toHaveBeenCalledWith({ agent: 'ClaudeCode', full_access: false }),
     );
@@ -590,8 +618,8 @@ describe('AgentsSection — full-access switch', () => {
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
       agentAccess: accessConfig(),
     });
-    openAgentConfig('ClaudeCode');
     fireEvent.click(screen.getByRole('switch'));
+    confirmFullAccess();
     await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
     warnSpy.mockRestore();
   });

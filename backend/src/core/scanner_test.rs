@@ -231,6 +231,55 @@ mod tests {
     }
 
     #[test]
+    fn detect_audit_status_never_writes_the_state_file() {
+        // Read paths (GET /api/projects) must not create `docs/.kronn.json`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("AGENTS.md"),
+            "# Projet\n<!-- KRONN:VALIDATED -->\n",
+        )
+        .unwrap();
+        std::fs::write(
+            docs.join("checksums.json"),
+            r#"{"audited_at": "2026-01-01", "mappings": []}"#,
+        )
+        .unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        for _ in 0..2 {
+            assert!(matches!(
+                detect_audit_status(&path),
+                crate::models::AiAuditStatus::Validated
+            ));
+        }
+        assert!(!docs.join(".kronn.json").exists());
+    }
+
+    #[test]
+    fn a_recorded_run_never_overrides_placeholders_or_validation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        std::fs::write(docs.join("AGENTS.md"), "# {{PROJECT_NAME}}\n").unwrap();
+        assert!(matches!(
+            detect_audit_status_with_runs(&path, true),
+            crate::models::AiAuditStatus::TemplateInstalled
+        ));
+        std::fs::write(docs.join("AGENTS.md"), "# Filled\n").unwrap();
+        assert!(matches!(
+            detect_audit_status_with_runs(&path, true),
+            crate::models::AiAuditStatus::Audited
+        ));
+        crate::core::kronn_state::mark_validated(tmp.path()).unwrap();
+        assert!(matches!(
+            detect_audit_status_with_runs(&path, true),
+            crate::models::AiAuditStatus::Validated
+        ));
+    }
+
+    #[test]
     fn count_ai_todos_empty() {
         let tmp = std::env::temp_dir().join("kronn-test-todos-empty");
         let _ = std::fs::create_dir_all(&tmp);

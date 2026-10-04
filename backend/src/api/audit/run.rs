@@ -144,6 +144,69 @@ pub async fn audit_run_steps(
     }
 }
 
+/// Runs whose steps the timeline merges (newest first): a resume or a partial
+/// run records only the steps it ran.
+const TIMELINE_STEP_RUNS: usize = 12;
+const TIMELINE_HISTORY: u32 = 20;
+
+/// Everything the audit timeline draws, in one request.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct AuditTimelineData {
+    /// Latest runs of every kind, newest first.
+    pub runs: Vec<AuditRun>,
+    /// Steps of the newest Full and Partial runs, grouped by run in `runs` order.
+    pub steps: Vec<AuditRunStep>,
+    /// Audits the branch's `docs/.kronn.json` records (another instance, an
+    /// attestation, legacy evidence), oldest first. Empty without the file.
+    pub recorded_audits: Vec<crate::core::kronn_state::AuditEntry>,
+    pub recorded_validated_at: Option<String>,
+}
+
+/// GET /api/projects/{id}/audit-timeline
+pub async fn audit_timeline(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<AuditTimelineData>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| {
+            let project = crate::db::projects::get_project(conn, &id)?;
+            let runs = crate::db::audit_runs::list_recent(conn, &id, TIMELINE_HISTORY)?;
+            let mut steps = Vec::new();
+            for run in runs
+                .iter()
+                .filter(|run| run.kind == "Full" || run.kind == "Partial")
+                .take(TIMELINE_STEP_RUNS)
+            {
+                steps.extend(crate::db::audit_runs::list_audit_steps(conn, &run.id)?);
+            }
+            Ok((project, runs, steps))
+        })
+        .await;
+    let (project, runs, steps) = match result {
+        Ok((Some(project), runs, steps)) => (project, runs, steps),
+        Ok((None, _, _)) => return Json(ApiResponse::err("Project not found")),
+        Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
+    };
+    let recorded = tokio::task::spawn_blocking(move || {
+        let root = crate::core::scanner::resolve_host_path(&project.path);
+        crate::core::kronn_state::read(&root)
+    })
+    .await
+    .ok()
+    .flatten();
+    let (recorded_audits, recorded_validated_at) = recorded
+        .map(|state| (state.audits, state.validated_at))
+        .unwrap_or_default();
+    Json(ApiResponse::ok(AuditTimelineData {
+        runs,
+        steps,
+        recorded_audits,
+        recorded_validated_at,
+    }))
+}
+
 /// 0.8.3 (#311) — fetch the most-recent resumable audit run for a project,
 /// or `None`. Resumable = `status = 'Interrupted'` AND
 /// the persisted checkpoint belongs to the latest run. The frontend uses this

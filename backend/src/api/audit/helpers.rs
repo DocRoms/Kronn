@@ -230,17 +230,17 @@ pub(crate) fn run_scope_block(run_td_ids: &[String], language: &str) -> String {
     match language {
         "en" => format!(
             "## SCOPE — this run's TDs ONLY\n\
-             This run created or re-emitted exactly these TDs: {ids}.\n\
+             This run's TDs that still need a decision: {ids}. TDs an earlier validation decided keep their decision.\n\
              The TD review covers ONLY them — never re-read, re-validate or modify any other `docs/tech-debt/TD-*.md`: they belong to previous audits already settled by their own validation discussions.\n\n",
         ),
         "es" => format!(
             "## SCOPE — SOLO los TDs de ESTE run\n\
-             Este run creo o re-emitio exactamente estos TDs: {ids}.\n\
+             Los TDs de este run que aun necesitan una decision: {ids}. Los TDs decididos por una validacion anterior conservan su decision.\n\
              La revision cubre SOLO estos — nunca releas, revalides o modifiques ningun otro `docs/tech-debt/TD-*.md`: pertenecen a auditorias anteriores ya cerradas por su propia discusion de validacion.\n\n",
         ),
         _ => format!(
             "## SCOPE — TDs de CE run uniquement\n\
-             Ce run a créé ou ré-émis exactement ces TDs : {ids}.\n\
+             Les TDs de ce run qui attendent encore une décision : {ids}. Celles qu'une validation précédente a tranchées gardent leur décision.\n\
              La revue des TDs porte UNIQUEMENT sur eux — ne relis, ne revalide et ne modifie AUCUN autre `docs/tech-debt/TD-*.md` : ils appartiennent à des audits précédents déjà validés par leur propre discussion.\n\n",
         ),
     }
@@ -253,6 +253,36 @@ pub(crate) fn run_scope_block(run_td_ids: &[String], language: &str) -> String {
 /// 1-based step and its target file. `no_run_tds` is true when the successful
 /// steps produced no TD: without an explicit instruction the TD phases would
 /// fall back to reading every TD on disk, those of previous audits included.
+/// Every TD the run listed was already decided: without this block an empty
+/// scope would let the TD phases fall back to every sheet on disk.
+pub(crate) fn all_tds_decided_block(language: &str) -> &'static str {
+    match language {
+        "en" => "## SCOPE — no TD to decide\nEvery TD this run lists was already decided by an earlier validation: skip the TD review phases and emit no TD card.\n\n",
+        "es" => "## SCOPE — ningun TD por decidir\nCada TD que lista este run ya fue decidido por una validacion anterior: omite las fases de revision de TDs y no emitas ninguna tarjeta TD.\n\n",
+        _ => "## SCOPE — aucune TD à trancher\nToutes les TDs que liste ce run ont déjà été tranchées par une validation précédente : saute les phases de revue des TDs et n'émets aucune carte TD.\n\n",
+    }
+}
+
+/// The full validation after a resume names the partial validation of the
+/// run it resumed: decisions taken there are already on the TD sheets.
+pub(crate) fn prior_partial_validation_block(discussion_id: &str, language: &str) -> String {
+    let (title, body) = match language {
+        "en" => (
+            "## AFTER A RESUME — partial validation",
+            "The run this audit resumed was already validated in part, in discussion `{id}` (`#discussion-{id}`). The TDs decided there keep their decision: they are not in this run's scope and get no card. Mention that validation to the user in your first message.",
+        ),
+        "es" => (
+            "## TRAS UNA REANUDACION — validacion parcial",
+            "El run que esta auditoria reanudo ya se valido en parte, en la discusion `{id}` (`#discussion-{id}`). Los TDs decididos alli conservan su decision: no estan en el scope de este run y no reciben tarjeta. Menciona esa validacion al usuario en tu primer mensaje.",
+        ),
+        _ => (
+            "## APRÈS UNE REPRISE — validation partielle",
+            "Le run que cet audit a repris a déjà été validé en partie, dans la discussion `{id}` (`#discussion-{id}`). Les TDs tranchées là-bas gardent leur décision : elles ne sont pas dans le périmètre de ce run et n'ont pas de carte. Mentionne cette validation à l'utilisateur dans ton premier message.",
+        ),
+    };
+    format!("{title}\n{}\n\n", body.replace("{id}", discussion_id))
+}
+
 pub(crate) fn partial_run_block(
     steps_to_redo: &[(u32, String)],
     total_steps: u32,

@@ -640,7 +640,7 @@ kronn_version: string,
  */
 type: string, provenance: AuditProvenance, };
 
-export type AuditEvidenceKind = "no_documentation" | "incomplete_template" | "missing_evidence" | "corrupt_state" | "kronn_audit" | "human_attestation" | "legacy_evidence" | "bootstrap_only";
+export type AuditEvidenceKind = "no_documentation" | "incomplete_template" | "missing_evidence" | "corrupt_state" | "kronn_audit" | "human_attestation" | "legacy_evidence" | "bootstrap_only" | "recorded_run";
 
 export type AuditEvidenceResponse = { project_id: string, status: AiAuditStatus, kind: AuditEvidenceKind,
 /**
@@ -652,7 +652,12 @@ state_file: string, runtime_workspace: string, audit_runs: number, interrupted_r
  * Present only when the authoritative newest run passes the exact resume
  * gate. The next usable step is this checkpoint + 1.
  */
-resumable_after_step: number | null, };
+resumable_after_step: number | null,
+/**
+ * The evidence file is missing on this branch but another commit carries
+ * it: the card offers to restore it.
+ */
+state_in_history: StateInHistory | null, };
 
 export type AuditFileInfo = { path: string, filled: boolean, };
 
@@ -821,7 +826,15 @@ report_path?: string | null,
  * in the model to avoid forcing schema migrations on every
  * recommendation-shape tweak.
  */
-recommendations_json?: string | null, };
+recommendations_json?: string | null,
+/**
+ * Commit, branch and source fingerprint at the run's start (KT-1021).
+ */
+head_sha?: string | null, branch?: string | null, source_fingerprint?: string | null,
+/**
+ * The model the run's agent used, when known.
+ */
+model?: string | null, };
 
 /**
  * 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -852,13 +865,40 @@ cli_success: boolean, step_warning?: string | null,
 /**
  * Mirrors the `step_warning.repaired` field from #292.
  */
-step_repaired_from_template: boolean, };
+step_repaired_from_template: boolean,
+/**
+ * The step's cost in millionths of a dollar, when its agent reported one.
+ */
+cost_usd_micros?: number | null,
+/**
+ * For a step a resume inherited: the run that actually ran it. Its tokens,
+ * duration and cost are that run's, not spent again.
+ */
+carried_from_run_id?: string | null, };
 
 /**
  * KT-977 — one step of the Full audit, known before any run: lets the UI
  * say what a step not yet run will produce.
  */
 export type AuditStepInfo = { index: number, target_file: string, };
+
+/**
+ * Everything the audit timeline draws, in one request.
+ */
+export type AuditTimelineData = {
+/**
+ * Latest runs of every kind, newest first.
+ */
+runs: Array<AuditRun>,
+/**
+ * Steps of the newest Full and Partial runs, grouped by run in `runs` order.
+ */
+steps: Array<AuditRunStep>,
+/**
+ * Audits the branch's `docs/.kronn.json` records (another instance, an
+ * attestation, legacy evidence), oldest first. Empty without the file.
+ */
+recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 
@@ -3458,7 +3498,12 @@ export type ImportPluginBundleReport = { bundle_id: string, already_imported: bo
  */
 imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
 
-export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
+export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
+/**
+ * Explicit consent to apply bundled custom arguments. They replace the
+ * plugin's whole command line, so they are dropped unless this is true.
+ */
+accept_args_override?: boolean, };
 
 export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
 /**
@@ -4165,6 +4210,11 @@ configs_merged: number,
  * Duplicate config rows removed by deduplication.
  */
 configs_deleted: number,
+/**
+ * Projects that gained a configuration in this scan (created or merged),
+ * so a preview can name the blast radius a dry run cannot measure in files.
+ */
+projects_affected: number,
 /**
  * Projects whose `.mcp.json` (or equivalent host file) was actually
  * rewritten. `None` for a `dry_run` — it never touches the filesystem,
@@ -6097,6 +6147,12 @@ export type ResponseUsage = {
  */
 at: string, input: number | null, cache_creation: number | null, cache_read: number | null, output: number | null, };
 
+export type RestoreAuditStateRequest = {
+/**
+ * The commit `state_in_history` named.
+ */
+commit: string, };
+
 /**
  * What a fresh session needs to continue, and nothing else.
  */
@@ -7096,6 +7152,28 @@ connection_id?: string | null, };
 export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discussion_id: string, status: string, };
 
 export type StartBriefingResponse = { discussion_id: string, };
+
+/**
+ * A state file absent from the checked-out branch but present in git history,
+ * e.g. committed on a feature branch only.
+ */
+export type StateInHistory = {
+/**
+ * Full sha of the newest commit that added or changed the file.
+ */
+commit: string,
+/**
+ * Committer date of that commit, ISO 8601.
+ */
+committed_at: string,
+/**
+ * Up to five branches that contain the commit (empty if none does).
+ */
+branches: Array<string>,
+/**
+ * Path relative to the project root.
+ */
+path: string, };
 
 export type StaticContextInventory = { blocks: Array<ContextBlock>,
 /**
@@ -8894,7 +8972,13 @@ multi_agent_review?: MultiAgentReviewConfig | null,
  * step's agent joins that room as its principal without an invite token,
  * on every launch and every resume of the step.
  */
-room_id?: string | null, };
+room_id?: string | null,
+/**
+ * Absolute local repository paths made readable, never writable, by this
+ * Agent step. Supported by Claude Code and Codex only; empty preserves
+ * the existing launch policy. Paths are validated again before launch.
+ */
+read_only_repos?: Array<string>, };
 
 /**
  * Durable identity of an Agent step that joined a discussion room.
