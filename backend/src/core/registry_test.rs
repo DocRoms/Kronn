@@ -187,6 +187,7 @@ mod tests {
             "mcp-git",
             // Databases
             "mcp-postgres",
+            "mcp-mysql",
             "mcp-sqlite",
             "mcp-redis",
             "mcp-neon",
@@ -298,6 +299,31 @@ mod tests {
             m.env_keys.contains(&"GOOGLE_PROJECT_ID".to_string()),
             "BigQuery requires GOOGLE_PROJECT_ID"
         );
+    }
+
+    #[test]
+    fn mysql_mcp_configuration() {
+        let reg = builtin_registry();
+        let m = reg.iter().find(|m| m.id == "mcp-mysql").unwrap();
+        assert!(m.tags.contains(&"mariadb".to_string()));
+        for key in [
+            "MYSQL_HOST",
+            "MYSQL_PORT",
+            "MYSQL_USER",
+            "MYSQL_PASS",
+            "MYSQL_DB",
+        ] {
+            assert!(m.env_keys.contains(&key.to_string()), "missing {key}");
+        }
+        let McpTransport::Stdio { command, args } = &m.transport else {
+            panic!("MySQL runs over stdio");
+        };
+        assert_eq!(command, "npx");
+        assert!(args.contains(&"@benborla29/mcp-server-mysql".to_string()));
+        assert!(m
+            .default_context
+            .as_deref()
+            .is_some_and(|c| c.contains("mysql_query")));
     }
 
     #[test]
