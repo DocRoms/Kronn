@@ -75,6 +75,17 @@ Release notes for 0.9.3 and earlier are available in the
 - An old single-plugin JSON from the removed per-plugin export dropped into the
   bundle import is recognised and imported as a one-plugin bundle, with the same
   review; a malformed one gets a clear error (KT-833).
+
+- Large databases stay responsive (KT-1019). The token statistics and the
+  workflow list no longer read every run's step results to reach a few
+  columns: a covering index answers them, on the read connection. Scheduled
+  and manual backups copy a read snapshot with `VACUUM INTO` instead of
+  holding the write connection, so runs and discussions keep writing during
+  the copy, and they are refused with a clear log when the disk lacks the
+  space. The backup taken before a migration is written to a temporary file
+  and renamed, so a full disk no longer replaces the previous good backup,
+  and a failed copy stops the upgrade instead of migrating without a backup
+  (`KRONN_MIGRATION_BACKUP=0` upgrades without one, on purpose).
 - The desktop release pipeline now fails before building when the pushed tag
   differs from `VERSION` or a version marker is stale, builds the release job
   from the requested tag on a manual run, and expects exactly the installers

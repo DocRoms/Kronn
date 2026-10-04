@@ -83,54 +83,132 @@ pub fn prune_old_backups(dir: &Path, keep_n: usize) -> usize {
     removed
 }
 
-/// Run one backup now: SQLite online-copy the live DB into `dir`, then prune to
-/// `keep_n`. Returns the written path. Skips (Ok(None)) for an in-memory DB.
+/// Serializes the operations that copy or rebuild the whole database file
+/// (scheduled and manual backups, compaction): two at once would double the
+/// disk they need and race for the same free space.
+pub(crate) static MAINTENANCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Free space a full copy of `live_bytes` needs: the copy itself, a tenth for
+/// what is written meanwhile, and a floor so the disk is not left full.
+pub fn required_free_bytes(live_bytes: u64) -> u64 {
+    const FLOOR: u64 = 512 * 1024 * 1024;
+    live_bytes
+        .saturating_add(live_bytes / 10)
+        .saturating_add(FLOOR)
+}
+
+/// Bytes of the pages the database actually uses: what `VACUUM INTO` writes.
+pub fn live_bytes(conn: &rusqlite::Connection) -> anyhow::Result<u64> {
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let free_pages: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+    Ok((page_count - free_pages).max(0) as u64 * page_size.max(0) as u64)
+}
+
+/// Refuse a copy that would not fit, with a message the operator can act on.
+pub fn ensure_free_space(dir: &Path, required: u64, available: u64) -> anyhow::Result<()> {
+    if available < required {
+        anyhow::bail!(
+            "not enough free space in {}: the copy needs about {} MB, {} MB are free",
+            dir.display(),
+            required / (1024 * 1024),
+            available / (1024 * 1024)
+        );
+    }
+    Ok(())
+}
+
+/// Write a consistent, compact copy of the database at `source` to `dest`.
+///
+/// `VACUUM INTO` runs on its own read-only connection: it reads one WAL
+/// snapshot, so the write connection keeps committing for the whole copy, and
+/// it skips free pages. A paged `backup.step(N)` from another connection
+/// restarts whenever the writer commits between two steps, so on a busy
+/// instance a large copy may never finish; from the write connection it holds
+/// the global mutex. The copy is staged in an owner-only directory, synced,
+/// then renamed: a failed copy never leaves a file that looks like a backup.
+/// Blocking: call it from `spawn_blocking`.
+pub fn snapshot_database(
+    source: &Path,
+    dest: &Path,
+    available_space: impl Fn(&Path) -> std::io::Result<u64>,
+) -> anyhow::Result<u64> {
+    let dir = dest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("backup path {} has no parent", dest.display()))?;
+    let name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("backup path {} has no file name", dest.display()))?;
+    if dest.exists() {
+        anyhow::bail!("{} already exists", dest.display());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        source,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+    let required = required_free_bytes(live_bytes(&conn)?);
+    ensure_free_space(dir, required, available_space(dir)?)?;
+
+    let staging = dir.join(format!(".{name}.partial"));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    std::fs::create_dir(&staging)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let staged = staging.join(name);
+    let copied = (|| -> anyhow::Result<u64> {
+        let staged_str = staged
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("backup path {} is not UTF-8", staged.display()))?;
+        conn.execute("VACUUM INTO ?1", [staged_str])?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))?;
+        }
+        // SQLite does not sync a VACUUM INTO target.
+        std::fs::File::open(&staged)?.sync_all()?;
+        std::fs::rename(&staged, dest)?;
+        Ok(std::fs::metadata(dest)?.len())
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    copied
+}
+
+/// Run one backup now: copy the live DB into `dir`, then prune to `keep_n`.
+/// Returns the written path. Skips (Ok(None)) for an in-memory DB.
 pub async fn perform_backup(
     db: &Database,
     dir: &Path,
     keep_n: usize,
 ) -> anyhow::Result<Option<PathBuf>> {
+    perform_backup_with(db, dir, keep_n, |path| fs2::available_space(path)).await
+}
+
+async fn perform_backup_with(
+    db: &Database,
+    dir: &Path,
+    keep_n: usize,
+    available_space: fn(&Path) -> std::io::Result<u64>,
+) -> anyhow::Result<Option<PathBuf>> {
     if db.path().to_string_lossy() == ":memory:" {
         return Ok(None);
     }
+    let _maintenance = MAINTENANCE_LOCK.lock().await;
     std::fs::create_dir_all(dir)?;
     let dest = dir.join(backup_filename(Utc::now()));
-    // The copy holds the full history in clear and may sit in a host dir
-    // (`KRONN_BACKUP_DIR`): create it owner-only before SQLite opens it.
-    {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options.open(&dest)?;
-    }
+    let source = db.path().clone();
     let dest_owned = dest.clone();
-    db.with_conn(move |conn| {
-        let mut dst = rusqlite::Connection::open(&dest_owned)?;
-        let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-        // One-shot copy: sqlite3_backup_step(-1) copies every page in a
-        // single call. The paged 5-pages/50ms variant is designed to let
-        // OTHER connections write between steps — but Kronn has a single
-        // shared connection, so the pauses just held the global DB mutex
-        // ~2.5s/MB while every API handler queued behind it.
-        // MUST be `step(-1)`, NOT `run_to_completion(-1, …)`: the latter
-        // asserts pages_per_step > 0 and PANICS — observed live 2026-07-09,
-        // where the boot-tick backup poisoned the DB mutex for the whole
-        // process (see `perform_backup_writes_a_readable_copy`).
-        match backup.step(-1)? {
-            rusqlite::backup::StepResult::Done => {}
-            other => anyhow::bail!("backup did not complete in one step: {other:?}"),
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| {
-        let _ = std::fs::remove_file(&dest);
-        anyhow::anyhow!("scheduled backup failed: {e}")
-    })?;
+    tokio::task::spawn_blocking(move || snapshot_database(&source, &dest_owned, available_space))
+        .await
+        .map_err(|e| anyhow::anyhow!("scheduled backup task failed: {e}"))?
+        .map_err(|e| anyhow::anyhow!("scheduled backup skipped: {e}"))?;
     let pruned = prune_old_backups(dir, keep_n);
     if pruned > 0 {
         tracing::info!(target: "backup", "pruned {pruned} old scheduled backup(s)");
@@ -254,6 +332,108 @@ mod tests {
             "a backup in a host dir must not be world-readable"
         );
     }
+    #[tokio::test]
+    async fn backup_is_refused_without_enough_free_space() {
+        // KT-1019 — 24 h × keep 7 of a 10 GB base filled disks unchecked.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Database::open_path(&tmp.path().join("kronn.db")).expect("open db");
+        let dir = tmp.path().join("backups");
+        let error = perform_backup_with(&db, &dir, 3, |_| Ok(1024))
+            .await
+            .expect_err("a full disk must refuse the backup");
+        assert!(
+            error.to_string().contains("not enough free space"),
+            "{error}"
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert!(left.is_empty(), "nothing is written: {left:?}");
+    }
+
+    #[test]
+    fn required_free_space_covers_the_copy_and_a_floor() {
+        let gib = 1024 * 1024 * 1024;
+        assert!(required_free_bytes(10 * gib) > 10 * gib);
+        assert_eq!(required_free_bytes(0), 512 * 1024 * 1024);
+        assert_eq!(required_free_bytes(u64::MAX), u64::MAX);
+        assert!(ensure_free_space(Path::new("/x"), 10, 9).is_err());
+        assert!(ensure_free_space(Path::new("/x"), 10, 10).is_ok());
+    }
+
+    #[tokio::test]
+    async fn backup_does_not_wait_for_the_write_connection() {
+        // KT-1019 — the copy ran inside with_conn: every writer waited for it.
+        // Here the write connection stays held for the whole backup.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("kronn.db");
+        let db = Arc::new(crate::db::Database::open_path(&path).expect("open db"));
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE filler(blob BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
+                 INSERT INTO filler SELECT randomblob(16384) FROM n;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, is_held) = tokio::sync::oneshot::channel::<()>();
+        let holder = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                db.with_conn(move |_conn| {
+                    let _ = held.send(());
+                    let _ = released.recv();
+                    Ok(())
+                })
+                .await
+            })
+        };
+        is_held.await.unwrap();
+
+        let written = tokio::time::timeout(
+            Duration::from_secs(30),
+            perform_backup(&db, &tmp.path().join("backups"), 3),
+        )
+        .await
+        .expect("the backup must not wait for the write connection")
+        .unwrap()
+        .unwrap();
+        release.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+
+        let copy = rusqlite::Connection::open(&written).unwrap();
+        let rows: i64 = copy
+            .query_row("SELECT COUNT(*) FROM filler", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 400, "the copy holds every committed row");
+        let staging_left = std::fs::read_dir(tmp.path().join("backups"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".partial"));
+        assert!(!staging_left, "the staging directory is removed");
+    }
+
+    #[test]
+    fn snapshot_leaves_no_backup_when_the_copy_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("kronn.db");
+        rusqlite::Connection::open(&source)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+            .unwrap();
+        let missing_dir = tmp.path().join("missing").join("kronn-auto-x.db");
+        assert!(snapshot_database(&source, &missing_dir, |_| Ok(u64::MAX)).is_err());
+        assert!(!missing_dir.exists());
+        let dest = tmp.path().join("kronn-auto-y.db");
+        std::fs::write(&dest, b"previous").unwrap();
+        assert!(
+            snapshot_database(&source, &dest, |_| Ok(u64::MAX)).is_err(),
+            "an existing file is never overwritten"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous");
+    }
+
     #[tokio::test]
     async fn perform_backup_writes_a_readable_copy() {
         // End-to-end through the REAL copy path. This is the test that was

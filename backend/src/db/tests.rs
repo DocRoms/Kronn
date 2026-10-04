@@ -3796,7 +3796,7 @@ fn workflow_get_last_runs_all_batch() {
     crate::db::workflows::insert_run(&conn, &sample_run("r2", "w1")).unwrap();
     crate::db::workflows::insert_run(&conn, &sample_run("r3", "w2")).unwrap();
 
-    let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    let last_runs = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
     assert_eq!(last_runs.len(), 2);
     assert!(last_runs.contains_key("w1"));
     assert!(last_runs.contains_key("w2"));
@@ -3807,7 +3807,7 @@ fn workflow_get_last_runs_all_batch() {
 fn workflow_get_last_runs_all_empty() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
-    let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    let last_runs = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
     assert!(last_runs.is_empty());
 }
 
@@ -3827,6 +3827,39 @@ fn workflow_latest_run_aggregation_does_not_read_run_payload_pages() {
         "latest-run aggregation must stay on index pages rather than visiting every payload row: {plan:?}"
     );
     assert!(!plan.iter().any(|detail| detail.contains("TEMP B-TREE")));
+}
+
+#[test]
+fn workflow_list_last_runs_never_read_run_payloads() {
+    // KT-1019 — the list showed five scalars yet rebuilt every latest
+    // step_results_json with json_each; all five sit after the payload.
+    let conn = test_db();
+    let plan = super::query_plan(&conn, crate::db::workflows::LAST_RUN_SUMMARIES_SQL);
+    assert!(
+        super::table_reads_outside_index(&plan, &["wr", "workflow_runs"]).is_empty(),
+        "the last-run summaries must be answered from an index: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("idx_workflow_runs_summary")),
+        "{plan:?}"
+    );
+    assert!(!crate::db::workflows::LAST_RUN_SUMMARIES_SQL.contains("json_each"));
+}
+
+#[test]
+fn table_reads_outside_index_flags_a_payload_walk() {
+    // The guard above must be able to fail: a column outside every index.
+    let conn = test_db();
+    let plan = super::query_plan(
+        &conn,
+        "SELECT SUM(LENGTH(step_results_json)) FROM workflow_runs",
+    );
+    assert_eq!(
+        super::table_reads_outside_index(&plan, &["workflow_runs"]).len(),
+        1,
+        "{plan:?}"
+    );
 }
 
 #[test]
@@ -3902,7 +3935,7 @@ fn workflow_latest_run_index_upgrade_preserves_existing_runs_and_ties() {
         )
         .unwrap();
     assert!(indexed, "the upgrade must create the latest-run index");
-    let latest = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    let latest = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
     assert_eq!(latest.len(), 2);
     assert!(!latest.contains_key("without-runs"));
     assert_eq!(latest["qp:latest-batch"].id, "batch");

@@ -2142,35 +2142,40 @@ pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get the last run for a workflow (for summaries).
-/// Batch-load the last run for every workflow in one query (avoids N+1).
-pub fn get_last_runs_all(
-    conn: &Connection,
-) -> Result<std::collections::HashMap<String, WorkflowRun>> {
-    // Must alias columns with wr. prefix since we join to `latest` — can't
-    // reuse the WORKFLOW_RUN_COLS constant directly. Keep the list in sync.
-    // Callers only build a WorkflowRunSummary from this, so the step outputs
-    // were being decoded just to be dropped.
-    let mut stmt = conn.prepare(
-        "SELECT wr.id, wr.workflow_id, wr.status, wr.trigger_context,
-                CASE WHEN json_valid(wr.step_results_json)
-                     THEN (SELECT json_group_array(json_set(value, '$.output', ''))
-                           FROM json_each(wr.step_results_json))
-                     ELSE '[]' END,
-                wr.tokens_used, wr.workspace_path, wr.started_at, wr.finished_at,
-                wr.run_type, wr.batch_total, wr.batch_completed, wr.batch_failed, wr.batch_name,
-                wr.parent_run_id, wr.state
-         FROM workflow_runs wr
-         INNER JOIN (
-             SELECT workflow_id, MAX(started_at) AS max_started
-             FROM workflow_runs GROUP BY workflow_id
-         ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started",
-    )?;
+/// The latest run of every workflow, as the five fields the workflow list
+/// shows. Answered from `idx_workflow_runs_summary` alone: every column read
+/// here is stored after the step results, so touching the table would walk
+/// each run's payload pages.
+pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
+            wr.finished_at, wr.tokens_used
+     FROM workflow_runs wr
+     INNER JOIN (
+         SELECT workflow_id, MAX(started_at) AS max_started
+         FROM workflow_runs GROUP BY workflow_id
+     ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started";
 
+/// Batch-load the last run summary of every workflow in one query (no N+1).
+pub fn get_last_run_summaries(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, crate::models::WorkflowRunSummary>> {
+    let mut stmt = conn.prepare(LAST_RUN_SUMMARIES_SQL)?;
+    let rows = stmt.query_map([], |row| {
+        let status: String = row.get(2)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            crate::models::WorkflowRunSummary {
+                id: row.get(1)?,
+                status: parse_run_status(&status),
+                started_at: parse_dt(row.get::<_, String>(3)?),
+                finished_at: row.get::<_, Option<String>>(4)?.map(parse_dt),
+                tokens_used: row.get::<_, i64>(5)?.max(0) as u64,
+            },
+        ))
+    })?;
     let mut map = std::collections::HashMap::new();
-    let rows = stmt.query_map([], |row| Ok(row_to_run(row)))?;
-    for row in rows.filter_map(|r| r.ok()) {
-        map.insert(row.workflow_id.clone(), row);
+    for row in rows {
+        let (workflow_id, summary) = row?;
+        map.insert(workflow_id, summary);
     }
     Ok(map)
 }

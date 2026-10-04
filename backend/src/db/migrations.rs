@@ -815,6 +815,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "211_ui_preferences",
         include_str!("sql/211_ui_preferences.sql"),
     ),
+    (
+        "212_workflow_runs_summary_index",
+        include_str!("sql/212_workflow_runs_summary_index.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -968,6 +972,79 @@ fn migration_is_applied(conn: &Connection, current_name: &str) -> Result<bool> {
 
 /// Run all migrations, optionally backing up the database file first.
 pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> {
+    run_with_backup_checked(conn, db_path, |dir| fs2::available_space(dir))
+}
+
+/// Copy the database to `<db>.backup` before a migration touches it.
+///
+/// Written to a temporary file, synced, then renamed, so a copy cut short by a
+/// full disk never replaces the previous good backup. A failed copy stops the
+/// upgrade: migrating without a way back is the user's call, made with
+/// `KRONN_MIGRATION_BACKUP=0`, never a warning in a log.
+fn backup_before_migration(
+    path: &Path,
+    available_space: impl Fn(&Path) -> std::io::Result<u64>,
+) -> Result<()> {
+    if std::env::var("KRONN_MIGRATION_BACKUP").is_ok_and(|value| value.trim() == "0") {
+        tracing::warn!("KRONN_MIGRATION_BACKUP=0: migrating without a database backup");
+        return Ok(());
+    }
+    let backup_path = path.with_extension("db.backup");
+    let staging = path.with_extension("db.backup.tmp");
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let size = std::fs::metadata(path)?.len();
+    if size == 0 {
+        return Ok(());
+    }
+    let mib = |bytes: u64| bytes / (1024 * 1024);
+    let available = available_space(dir)
+        .map_err(|e| anyhow::anyhow!("cannot read the free space in {}: {e}", dir.display()))?;
+    let required = crate::core::backup::required_free_bytes(size);
+    if available < required {
+        anyhow::bail!(
+            "not enough free space to back up the database before upgrading it: \
+             {} needs about {} MB, {} MB are free in {}. Free some space, or set \
+             KRONN_MIGRATION_BACKUP=0 to upgrade without a backup.",
+            path.display(),
+            mib(required),
+            mib(available),
+            dir.display()
+        );
+    }
+    tracing::info!(
+        "Preparing the upgrade: backing up the database ({} MB) to {}",
+        mib(size),
+        backup_path.display()
+    );
+    let started = std::time::Instant::now();
+    let copied = (|| -> std::io::Result<()> {
+        if staging.exists() {
+            std::fs::remove_file(&staging)?;
+        }
+        std::fs::copy(path, &staging)?;
+        std::fs::File::open(&staging)?.sync_all()?;
+        std::fs::rename(&staging, &backup_path)
+    })();
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&staging);
+        anyhow::bail!(
+            "could not back up the database before upgrading it ({e}); no migration was applied. \
+             Fix the cause, or set KRONN_MIGRATION_BACKUP=0 to upgrade without a backup."
+        );
+    }
+    tracing::info!(
+        "Database backed up to {} in {:.1} s",
+        backup_path.display(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn run_with_backup_checked(
+    conn: &Connection,
+    db_path: Option<&Path>,
+    available_space: impl Fn(&Path) -> std::io::Result<u64>,
+) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (
             id INTEGER PRIMARY KEY,
@@ -995,12 +1072,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
                         e
                     );
                 }
-                let backup_path = path.with_extension("db.backup");
-                if let Err(e) = std::fs::copy(path, &backup_path) {
-                    tracing::warn!("Failed to backup database before migration: {}", e);
-                } else {
-                    tracing::info!("Database backed up to {}", backup_path.display());
-                }
+                backup_before_migration(path, available_space)?;
                 // Also snapshot config.toml (co-located in the data dir) — it
                 // holds auth_token + other config a bad migration/crash could
                 // strand. Best-effort; absence is fine (Docker/env configs).
@@ -1486,6 +1558,80 @@ mod tests {
             .query_row("SELECT val FROM t WHERE id = 1", [], |row| row.get(0))
             .unwrap();
         assert_eq!(val, "hello");
+    }
+
+    fn seeded_file_db(dir: &Path) -> std::path::PathBuf {
+        let db_path = dir.join("test.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT); INSERT INTO t(val) VALUES ('été');",
+        )
+        .unwrap();
+        db_path
+    }
+
+    fn applied_migrations(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_failed_migration_backup_keeps_the_previous_one_and_applies_nothing() {
+        // KT-1019 — std::fs::copy truncated the backup first: a full disk left
+        // a partial copy in place of the good one, and migrations went ahead.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_file_db(dir.path());
+        let backup_path = db_path.with_extension("db.backup");
+        std::fs::write(&backup_path, b"previous good backup").unwrap();
+        // A directory where the copy is staged makes the copy fail.
+        let staging = db_path.with_extension("db.backup.tmp");
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("keep"), b"x").unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let error = run_with_backup_checked(&conn, Some(&db_path), |_| Ok(u64::MAX))
+            .expect_err("a failed backup stops the upgrade");
+        assert!(
+            error.to_string().contains("no migration was applied"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            b"previous good backup"
+        );
+        assert_eq!(applied_migrations(&conn), 0);
+    }
+
+    #[test]
+    fn a_full_disk_refuses_the_upgrade_before_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_file_db(dir.path());
+        let conn = Connection::open(&db_path).unwrap();
+        let error = run_with_backup_checked(&conn, Some(&db_path), |_| Ok(1))
+            .expect_err("no room for the backup");
+        assert!(
+            error.to_string().contains("KRONN_MIGRATION_BACKUP=0"),
+            "{error}"
+        );
+        assert!(!db_path.with_extension("db.backup").exists());
+        assert!(!db_path.with_extension("db.backup.tmp").exists());
+        assert_eq!(applied_migrations(&conn), 0);
+    }
+
+    #[test]
+    fn the_migration_backup_is_renamed_into_place_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_file_db(dir.path());
+        std::fs::write(db_path.with_extension("db.backup"), b"older").unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        run_with_backup_checked(&conn, Some(&db_path), |_| Ok(u64::MAX)).unwrap();
+        assert!(!db_path.with_extension("db.backup.tmp").exists());
+        let backup = Connection::open(db_path.with_extension("db.backup")).unwrap();
+        let val: String = backup
+            .query_row("SELECT val FROM t WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(val, "été");
+        assert!(applied_migrations(&conn) > 0);
     }
 
     #[test]

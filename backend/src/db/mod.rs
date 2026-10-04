@@ -67,6 +67,37 @@ mod tests;
 #[cfg(test)]
 mod release_gate_tests;
 
+/// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
+#[cfg(test)]
+pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut statement = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("query plan");
+    statement
+        .query_map([], |row| row.get::<_, String>(3))
+        .expect("query plan rows")
+        .collect::<rusqlite::Result<_>>()
+        .expect("query plan details")
+}
+
+/// Plan lines that read one of `aliases` from its table rather than from a
+/// covering index. On `workflow_runs` such a read walks the run's step results
+/// to reach any later column.
+#[cfg(test)]
+pub(crate) fn table_reads_outside_index(plan: &[String], aliases: &[&str]) -> Vec<String> {
+    plan.iter()
+        .filter(|line| {
+            let mut words = line.split_whitespace();
+            let verb = words.next().unwrap_or_default();
+            let target = words.next().unwrap_or_default();
+            matches!(verb, "SCAN" | "SEARCH")
+                && aliases.contains(&target)
+                && !line.contains("COVERING INDEX")
+        })
+        .cloned()
+        .collect()
+}
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::Connection;

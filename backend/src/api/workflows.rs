@@ -1369,24 +1369,19 @@ pub async fn step_schema() -> Json<ApiResponse<serde_json::Value>> {
 
 /// GET /api/workflows
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
+    // Read connection: a list must not queue behind a run writing its steps.
     match state
         .db
-        .with_conn(|conn| {
+        .with_read_conn(|conn| {
             let workflows = crate::db::workflows::list_workflows(conn)?;
             // Batch-load last runs and project names (avoids N+1 queries)
-            let last_runs = crate::db::workflows::get_last_runs_all(conn)?;
+            let mut last_runs = crate::db::workflows::get_last_run_summaries(conn)?;
             let project_names = crate::db::projects::get_project_names(conn)?;
 
             let summaries = workflows
                 .into_iter()
                 .map(|wf| {
-                    let last_run = last_runs.get(&wf.id).map(|r| WorkflowRunSummary {
-                        id: r.id.clone(),
-                        status: r.status.clone(),
-                        started_at: r.started_at,
-                        finished_at: r.finished_at,
-                        tokens_used: r.tokens_used,
-                    });
+                    let last_run = last_runs.remove(&wf.id);
 
                     let project_name = wf
                         .project_id
