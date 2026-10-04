@@ -511,6 +511,23 @@ fn main_tree_refusal_message(refusal: &crate::workflows::workspace::MainTreeRefu
     }
 }
 
+/// The definition a run executes against: the run's launch project wins over
+/// the workflow's, so a global workflow keeps its project across a gate pause,
+/// a restart, or an edit of the workflow while the run waited.
+pub(crate) fn workflow_in_run_project<'a>(
+    workflow: &'a Workflow,
+    run: &WorkflowRun,
+) -> std::borrow::Cow<'a, Workflow> {
+    match run.project_id.as_deref() {
+        Some(project_id) if workflow.project_id.as_deref() != Some(project_id) => {
+            let mut resolved = workflow.clone();
+            resolved.project_id = Some(project_id.to_string());
+            std::borrow::Cow::Owned(resolved)
+        }
+        _ => std::borrow::Cow::Borrowed(workflow),
+    }
+}
+
 /// Execute a complete workflow run.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_run(
@@ -590,6 +607,8 @@ async fn execute_run_with_notify_policy(
             .map_err(anyhow::Error::msg)
         })
         .await?;
+    let workflow_in_project = workflow_in_run_project(workflow, run);
+    let workflow: &Workflow = &workflow_in_project;
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
     // SSE is an optional live projection, never part of the execution
@@ -3133,6 +3152,8 @@ pub async fn resume_run(
     events_tx: Option<EventSender>,
 ) -> Result<()> {
     use anyhow::anyhow;
+    let workflow_in_project = workflow_in_run_project(workflow, run);
+    let workflow: &Workflow = &workflow_in_project;
 
     let gate_step_idx = run
         .step_results
@@ -5032,6 +5053,7 @@ mod tests {
             produced_branches: vec![],
             concurrency_key: None,
             triggered_by_run_id: None,
+            project_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -7014,6 +7036,243 @@ mod tests {
         assert!(
             persisted.finished_at.is_some(),
             "terminal write re-stamps finished_at"
+        );
+    }
+
+    // ─── KT-1015 — the run's launch project ──────────────────────────────
+
+    async fn insert_project_at(state: &crate::AppState, id: &str, path: &std::path::Path) {
+        let now = chrono::Utc::now();
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "path": path.to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+    }
+
+    fn pwd_step(name: &str) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Exec;
+        step.exec_command = Some("pwd".into());
+        step
+    }
+
+    fn dir_name(path: &std::path::Path) -> String {
+        path.file_name().unwrap().to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_manual_launch_records_the_launch_project_of_a_global_workflow() {
+        let (state, _, _) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-manual-launch", repo.path()).await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-manual-global".into();
+        workflow.project_id = None;
+        let wf_db = workflow.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+
+        let (_, run) = crate::api::workflows::create_manual_run(
+            &state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                project_id: Some("proj-manual-launch".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("admitted");
+        let run_id = run.id.clone();
+        let persisted = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.project_id.as_deref(), Some("proj-manual-launch"));
+        let stored = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_workflow(conn, "wf-manual-global"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.project_id, None, "the workflow itself stays global");
+    }
+
+    #[tokio::test]
+    async fn a_gate_approval_continues_a_global_workflow_in_its_launch_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-gate-launch", repo.path()).await;
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-gate-global".into();
+        workflow.project_id = None;
+        workflow.exec_allowlist = vec!["pwd".into()];
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        workflow.steps = vec![gate, pwd_step("where")];
+
+        let mut run = pending_run("run-gate-global", &workflow.id);
+        run.project_id = Some("proj-gate-launch".into());
+        run.status = RunStatus::Running;
+        let mut paused = fake_result("review");
+        paused.status = RunStatus::WaitingApproval;
+        run.step_results = vec![paused];
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        resume_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("approval resumes");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(
+            output.contains(&dir_name(repo.path())),
+            "the step ran in the launch project, not in the server's cwd: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_resume_continues_a_global_workflow_in_its_launch_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-interrupted-launch", repo.path()).await;
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-interrupted-global".into();
+        workflow.project_id = None;
+        workflow.exec_allowlist = vec!["pwd".into()];
+        workflow.steps = vec![
+            json_data_step("first", serde_json::json!({ "n": 1 })),
+            pwd_step("where"),
+        ];
+        let mut run = pending_run("run-interrupted-global", &workflow.id);
+        run.project_id = Some("proj-interrupted-launch".into());
+        run.status = RunStatus::Interrupted;
+        run.step_results.push(fake_result("first"));
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        claim_interrupted_run(&state, &mut run, false)
+            .await
+            .expect("claim");
+        resume_interrupted_run(state.clone(), &workflow, &mut run, &tokens, &agents, None)
+            .await
+            .expect("resume");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(output.contains(&dir_name(repo.path())), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_sub_workflow_pinned_to_another_project_runs_in_that_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let parent_repo = tempfile::TempDir::new().unwrap();
+        git_in(parent_repo.path(), &["init", "-q", "-b", "main"]).await;
+        git_in(
+            parent_repo.path(),
+            &["config", "user.email", "t@kronn.local"],
+        )
+        .await;
+        git_in(parent_repo.path(), &["config", "user.name", "t"]).await;
+        std::fs::write(parent_repo.path().join("README.md"), "a\n").unwrap();
+        git_in(parent_repo.path(), &["add", "."]).await;
+        git_in(parent_repo.path(), &["commit", "-q", "-m", "init"]).await;
+        let child_repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-parent-a", parent_repo.path()).await;
+        insert_project_at(&state, "proj-child-b", child_repo.path()).await;
+
+        let mut child = make_workflow_with_artifacts(Default::default());
+        child.id = "wf-child-b".into();
+        child.name = "child-b".into();
+        child.project_id = Some("proj-child-b".into());
+        child.exec_allowlist = vec!["pwd".into()];
+        child.steps = vec![pwd_step("where")];
+        let child_db = child.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &child_db))
+            .await
+            .unwrap();
+
+        let mut parent = make_workflow_with_artifacts(Default::default());
+        parent.id = "wf-parent-a".into();
+        parent.name = "parent-a".into();
+        parent.project_id = Some("proj-parent-a".into());
+        parent.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        });
+        let mut call = fake_step("call_child");
+        call.step_type = StepType::SubWorkflow;
+        call.sub_workflow_id = Some(child.id.clone());
+        parent.steps = vec![call];
+        let mut run = pending_run("run-parent-a", &parent.id);
+        run.project_id = parent.project_id.clone();
+        insert_wf_and_run(&state, &parent, &run).await;
+
+        execute_run(
+            state.clone(),
+            &parent,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("parent run");
+
+        let child_run_id = run.step_results[0]
+            .child_run_id
+            .clone()
+            .unwrap_or_else(|| panic!("child launched: {:?}", run.step_results));
+        let child_run = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &child_run_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(child_run.project_id.as_deref(), Some("proj-child-b"));
+        assert_eq!(
+            child_run.status,
+            RunStatus::Success,
+            "{:?}",
+            child_run.step_results
+        );
+        let output = &child_run.step_results[0].output;
+        assert!(
+            output.contains(&dir_name(child_repo.path())),
+            "the child ran in its own project's repository: {output}"
+        );
+        assert!(
+            !output.contains(&dir_name(parent_repo.path())),
+            "never in the parent's worktree: {output}"
         );
     }
 }

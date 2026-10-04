@@ -2849,6 +2849,7 @@ pub(crate) async fn create_manual_run_with_id(
         produced_branches: vec![],
         concurrency_key,
         triggered_by_run_id: launch.triggered_by_run_id.clone(),
+        project_id: wf.project_id.clone(),
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -4210,7 +4211,7 @@ pub async fn test_worktree(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let project_path = if let Some(pid) = workflow.project_id.clone() {
+    let project_path = if let Some(pid) = run.project_id.clone().or(workflow.project_id.clone()) {
         match state
             .db
             .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
@@ -4337,7 +4338,7 @@ pub async fn delete_test_worktree(
         }
     };
 
-    let project_path = if let Some(pid) = workflow.project_id.clone() {
+    let project_path = if let Some(pid) = run.project_id.clone().or(workflow.project_id.clone()) {
         match state
             .db
             .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))

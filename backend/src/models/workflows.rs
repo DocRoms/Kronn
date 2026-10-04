@@ -1337,6 +1337,10 @@ pub struct WorkflowRun {
     /// `parent_run_id`, the two runs have independent lifecycles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggered_by_run_id: Option<String>,
+    /// The project resolved at launch: the workflow's own, or the launcher's
+    /// for a global workflow. Resume and worktree cleanup read it first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     /// Provenance enrichment (DERIVED, not persisted). When this run is a
     /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
     /// workflow id + name + tick time so the UI can render

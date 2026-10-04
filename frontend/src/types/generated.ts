@@ -8569,6 +8569,11 @@ concurrency_key?: string | null,
  */
 triggered_by_run_id?: string | null,
 /**
+ * The project resolved at launch: the workflow's own, or the launcher's
+ * for a global workflow. Resume and worktree cleanup read it first.
+ */
+project_id?: string | null,
+/**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's
  * workflow id + name + tick time so the UI can render

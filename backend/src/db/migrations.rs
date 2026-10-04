@@ -807,6 +807,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "209_audit_run_provenance",
         include_str!("sql/209_audit_run_provenance.sql"),
     ),
+    (
+        "210_workflow_runs_project",
+        include_str!("sql/210_workflow_runs_project.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

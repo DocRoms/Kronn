@@ -598,6 +598,7 @@ pub(crate) fn create_batch_run_with_launch_settings(
         produced_branches: vec![],
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -1171,7 +1172,7 @@ pub fn terminal_workspace_cleanup_candidates(
         "SELECT run.id, workflow.name, project.path, run.workspace_path
            FROM workflow_runs run
            JOIN workflows workflow ON workflow.id = run.workflow_id
-           JOIN projects project ON project.id = workflow.project_id
+           JOIN projects project ON project.id = COALESCE(run.project_id, workflow.project_id)
           WHERE run.workspace_path IS NOT NULL
             AND run.status IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')
             AND NOT EXISTS (
@@ -1250,7 +1251,7 @@ pub fn stale_interrupted_workspace_candidates(
                 )
            FROM workflow_runs run
            JOIN workflows workflow ON workflow.id = run.workflow_id
-           LEFT JOIN projects project ON project.id = workflow.project_id
+           LEFT JOIN projects project ON project.id = COALESCE(run.project_id, workflow.project_id)
           WHERE run.workspace_path IS NOT NULL
           ORDER BY run.started_at, run.id",
     )?;
@@ -1682,8 +1683,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
          run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
-         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             run.id,
             run.workflow_id,
@@ -1718,6 +1719,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.batch_no_response as i64,
             run.concurrency_key,
             run.triggered_by_run_id,
+            run.project_id,
         ],
     )?;
     crate::db::shared_runs::sync_workflow(conn, run)?;
@@ -2354,6 +2356,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     let batch_no_response: i64 = row.get(17).unwrap_or(0);
     let concurrency_key: Option<String> = row.get(18).unwrap_or(None);
     let triggered_by_run_id: Option<String> = row.get(19).unwrap_or(None);
+    let project_id: Option<String> = row.get(20).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -2387,6 +2390,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
             .unwrap_or_default(),
         concurrency_key,
         triggered_by_run_id,
+        project_id,
         // Derived, filled by enrich_parent_provenance (never from a column).
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2399,7 +2403,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id";
+    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id";
 
 /// Blanks every step's `output` inside SQLite, leaving names, statuses and
 /// timings intact. `output` is the entire weight of the column — measured at

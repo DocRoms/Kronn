@@ -185,6 +185,13 @@ Release notes for 0.9.3 and earlier are available in the
   response, and stay unknown (never zero) when not reported. Showing it per
   audit step comes later.
 
+- A workflow run now keeps the project it was launched in (KT-1015). A global
+  workflow launched from a project lost that project after a gate approval or a
+  resume and continued with no working directory, and its worktree was never
+  cleaned at startup. A sub-workflow pinned to another project now runs in that
+  project's repository instead of the parent's worktree; as a foreach child it
+  is refused, since it would have to share the parent's worktree.
+
 ### Changed
 
 - Plugins page: one export and one import flow, the plugin bundle, where each

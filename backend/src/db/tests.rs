@@ -2038,6 +2038,7 @@ pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         produced_branches: vec![],
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -2439,6 +2440,79 @@ fn terminal_workspace_cleanup_candidates_exclude_interrupted_and_owned_paths() {
         Some("/repo/.kronn/worktrees/owned"),
         "an active child retains durable ownership of the checkout"
     );
+}
+
+#[test]
+fn a_run_keeps_its_launch_project_and_cleanup_reads_it_for_a_global_workflow() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-launch', 'Launch', '/repo-launch', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    // A global workflow: no project of its own.
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w-global")).unwrap();
+    let mut done = sample_run("global-done", "w-global");
+    done.status = RunStatus::Success;
+    done.project_id = Some("p-launch".into());
+    done.workspace_path = Some("/repo-launch/.kronn/worktrees/global".into());
+    crate::db::workflows::insert_run(&conn, &done).unwrap();
+    let mut stale = sample_run("global-stale", "w-global");
+    stale.status = RunStatus::Interrupted;
+    stale.project_id = Some("p-launch".into());
+    stale.finished_at = Some(Utc::now() - chrono::Duration::days(30));
+    stale.workspace_path = Some("/repo-launch/.kronn/worktrees/stale".into());
+    crate::db::workflows::insert_run(&conn, &stale).unwrap();
+
+    let loaded = crate::db::workflows::get_run(&conn, "global-done")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.project_id.as_deref(), Some("p-launch"));
+    let listed = crate::db::workflows::list_runs(&conn, "w-global").unwrap();
+    assert!(listed
+        .iter()
+        .all(|run| run.project_id.as_deref() == Some("p-launch")));
+
+    let terminal = crate::db::workflows::terminal_workspace_cleanup_candidates(&conn).unwrap();
+    assert_eq!(terminal.len(), 1, "{terminal:?}");
+    assert_eq!(terminal[0].run_id, "global-done");
+    assert_eq!(terminal[0].project_path, "/repo-launch");
+    let interrupted = crate::db::workflows::stale_interrupted_workspace_candidates(
+        &conn,
+        Utc::now() - chrono::Duration::days(7),
+    )
+    .unwrap();
+    assert_eq!(interrupted.len(), 1, "{interrupted:?}");
+    assert_eq!(interrupted[0].project_path, "/repo-launch");
+}
+
+#[test]
+fn a_run_without_a_launch_project_still_falls_back_to_its_workflow_project() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-legacy', 'Legacy', '/repo-legacy', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    let mut workflow = sample_workflow("w-legacy");
+    workflow.project_id = Some("p-legacy".into());
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let mut done = sample_run("legacy-done", "w-legacy");
+    done.status = RunStatus::Failed;
+    done.workspace_path = Some("/repo-legacy/.kronn/worktrees/x".into());
+    crate::db::workflows::insert_run(&conn, &done).unwrap();
+    assert_eq!(
+        crate::db::workflows::get_run(&conn, "legacy-done")
+            .unwrap()
+            .unwrap()
+            .project_id,
+        None
+    );
+    let terminal = crate::db::workflows::terminal_workspace_cleanup_candidates(&conn).unwrap();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].project_path, "/repo-legacy");
 }
 
 #[test]
@@ -3409,6 +3483,7 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         produced_branches: vec![],
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
