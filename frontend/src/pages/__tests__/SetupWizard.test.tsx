@@ -23,10 +23,12 @@ vi.mock('../../lib/api', () => ({
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
+    getAgentAccess: vi.fn().mockResolvedValue({}),
+    setAgentAccess: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
-import { agents as agentsApi, setup as setupApi, projects as projectsApi } from '../../lib/api';
+import { agents as agentsApi, setup as setupApi, projects as projectsApi, config as configApi } from '../../lib/api';
 import { SetupWizard } from '../SetupWizard';
 import type { AgentDetection, DetectedRepo, SetupStatus, Project } from '../../types/generated';
 
@@ -34,7 +36,8 @@ import type { AgentDetection, DetectedRepo, SetupStatus, Project } from '../../t
 
 const makeAgent = (overrides: Partial<AgentDetection> = {}): AgentDetection => ({
   name: 'Claude Code',
-  agent_type: 'ClaudeCode',
+  // Kiro has no full-access switch, so the default fixture skips the access step.
+  agent_type: 'Kiro',
   installed: true,
   enabled: true,
   path: '/usr/bin/claude',
@@ -520,5 +523,60 @@ describe('SetupWizard — completing state', () => {
       // Should show preparing state
       expect(document.body.textContent).toContain('Préparation du dashboard');
     }
+  });
+});
+
+describe('SetupWizard — access step (KT-975)', () => {
+  const clickButton = async (text: string) => {
+    const btn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes(text));
+    expect(btn, text).toBeTruthy();
+    await act(async () => { btn!.click(); });
+  };
+
+  const toAccessStep = async (agents: AgentDetection[]) => {
+    vi.mocked(agentsApi.detect).mockResolvedValue(agents);
+    await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
+    await clickButton('Continuer');
+  };
+
+  it('offers full access per supported agent, off by default, and skips agents it does not apply to', async () => {
+    await toAccessStep([
+      makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode' }),
+      makeAgent({ name: 'Kiro', agent_type: 'Kiro' }),
+    ]);
+    const sw = document.body.querySelector('[data-testid="setup-full-access-ClaudeCode"]');
+    expect(sw?.getAttribute('role')).toBe('switch');
+    expect(sw?.getAttribute('aria-checked')).toBe('false');
+    expect(document.body.querySelector('[data-testid="setup-full-access-Kiro"]')).toBeNull();
+    expect(configApi.setAgentAccess).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing until the risk dialog is confirmed, and nothing at all when cancelled', async () => {
+    await toAccessStep([makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode' })]);
+    const sw = document.body.querySelector('[data-testid="setup-full-access-ClaudeCode"]') as HTMLButtonElement;
+    await act(async () => { sw.click(); });
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeTruthy();
+    expect(configApi.setAgentAccess).not.toHaveBeenCalled();
+    await clickButton('Annuler');
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(configApi.setAgentAccess).not.toHaveBeenCalled();
+
+    await act(async () => { sw.click(); });
+    await clickButton("Activer l'accès complet");
+    expect(configApi.setAgentAccess).toHaveBeenCalledWith({ agent: 'ClaudeCode', full_access: true });
+    expect(sw.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('shows the access an existing config already grants', async () => {
+    vi.mocked(configApi.getAgentAccess).mockResolvedValueOnce({ claude_code: { full_access: true } } as never);
+    await toAccessStep([makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode' })]);
+    const sw = document.body.querySelector('[data-testid="setup-full-access-ClaudeCode"]');
+    expect(sw?.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('continues to the repositories step', async () => {
+    await toAccessStep([makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode' })]);
+    await clickButton('Continuer');
+    expect(document.body.textContent).toContain('Dépôts détectés');
   });
 });

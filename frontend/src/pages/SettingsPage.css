@@ -7092,3 +7092,7 @@
   color: var(--kr-danger);
   font-size: 0.85em;
 }
+
+.set-agent-access-row {
+  padding: var(--kr-sp-3) var(--kr-sp-7) var(--kr-sp-4);
+}

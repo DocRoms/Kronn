@@ -79,6 +79,7 @@ import {
   pendingAgentReplies,
   targetsFromComposerText, draftBelongsToTurn } from '../lib/messageTargets';
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
+import { safeGetItem, safeSetItem } from '../lib/safeStorage';
 
 type LoadedDiscussion = Discussion
   & Partial<Pick<DiscussionDetail,
@@ -782,9 +783,9 @@ export function DiscussionsPage({
       // Contacts permanently open for exactly the large workspaces this
       // redesign targets. Apply the new default once, then respect every
       // subsequent user toggle.
-      if (!localStorage.getItem('kronn:discSidebarSectionsV2')) {
+      if (!safeGetItem('kronn:discSidebarSectionsV2')) {
         groups.add('__contacts__');
-        localStorage.setItem('kronn:discSidebarSectionsV2', '1');
+        safeSetItem('kronn:discSidebarSectionsV2', '1');
       }
       return groups;
     } catch { return new Set(['__contacts__']); }
@@ -1121,15 +1122,15 @@ export function DiscussionsPage({
 
   // Persist sidebar collapse state to localStorage
   useEffect(() => {
-    localStorage.setItem('kronn:discCollapsedGroups', JSON.stringify([...collapsedDiscGroups]));
+    safeSetItem('kronn:discCollapsedGroups', JSON.stringify([...collapsedDiscGroups]));
   }, [collapsedDiscGroups]);
   useEffect(() => {
-    localStorage.setItem('kronn:sidebarCollapsed', String(sidebarCollapsed));
+    safeSetItem('kronn:sidebarCollapsed', String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
   // Persist TTS preference
   useEffect(() => {
-    localStorage.setItem('kronn:ttsEnabled', String(ttsEnabled));
+    safeSetItem('kronn:ttsEnabled', String(ttsEnabled));
   }, [ttsEnabled]);
 
   // Stop TTS when switching conversations

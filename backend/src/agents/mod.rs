@@ -31,6 +31,7 @@ pub mod media_runner;
 pub mod media_worker;
 pub(crate) mod ollama_memory;
 pub mod provenance;
+pub(crate) mod read_only_repos;
 pub mod runner;
 pub mod tool_trace;
 pub mod tools;

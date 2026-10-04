@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import {
-  Puzzle, Pencil, X, Trash2, Upload, Info, Plug, Check, Minus, RefreshCw,
+  Puzzle, Pencil, X, Trash2, Info, Plug, Check, Minus, RefreshCw,
   Sparkles, Key, Terminal, ExternalLink, Save, Eye, FileText, Download,
 } from 'lucide-react';
-import type { McpConfigDisplay, McpServer, PluginInterface } from '../../types/generated';
+import type { McpConfigDisplay, PluginInterface } from '../../types/generated';
 import { linkify } from '../../lib/linkify';
 import { pluginCredentialKeys } from '../../lib/pluginCredentials';
 import { CustomApiForm } from './CustomApiForm';
@@ -32,7 +32,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     setCustomName, setCustomBaseUrl, setCustomDescription, setCustomDocsUrl,
     setCustomFields, setReplacingFields, setCustomEndpoints, setCustomAuth,
     setAddMcpGlobal, setAddMcpIncludeGeneral, setAddMcpProjectIds,
-    handleExportCustomPlugin, handleDeleteMcpConfig, setSelectedConfigId, resetAddMcp, setPortabilityMode,
+    handleDeleteMcpConfig, setSelectedConfigId, resetAddMcp, setPortabilityMode,
     editingEnvId, setEditingEnvId, editingEnv, setEditingEnv, editingEnvLoading, editingEnvError, visibleFields, setVisibleFields,
     handleStartEditSecrets, handleSaveSecrets, toggleFieldVisibility,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleToggleConfigProject, handleSetHostSync,
@@ -177,19 +177,6 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
                   title={t('mcp.custom.editSpec')}
                 >
                   <Pencil size={12} /> {t('mcp.custom.editSpec')}
-                </button>
-              )}
-              {/* 0.8.6 (#33) — Export as JSON. Spec-only, no
-                  credentials. Sharing the resulting payload is
-                  safe. */}
-              {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && (
-                <button
-                  className="mcp-btn-action"
-                  onClick={() => handleExportCustomPlugin(cfgServer as McpServer)}
-                  title={t('mcp.custom.copyAsJson')}
-                  data-testid="mcp-custom-export-json"
-                >
-                  <Upload size={12} /> {t('mcp.custom.copyAsJson')}
                 </button>
               )}
             </>
@@ -566,7 +553,6 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             <h3 className="mcp-detail-section-title"><Download size={12} />{t('mcp.sharePlugin')}</h3>
             <div className="mcp-advanced-actions">
               <button type="button" className="mcp-btn-action" onClick={() => setPortabilityMode('export')}><Download size={12} />{t('mcp.portability.export')}</button>
-              {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && <button type="button" className="mcp-btn-action" onClick={() => handleExportCustomPlugin(cfgServer as McpServer)}><Upload size={12} />{t('mcp.custom.copyAsJson')}</button>}
             </div>
           </div>
           <div className="mcp-danger-zone">
@@ -578,7 +564,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
               <p>{t('mcp.deleteConfigConfirm', cfg.label)}</p>
               <div className="mcp-advanced-actions">
                 <button type="button" className="mcp-btn-action mcp-btn-danger" onClick={async () => {
-                  if (await handleDeleteMcpConfig(cfg.id, true)) setSelectedConfigId(null);
+                  if (await handleDeleteMcpConfig(cfg.id)) setSelectedConfigId(null);
                 }}>{t('mcp.deleteDefinitely')}</button>
                 <button type="button" className="mcp-btn-action" onClick={() => setConfirmingDelete(false)}>{t('mcp.cancel')}</button>
               </div>

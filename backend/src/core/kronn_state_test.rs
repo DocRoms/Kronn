@@ -384,3 +384,89 @@ fn backfill_is_idempotent_on_repeated_calls() {
     assert_eq!(state.audits.len(), 1);
     cleanup(&tmp);
 }
+
+#[test]
+fn first_write_on_a_marker_project_keeps_its_validated_state() {
+    // The scanner no longer backfills: the first mutator seeds from the
+    // legacy evidence so an attestation does not downgrade a validated project.
+    let tmp = fresh_tmp("seed-legacy-on-mutation");
+    std::fs::write(
+        tmp.join("docs/AGENTS.md"),
+        "# p\n<!-- KRONN:VALIDATED -->\n",
+    )
+    .unwrap();
+    attest_documentation(&tmp).unwrap();
+    let state = read(&tmp).unwrap();
+    assert!(state.validated_at.is_some());
+    assert_eq!(state.audits.len(), 2);
+    assert_eq!(state.audits[0].provenance, AuditProvenance::LegacyEvidence);
+    assert_eq!(
+        state.audits[1].provenance,
+        AuditProvenance::HumanAttestation
+    );
+    cleanup(&tmp);
+}
+
+#[test]
+fn legacy_state_is_computed_without_writing() {
+    let tmp = fresh_tmp("legacy-state-pure");
+    assert!(legacy_state(&tmp).is_none());
+    std::fs::write(
+        tmp.join("docs/AGENTS.md"),
+        "# p\n<!-- KRONN:BOOTSTRAPPED -->\n",
+    )
+    .unwrap();
+    let state = legacy_state(&tmp).unwrap();
+    assert!(state.bootstrapped_at.is_some());
+    assert!(read(&tmp).is_none(), "no file written");
+    cleanup(&tmp);
+}
+
+#[test]
+fn write_leaves_no_temp_file_behind() {
+    let tmp = fresh_tmp("atomic-write");
+    record_audit(&tmp, "full").unwrap();
+    let names: Vec<String> = std::fs::read_dir(tmp.join("docs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(names, vec![KRONN_STATE_FILENAME.to_string()]);
+    cleanup(&tmp);
+}
+
+#[test]
+fn history_lookup_outside_git_or_with_the_file_present_finds_nothing() {
+    let tmp = fresh_tmp("history-none");
+    assert!(find_in_git_history(&tmp).is_none());
+    record_audit(&tmp, "full").unwrap();
+    assert!(find_in_git_history(&tmp).is_none());
+    assert!(restore_from_git_history(&tmp, "abcdef1").is_err());
+    cleanup(&tmp);
+}
+
+#[test]
+fn restore_refuses_a_commit_without_a_valid_state_file() {
+    let tmp = fresh_tmp("history-invalid");
+    let git = |args: &[&str]| {
+        assert!(crate::core::cmd::sync_cmd("git")
+            .arg("-C")
+            .arg(&tmp)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(tmp.join("docs/.kronn.json"), "not json").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "broken"]);
+    git(&["rm", "-q", "docs/.kronn.json"]);
+    git(&["commit", "-qm", "removed"]);
+    let found = find_in_git_history(&tmp).expect("the add commit is found, not the delete");
+    let err = restore_from_git_history(&tmp, &found.commit).unwrap_err();
+    assert!(err.contains("not a valid state file"), "{err}");
+    assert!(!tmp.join("docs/.kronn.json").exists());
+    cleanup(&tmp);
+}

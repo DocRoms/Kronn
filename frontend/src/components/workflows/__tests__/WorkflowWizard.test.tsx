@@ -681,6 +681,23 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(updateMock.mock.calls[0][1].steps[0].room_id).toBeNull();
   });
 
+  it.each([' /repos/API équipe\n\n/repos/backend ', '   '])('saves and clears read-only repository declarations: %s', async value => {
+    toStepsPage([mkStep({ read_only_repos: ['/repos/old'] }), mkStep({ name: 'beta' })]);
+    fireEvent.click(screen.getByText('wiz.advanced *'));
+    const repos = screen.getByLabelText('wiz.readOnlyRepos');
+    expect(repos).toHaveValue('/repos/old');
+    fireEvent.change(repos, { target: { value } });
+    fireEvent.blur(repos);
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalled());
+    expect(updateMock.mock.calls[0][1].steps[0].read_only_repos).toEqual(
+      value.trim() ? ['/repos/API équipe', '/repos/backend'] : [],
+    );
+    expect(updateMock.mock.calls[0][1].steps[1].read_only_repos).toBeUndefined();
+  });
+
   it('adding a rollback (on_failure) step renders a Notify rollback row', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const addRb = screen.getByText('wiz.addRollbackStep').closest('button') as HTMLButtonElement;

@@ -95,6 +95,18 @@ pub async fn perform_backup(
     }
     std::fs::create_dir_all(dir)?;
     let dest = dir.join(backup_filename(Utc::now()));
+    // The copy holds the full history in clear and may sit in a host dir
+    // (`KRONN_BACKUP_DIR`): create it owner-only before SQLite opens it.
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&dest)?;
+    }
     let dest_owned = dest.clone();
     db.with_conn(move |conn| {
         let mut dst = rusqlite::Connection::open(&dest_owned)?;
@@ -226,6 +238,22 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn perform_backup_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Database::open_path(&tmp.path().join("kronn.db")).expect("open db");
+        let written = perform_backup(&db, &tmp.path().join("backups"), 3)
+            .await
+            .unwrap()
+            .unwrap();
+        let mode = std::fs::metadata(&written).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a backup in a host dir must not be world-readable"
+        );
+    }
     #[tokio::test]
     async fn perform_backup_writes_a_readable_copy() {
         // End-to-end through the REAL copy path. This is the test that was

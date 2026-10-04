@@ -37,7 +37,7 @@ use crate::agents::runner::{AdapterLaunchOptions, PromptCacheUsage, SpawnIo};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -186,6 +186,9 @@ fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Optio
         ));
     }
 
+    if broker.audit_excludes("kronn-internal") {
+        return Some(format!("mcp_servers={{{}}}", entries.trim_end_matches(',')));
+    }
     let launch = crate::agents::runner::disc_introspection_mcp_command()?;
     broker.register_trusted_mcp_server(&AcpMcpServer {
         id: "kronn-internal".to_owned(),
@@ -399,8 +402,12 @@ impl AcpTransport for CodexAcpAdapter {
             args.push(thread.clone());
         }
         args.push("--json".into());
-        if self.launch.worker_context.is_none() {
+        // Read-only workflow launches also reuse the direct argv, including
+        // this flag, but still need the project MCP override below.
+        if self.launch.worker_args.is_none() {
             args.push("--skip-git-repo-check".into());
+        }
+        if self.launch.worker_context.is_none() {
             args.push("-c".into());
             args.push(
                 codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
@@ -424,7 +431,8 @@ impl AcpTransport for CodexAcpAdapter {
         }
         // `codex exec resume` rejects `--sandbox` and does not keep the first
         // turn's mode, so a resumed turn passes it as a config override.
-        if self.launch.worker_context.is_none() {
+        // Worker and read-only-repo launches carry their own policy args.
+        if self.launch.worker_context.is_none() && self.launch.worker_args.is_none() {
             if let Some(sandbox) = self.broker.session_policy().codex_sandbox {
                 if known_thread.is_none() {
                     args.push(format!("--sandbox={sandbox}"));
@@ -443,7 +451,7 @@ impl AcpTransport for CodexAcpAdapter {
             &cwd,
             "OPENAI_API_KEY",
             self.launch.api_key.as_deref(),
-            SpawnIo::Adapter,
+            SpawnIo::Adapter(&[]),
             self.discussion_id.as_deref(),
             self.launch.worker_context.as_ref(),
             self.launch.room_agent_context.as_ref(),
@@ -474,7 +482,7 @@ impl AcpTransport for CodexAcpAdapter {
         }
         drop(stdin);
 
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = crate::agents::runner::lossy_lines(stdout);
         let mut fatal: Option<String> = None;
         loop {
             match lines.next_line().await {
@@ -991,6 +999,25 @@ exec sleep 30"#,
         for var in crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS {
             assert!(argv.contains(var), "{var} must be listed by name: {argv}");
         }
+    }
+
+    #[test]
+    fn an_audit_session_override_has_no_kronn_internal_and_stays_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"Git": {"command": "git-mcp", "args": ["serve"]}}}"#,
+        )
+        .unwrap();
+        let broker = AcpPermissionBroker::scoped(
+            false,
+            AcpSessionScope::new(Some(dir.path().to_path_buf()), "unbound-discussion"),
+        );
+        let _audit = crate::core::audit_mcp_filter::AuditSessionGuard::enter(dir.path());
+        let config = codex_project_mcp_override(dir.path(), &broker).unwrap();
+        let parsed: toml::Value = toml::from_str(&config).expect("valid TOML");
+        let servers = parsed["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), ["Git"]);
     }
 
     #[test]

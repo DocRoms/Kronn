@@ -1987,7 +1987,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
-              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id;
+              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id || step.read_only_repos?.length;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
             const activeTypeOption = STEP_TYPE_GROUPS
@@ -4332,6 +4332,23 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             </div>
                           </div>
                         )}
+                      </div>
+                    )}
+
+                    {(!step.step_type || step.step_type.type === 'Agent') && (
+                      <div className="mb-5">
+                        <label className="wf-label">{t('wiz.readOnlyRepos')}</label>
+                        <textarea
+                          className="wf-textarea"
+                          rows={3}
+                          value={(step.read_only_repos ?? []).join('\n')}
+                          onChange={e => updateStep(i, { read_only_repos: e.target.value.split('\n') })}
+                          onBlur={e => updateStep(i, {
+                            read_only_repos: e.target.value.split('\n').map(path => path.trim()).filter(Boolean),
+                          })}
+                          aria-label={t('wiz.readOnlyRepos')}
+                        />
+                        <p className="text-2xs text-muted">{t('wiz.readOnlyReposHint')}</p>
                       </div>
                     )}
 

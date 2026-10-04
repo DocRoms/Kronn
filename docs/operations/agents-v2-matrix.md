@@ -144,6 +144,12 @@ the same job.
   builder's restrictive worktree/settings/tool policy and a fresh session.
   An explicit false override selects direct compatibility for that agent.
   [src: file: backend/tests/adapter_worker_policy.rs:1]
+  Native ACP agents (OpenCode, Gemini, Copilot, Kiro, Vibe) cannot be
+  launched as task workers: that route carries neither the delivery context
+  nor the worker permission scope. `task_worker_route_policy` decides this for
+  worker preparation and for every launch route; an exact joined CLI session
+  of the same agent stays eligible.
+  [src: file: backend/src/agents/runner.rs:3407]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.

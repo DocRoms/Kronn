@@ -481,6 +481,10 @@ pub enum AcpSessionEvent {
         output_tokens: u64,
         prompt_cache: crate::agents::runner::PromptCacheUsage,
     },
+    /// The turn's cost as the runtime itself reported it, in micro-USD.
+    Cost {
+        usd_micros: u64,
+    },
     /// A frame from the agent that carries nothing to show — a reasoning chunk,
     /// a plan, a status update. It is proof of life and nothing else: without
     /// it, a model thinking for ten minutes before it answers looks exactly like
@@ -856,9 +860,12 @@ impl AcpJsonRpcTransport {
         broker: Arc<AcpPermissionBroker>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            let mut bytes = Vec::new();
             loop {
-                let mut line = String::new();
-                let read = match stdout.read_line(&mut line).await {
+                bytes.clear();
+                // A stray non-UTF-8 byte must not end the session: frames are
+                // decoded lossily and a malformed one is discarded below.
+                let read = match stdout.read_until(b'\n', &mut bytes).await {
                     Ok(read) => read,
                     Err(error) => {
                         fail_pending(
@@ -877,6 +884,7 @@ impl AcpJsonRpcTransport {
                     .await;
                     return;
                 }
+                let line = String::from_utf8_lossy(&bytes);
                 let message: Value = match serde_json::from_str(line.trim()) {
                     Ok(message) => message,
                     Err(error) => {
@@ -1233,6 +1241,7 @@ fn native_session_mcp_servers(
     candidates: Vec<AcpMcpServer>,
     internal: Option<crate::agents::runner::InternalMcpCommand>,
 ) -> Vec<AcpMcpServer> {
+    let candidates = broker.without_audit_excluded(candidates);
     let requested_internal = candidates
         .iter()
         .any(|server| server.id == "kronn-internal");
@@ -1659,6 +1668,33 @@ mod tests {
             native_session_mcp_servers(&broker, vec![], Some(launch())).is_empty(),
             "catalogue probes that do not request MCP must remain tool-free"
         );
+    }
+
+    #[test]
+    fn an_audit_session_gets_no_kronn_internal_bridge() {
+        let project = tempfile::tempdir().unwrap();
+        let broker = AcpPermissionBroker::scoped(
+            false,
+            AcpSessionScope::new(Some(project.path().to_path_buf()), "unbound-discussion"),
+        );
+        let launch = crate::agents::runner::InternalMcpCommand {
+            command: "owned-kronn-mcp".into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        let bridge = AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: "owned-kronn-mcp".into(),
+            args: vec![],
+            allowed_tools: Vec::new(),
+        };
+        let _audit = crate::core::audit_mcp_filter::AuditSessionGuard::enter(project.path());
+        assert!(native_session_mcp_servers(&broker, vec![bridge], Some(launch)).is_empty());
+        assert!(broker
+            .audit_log()
+            .iter()
+            .any(|e| e.server.as_deref() == Some("kronn-internal")
+                && e.reason.contains("excluded from audits")));
     }
 
     struct FakeTransport;
@@ -2747,6 +2783,33 @@ mod tests {
         assert_eq!(config["permission"]["read"]["*.env.*"], "deny");
         assert_eq!(config["permission"]["read"]["*.env.dist"], "allow");
         assert_eq!(config["permission"]["read"]["*.env.example"], "allow");
+    }
+
+    /// A non-UTF-8 byte on the agent's stdout costs one discarded frame, not
+    /// the session: the dispatcher keeps reading and answers the next request.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_non_utf8_stdout_line_does_not_end_the_session() {
+        let peer = r#"
+import json, sys
+sys.stdout.buffer.write(b"\xff not json\n")
+sys.stdout.flush()
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("method") == "initialize":
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1}}) + "\n")
+        sys.stdout.flush()
+"#;
+        let mut command = crate::core::cmd::async_cmd("python3");
+        command.args(["-c", peer]);
+        let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
+            .await
+            .unwrap();
+        timeout(FIXTURE_GUARD, transport.initialize(request()))
+            .await
+            .expect("the dispatcher keeps reading after the invalid byte")
+            .expect("initialize succeeds");
+        transport.shutdown().await.unwrap();
     }
 
     /// KT-927 — stopping the agent stops what it started. Killing the ACP child

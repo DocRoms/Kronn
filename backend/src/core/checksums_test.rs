@@ -852,3 +852,19 @@ fn concurrent_drift_requests_for_one_project_compute_it_once() {
     assert_eq!(drift_computations(&dir), 1);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn head_and_branch_are_read_from_git_and_unknown_outside() {
+    let dir = temp_dir("head_and_branch");
+    assert_eq!(git_head_and_branch(&dir), (None, None));
+    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["config", "user.email", "t@t"]);
+    git(&dir, &["config", "user.name", "t"]);
+    fs::write(dir.join("a.txt"), "a").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "a"]);
+    let (head, branch) = git_head_and_branch(&dir);
+    assert_eq!(head.map(|h| h.len()), Some(40));
+    assert_eq!(branch.as_deref(), Some("main"));
+    let _ = fs::remove_dir_all(&dir);
+}

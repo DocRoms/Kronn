@@ -693,6 +693,11 @@ pub struct WorkflowStep {
     /// on every launch and every resume of the step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_id: Option<String>,
+    /// Absolute local repository paths made readable, never writable, by this
+    /// Agent step. Supported by Claude Code and Codex only; empty preserves
+    /// the existing launch policy. Paths are validated again before launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_repos: Vec<String>,
 }
 
 /// Config for the "Multi-agent review" option on an Agent step (see

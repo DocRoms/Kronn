@@ -235,6 +235,26 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             api_spec: None,
         },
         McpDefinition {
+            id: "mcp-mysql".into(),
+            name: "MySQL / MariaDB".into(),
+            description: "SQL queries and schema inspection, read-only by default — community server".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@benborla29/mcp-server-mysql".into()],
+            },
+            // Every declared key is required (`find_incomplete_configs`): the
+            // port (3306) and the database (multi-database mode) are optional.
+            env_keys: vec!["MYSQL_HOST".into(), "MYSQL_USER".into(), "MYSQL_PASS".into()],
+            tags: vec!["database".into(), "sql".into(), "mysql".into(), "mariadb".into()],
+            token_url: None,
+            token_help: Some("Host, user and password of a MySQL 5.7+ or MariaDB server. Optional: MYSQL_PORT (default 3306) and MYSQL_DB (left empty, the server works across databases). Use a read-only database user: writes stay off unless ALLOW_INSERT_OPERATION, ALLOW_UPDATE_OPERATION or ALLOW_DELETE_OPERATION is set to true.".into()),
+            publisher: "benborla".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: Some("# MySQL / MariaDB — Usage Context\n\nTool: `mysql_query` runs one SQL statement; resource `mysql://tables` lists tables and columns.\n- Read the schema from `mysql://tables` before writing a query.\n- Add `LIMIT` to exploratory SELECTs to keep results small.\n- Writes are refused unless the server was started with an ALLOW_*_OPERATION flag: ask before enabling one, and never run DDL or DELETE without explicit confirmation.\n- Never echo the connection password.".into()),
+            api_spec: None,
+        },
+        McpDefinition {
             id: "mcp-sqlite".into(),
             name: "SQLite".into(),
             description: "Embedded database queries — official MCP server".into(),

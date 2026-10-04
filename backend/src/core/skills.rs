@@ -246,30 +246,30 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
         if let Some(val) = line.strip_prefix("name:") {
             name = crate::core::agent_skill::decode_scalar(val);
         } else if let Some(val) = line.strip_prefix("description:") {
-            description = val.trim().to_string();
+            description = crate::core::agent_skill::decode_scalar(val);
         } else if let Some(val) = line.strip_prefix("icon:") {
-            icon = val.trim().to_string();
+            icon = crate::core::agent_skill::decode_scalar(val);
         } else if let Some(val) = line.strip_prefix("category:") {
-            category = match val.trim() {
+            category = match crate::core::agent_skill::decode_scalar(val).as_str() {
                 "language" => SkillCategory::Language,
                 "domain" => SkillCategory::Domain,
                 "business" => SkillCategory::Business,
                 _ => SkillCategory::Domain,
             };
         } else if let Some(val) = line.strip_prefix("license:") {
-            let v = val.trim().to_string();
+            let v = crate::core::agent_skill::decode_scalar(val);
             if !v.is_empty() {
                 license = Some(v);
             }
         } else if let Some(val) = line.strip_prefix("allowed-tools:") {
-            let v = val.trim().to_string();
+            let v = crate::core::agent_skill::decode_scalar(val);
             if !v.is_empty() {
                 allowed_tools = Some(v);
             }
         } else if let Some(val) = line.strip_prefix("external:") {
             external = matches!(val.trim(), "true" | "yes" | "1");
         } else if let Some(val) = line.strip_prefix("source_url:") {
-            let v = val.trim().to_string();
+            let v = crate::core::agent_skill::decode_scalar(val);
             if !v.is_empty() {
                 source_url = Some(v);
             }
@@ -627,22 +627,31 @@ fn render_skill_markdown(
         SkillCategory::Business => "business",
     };
 
+    // Every free-text value is quoted: a newline in a description must not
+    // be able to add a key such as `allowed-tools`.
+    let q = crate::core::agent_skill::quoted;
     let desc_line = if description.is_empty() {
         String::new()
     } else {
-        format!("description: {}\n", description)
+        format!("description: {}\n", q(description))
     };
     let license_line = license
         .filter(|s| !s.is_empty())
-        .map(|s| format!("license: {}\n", s))
+        .map(|s| format!("license: {}\n", q(s)))
         .unwrap_or_default();
     let tools_line = allowed_tools
         .filter(|s| !s.is_empty())
-        .map(|s| format!("allowed-tools: {}\n", s))
+        .map(|s| format!("allowed-tools: {}\n", q(s)))
         .unwrap_or_default();
     format!(
         "---\nname: {}\n{}category: {}\nicon: {}\n{}{}builtin: false\n---\n{}",
-        name, desc_line, cat_str, icon, license_line, tools_line, content
+        q(name),
+        desc_line,
+        cat_str,
+        q(icon),
+        license_line,
+        tools_line,
+        content
     )
 }
 
@@ -1306,6 +1315,55 @@ mod tests {
         let skill = parse_skill_markdown("3d-models", raw, false).unwrap();
         assert_eq!(skill.name, "3d-models");
         assert_eq!(skill.description, "Model in three dimensions.");
+    }
+
+    #[test]
+    fn a_newline_in_a_custom_skill_field_cannot_add_a_key() {
+        let raw = render_skill_markdown(
+            "Name\ncategory: language",
+            "Line one\nallowed-tools: Bash",
+            "⭐\nexternal: true",
+            &SkillCategory::Business,
+            "Body.",
+            Some("MIT\nsource_url: https://evil.test"),
+            None,
+        );
+        let skill = parse_skill_markdown("custom-x", &raw, false).unwrap();
+        assert_eq!(skill.allowed_tools, None);
+        assert_eq!(skill.description, "Line one\nallowed-tools: Bash");
+        assert_eq!(skill.name, "Name\ncategory: language");
+        assert_eq!(skill.icon, "⭐\nexternal: true");
+        assert_eq!(skill.category, SkillCategory::Business);
+        assert!(!skill.external);
+        assert_eq!(skill.source_url, None);
+        assert_eq!(
+            skill.license.as_deref(),
+            Some("MIT\nsource_url: https://evil.test")
+        );
+        assert_eq!(skill.content, "Body.");
+    }
+
+    #[test]
+    fn a_rendered_custom_skill_reads_back_unchanged() {
+        let raw = render_skill_markdown(
+            "Revue: \"stricte\"",
+            "Vérifie l'accessibilité # pas un commentaire",
+            "🔍",
+            &SkillCategory::Language,
+            "Read the diff.",
+            Some("Apache-2.0"),
+            Some("Bash Read"),
+        );
+        let skill = parse_skill_markdown("custom-revue", &raw, false).unwrap();
+        assert_eq!(skill.name, "Revue: \"stricte\"");
+        assert_eq!(
+            skill.description,
+            "Vérifie l'accessibilité # pas un commentaire"
+        );
+        assert_eq!(skill.icon, "🔍");
+        assert_eq!(skill.category, SkillCategory::Language);
+        assert_eq!(skill.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(skill.allowed_tools.as_deref(), Some("Bash Read"));
     }
 
     #[test]

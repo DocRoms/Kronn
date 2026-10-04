@@ -62,12 +62,17 @@ pub fn parse_secret(hex_str: &str) -> Result<[u8; 32], String> {
     Ok(key)
 }
 
-/// Mask a string for display: show first 2 and last 2 chars.
+/// Mask a string for display: show first 2 and last 2 chars, counted in
+/// chars (never bytes). Values under 12 chars are fully masked so the hint
+/// never reveals a meaningful share of a short secret.
 pub fn mask_value(value: &str) -> String {
-    if value.len() <= 6 {
-        return "*".repeat(value.len());
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() < 12 {
+        return "*".repeat(chars.len());
     }
-    format!("{}...{}", &value[..2], &value[value.len() - 2..])
+    let head: String = chars[..2].iter().collect();
+    let tail: String = chars[chars.len() - 2..].iter().collect();
+    format!("{head}...{tail}")
 }
 
 /// Domain-separated fingerprint ("KID") of a 32-byte encryption key.
@@ -330,8 +335,21 @@ mod tests {
 
     #[test]
     fn mask_value_longer_strings_show_first_two_and_last_two() {
-        assert_eq!(mask_value("abcdefg"), "ab...fg");
+        assert_eq!(mask_value("abcdefghijkl"), "ab...kl");
         assert_eq!(mask_value("ghp_abcdefghijklmnop"), "gh...op");
+    }
+
+    #[test]
+    fn mask_value_short_secrets_reveal_nothing() {
+        assert_eq!(mask_value("abcdefg"), "*******");
+        assert_eq!(mask_value("abcdefghijk"), "***********");
+    }
+
+    #[test]
+    fn mask_value_never_panics_on_multibyte_edges() {
+        assert_eq!(mask_value("éé-secret-value-ü€"), "éé...ü€");
+        assert_eq!(mask_value("🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑"), "🔑🔑...🔑🔑");
+        assert_eq!(mask_value("ééééé"), "*****");
     }
 
     #[test]

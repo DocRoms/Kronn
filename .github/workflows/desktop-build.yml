@@ -16,12 +16,54 @@ permissions:
   contents: write
 
 jobs:
+  # Installers are named after the committed version, so a tag that differs
+  # from VERSION, or a tree with stale version markers, must fail before any
+  # runner builds.
+  release-checks:
+    name: Version and tag consistency
+    runs-on: ubuntu-latest
+    outputs:
+      # The commit every later job and check uses, resolved once: on a manual
+      # dispatch the selected branch and the requested tag can differ.
+      sha: ${{ steps.resolve.outputs.sha }}
+    env:
+      # Tag push: the pushed tag. Dispatch: the requested release, or empty
+      # for a build-only dry run on the selected branch.
+      RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Resolve the release commit
+        id: resolve
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check version consistency and the tag
+        run: scripts/check-version-sync.sh "$RELEASE_TAG"
+
   dependency-review:
     name: Pre-release dependency review
+    needs: release-checks
     uses: ./.github/workflows/dependency-review.yml
+    with:
+      ref: ${{ needs.release-checks.outputs.sha }}
+
+  # The full CI gate, label-gated jobs included, on the exact commit that is
+  # published. ci-test.yml has no push trigger, so a tag carries no check run.
+  quality-gates:
+    name: CI quality gates on the release commit
+    needs: release-checks
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      ref: ${{ needs.release-checks.outputs.sha }}
 
   build-desktop:
-    needs: dependency-review
+    needs: [release-checks, dependency-review]
     strategy:
       fail-fast: false
       matrix:
@@ -54,8 +96,7 @@ jobs:
         uses: actions/checkout@v7
         timeout-minutes: 5
         with:
-          # Installers attached to an existing release are built from its tag.
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.release-checks.outputs.sha }}
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
@@ -298,9 +339,7 @@ jobs:
           name: kronn-windows
           path: |
             desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
             target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
           if-no-files-found: error
 
       - name: Upload macOS artifacts
@@ -326,21 +365,21 @@ jobs:
           name: kronn-linux
           path: |
             desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
-            desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
             target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
   # ─── Prove that every matrix leg produced an installer ─────────────
 
   verify-installers:
-    needs: build-desktop
+    needs: [release-checks, build-desktop]
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout verifier
         uses: actions/checkout@v7
         timeout-minutes: 5
+        with:
+          ref: ${{ needs.release-checks.outputs.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -353,7 +392,7 @@ jobs:
   # ─── Create GitHub Release on tag ─────────────────────────────────
 
   release:
-    needs: [build-desktop, verify-installers]
+    needs: [release-checks, build-desktop, verify-installers, quality-gates]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     env:
@@ -366,7 +405,13 @@ jobs:
         uses: actions/checkout@v7
         timeout-minutes: 5
         with:
-          sparse-checkout: backend/sidecars/docs
+          # On workflow_dispatch the default checkout is the selected branch;
+          # the CHANGELOG and checks must come from the release being attached.
+          ref: ${{ needs.release-checks.outputs.sha }}
+          sparse-checkout: |
+            backend/sidecars/docs
+            backend/scripts/ci
+            CHANGELOG.md
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -376,6 +421,15 @@ jobs:
       - name: List verified artifacts
         run: find artifacts -type f | sort
 
+      # The body links only what is attached and carries the version's CHANGELOG
+      # section; it fails when a platform or the section is missing.
+      - name: Generate the release body
+        if: inputs.release_tag == ''
+        run: |
+          python3 backend/scripts/ci/release_notes.py \
+            --tag "$RELEASE_TAG" --changelog CHANGELOG.md \
+            --assets-dir artifacts --output release-body.md
+
       - name: Create Release
         if: inputs.release_tag == ''
         uses: softprops/action-gh-release@v2
@@ -383,55 +437,18 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           draft: true
           generate_release_notes: true
-          body: |
-            ## Installation
-
-            | OS | File | Min version |
-            |----|------|-------------|
-            | Windows | `.exe` (NSIS) or `.msi` | Windows 10+ |
-            | macOS Apple Silicon | `aarch64.dmg` | macOS 11+ |
-            | macOS Intel | `x64.dmg` | macOS 11+ |
-            | Linux | `.deb` or `.AppImage` | Ubuntu 22.04+ / Debian 12+ / Fedora 38+ |
-
-            ### Linux — webkit2gtk-4.1 requirement
-
-            Kronn uses Tauri 2 which requires **`libwebkit2gtk-4.1-0`** at runtime.
-            On Ubuntu 22.04 it lives in the `universe` repository (enabled by
-            default on desktop installs). On minimal/server installs you may need:
-            ```bash
-            sudo add-apt-repository universe
-            sudo apt update
-            sudo apt install -y libwebkit2gtk-4.1-0
-            sudo dpkg -i kronn_*.deb
-            sudo apt-get -f install   # resolves any remaining deps
-            ```
-            On older distros (Ubuntu 20.04, RHEL 8) the `.deb` will not install —
-            use the AppImage instead, or upgrade.
-
-            ### macOS — "app is damaged" warning
-
-            Kronn is open-source and not signed with an Apple Developer certificate.
-            macOS Gatekeeper may show _"Kronn is damaged and can't be opened"_.
-
-            **Fix** — run this once after installing:
-            ```bash
-            xattr -cr /Applications/Kronn.app
-            ```
-            Then open the app normally.
-
+          body_path: release-body.md
           files: |
             artifacts/**/*.exe
-            artifacts/**/*.msi
             artifacts/**/*.dmg
             artifacts/**/*.deb
-            artifacts/**/*.AppImage
 
       # A release published by hand, before this workflow fixed its trigger,
       # gets its installers attached without touching its notes or status.
       - name: Attach installers to an existing release
         if: inputs.release_tag != ''
         run: |
-          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0 \
+          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.deb' \) -print0 \
             | xargs -0 gh release upload "$RELEASE_TAG" --clobber
 
       # Blocking: the release must carry an installer for every platform.

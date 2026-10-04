@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useLayoutEffect } from 'react';
 
 /**
  * Wraps an async fn with a synchronous re-entry guard backed by a ref.
@@ -26,18 +26,19 @@ export function useAsyncGuard<TArgs extends unknown[], TResult>(
   fn: (...args: TArgs) => Promise<TResult>,
 ): (...args: TArgs) => Promise<TResult | undefined> {
   const inFlightRef = useRef(false);
+  // The guarded handler is stable but always runs the latest closure, so it
+  // never acts on stale props, state or translations.
+  const latestRef = useRef(fn);
+  useLayoutEffect(() => {
+    latestRef.current = fn;
+  });
   return useCallback(async (...args: TArgs): Promise<TResult | undefined> => {
     if (inFlightRef.current) return undefined;
     inFlightRef.current = true;
     try {
-      return await fn(...args);
+      return await latestRef.current(...args);
     } finally {
       inFlightRef.current = false;
     }
-    // Intentionally do not depend on `fn` — the ref protects across renders
-    // even if the caller passes a fresh arrow function each time. Recreating
-    // the callback on every render would also recreate the ref-binding,
-    // which is harmless but noisy in deps lists.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }

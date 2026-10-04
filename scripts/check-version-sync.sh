@@ -126,6 +126,15 @@ for site in site/index.html site/en.html site/es.html; do
     fi
 done
 
+# Optional argument: the release tag being built; installers are named after
+# VERSION, so a tag that differs would publish mismatched files.
+if [ -n "${1:-}" ]; then
+    release_tag="${1#v}"
+    if [ "$release_tag" != "$VERSION" ]; then
+        fail "release tag '$1' does not match VERSION '$VERSION'"
+    fi
+fi
+
 if [ "$failures" -ne 0 ]; then
     printf '\nVersion consistency check failed (%s issue(s)).\n' "$failures" >&2
     exit 1

@@ -28,6 +28,27 @@ pub struct GitStatusQuery {
     /// Requested page size. The git layer clamps it to its hard maximum.
     #[serde(default = "default_git_commit_limit")]
     pub commit_limit: u32,
+    /// Answer from local Git only; the PR link is whatever an earlier lookup
+    /// already found. A client fetches the full status afterwards.
+    #[serde(default)]
+    pub skip_pr_lookup: bool,
+}
+
+fn status_page(
+    repo_path: &std::path::Path,
+    commit_offset: u32,
+    commit_limit: u32,
+    skip_pr_lookup: bool,
+) -> Result<GitStatusResponse, String> {
+    if skip_pr_lookup {
+        crate::api::git_ops::run_git_status_page_without_pr_lookup(
+            repo_path,
+            commit_offset,
+            commit_limit,
+        )
+    } else {
+        crate::api::git_ops::run_git_status_page(repo_path, commit_offset, commit_limit)
+    }
 }
 
 fn default_git_commit_limit() -> u32 {
@@ -212,9 +233,9 @@ pub async fn git_status(
         let exclusions_for_compute = exclusions.clone();
         let commit_offset = query.commit_offset;
         let commit_limit = query.commit_limit;
+        let skip_pr_lookup = query.skip_pr_lookup;
         let result = tokio::task::spawn_blocking(move || {
-            let mut status =
-                crate::api::git_ops::run_git_status_page(&repo_path, commit_offset, commit_limit)?;
+            let mut status = status_page(&repo_path, commit_offset, commit_limit, skip_pr_lookup)?;
             status.languages = crate::api::ai_docs::compute_source_language_stats(
                 &repo_path,
                 &exclusions_for_compute,
@@ -246,8 +267,14 @@ pub async fn git_status(
     let repo_path_for_status = repo_path.clone();
     let commit_offset = query.commit_offset;
     let commit_limit = query.commit_limit;
+    let skip_pr_lookup = query.skip_pr_lookup;
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_git_status_page(&repo_path_for_status, commit_offset, commit_limit)
+        status_page(
+            &repo_path_for_status,
+            commit_offset,
+            commit_limit,
+            skip_pr_lookup,
+        )
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));

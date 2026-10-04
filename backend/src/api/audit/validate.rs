@@ -205,6 +205,13 @@ pub async fn validate_audit(
                     blocking.join("; ")
                 ));
             }
+            let unresolved = unresolved_unknowns(&project_path, &report);
+            if !unresolved.is_empty() {
+                return Err(format!(
+                    "Unresolved unknowns remain (`{{{{...}}}}` or `<!-- TODO: ... -->`); the validation must settle them before the project is validated: {}",
+                    unresolved.join(", ")
+                ));
+            }
         }
 
         kronn_state::mark_validated(&project_path)
@@ -218,6 +225,25 @@ pub async fn validate_audit(
 
     let status = scanner::detect_audit_status(&project.path);
     Json(ApiResponse::ok(status))
+}
+
+/// Documents Kronn owns that still carry a placeholder or a `TODO:` marker.
+/// The validation's first phase settles every such unknown; TD sheets and
+/// dated reports have their own review and are not counted here.
+fn unresolved_unknowns(
+    project_path: &std::path::Path,
+    report: &crate::core::document_optimization::DocumentaryOptimizationReport,
+) -> Vec<String> {
+    let mut paths: Vec<String> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "placeholder")
+        .filter(|d| !d.path.starts_with("docs/tech-debt/") && !d.path.starts_with("docs/reports/"))
+        .filter(|d| crate::core::document_optimization::kronn_owns(project_path, &d.path))
+        .map(|d| d.path.clone())
+        .collect();
+    paths.dedup();
+    paths
 }
 
 /// POST /api/projects/:id/mark-bootstrapped
@@ -350,6 +376,62 @@ mod validate_gate_tests {
             !state.audit_tracker.lock().unwrap().leased.contains("p1"),
             "the lease must be released after validation"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unresolved_unknowns_block_validation_until_settled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        let docs = tmp.path().join("docs");
+        std::fs::write(
+            docs.join("AGENTS.md"),
+            "# Projet\n\nSee [glossary](glossary.md) and [notes](legacy/notes.md).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            docs.join("glossary.md"),
+            "# Glossaire\n\n<!-- TODO: ask user — what does « lot » mean? -->\n",
+        )
+        .unwrap();
+        // A TD sheet's own unknowns and a human legacy note do not count.
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(
+            docs.join("tech-debt/TD-20260901-x.md"),
+            "# TD\n<!-- TODO: verify -->\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(docs.join("legacy")).unwrap();
+        std::fs::write(
+            docs.join("legacy/notes.md"),
+            "# Notes\n<!-- TODO: later -->\n",
+        )
+        .unwrap();
+
+        let refused = call(&state).await;
+        assert!(!refused.success);
+        let error = refused.error.unwrap();
+        assert!(error.contains("docs/glossary.md"), "{error}");
+        assert!(
+            !error.contains("tech-debt") && !error.contains("legacy"),
+            "{error}"
+        );
+        assert!(crate::core::kronn_state::read(tmp.path()).is_none_or(|s| s.validated_at.is_none()));
+
+        std::fs::write(
+            docs.join("glossary.md"),
+            "# Glossaire\n\n- **lot**: unknown.\n",
+        )
+        .unwrap();
+        let validated = call(&state).await;
+        assert!(validated.success, "{:?}", validated.error);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

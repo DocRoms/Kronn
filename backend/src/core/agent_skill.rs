@@ -96,8 +96,9 @@ pub fn decode_scalar(raw: &str) -> String {
     raw.to_string()
 }
 
-/// Writes `value` as a YAML double-quoted scalar.
-fn quoted(value: &str) -> String {
+/// Writes `value` as a YAML double-quoted scalar (also a valid TOML basic
+/// string): a newline or a quote in it can never start another key.
+pub(crate) fn quoted(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
@@ -113,6 +114,13 @@ fn name_scalar(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+fn metadata_key_ok(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// The text of a `SKILL.md`. The header is always valid YAML; the body follows
@@ -134,7 +142,8 @@ pub fn render(file: &AgentSkillFile) -> String {
     }
     if !file.metadata.is_empty() {
         header.push_str("metadata:\n");
-        for (key, value) in &file.metadata {
+        // A key is written bare, so one that could break the line is dropped.
+        for (key, value) in file.metadata.iter().filter(|(key, _)| metadata_key_ok(key)) {
             header.push_str(&format!("  {key}: {}\n", quoted(value)));
         }
     }

@@ -271,6 +271,11 @@ fn scan(root: &Path) -> Scan {
                 }
                 Some(true) => {}
             }
+            // A catalogue skill Kronn synced here is not the repository's own.
+            if crate::core::native_files::is_kronn_owned_file(root, &format!("{dir}/{SKILL_FILE}"))
+            {
+                continue;
+            }
             if slug == RESERVED_SLUG {
                 blocked.push(block(&dir, SkillMigrationBlockReason::ReservedSlug));
                 continue;
@@ -582,6 +587,48 @@ mod tests {
             );
         }
         assert!(!root.path().join(".agents/skills/skill-0").exists());
+    }
+
+    #[test]
+    fn kronn_synced_catalogue_copies_are_not_offered_for_migration() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().to_string();
+        crate::core::native_files::sync_project_native_files(
+            &path,
+            &["accessibility".to_string(), "api-design".to_string()],
+            &[],
+        )
+        .unwrap();
+        assert!(root
+            .path()
+            .join(".claude/skills/accessibility/SKILL.md")
+            .exists());
+        skill(root.path(), ".gemini/skills", "repo-own", "Body.");
+
+        let plan = plan(root.path());
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts.len());
+        assert_eq!(
+            plan.moves
+                .iter()
+                .map(|entry| entry.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["repo-own"]
+        );
+
+        // Once the reader edits Kronn's copy it is theirs, and it is offered.
+        write(
+            root.path(),
+            ".claude/skills/api-design/SKILL.md",
+            "---\nname: api-design\ndescription: Mine now.\n---\n\nEdited.\n",
+        );
+        let plan = super::plan(root.path());
+        assert!(
+            plan.moves.iter().any(|entry| entry.slug == "api-design")
+                || plan
+                    .conflicts
+                    .iter()
+                    .any(|entry| entry.slug == "api-design")
+        );
     }
 
     #[test]

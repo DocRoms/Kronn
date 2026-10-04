@@ -289,6 +289,8 @@ pub async fn partial_audit(
             guard_project,
         );
         drop_guard.hold_lease();
+        // Its agent sessions get the audit MCP rule (no kronn-internal, no Memory).
+        let _audit_session = crate::core::audit_mcp_filter::AuditSessionGuard::enter(&project_path);
 
         // A3 — partial runs get their own audit_runs row: history and the
         // resume/validate rules must see a failed or newer partial, not
@@ -612,7 +614,7 @@ pub async fn partial_audit(
                                         output: Some(output_tokens),
                                         cache_read: prompt_cache.cached_prompt_tokens,
                                         cache_write: prompt_cache.cache_write_prompt_tokens,
-                                    };
+                                    }.inclusive_for(&agent_type);
                                 }
                             }
                         }
@@ -624,7 +626,7 @@ pub async fn partial_audit(
                     if !is_stream_json {
                         let reading = crate::db::audit_runs::StepTokens::from_reported(
                             process.reported_usage_counters(),
-                        );
+                        ).inclusive_for(&agent_type);
                         if reading.total().is_some() {
                             step_usage = reading;
                         }
@@ -1046,11 +1048,7 @@ pub async fn partial_audit(
             let idx: Vec<String> = refreshed_files.iter()
                 .filter(|f| f.contains("inconsistencies-")).cloned().collect();
             tokio::task::spawn_blocking(move || {
-                idx.iter()
-                    .filter_map(|f| std::fs::read_to_string(pp.join(f)).ok())
-                    .flat_map(|c| super::reconciliation::parse_index_td_ids(&c))
-                    .collect::<std::collections::BTreeSet<String>>()
-                    .into_iter().collect::<Vec<String>>()
+                super::reconciliation::td_validation_scope(&pp, &idx).undecided
             }).await.unwrap_or_default()
         };
         // Exact partition (matrix v2): requested = succeeded ⊎ unchanged ⊎ failed.

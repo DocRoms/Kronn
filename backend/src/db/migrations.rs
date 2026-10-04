@@ -804,8 +804,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/208_workflow_runs_type_index.sql"),
     ),
     (
+        // Main and 0.14.3 both took 209. Receipts are keyed by name, so each
+        // keeps its name: a database from either line applies the other's.
         "209_live_page_declared_embed_origins",
         include_str!("sql/209_live_page_declared_embed_origins.sql"),
+    ),
+    (
+        "209_audit_run_provenance",
+        include_str!("sql/209_audit_run_provenance.sql"),
     ),
 ];
 

@@ -112,3 +112,6 @@
   .audit-tl-step-side { grid-column: 2; flex-wrap: wrap; }
   .audit-tl-phase-head { flex-wrap: wrap; }
 }
+
+.audit-tl-recorded ul { list-style: none; margin: var(--kr-sp-3) 0 0; padding: 0; display: grid; gap: var(--kr-sp-2); }
+.audit-tl-recorded li { display: flex; flex-wrap: wrap; gap: var(--kr-sp-4); align-items: baseline; font-size: var(--kr-fs-md); }

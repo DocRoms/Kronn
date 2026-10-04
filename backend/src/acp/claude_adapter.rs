@@ -14,8 +14,10 @@
 //!   registry: the exact authorized project set (or none), plus Kronn's own bridge.
 //!   Kronn parses the local project registry to validate that shape, but
 //!   never serializes secret values into argv, prompts, events, client
-//!   payloads, or audit entries; a credential-bearing or mixed file is
-//!   refused wholesale, without falling back to the global account registry.
+//!   payloads, or audit entries: an entry's env values become `${KRONN_MCP_…}`
+//!   references that Claude resolves from its own process environment, and an
+//!   unauthorized or credential-in-args entry is left out on its own, without
+//!   falling back to the global account registry.
 //!
 //! There is no `--permission-prompt-tool` (or equivalent) flag in this CLI
 //! version, so Claude cannot call back into Kronn mid-turn the way a native
@@ -27,7 +29,7 @@ use super::adapter_process::{AdapterProcess, StderrTail};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use super::permission_broker::{AcpAuditEntry, AcpPermissionBroker, AcpSessionScope};
@@ -47,6 +49,8 @@ pub struct ClaudeAcpAdapter {
     broker: AcpPermissionBroker,
     allowed_tools: Mutex<Vec<String>>,
     project_mcp_config: Mutex<String>,
+    /// Values of the references in `project_mcp_config`, for the CLI's env.
+    project_mcp_env: Mutex<Vec<(String, String)>>,
     discussion_id: Option<String>,
     has_run_before: AtomicBool,
     process: AdapterProcess,
@@ -69,6 +73,7 @@ impl ClaudeAcpAdapter {
             broker: AcpPermissionBroker::scoped(full_access, scope),
             allowed_tools: Mutex::new(Vec::new()),
             project_mcp_config: Mutex::new(r#"{"mcpServers":{}}"#.into()),
+            project_mcp_env: Mutex::new(Vec::new()),
             discussion_id,
             has_run_before: AtomicBool::new(false),
             process: AdapterProcess::default(),
@@ -124,29 +129,42 @@ impl AcpTransport for ClaudeAcpAdapter {
             .iter()
             .filter(|server| server.id != "kronn-internal")
             .count();
-        let authorized_file = crate::core::mcp_scanner::read_mcp_json(&request.cwd)
-            .map(|mut file| {
-                file.mcp_servers.remove("kronn-internal");
-                file
-            })
-            .filter(|file| {
-                file.mcp_servers.len() == project_servers
-                    && file.mcp_servers.iter().all(|(id, entry)| {
-                        servers.iter().any(|server| {
-                            server.id == *id
+        // Keep each entry the broker authorized, on its own: one refused entry
+        // must not cost the project its other servers (KT-1003). Env values
+        // become references, resolved from this launch's environment only.
+        let mut mcp_env = Vec::new();
+        let mut file = crate::core::mcp_scanner::McpJsonFile {
+            mcp_servers: Default::default(),
+        };
+        if project_servers > 0 {
+            if let Some(read) = crate::core::mcp_scanner::read_mcp_json(&request.cwd) {
+                for (id, mut entry) in read.mcp_servers {
+                    let authorized = id != "kronn-internal"
+                        && entry.url.is_none()
+                        && servers.iter().any(|server| {
+                            server.id == id
                                 && entry.command.as_deref() == Some(server.command.as_str())
                                 && entry.args.as_deref().unwrap_or_default() == server.args
-                        }) && entry.url.is_none()
-                            && !crate::core::mcp_scanner::mcp_entry_leaks_secret(entry)
-                    })
-            });
+                        })
+                        && !entry
+                            .args
+                            .as_deref()
+                            .is_some_and(crate::core::mcp_scanner::mcp_args_carry_secret);
+                    if !authorized {
+                        continue;
+                    }
+                    let (references, values) =
+                        crate::core::mcp_secret_refs::entry_as_references(&id, &entry.env);
+                    entry.env = references;
+                    mcp_env.extend(values);
+                    file.mcp_servers.insert(id, entry);
+                }
+            }
+        }
         // Always supply a strict registry, even when absent/invalid/refused.
         // Freeze the exact authorized snapshot: passing its path would allow
         // a replacement between negotiation and CLI startup to widen scope.
-        let mut file = authorized_file.unwrap_or(crate::core::mcp_scanner::McpJsonFile {
-            mcp_servers: Default::default(),
-        });
-        if self.launch.worker_context.is_none() {
+        if self.launch.worker_context.is_none() && !self.broker.audit_excludes("kronn-internal") {
             // This is Kronn's own executable, not a user/project declaration.
             // Keep room tools available even without a project, just as the
             // Codex adapter does, without restoring any global MCP registry.
@@ -172,6 +190,7 @@ impl AcpTransport for ClaudeAcpAdapter {
                 },
             );
         }
+        *self.project_mcp_env.lock().await = mcp_env;
         *self.project_mcp_config.lock().await = serde_json::to_string(&file)
             .map_err(|_| AcpError::Transport("Cannot serialize scoped Claude MCP config".into()))?;
         let mut allowed_tools = Vec::new();
@@ -292,6 +311,11 @@ impl AcpTransport for ClaudeAcpAdapter {
         if self.broker.session_policy().claude_skip_permissions {
             args.push("--dangerously-skip-permissions".into());
         }
+        let mcp_env = if self.launch.worker_context.is_none() {
+            self.project_mcp_env.lock().await.clone()
+        } else {
+            Vec::new()
+        };
         let mut child = crate::agents::runner::try_spawn(
             &self.program,
             None,
@@ -299,7 +323,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             &cwd,
             "ANTHROPIC_API_KEY",
             self.launch.api_key.as_deref(),
-            SpawnIo::Adapter,
+            SpawnIo::Adapter(&mcp_env),
             self.discussion_id.as_deref(),
             self.launch.worker_context.as_ref(),
             self.launch.room_agent_context.as_ref(),
@@ -336,7 +360,7 @@ impl AcpTransport for ClaudeAcpAdapter {
         }
         drop(stdin);
 
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = crate::agents::runner::lossy_lines(stdout);
         let mut failure: Option<String> = None;
         // Input of the tool call in progress, streamed as partial JSON.
         let mut tool_input: Option<String> = None;
@@ -370,7 +394,7 @@ impl AcpTransport for ClaudeAcpAdapter {
                             input_tokens,
                             output_tokens,
                             prompt_cache,
-                            ..
+                            cost_usd,
                         } => {
                             let _ = events
                                 .send(AcpSessionEvent::Usage {
@@ -379,6 +403,11 @@ impl AcpTransport for ClaudeAcpAdapter {
                                     prompt_cache,
                                 })
                                 .await;
+                            if let Some(usd_micros) =
+                                cost_usd.and_then(crate::agents::chat_codec::usd_to_micros)
+                            {
+                                let _ = events.send(AcpSessionEvent::Cost { usd_micros }).await;
+                            }
                         }
                         StreamJsonEvent::ToolStart(name) => {
                             tool_input = Some(String::new());
@@ -707,28 +736,35 @@ exec sleep 30"#,
     }
 
     #[tokio::test]
-    async fn a_credentialed_project_mcp_config_is_omitted_instead_of_leaking_or_bypassing_scope() {
-        // A project `.mcp.json` carrying a real credential value. The adapter
-        // must not pass the original file wholesale: the broker excluded its
-        // credential-bearing server, and loading that file anyway would let a
-        // full-access Claude invocation bypass the authorized server set.
+    async fn a_credentialed_project_mcp_server_runs_by_reference_without_costing_the_others() {
+        // KT-1003: one entry carrying a credential used to void the whole
+        // project file. Each authorized entry now stays; its env values travel
+        // as references in argv and as values in the CLI's own environment.
         let dir = tempfile::tempdir().unwrap();
         let secret = "sk-super-secret-token-do-not-leak";
         std::fs::write(
             dir.path().join(".mcp.json"),
             format!(
-                r#"{{"mcpServers":{{"private":{{"command":"private-server","env":{{"API_KEY":"{secret}"}}}}}}}}"#
+                r#"{{"mcpServers":{{
+                    "private":{{"command":"private-server","env":{{"API_KEY":"{secret}"}}}},
+                    "plain":{{"command":"plain-server"}},
+                    "leaky":{{"command":"leaky-server","args":["--token","{secret}"]}},
+                    "unlisted":{{"command":"unlisted-server"}}
+                }}}}"#
             ),
         )
         .unwrap();
         let argv_file = dir.path().join("argv.txt");
+        let env_file = dir.path().join("env.txt");
         let fixture = crate::acp::test_support::write_fixture_script(
             dir.path(),
             &format!(
                 r#"printf '%s\n' "$*" > '{}'
+                env > '{}'
                 cat >/dev/null
                 printf '%s\n' '{{"type":"result","subtype":"success","usage":{{"input_tokens":1,"output_tokens":2}}}}'"#,
-                argv_file.display()
+                argv_file.display(),
+                env_file.display()
             ),
         );
         let adapter = std::sync::Arc::new(ClaudeAcpAdapter {
@@ -741,16 +777,25 @@ exec sleep 30"#,
                 AcpSessionScope::new(Some(dir.path().to_path_buf()), "disc-secret"),
             )
         });
+        let declared = |id: &str, command: &str, args: Vec<String>| crate::acp::AcpMcpServer {
+            id: id.into(),
+            command: command.into(),
+            args,
+            allowed_tools: vec![],
+        };
         let mut host = AcpHost::new(1, adapter.clone());
         host.negotiate(AcpInitialize {
             protocol_version: 1,
             cwd: dir.path().to_string_lossy().into_owned(),
-            mcp_servers: vec![crate::acp::AcpMcpServer {
-                id: "private".into(),
-                command: "private-server".into(),
-                args: vec![],
-                allowed_tools: vec![],
-            }],
+            mcp_servers: vec![
+                declared("private", "private-server", vec![]),
+                declared("plain", "plain-server", vec![]),
+                declared(
+                    "leaky",
+                    "leaky-server",
+                    vec!["--token".into(), secret.into()],
+                ),
+            ],
         })
         .await
         .unwrap();
@@ -763,12 +808,24 @@ exec sleep 30"#,
         assert!(
             argv.contains("--strict-mcp-config")
                 && argv.contains("kronn-internal")
-                && !argv.contains("private-server"),
-            "refused config must not inherit the global registry: {argv}"
+                && argv.contains("private-server")
+                && argv.contains("plain-server")
+                && argv.contains("${KRONN_MCP_"),
+            "authorized servers stay, the credential as a reference: {argv}"
+        );
+        assert!(
+            !argv.contains("leaky-server") && !argv.contains("unlisted-server"),
+            "a credential in args or an undeclared entry stays out: {argv}"
         );
         assert!(
             !argv.contains(secret),
             "the raw secret value must never appear in the adapter's own argv: {argv}"
+        );
+        let env = std::fs::read_to_string(&env_file).unwrap();
+        assert!(
+            env.lines()
+                .any(|line| line.starts_with("KRONN_MCP_") && line.ends_with(&format!("={secret}"))),
+            "the CLI resolves the reference from its own environment"
         );
         assert!(adapter.permission_audit_log().iter().all(|entry| {
             !entry.reason.contains(secret)
@@ -845,7 +902,9 @@ exec sleep 30"#,
                 .as_object_mut()
                 .unwrap()
                 .remove("kronn-internal");
-            let expected = if case == "changed" {
+            // KT-1003: an undeclared entry beside a declared one no longer
+            // voids the declared one.
+            let expected = if case == "changed" || case == "mixed" {
                 serde_json::json!({"mcpServers":{"safe":{"command":"safe-server"}}})
             } else {
                 serde_json::json!({"mcpServers":{}})

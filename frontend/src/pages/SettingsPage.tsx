@@ -75,6 +75,7 @@ import { UserContextEditor } from '../components/UserContextEditor';
 import { MatrixText } from '../components/MatrixText';
 import { KronnMark } from '../components/KronnMark';
 import './SettingsPage.css';
+import { safeGetItem } from '../lib/safeStorage';
 
 const KRONN_REPOSITORY_URL = 'https://github.com/DocRoms/Kronn';
 const KRONN_RELEASES_URL = `${KRONN_REPOSITORY_URL}/releases`;
@@ -328,7 +329,7 @@ export function SettingsPage({
   // and the new level only kicks in on the next backend restart.
   const [debugModeNeedsRestart, setDebugModeNeedsRestart] = useState(false);
   const [authToken, setAuthTokenState] = useState<string | null>(() => (
-    localStorage.getItem('kronn_auth_token')
+    safeGetItem('kronn_auth_token')
   ));
   const [authVisible, setAuthVisible] = useState(false);
 
