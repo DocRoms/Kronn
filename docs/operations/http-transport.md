@@ -52,6 +52,18 @@ fail an otherwise valid artifact (KT-951).
 [src: file: backend/src/agents/runner.rs:681]
 [src: file: backend/src/api/audit/validation.rs:102]
 
+Hosted OpenAI-wire models (LiteLLM, NVIDIA, Custom, OpenRouter) send no
+`num_ctx`, so their context pressure is measured on a bounded step budget:
+the smaller of the advertised window and 128 000 tokens
+(`KRONN_HTTP_STEP_CTX_BUDGET`). Workers finalize and audits open their write
+window at 75 % of it. An audit step also opens its write window once it has
+spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
+the estimated prompt counts when the provider reports no usage). Tool results
+are not clamped on this wire, and discussion round caps still follow the
+advertised window (KT-998).
+[src: file: backend/src/agents/runner.rs:7048]
+[src: file: backend/src/agents/runner.rs:8285]
+
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
 are split only when every individual path and line resolves; documents containing

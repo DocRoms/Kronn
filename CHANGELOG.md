@@ -111,6 +111,15 @@ Release notes for 0.9.3 and earlier are available in the
   Ollama turn that offers tools, the first 512 bytes of an attempt are now held
   until the attempt ends: a replayed attempt's preamble is dropped, a
   successful one is shown, and a longer answer streams live as before.
+- An audit step on a hosted large-context model (OpenRouter, LiteLLM, NVIDIA,
+  Custom) could explore for hours, resending its whole history each round,
+  because context pressure was never measured on that wire and the write
+  window only opened at round 242 of 250 (KT-998). Pressure is now measured on
+  a bounded step budget (the smaller of the model's window and 128 000
+  tokens), for audits and HTTP workers alike, and an audit step writes its
+  deliverable once it has spent 1 500 000 input tokens. Both budgets can be
+  set with `KRONN_HTTP_STEP_CTX_BUDGET` and
+  `KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`.
 
 ### Changed
 

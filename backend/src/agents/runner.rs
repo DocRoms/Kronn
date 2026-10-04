@@ -7086,6 +7086,30 @@ pub(crate) fn parse_ceiling_report(stderr_lines: &[String]) -> Option<CeilingRep
         })
 }
 
+/// Context budget a hosted step's pressure is measured on, whatever the model's
+/// window: the smaller of the two, overridable by `KRONN_HTTP_STEP_CTX_BUDGET`.
+pub(crate) const HOSTED_STEP_CTX_BUDGET: u64 = 128_000;
+
+/// Cumulative input tokens after which a hosted audit step must write its
+/// deliverable, overridable by `KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`.
+pub(crate) const HOSTED_AUDIT_STEP_INPUT_BUDGET: u64 = 1_500_000;
+
+fn positive_u64(raw: Option<String>) -> Option<u64> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+}
+
+pub(crate) fn hosted_step_context_budget(window: Option<u64>, raw: Option<String>) -> u64 {
+    let budget = positive_u64(raw).unwrap_or(HOSTED_STEP_CTX_BUDGET);
+    window
+        .filter(|window| *window > 0)
+        .map_or(budget, |window| window.min(budget))
+}
+
+pub(crate) fn hosted_audit_step_input_budget(raw: Option<String>) -> u64 {
+    positive_u64(raw).unwrap_or(HOSTED_AUDIT_STEP_INPUT_BUDGET)
+}
+
 /// Scale discussion tool rounds with the context window; keep the default when unknown.
 pub(crate) fn round_cap_for_window(window_tokens: Option<u64>) -> usize {
     match window_tokens {
@@ -8282,17 +8306,38 @@ async fn start_ollama_http_with_idle(
         }
         _ => crate::agents::tools::CeilingAllowance::default(),
     };
+    let remote_window = if is_openai_wire {
+        remote_context_window(&base, model, auth_key.as_deref()).await
+    } else {
+        None
+    };
     let round_cap = if tool_run_mode == crate::agents::tools::ToolRunMode::Worker {
         crate::agents::tools::MAX_TOOL_ITERATIONS
     } else {
-        let window = if is_openai_wire {
-            remote_context_window(&base, model, auth_key.as_deref()).await
+        round_cap_for_window(if is_openai_wire {
+            remote_window
         } else {
             Some(ctx_cap)
-        };
-        round_cap_for_window(window)
+        })
     }
     .saturating_add(ceiling_allowance.extra_rounds);
+    // A hosted model's window (often unknown or a million tokens) says nothing
+    // about what a step may spend: context pressure is measured on a bounded
+    // budget instead, and an audit step also stops exploring at a cumulative
+    // input budget (KT-998).
+    let pressure_ctx_cap = if is_openai_wire {
+        hosted_step_context_budget(
+            remote_window,
+            std::env::var("KRONN_HTTP_STEP_CTX_BUDGET").ok(),
+        )
+    } else {
+        ctx_cap
+    };
+    let audit_input_budget =
+        (is_openai_wire && tool_run_mode == crate::agents::tools::ToolRunMode::Audit).then(|| {
+            hosted_audit_step_input_budget(std::env::var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET").ok())
+        });
+    let mut step_input_tokens: u64 = 0;
     // A turn that declares tools will grow by whatever they return, and Ollama
     // fixes the window when it loads the model — it does not grow mid-run. Sizing
     // it on the prompt alone gives a one-line question a tiny slot that the first
@@ -8778,6 +8823,12 @@ async fn start_ollama_http_with_idle(
             emitted_text |= emitted_this_turn;
 
             let calls = pending_tools.finish();
+            // A provider that reports no usage is charged its estimated prompt.
+            step_input_tokens = step_input_tokens.saturating_add(if tally.prompt > 0 {
+                tally.prompt
+            } else {
+                estimated_chat_history_tokens(&body)
+            });
             // Each response reports cumulative usage; add it once per tool turn,
             // not once per usage frame. Audit consumers read this shared counter.
             if let Ok(mut usage) = task_usage.lock() {
@@ -9531,7 +9582,11 @@ async fn start_ollama_http_with_idle(
             let mut worker_repair_prompt: Option<String> = None;
             let context_pressure_tokens = worker_run
                 .then(|| {
-                    worker_context_pressure(&body, ctx_cap, worker_policy.context_pressure_percent)
+                    worker_context_pressure(
+                        &body,
+                        pressure_ctx_cap,
+                        worker_policy.context_pressure_percent,
+                    )
                 })
                 .flatten();
             let worker_boundary = worker_run
@@ -10811,11 +10866,18 @@ async fn start_ollama_http_with_idle(
             // An audit that is still exploring when its rounds or context run out
             // fails at the ceiling with its file unwritten. Keep a few rounds in
             // reserve for the only output that counts: the deliverable.
+            let audit_budget_spent =
+                audit_input_budget.filter(|budget| step_input_tokens >= *budget);
             if !forced_synthesis
                 && !audit_writer_seed.is_empty()
                 && (turn.saturating_add(AUDIT_WRITE_RESERVE_ROUNDS) >= round_cap
-                    || worker_context_pressure(&body, ctx_cap, WORKER_CONTEXT_PRESSURE_PERCENT)
-                        .is_some())
+                    || worker_context_pressure(
+                        &body,
+                        pressure_ctx_cap,
+                        WORKER_CONTEXT_PRESSURE_PERCENT,
+                    )
+                    .is_some()
+                    || audit_budget_spent.is_some())
             {
                 withdraw_tools_for_convergence(&mut body, &audit_writer_seed, &withdrawn);
                 if body.get("tools").is_some() {
@@ -10840,6 +10902,11 @@ async fn start_ollama_http_with_idle(
                         se.push(format!(
                             "{backend} audit write window opened at turn {turn} of {round_cap}"
                         ));
+                        if let Some(budget) = audit_budget_spent {
+                            se.push(format!(
+                                "{backend} audit step spent {step_input_tokens} input tokens of its {budget} budget"
+                            ));
+                        }
                     }
                 }
             }

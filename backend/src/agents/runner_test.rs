@@ -7758,6 +7758,188 @@ mod tests {
         assert!(captured.contains("audit write window opened"), "{captured}");
     }
 
+    #[test]
+    fn hosted_budgets_ignore_a_huge_window_and_honour_overrides() {
+        assert_eq!(
+            hosted_step_context_budget(None, None),
+            HOSTED_STEP_CTX_BUDGET
+        );
+        assert_eq!(
+            hosted_step_context_budget(Some(1_000_000), None),
+            HOSTED_STEP_CTX_BUDGET
+        );
+        assert_eq!(hosted_step_context_budget(Some(32_768), None), 32_768);
+        assert_eq!(
+            hosted_step_context_budget(Some(0), None),
+            HOSTED_STEP_CTX_BUDGET
+        );
+        assert_eq!(
+            hosted_step_context_budget(Some(1_000_000), Some(" 400000 ".into())),
+            400_000
+        );
+        for invalid in ["0", "-1", "lots", ""] {
+            assert_eq!(
+                hosted_step_context_budget(None, Some(invalid.into())),
+                HOSTED_STEP_CTX_BUDGET
+            );
+            assert_eq!(
+                hosted_audit_step_input_budget(Some(invalid.into())),
+                HOSTED_AUDIT_STEP_INPUT_BUDGET
+            );
+        }
+        assert_eq!(
+            hosted_audit_step_input_budget(Some("250000".into())),
+            250_000
+        );
+    }
+
+    /// Runs a hosted (OpenAI-wire) audit step whose model never stops
+    /// exploring, each request reporting `prompt_tokens` of input. Returns the
+    /// 1-based request that first offered only the writer, and the stderr.
+    async fn hosted_audit_that_keeps_exploring(
+        prompt_tokens: u64,
+        result_bytes: usize,
+    ) -> (Option<usize>, String) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let turn = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let write_only_at = std::sync::Arc::new(Mutex::new(None::<usize>));
+        let (turn_for_mock, write_for_mock) = (turn.clone(), write_only_at.clone());
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let current = turn_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = declared_names(&body);
+                let usage = format!(
+                    r#"{{"choices":[],"usage":{{"prompt_tokens":{prompt_tokens},"completion_tokens":5}}}}"#
+                );
+                let call = |name: &str, path: String| {
+                    let frame = format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"c{current}","function":{{"name":"{name}","arguments":"{{\"path\":\"{path}\"}}"}}}}]}}}}]}}"#
+                    );
+                    ResponseTemplate::new(200).set_body_string(sse(&[&frame, &usage]))
+                };
+                if names == ["write_file"] {
+                    let mut first = write_for_mock.lock().unwrap();
+                    if first.is_none() {
+                        *first = Some(current);
+                        return call("write_file", "docs/AGENTS.md".into());
+                    }
+                } else if !names.is_empty() {
+                    let tool = if current % 2 == 0 { "read_file" } else { "search_text" };
+                    return call(tool, format!("src/file-{current}.js"));
+                }
+                ResponseTemplate::new(200).set_body_string(sse(&[
+                    r#"{"choices":[{"index":0,"delta":{"content":"AGENTS.md written."}}]}"#,
+                    &usage,
+                ]))
+            })
+            .mount(&server)
+            .await;
+
+        struct HostedAuditTools(usize);
+        #[async_trait::async_trait]
+        impl crate::agents::tools::ToolExecutor for HostedAuditTools {
+            fn run_mode(&self) -> crate::agents::tools::ToolRunMode {
+                crate::agents::tools::ToolRunMode::Audit
+            }
+            fn catalogue(&self) -> Vec<serde_json::Value> {
+                ["read_file", "search_text", "write_file"]
+                    .into_iter()
+                    .map(|name| {
+                        serde_json::json!({"type": "function", "function": {
+                            "name": name, "description": name,
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+                        }})
+                    })
+                    .collect()
+            }
+            async fn execute(
+                &self,
+                call: &crate::agents::tools::ToolCall,
+            ) -> crate::agents::tools::ToolOutcome {
+                let path = call.arguments["path"].as_str().unwrap_or_default();
+                crate::agents::tools::ToolOutcome {
+                    call: call.clone(),
+                    content: serde_json::json!({ "content": format!("ok {path} {}", "y".repeat(self.0)) }),
+                    ok: true,
+                }
+            }
+        }
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "fill docs/AGENTS.md",
+            "",
+            "hosted-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(HostedAuditTools(result_bytes))),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        while process.next_line().await.is_some() {}
+        let _ = process.child.wait().await;
+        let captured = process.stderr_capture.lock().unwrap().join("\n");
+        let first = *write_only_at.lock().unwrap();
+        (first, captured)
+    }
+
+    /// KT-998 — a hosted audit step that keeps exploring writes its
+    /// deliverable once its cumulative input budget is spent, whatever the
+    /// model's window. Counter-proof: the same step under the budget explores
+    /// until the round or per-tool limits, as before.
+    #[tokio::test]
+    #[serial]
+    async fn hosted_audit_step_converges_within_its_input_budget() {
+        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        let per_turn = 100_000;
+        let (budgeted, captured) = hosted_audit_that_keeps_exploring(per_turn, 0).await;
+        let opened = budgeted.expect("the write window must open");
+        let bound = (HOSTED_AUDIT_STEP_INPUT_BUDGET / per_turn) as usize + 2;
+        assert!(
+            opened <= bound,
+            "opened at request {opened}, bound {bound}: {captured}"
+        );
+        assert!(
+            captured.contains("audit step spent") && captured.contains("audit write window opened"),
+            "{captured}"
+        );
+
+        let (unbudgeted, captured) = hosted_audit_that_keeps_exploring(10, 0).await;
+        let late = unbudgeted.expect("the round or per-tool limit still ends exploration");
+        assert!(
+            late > 4 * bound,
+            "under the budget the step explores on (request {late}): {captured}"
+        );
+        assert!(!captured.contains("audit step spent"), "{captured}");
+    }
+
+    /// KT-998 — a hosted model's history is under context pressure against
+    /// the bounded step budget, not its (unknown or huge) window: large tool
+    /// results open the write window long before the round limit.
+    #[tokio::test]
+    #[serial]
+    async fn hosted_audit_history_pressure_uses_the_bounded_context_budget() {
+        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        let (opened, captured) = hosted_audit_that_keeps_exploring(10, 40_000).await;
+        let opened = opened.expect("the write window must open");
+        assert!(opened <= 30, "opened at request {opened}: {captured}");
+        assert!(!captured.contains("audit step spent"), "{captured}");
+    }
+
     /// KT-967 — on run O4, qwen3.8 wrote docs/AGENTS.md seven times in its
     /// write window and never stopped; the ceiling then failed a step whose
     /// file was complete. A written deliverable ends the step at the ceiling.
