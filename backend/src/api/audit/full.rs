@@ -641,10 +641,10 @@ pub async fn full_audit(
                     crate::core::root_agent_files::KRONN_ROOT_AGENT_FILES.contains(path)
                 }) {
                     let src = template_dir.join(filename);
-                    let dst = project_path.join(filename);
                     let template_body = std::fs::read_to_string(&src).ok();
-                    match crate::core::root_agent_files::inject_or_update(
-                        &dst,
+                    match crate::core::root_agent_files::inject_or_update_if_entry_exists(
+                        &project_path,
+                        filename,
                         template_body.as_deref(),
                     ) {
                         Ok(outcome) => {

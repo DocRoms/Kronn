@@ -89,6 +89,14 @@ Release notes for 0.9.3 and earlier are available in the
   knowledge graph shared across projects, and the refusal is logged instead of
   appearing as a registry error. Discussions on the audited project keep
   their tools.
+
+
+
+- The documentation template and audit are more consistent (KT-934): a
+  validation is refused while a document Kronn owns still carries a
+  placeholder or a `TODO:` marker, the final review skips the `TEMPLATE.md`
+  gabarits like the document gate does, and no root redirector is written
+  toward a missing `docs/AGENTS.md`.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its

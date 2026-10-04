@@ -581,26 +581,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fresh_docs_agents_md_never_carries_a_bootstrap_instruction() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fresh_docs_agents_md_never_carries_a_bootstrap_instruction() {
         // KT-841 — a "FIRST-RUN TASK" block used to be injected into
-        // docs/AGENTS.md at install time. That file is the tiered context
-        // loader every subsequent agent reads for unrelated tasks; an
-        // interrupted first run (or a manually-invoked agent that never
-        // reached the self-delete step) left it there permanently. The
-        // Full audit's own Step 1 prompt is self-sufficient and never
-        // depended on this block — nothing must (re)inject it here.
+        // docs/AGENTS.md at install time; an interrupted first run left it in
+        // the file every later agent reads. Exercised through the install
+        // route itself, so a re-injection anywhere in it fails here.
         let tmp = tempfile::TempDir::new().unwrap();
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        write(
-            &src.join("docs/AGENTS.md"),
-            &"# {{PROJECT_NAME}}\n".repeat(20),
-        );
-        copy_dir_nondestructive(&src, &dst).unwrap();
-        let body = std::fs::read_to_string(dst.join("docs/AGENTS.md")).unwrap();
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let path = tmp.path().to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('p1', 'Projet été', ?1, datetime('now'), datetime('now'))",
+                    [path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = install_template(
+            axum::extract::State(state),
+            axum::extract::Path("p1".to_string()),
+        )
+        .await
+        .0;
+        assert!(response.success, "{:?}", response.error);
+        let body = std::fs::read_to_string(tmp.path().join("docs/AGENTS.md"))
+            .expect("the install wrote docs/AGENTS.md");
         assert!(!body.contains("FIRST-RUN TASK"), "{body}");
         assert!(!body.contains("KRONN:BOOTSTRAP:START"), "{body}");
+        assert!(!body.contains("KRONN:BOOTSTRAP:END"), "{body}");
     }
 
     #[test]

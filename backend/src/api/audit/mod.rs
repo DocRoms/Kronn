@@ -582,7 +582,7 @@ This is the FINAL step. Execute the two phases in order:\n\n\
 \
 # PHASE 1 — Final quality review (reports excluded)\n\
 \n\
-Read current guidance under `docs/`, but EXCLUDE `docs/reports/`: reports are dated snapshots outside routing and must not be rewritten during final review. Fix issues directly in the remaining files (Write/Edit each file as needed).\n\
+Read current guidance under `docs/`, but EXCLUDE `docs/reports/`: reports are dated snapshots outside routing and must not be rewritten during final review. EXCLUDE every `TEMPLATE.md` too: those gabarits are copied per instance, never filled in place. Fix issues directly in the remaining files (Write/Edit each file as needed).\n\
 \n\
 Check:\n\
 - **No remaining `{{...}}` placeholders** — replace with content or `N/A — not used` for missing features. \
@@ -1751,6 +1751,76 @@ mod prompt_tests {
             sub.contains("gardent leur statut actuel"),
             "sub-audit variant must state that unselected TDs keep their status"
         );
+    }
+
+    #[test]
+    fn final_review_skips_the_template_gabarits_the_gate_skips() {
+        let step = super::ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/decisions.md")
+            .unwrap();
+        assert!(step.prompt.contains("EXCLUDE every `TEMPLATE.md`"));
+    }
+
+    #[test]
+    fn template_internal_anchors_resolve_to_a_heading() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("templates/docs");
+        let slug = |heading: &str| -> String {
+            heading
+                .trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                .map(|c| if c == ' ' { '-' } else { c })
+                .collect()
+        };
+        let mut stack = vec![root.clone()];
+        let mut checked = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).unwrap();
+                for (_, rest) in body.match_indices("](").map(|(i, _)| ((), &body[i + 2..])) {
+                    let Some(target) = rest.split(')').next() else {
+                        continue;
+                    };
+                    let Some((file, anchor)) = target.split_once('#') else {
+                        continue;
+                    };
+                    if file.contains("://") || anchor.is_empty() {
+                        continue;
+                    }
+                    let linked = if file.is_empty() {
+                        path.clone()
+                    } else {
+                        path.parent().unwrap().join(file)
+                    };
+                    let content = std::fs::read_to_string(&linked)
+                        .unwrap_or_else(|_| panic!("{} links to missing {}", path.display(), file));
+                    let found = content
+                        .lines()
+                        .filter_map(|l| {
+                            l.trim_start_matches('#')
+                                .strip_prefix(' ')
+                                .filter(|_| l.starts_with('#'))
+                        })
+                        .any(|h| slug(h) == anchor);
+                    assert!(found, "{} → {file}#{anchor} has no heading", path.display());
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "the template links to at least one anchor");
     }
 
     #[test]
