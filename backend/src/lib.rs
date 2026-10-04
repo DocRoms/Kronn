@@ -1404,6 +1404,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::plugin_portability::export_plugin_bundle),
         )
         .route(
+            "/api/mcps/bundles/import-preview",
+            post(api::plugin_portability::preview_plugin_bundle_import)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
             "/api/mcps/bundles/import",
             post(api::plugin_portability::import_plugin_bundle)
                 .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),

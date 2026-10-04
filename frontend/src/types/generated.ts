@@ -3459,6 +3459,12 @@ dedup_key: string, title: string,
  */
 highlight: string, context?: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, };
 
+export type ImportBundlePreview = { bundle_id: string, already_imported: boolean, includes_values: boolean,
+/**
+ * The file was a single-plugin JSON from the old per-plugin export.
+ */
+legacy: boolean, plugins: Array<ImportPreviewPlugin>, };
+
 export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
 
 export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
@@ -3474,10 +3480,24 @@ imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
 /**
- * Explicit consent to apply bundled custom arguments. They replace the
- * plugin's whole command line, so they are dropped unless this is true.
+ * Source config ids whose bundled custom arguments the importer accepted.
+ * They replace the plugin's whole command line, so every other plugin's
+ * arguments are dropped.
  */
-accept_args_override?: boolean, };
+accept_args_for?: Array<string>, };
+
+/**
+ * One plugin as the import would treat it, before anything is written.
+ */
+export type ImportPreviewPlugin = { source_config_id: string, label: string, server_name: string,
+/**
+ * The command line the plugin runs today (catalogue), for stdio plugins.
+ */
+usual_args: Array<string> | null,
+/**
+ * The bundle's proposed command line, secret-looking parts masked.
+ */
+proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null, };
 
 export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
 /**

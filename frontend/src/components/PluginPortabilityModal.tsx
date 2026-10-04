@@ -15,6 +15,7 @@ import type {
   McpConfigDisplay,
   McpDefinition,
   PluginBundlePreview,
+  ImportBundlePreview,
   Project,
 } from '../types/generated';
 
@@ -28,6 +29,8 @@ interface PluginPortabilityModalProps {
 }
 
 interface BundleHeader {
+  name?: string;
+  base_url?: string;
   kind?: string;
   encrypted?: boolean;
   includes_values?: boolean;
@@ -54,6 +57,8 @@ export function PluginPortabilityModal({
   const [importContent, setImportContent] = useState('');
   const [importHeader, setImportHeader] = useState<BundleHeader | null>(null);
   const [importFilename, setImportFilename] = useState('');
+  const [importPreview, setImportPreview] = useState<ImportBundlePreview | null>(null);
+  const [argsConsent, setArgsConsent] = useState<Set<string>>(() => new Set());
   const [report, setReport] = useState<ImportPluginBundleReport | null>(null);
   type ImportScope = {
     global: boolean;
@@ -153,18 +158,45 @@ export function PluginPortabilityModal({
     try {
       const content = await file.text();
       const parsed = JSON.parse(content) as BundleHeader;
-      if (parsed.kind !== 'kronn.plugins') {
+      // A single-plugin JSON from the old per-plugin export is converted by the
+      // server into a one-plugin bundle; anything else must be a bundle.
+      const legacy = parsed.kind === undefined
+        && typeof parsed.name === 'string' && typeof parsed.base_url === 'string';
+      if (parsed.kind !== 'kronn.plugins' && !legacy) {
         throw new Error(t('mcp.portability.invalidBundle'));
       }
       setImportContent(content);
-      setImportHeader(parsed);
+      setImportPreview(null);
+      setArgsConsent(new Set());
+      const header = legacy ? { ...parsed, plugin_labels: [parsed.name as string] } : parsed;
+      setImportHeader(header);
       setImportFilename(file.name);
       setPassphrase('');
+      if (!header.encrypted && !header.includes_values) void reviewImport(content, header);
     } catch (caught) {
       setImportContent('');
       setImportHeader(null);
+      setImportPreview(null);
       setImportFilename('');
       setError(userError(caught));
+    }
+  };
+
+  const reviewImport = async (content = importContent, header = importHeader) => {
+    if (!content || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setImportPreview(await mcpsApi.previewImportBundle({
+        content,
+        passphrase: header?.encrypted ? passphrase : null,
+        accept_args_for: [],
+      }));
+    } catch (caught) {
+      setImportPreview(null);
+      setError(userError(caught));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -176,6 +208,7 @@ export function PluginPortabilityModal({
       const nextReport = await mcpsApi.importBundle({
         content: importContent,
         passphrase: importHeader?.encrypted ? passphrase : null,
+        accept_args_for: [...argsConsent],
       });
       setReport(nextReport);
       setImportScopes(Object.fromEntries(nextReport.imported_configs.map(item => [
@@ -450,17 +483,72 @@ export function PluginPortabilityModal({
                       className="input"
                       type="password"
                       value={passphrase}
-                      onChange={event => setPassphrase(event.target.value)}
+                      onChange={event => {
+                        setPassphrase(event.target.value);
+                        setImportPreview(null);
+                      }}
                       autoComplete="current-password"
                     />
                   </label>
                 )}
+                {importHeader.encrypted && !importPreview && (
+                  <button
+                    type="button"
+                    className="mcp-btn-action"
+                    disabled={busy || !passphrase}
+                    onClick={() => void reviewImport()}
+                  >
+                    {t('mcp.portability.reviewBundle')}
+                  </button>
+                )}
+              </div>
+            )}
+            {importPreview && (
+              <div className="mcp-portability-import-review" data-testid="mcp-import-review">
+                {importPreview.legacy && <p className="mcp-form-hint">{t('mcp.portability.legacyNotice')}</p>}
+                {importPreview.already_imported && <p className="mcp-form-hint">{t('mcp.portability.alreadyImported')}</p>}
+                {importPreview.plugins.map(plugin => (
+                  <div key={plugin.source_config_id} className="mcp-portability-import-plugin">
+                    <strong>{plugin.label}</strong>
+                    <small>{plugin.server_name}</small>
+                    {plugin.issue && (
+                      <span className="mcp-form-hint" role="note">{t(`mcp.portability.issue.${plugin.issue}`)}</span>
+                    )}
+                    {plugin.args_differ && plugin.proposed_args && (
+                      <div className="mcp-portability-args-diff">
+                        <p className="mcp-form-hint">{t('mcp.portability.argsWarning')}</p>
+                        <div>
+                          <span>{t('mcp.portability.argsUsual')}</span>
+                          <code>{(plugin.usual_args ?? []).join(' ')}</code>
+                        </div>
+                        <div>
+                          <span>{t('mcp.portability.argsProposed')}</span>
+                          <code>{plugin.proposed_args.join(' ')}</code>
+                        </div>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={argsConsent.has(plugin.source_config_id)}
+                            aria-label={t('mcp.portability.argsAcceptFor', plugin.label)}
+                            onChange={event => setArgsConsent(previous => {
+                              const next = new Set(previous);
+                              if (event.target.checked) next.add(plugin.source_config_id);
+                              else next.delete(plugin.source_config_id);
+                              return next;
+                            })}
+                          />
+                          {t('mcp.portability.argsAccept')}
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
             <button
               type="button"
               className="mcp-btn-action mcp-btn-action-primary"
-              disabled={!importContent || busy || (!!importHeader?.encrypted && !passphrase)}
+              disabled={!importContent || !importPreview || busy || (!!importHeader?.encrypted && !passphrase)}
               onClick={runImport}
             >
               <Upload size={13} />

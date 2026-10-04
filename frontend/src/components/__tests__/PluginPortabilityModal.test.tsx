@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { McpConfigDisplay, McpDefinition, PluginBundlePreview, Project } from '../../types/generated';
 
@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   previewBundle: vi.fn(),
   exportBundle: vi.fn(),
   importBundle: vi.fn(),
+  previewImportBundle: vi.fn(),
   updateConfig: vi.fn(),
   setConfigProjects: vi.fn(),
   triggerDownload: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock('../../lib/api', async () => {
       previewBundle: mocks.previewBundle,
       exportBundle: mocks.exportBundle,
       importBundle: mocks.importBundle,
+      previewImportBundle: mocks.previewImportBundle,
       updateConfig: mocks.updateConfig,
       setConfigProjects: mocks.setConfigProjects,
     },
@@ -107,7 +109,30 @@ const renderModal = (mode: 'export' | 'import') => render(
   </I18nProvider>,
 );
 
+const plainImportPreview = (over: Record<string, unknown> = {}) => ({
+  bundle_id: 'bundle-1',
+  already_imported: false,
+  includes_values: false,
+  legacy: false,
+  plugins: [{
+    source_config_id: 'source-1',
+    label: 'Fastly production',
+    server_name: 'Fastly',
+    usual_args: null,
+    proposed_args: null,
+    args_differ: false,
+    importable: true,
+    issue: null,
+  }],
+  ...over,
+});
+
 describe('PluginPortabilityModal', () => {
+  beforeEach(() => {
+    mocks.previewImportBundle.mockReset();
+    mocks.previewImportBundle.mockResolvedValue(plainImportPreview());
+  });
+
   it('exports configuration only by default', async () => {
     mocks.previewBundle.mockResolvedValue(preview);
     const blob = new Blob(['{}'], { type: 'application/json' });
@@ -204,11 +229,16 @@ describe('PluginPortabilityModal', () => {
     fireEvent.change(document.querySelector('input[type="password"]')!, {
       target: { value: 'long-passphrase' },
     });
+    expect(importButton).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Examiner le lot' }));
+    await waitFor(() => expect(importButton).not.toBeDisabled());
+    expect(mocks.previewImportBundle).toHaveBeenCalledWith(expect.objectContaining({ passphrase: 'long-passphrase' }));
     fireEvent.click(importButton);
 
     await waitFor(() => expect(mocks.importBundle).toHaveBeenCalledWith({
       content: expect.stringContaining('"kind":"kronn.plugins"'),
       passphrase: 'long-passphrase',
+      accept_args_for: [],
     }));
     expect(screen.getByRole('button', {
       name: 'Tous les projets',
@@ -434,5 +464,134 @@ describe('PluginPortabilityModal', () => {
 
     expect(await screen.findByText('scope write failed')).toBeVisible();
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('PluginPortabilityModal import review (KT-1010, KT-833)', () => {
+  const argsPreview = (over: Record<string, unknown> = {}) => plainImportPreview({
+    plugins: [
+      {
+        source_config_id: 'source-a', label: 'GitHub A', server_name: 'GitHub',
+        usual_args: ['-y', '@modelcontextprotocol/server-github'],
+        proposed_args: ['--token', '••••', 'evil-package'], args_differ: true, importable: true, issue: null,
+      },
+      {
+        source_config_id: 'source-b', label: 'GitHub B', server_name: 'GitHub',
+        usual_args: ['-y', '@modelcontextprotocol/server-github'],
+        proposed_args: ['-y', 'other'], args_differ: true, importable: true, issue: null,
+      },
+      {
+        source_config_id: 'source-c', label: 'Fastly', server_name: 'Fastly',
+        usual_args: null, proposed_args: null, args_differ: false, importable: false, issue: 'exists',
+      },
+    ],
+    ...over,
+  });
+
+  const importReport = (over: Record<string, unknown> = {}) => ({
+    bundle_id: 'bundle-1', already_imported: false, imported_config_ids: [], imported_configs: [],
+    skipped_plugins: 0, includes_values: false, warnings: [], conflicts: [], ...over,
+  });
+
+  const dropFile = (body: unknown, name = 'plugins.json') => {
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [new File([typeof body === 'string' ? body : JSON.stringify(body)], name, { type: 'application/json' })] },
+    });
+  };
+
+  const clearBundle = { kind: 'kronn.plugins', encrypted: false, includes_values: false, plugin_labels: ['GitHub A', 'GitHub B'] };
+
+  beforeEach(() => {
+    mocks.previewImportBundle.mockReset();
+    mocks.importBundle.mockReset();
+    mocks.importBundle.mockResolvedValue(importReport());
+  });
+
+  it('shows the usual and the proposed command per plugin, with an unchecked consent box each', async () => {
+    mocks.previewImportBundle.mockResolvedValue(argsPreview());
+    renderModal('import');
+    dropFile(clearBundle);
+    const review = await screen.findByTestId('mcp-import-review');
+    expect(review).toHaveTextContent('-y @modelcontextprotocol/server-github');
+    expect(review).toHaveTextContent('--token •••• evil-package');
+    expect(review).not.toHaveTextContent('s3cr3t');
+    const boxes = screen.getAllByRole('checkbox', { name: /j.accepte ces arguments/i });
+    expect(boxes).toHaveLength(2);
+    boxes.forEach(box => expect(box).not.toBeChecked());
+    expect(review).toHaveTextContent('une configuration avec le même plugin');
+  });
+
+  it('sends consent only for the plugins whose box is checked', async () => {
+    mocks.previewImportBundle.mockResolvedValue(argsPreview());
+    renderModal('import');
+    dropFile(clearBundle);
+    await screen.findByTestId('mcp-import-review');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'GitHub B : j\'accepte ces arguments' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Importer le bundle' }));
+    await waitFor(() => expect(mocks.importBundle).toHaveBeenCalledWith(
+      expect.objectContaining({ accept_args_for: ['source-b'] }),
+    ));
+  });
+
+  it('sends no consent when nothing is checked', async () => {
+    mocks.previewImportBundle.mockResolvedValue(argsPreview());
+    renderModal('import');
+    dropFile(clearBundle);
+    await screen.findByTestId('mcp-import-review');
+    fireEvent.click(screen.getByRole('button', { name: 'Importer le bundle' }));
+    await waitFor(() => expect(mocks.importBundle).toHaveBeenCalledWith(
+      expect.objectContaining({ accept_args_for: [] }),
+    ));
+  });
+
+  it('cannot import before the review has loaded', async () => {
+    mocks.previewImportBundle.mockReturnValue(new Promise(() => {}));
+    renderModal('import');
+    dropFile(clearBundle);
+    await screen.findByText('GitHub A');
+    expect(document.querySelector('.mcp-btn-action-primary')).toBeDisabled();
+  });
+
+  it('says so when the bundle was already imported, and lets a re-import add consent', async () => {
+    mocks.previewImportBundle.mockResolvedValue(argsPreview({ already_imported: true }));
+    renderModal('import');
+    dropFile(clearBundle);
+    const review = await screen.findByTestId('mcp-import-review');
+    expect(review).toHaveTextContent('déjà été importé');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'GitHub A : j\'accepte ces arguments' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Importer le bundle' }));
+    await waitFor(() => expect(mocks.importBundle).toHaveBeenCalledWith(
+      expect.objectContaining({ accept_args_for: ['source-a'] }),
+    ));
+  });
+
+  it('recognises an old single-plugin JSON and reviews it like any bundle', async () => {
+    mocks.previewImportBundle.mockResolvedValue(plainImportPreview({ legacy: true }));
+    renderModal('import');
+    const old = { name: 'Legacy API', base_url: 'https://api.legacy.test', fields: [], endpoints: [], auth: 'None' };
+    dropFile(old, 'legacy.kronn-plugin.json');
+    expect(await screen.findByText('Legacy API')).toBeInTheDocument();
+    const review = await screen.findByTestId('mcp-import-review');
+    expect(review).toHaveTextContent('Export d\'un seul plugin reconnu');
+    expect(mocks.previewImportBundle).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('"base_url"') }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Importer le bundle' }));
+    await waitFor(() => expect(mocks.importBundle).toHaveBeenCalledTimes(1));
+  });
+
+  it('refuses a file that is neither a bundle nor an old plugin export', async () => {
+    renderModal('import');
+    dropFile({ hello: 'world' });
+    expect(await screen.findByText('Ce fichier n’est pas un bundle de plugins Kronn.')).toBeInTheDocument();
+    expect(mocks.previewImportBundle).not.toHaveBeenCalled();
+  });
+
+  it('shows the server error when an old plugin JSON is malformed', async () => {
+    mocks.previewImportBundle.mockRejectedValue(new Error('Imported plugin: `base_url` is required'));
+    renderModal('import');
+    dropFile({ name: 'Broken', base_url: '' });
+    expect(await screen.findByText(/base_url/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Importer le bundle' })).toBeDisabled();
   });
 });

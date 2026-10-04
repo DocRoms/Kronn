@@ -52,6 +52,7 @@ import type {
   PluginBundlePreview,
   ExportPluginBundleRequest,
   ImportPluginBundleRequest,
+  ImportBundlePreview,
   ImportPluginBundleReport,
   Discussion,
   DiscussionDetail,
@@ -1593,6 +1594,8 @@ export const mcps = {
       blob: await response.blob(),
     };
   },
+  previewImportBundle: (request: ImportPluginBundleRequest) =>
+    api<ImportBundlePreview>('POST', '/mcps/bundles/import-preview', request),
   importBundle: (request: ImportPluginBundleRequest) =>
     api<ImportPluginBundleReport>('POST', '/mcps/bundles/import', request),
   createConfig: (req: CreateMcpConfigRequest) => api<McpConfigDisplay>('POST', '/mcps/configs', req),

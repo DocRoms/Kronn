@@ -64,6 +64,14 @@ Release notes for 0.9.3 and earlier are available in the
   ACP agents alike, through one probe; the counters no longer wait for a text
   line. A silent audit stream sends keep-alive comments every 15 seconds,
   which hold the connection without passing for model activity (KT-950).
+
+- Importing a plugin bundle now shows, per plugin whose bundled command line
+  differs from the catalogue's, the usual and the proposed command (secret-looking
+  arguments masked) with an unchecked "I accept these arguments" box. Consent is
+  per plugin, and re-importing an already imported bundle can add it (KT-1010).
+- An old single-plugin JSON from the removed per-plugin export dropped into the
+  bundle import is recognised and imported as a one-plugin bundle, with the same
+  review; a malformed one gets a clear error (KT-833).
 - The desktop release pipeline now fails before building when the pushed tag
   differs from `VERSION` or a version marker is stale, builds the release job
   from the requested tag on a manual run, and expects exactly the installers
