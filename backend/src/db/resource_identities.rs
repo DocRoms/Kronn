@@ -138,44 +138,175 @@ pub fn lookup_scoped(
     lookup(conn, "", kind, slug)
 }
 
-/// Resolves a symbolic reference (`prompt:<slug>`, `workflow:<slug>`,
-/// `qe:<slug>`, `qa:<slug>`, `skill:<slug>`, `plugin:<server>`) to the local
-/// identifier it names. Project-scoped kinds try the same project first,
-/// then fall back to the global scope — matching the ADR's "resolved at
-/// load time, first within the same project".
+/// The kinds a symbolic reference may name (`<kind>:<slug>`).
+pub const REFERENCE_KINDS: [&str; 7] = [
+    "workflow", "qe", "qa", "prompt", "skill", "plugin", "artifact",
+];
+
+/// Resolves a symbolic reference (`workflow:<slug>`, `qe:<slug>`, `qa:<slug>`,
+/// `prompt:<slug>`, `skill:<slug>`, `plugin:<server>`, `artifact:<slug>`) to
+/// the local identifier it names, first within `project_id`, then in the
+/// global scope (ADR-005 §Identity). Each scope reads the identity table
+/// before the resources' own names, so a resource created here and never
+/// published still resolves under the slug publication would give it.
+/// `Ok(None)` = nothing matches; `Err` = two resources of one scope match.
 pub fn resolve_symbolic_reference(
     conn: &Connection,
     reference: &str,
-    project_key: &str,
     project_id: Option<&str>,
 ) -> Result<Option<String>> {
     let Some((kind, slug)) = reference.split_once(':') else {
         return Ok(None);
     };
+    let slug = slug.trim();
     if slug.is_empty() {
         return Ok(None);
     }
-    match kind {
-        "skill" => {
-            return Ok(crate::core::skills::get_skill(&format!("custom-{slug}"))
-                .or_else(|| crate::core::skills::get_skill(slug))
-                .map(|skill| skill.id))
-        }
-        "plugin" => return crate::db::mcps::find_config_for_server(conn, slug, project_id),
-        _ => {}
+    let project_id = project_id.filter(|id| !id.is_empty());
+    if kind == "plugin" {
+        return crate::db::mcps::find_config_for_server(conn, slug, project_id);
     }
     let table_kind = match kind {
         "prompt" => "quick_prompt",
         "workflow" => "workflow",
         "qe" => "quick_exec",
         "qa" => "quick_api",
+        "artifact" => "artifact",
+        "skill" => "skill",
         _ => return Ok(None),
     };
-    lookup_scoped(conn, project_key, table_kind, slug)
+    if let Some(project_id) = project_id {
+        let key = project_key(conn, Some(project_id))?;
+        if let Some(id) = existing_identity(conn, &key, table_kind, slug)? {
+            return Ok(Some(id));
+        }
+        if let Some(id) = match_by_slug(conn, kind, slug, Some(project_id))? {
+            return Ok(Some(id));
+        }
+    }
+    if let Some(id) = existing_identity(conn, "", table_kind, slug)? {
+        return Ok(Some(id));
+    }
+    if let Some(id) = match_by_slug(conn, kind, slug, None)? {
+        return Ok(Some(id));
+    }
+    if kind == "skill" {
+        return Ok(crate::core::skills::get_skill(&format!("custom-{slug}"))
+            .or_else(|| crate::core::skills::get_skill(slug))
+            .map(|skill| skill.id));
+    }
+    Ok(None)
+}
+
+/// The identity of `(scope, kind, slug)` when its target still exists. An
+/// empty project key outside the global pass would read the global scope.
+fn existing_identity(
+    conn: &Connection,
+    scope_key: &str,
+    table_kind: &str,
+    slug: &str,
+) -> Result<Option<String>> {
+    match lookup(conn, scope_key, table_kind, slug)? {
+        Some(id) if target_exists(conn, table_kind, &id)? => Ok(Some(id)),
+        _ => Ok(None),
+    }
+}
+
+fn target_exists(conn: &Connection, table_kind: &str, id: &str) -> Result<bool> {
+    Ok(match table_kind {
+        "workflow" => crate::db::workflows::get_workflow(conn, id)?.is_some(),
+        "quick_prompt" => crate::db::quick_prompts::get_quick_prompt(conn, id)?.is_some(),
+        "quick_api" => crate::db::quick_apis::get_quick_api(conn, id)?.is_some(),
+        "quick_exec" => crate::db::quick_execs::get_quick_exec(conn, id)?.is_some(),
+        "artifact" => crate::db::live_pages::get_live_page_summary(conn, id)?.is_some(),
+        "skill" => id.starts_with("repository:") || crate::core::skills::get_skill(id).is_some(),
+        _ => false,
+    })
+}
+
+/// The one resource of `scope_project` (`None` = no project) whose slug is
+/// `slug`, as publication would derive it from its name.
+fn match_by_slug(
+    conn: &Connection,
+    kind: &str,
+    slug: &str,
+    scope_project: Option<&str>,
+) -> Result<Option<String>> {
+    use crate::core::repository_resources::ascii_slug;
+    let owned = |owner: Option<&str>| owner == scope_project;
+    let candidates: Vec<String> = match kind {
+        "workflow" => crate::db::workflows::list_workflows(conn)?
+            .into_iter()
+            .filter(|item| owned(item.project_id.as_deref()) && ascii_slug(&item.name) == slug)
+            .map(|item| item.id)
+            .collect(),
+        "prompt" => crate::db::quick_prompts::list_quick_prompts(conn)?
+            .into_iter()
+            .filter(|item| owned(item.project_id.as_deref()) && ascii_slug(&item.name) == slug)
+            .map(|item| item.id)
+            .collect(),
+        "qa" => crate::db::quick_apis::list_quick_apis(conn)?
+            .into_iter()
+            .filter(|item| owned(item.project_id.as_deref()) && ascii_slug(&item.name) == slug)
+            .map(|item| item.id)
+            .collect(),
+        "qe" => crate::db::quick_execs::list_quick_execs(conn)?
+            .into_iter()
+            .filter(|item| owned(item.project_id.as_deref()) && ascii_slug(&item.name) == slug)
+            .map(|item| item.id)
+            .collect(),
+        "artifact" => {
+            let pages: Vec<_> = crate::db::live_pages::list_live_pages(conn)?
+                .into_iter()
+                .filter(|page| owned(page.project_id.as_deref()))
+                .collect();
+            // A page's own slug wins over one derived from its title.
+            let by_slug: Vec<String> = pages
+                .iter()
+                .filter(|page| page.slug == slug)
+                .map(|page| page.id.clone())
+                .collect();
+            if by_slug.is_empty() {
+                pages
+                    .into_iter()
+                    .filter(|page| ascii_slug(&page.title) == slug)
+                    .map(|page| page.id)
+                    .collect()
+            } else {
+                by_slug
+            }
+        }
+        "skill" => {
+            let Some(project_id) = scope_project else {
+                return Ok(None);
+            };
+            let Some(project) = crate::db::projects::get_project(conn, project_id)? else {
+                return Ok(None);
+            };
+            let root = crate::core::scanner::resolve_host_path(&project.path);
+            let present = !slug.contains(['/', '\\'])
+                && slug != "."
+                && slug != ".."
+                && crate::api::projects::resources::PROJECT_SKILL_ROOTS
+                    .iter()
+                    .filter(|skill_root| !(**skill_root == ".agents/skills" && slug == "kronn"))
+                    .any(|skill_root| root.join(skill_root).join(slug).join("SKILL.md").is_file());
+            return Ok(present.then(|| format!("repository:{project_id}:{slug}")));
+        }
+        _ => Vec::new(),
+    };
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [id] => Ok(Some(id.clone())),
+        _ => anyhow::bail!(
+            "`{kind}:{slug}` is ambiguous: {} resources of the same scope have that slug",
+            candidates.len()
+        ),
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn conn() -> Connection {
@@ -226,71 +357,243 @@ mod tests {
         );
     }
 
+    fn timestamp() -> &'static str {
+        "2026-01-01T00:00:00Z"
+    }
+
+    pub(crate) fn seed_workflow(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+        let workflow: crate::models::Workflow = serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "project_id": project,
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "s", "step_type": {"type": "Agent"}, "prompt_template": "x"}],
+            "actions": [], "safety": {}, "workspace_config": null, "concurrency_limit": null,
+            "enabled": true, "created_at": timestamp(), "updated_at": timestamp()
+        }))
+        .unwrap();
+        crate::db::workflows::insert_workflow(conn, &workflow).unwrap();
+    }
+
+    pub(crate) fn seed_prompt(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+        let prompt: crate::models::QuickPrompt = serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "icon": "zap", "prompt_template": "x",
+            "variables": [], "agent": "ClaudeCode", "project_id": project,
+            "created_at": timestamp(), "updated_at": timestamp()
+        }))
+        .unwrap();
+        crate::db::quick_prompts::insert_quick_prompt(conn, &prompt).unwrap();
+    }
+
+    pub(crate) fn seed_api(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+        let api: crate::models::QuickApi = serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "icon": "globe", "project_id": project,
+            "api_plugin_slug": "github", "api_config_id": "cfg", "api_endpoint_path": "/user",
+            "variables": [], "created_at": timestamp(), "updated_at": timestamp()
+        }))
+        .unwrap();
+        crate::db::quick_apis::insert_quick_api(conn, &api).unwrap();
+    }
+
+    pub(crate) fn seed_exec(conn: &Connection, id: &str, name: &str, project: Option<&str>) {
+        let exec: crate::models::QuickExec = serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "icon": "terminal", "project_id": project,
+            "command": "cargo", "args": ["check"], "timeout_secs": 30,
+            "output_format": "text", "created_at": timestamp(), "updated_at": timestamp()
+        }))
+        .unwrap();
+        crate::db::quick_execs::insert_quick_exec(conn, &exec).unwrap();
+    }
+
+    pub(crate) fn seed_page(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        slug: &str,
+        project: Option<&str>,
+    ) {
+        let now = chrono::Utc::now();
+        let page = crate::models::LivePage {
+            id: id.into(),
+            project_id: project.map(Into::into),
+            title: title.into(),
+            slug: slug.into(),
+            current_revision_id: format!("rev-{id}"),
+            data_revision: 0,
+            created_at: now,
+            updated_at: now,
+            last_published_at: None,
+            pinned: false,
+            archived: false,
+        };
+        let revision = crate::models::LivePageRevision {
+            id: format!("rev-{id}"),
+            page_id: id.into(),
+            revision: 1,
+            html: "<h1>x</h1>".into(),
+            created_by_agent: None,
+            created_at: now,
+        };
+        crate::db::live_pages::create_live_page(conn, &page, &revision, &[], None).unwrap();
+    }
+
+    pub(crate) fn seed_plugin(conn: &Connection, config_id: &str, server_id: &str) {
+        crate::db::mcps::upsert_server(
+            conn,
+            &crate::models::McpServer {
+                id: server_id.into(),
+                name: server_id.into(),
+                description: String::new(),
+                transport: crate::models::McpTransport::Stdio {
+                    command: "echo".into(),
+                    args: vec![],
+                },
+                source: crate::models::McpSource::Registry,
+                api_spec: None,
+            },
+        )
+        .unwrap();
+        crate::db::mcps::insert_config(
+            conn,
+            &crate::models::McpConfig {
+                id: config_id.into(),
+                server_id: server_id.into(),
+                label: "L".into(),
+                env_keys: vec![],
+                env_encrypted: "x".into(),
+                args_override: None,
+                is_global: true,
+                config_hash: config_id.into(),
+                project_ids: vec![],
+                host_sync: crate::models::HostSyncMode::GlobalOnly,
+                include_general: true,
+            },
+        )
+        .unwrap();
+    }
+
+    fn resolve(conn: &Connection, reference: &str, project: Option<&str>) -> Option<String> {
+        resolve_symbolic_reference(conn, reference, project).unwrap()
+    }
+
     #[test]
     fn resolve_symbolic_reference_covers_every_declared_kind() {
         let conn = conn();
-        upsert(&conn, "proj-a", "quick_prompt", "review-pr", "qp-1").unwrap();
-        upsert(&conn, "proj-a", "workflow", "triage", "wf-1").unwrap();
-        upsert(&conn, "proj-a", "quick_exec", "lint", "qe-1").unwrap();
-        upsert(&conn, "proj-a", "quick_api", "fetch", "qa-1").unwrap();
+        seed_workflow(&conn, "wf-1", "Triage", None);
+        seed_prompt(&conn, "qp-1", "Review PR", None);
+        seed_exec(&conn, "qe-1", "Lint", None);
+        seed_api(&conn, "qa-1", "Fetch", None);
+        seed_page(&conn, "page-1", "Team follow-up", "team-follow-up", None);
+        assert_eq!(resolve(&conn, "workflow:triage", None), Some("wf-1".into()));
         assert_eq!(
-            resolve_symbolic_reference(&conn, "prompt:review-pr", "proj-a", None).unwrap(),
+            resolve(&conn, "prompt:review-pr", None),
             Some("qp-1".into())
         );
+        assert_eq!(resolve(&conn, "qe:lint", None), Some("qe-1".into()));
+        assert_eq!(resolve(&conn, "qa:fetch", None), Some("qa-1".into()));
         assert_eq!(
-            resolve_symbolic_reference(&conn, "workflow:triage", "proj-a", None).unwrap(),
-            Some("wf-1".into())
-        );
-        assert_eq!(
-            resolve_symbolic_reference(&conn, "qe:lint", "proj-a", None).unwrap(),
-            Some("qe-1".into())
-        );
-        assert_eq!(
-            resolve_symbolic_reference(&conn, "qa:fetch", "proj-a", None).unwrap(),
-            Some("qa-1".into())
+            resolve(&conn, "artifact:team-follow-up", None),
+            Some("page-1".into())
         );
         // Builtin skills are embedded at compile time — no filesystem
         // fixture needed, and no risk of writing under the real config dir.
+        assert_eq!(resolve(&conn, "skill:rust", None), Some("rust".into()));
+        assert_eq!(resolve(&conn, "skill:does-not-exist", None), None);
+        assert_eq!(REFERENCE_KINDS.len(), 7);
+    }
+
+    #[test]
+    fn an_identity_wins_over_a_name_and_a_dangling_identity_is_skipped() {
+        let conn = conn();
+        seed_workflow(&conn, "wf-named", "Triage", None);
+        seed_workflow(&conn, "wf-imported", "Renamed later", None);
+        upsert(&conn, "", "workflow", "triage", "wf-imported").unwrap();
         assert_eq!(
-            resolve_symbolic_reference(&conn, "skill:rust", "proj-a", None).unwrap(),
-            Some("rust".into())
+            resolve(&conn, "workflow:triage", None),
+            Some("wf-imported".into())
         );
+        upsert(&conn, "", "workflow", "triage", "wf-deleted").unwrap();
         assert_eq!(
-            resolve_symbolic_reference(&conn, "skill:does-not-exist", "proj-a", None).unwrap(),
-            None
+            resolve(&conn, "workflow:triage", None),
+            Some("wf-named".into())
         );
     }
 
     #[test]
-    fn resolve_symbolic_reference_falls_back_to_the_global_scope() {
+    fn resolve_symbolic_reference_prefers_the_project_then_the_global_scope() {
         let conn = conn();
-        upsert(&conn, "", "quick_prompt", "review-pr", "qp-global").unwrap();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "proj-a", "name": "A", "path": "/nonexistent/kronn-proj-a",
+            "repo_url": "https://github.com/acme/a",
+            "ai_config": {"detected": false, "configs": []},
+            "audit_status": "NoTemplate",
+            "created_at": timestamp(), "updated_at": timestamp()
+        }))
+        .unwrap();
+        crate::db::projects::insert_project(&conn, &project).unwrap();
+        seed_prompt(&conn, "qp-global", "Review PR", None);
         assert_eq!(
-            resolve_symbolic_reference(&conn, "prompt:review-pr", "proj-a", None).unwrap(),
+            resolve(&conn, "prompt:review-pr", Some("proj-a")),
             Some("qp-global".into())
         );
-        // A same-project mapping still wins over the global fallback.
-        upsert(&conn, "proj-a", "quick_prompt", "review-pr", "qp-local").unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('proj-b','B','/nonexistent/b','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        seed_prompt(&conn, "qp-other", "Review PR", Some("proj-b"));
+        seed_prompt(&conn, "qp-local", "Review PR", Some("proj-a"));
         assert_eq!(
-            resolve_symbolic_reference(&conn, "prompt:review-pr", "proj-a", None).unwrap(),
+            resolve(&conn, "prompt:review-pr", Some("proj-a")),
             Some("qp-local".into())
         );
+        assert_eq!(
+            resolve(&conn, "prompt:review-pr", None),
+            Some("qp-global".into())
+        );
+    }
+
+    #[test]
+    fn a_skill_reference_finds_the_project_repository_skill() {
+        let conn = conn();
+        let root = tempfile::tempdir().unwrap();
+        let skill = root.path().join(".agents/skills/block-migration");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: block-migration\n---\nBody",
+        )
+        .unwrap();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "proj-s", "name": "S", "path": root.path(),
+            "ai_config": {"detected": false, "configs": []},
+            "audit_status": "NoTemplate",
+            "created_at": timestamp(), "updated_at": timestamp()
+        }))
+        .unwrap();
+        crate::db::projects::insert_project(&conn, &project).unwrap();
+        assert_eq!(
+            resolve(&conn, "skill:block-migration", Some("proj-s")),
+            Some("repository:proj-s:block-migration".into())
+        );
+        // Without the project, only the catalogue is searched.
+        assert_eq!(resolve(&conn, "skill:block-migration", None), None);
+        assert_eq!(resolve(&conn, "skill:../escape", Some("proj-s")), None);
+    }
+
+    #[test]
+    fn two_resources_with_the_same_slug_in_one_scope_are_ambiguous() {
+        let conn = conn();
+        seed_workflow(&conn, "wf-1", "Triage", None);
+        seed_workflow(&conn, "wf-2", "triage", None);
+        let error = resolve_symbolic_reference(&conn, "workflow:triage", None).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error}");
     }
 
     #[test]
     fn resolve_symbolic_reference_rejects_malformed_or_unknown_input() {
         let conn = conn();
-        assert_eq!(
-            resolve_symbolic_reference(&conn, "not-a-reference", "", None).unwrap(),
-            None
-        );
-        assert_eq!(
-            resolve_symbolic_reference(&conn, "prompt:", "", None).unwrap(),
-            None
-        );
-        assert_eq!(
-            resolve_symbolic_reference(&conn, "unknown-kind:slug", "", None).unwrap(),
-            None
-        );
+        assert_eq!(resolve(&conn, "not-a-reference", None), None);
+        assert_eq!(resolve(&conn, "prompt:", None), None);
+        assert_eq!(resolve(&conn, "unknown-kind:slug", None), None);
+        assert_eq!(resolve(&conn, "workflow:unknown", None), None);
     }
 }

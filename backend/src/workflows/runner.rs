@@ -1224,6 +1224,22 @@ async fn execute_run_body(
     }
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set("run.id", run.id.clone());
+    // KT-917 — `{{ref:<kind>:<slug>}}` resolves in this run's project; an
+    // unresolved one stays unknown so strict rendering fails its step.
+    let refs_workflow = workflow.clone();
+    let refs_project = workflow.project_id.clone();
+    let references = db
+        .with_conn(move |conn| {
+            crate::core::resource_refs::resolve_template_references(
+                conn,
+                &refs_workflow,
+                refs_project.as_deref(),
+            )
+        })
+        .await?;
+    for (reference, id) in references {
+        ctx.set(reference, id);
+    }
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
     // wrote it) renders cleanly rather than leaving the literal
@@ -7165,6 +7181,101 @@ mod tests {
             persisted.finished_at.is_some(),
             "terminal write re-stamps finished_at"
         );
+    }
+
+    // ─── KT-917 — symbolic references resolved per run ───────────────────
+
+    fn exec_step(name: &str, command: &str, args: &[&str]) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Exec;
+        step.exec_command = Some(command.into());
+        step.exec_args = args.iter().map(|arg| arg.to_string()).collect();
+        step
+    }
+
+    #[tokio::test]
+    async fn an_exec_step_receives_the_local_id_of_a_workflow_reference() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-refs", repo.path()).await;
+        let mut target = make_workflow_with_artifacts(Default::default());
+        target.id = "wf-local-target-7".into();
+        target.name = "Nightly Triage".into();
+        target.project_id = Some("proj-refs".into());
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-refs".into();
+        workflow.project_id = Some("proj-refs".into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        workflow.steps = vec![exec_step(
+            "launch",
+            "echo",
+            &["--target={{ref:workflow:nightly-triage}}"],
+        )];
+        let mut run = pending_run("run-refs", &workflow.id);
+        run.project_id = Some("proj-refs".into());
+        let target_db = target.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &target_db))
+            .await
+            .unwrap();
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(output.contains("--target=wf-local-target-7"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_reference_fails_its_step_before_the_command_starts() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-refs-unknown", repo.path()).await;
+        let marker = repo.path().join("launched");
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-refs-unknown".into();
+        workflow.project_id = Some("proj-refs-unknown".into());
+        workflow.exec_allowlist = vec!["touch".into()];
+        let marker_arg = marker.to_string_lossy().to_string();
+        workflow.steps = vec![exec_step(
+            "launch",
+            "touch",
+            &[marker_arg.as_str(), "{{ref:workflow:no-such-workflow}}"],
+        )];
+        let mut run = pending_run("run-refs-unknown", &workflow.id);
+        run.project_id = Some("proj-refs-unknown".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Failed, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(output.contains("ref:workflow:no-such-workflow"), "{output}");
+        assert!(!marker.exists(), "the command must not have been launched");
     }
 
     // ─── KT-1015 — the run's launch project ──────────────────────────────

@@ -1497,10 +1497,56 @@ pub async fn unsafe_steps(
 }
 
 /// POST /api/workflows
+/// Save-time half of KT-917: a structured field written as `ref:<kind>:<slug>`
+/// is stored as the local id it names, so graph validation reads literal ids.
+async fn resolve_saved_references(
+    state: &AppState,
+    project_id: Option<String>,
+    steps: &mut Vec<WorkflowStep>,
+    on_failure: &mut Vec<WorkflowStep>,
+) -> Result<(), String> {
+    let mut owned = (std::mem::take(steps), std::mem::take(on_failure));
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let outcome = crate::core::resource_refs::resolve_structured_references(
+                conn,
+                &mut owned.0,
+                project_id.as_deref(),
+                false,
+            )
+            .and_then(|()| {
+                crate::core::resource_refs::resolve_structured_references(
+                    conn,
+                    &mut owned.1,
+                    project_id.as_deref(),
+                    false,
+                )
+            });
+            Ok::<_, anyhow::Error>((owned, outcome))
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?;
+    let ((resolved_steps, resolved_on_failure), outcome) = result;
+    *steps = resolved_steps;
+    *on_failure = resolved_on_failure;
+    outcome
+}
+
 pub async fn create(
     State(state): State<AppState>,
-    Json(req): Json<CreateWorkflowRequest>,
+    Json(mut req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
+    if let Err(e) = resolve_saved_references(
+        &state,
+        req.project_id.clone(),
+        &mut req.steps,
+        &mut req.on_failure,
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
+    }
     if req.steps.is_empty() {
         return Json(ApiResponse::err("Workflow must have at least one step"));
     }
@@ -1768,7 +1814,7 @@ pub async fn create_feasibility_autopilot(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<UpdateWorkflowRequest>,
+    Json(mut req): Json<UpdateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
     let existing = match state
@@ -1786,6 +1832,25 @@ pub async fn update(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    if req.steps.is_some() || req.on_failure.is_some() {
+        let project_id = req
+            .project_id
+            .clone()
+            .unwrap_or_else(|| existing.project_id.clone());
+        let mut steps = req.steps.clone().unwrap_or_default();
+        let mut on_failure = req.on_failure.clone().unwrap_or_default();
+        if let Err(e) =
+            resolve_saved_references(&state, project_id, &mut steps, &mut on_failure).await
+        {
+            return Json(ApiResponse::err(e));
+        }
+        if req.steps.is_some() {
+            req.steps = Some(steps);
+        }
+        if req.on_failure.is_some() {
+            req.on_failure = Some(on_failure);
+        }
+    }
     // Child targets are re-read only when what they depend on changes, so a
     // rename or a pin never fails on a target deleted since.
     let child_launches_changed =

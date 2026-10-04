@@ -3302,6 +3302,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn saving_a_workflow_stores_a_reference_as_the_local_id() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::resource_identities::tests::seed_workflow(
+                    conn,
+                    "wf-child-local",
+                    "Child Target",
+                    None,
+                );
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        let body_for = |target: &str| {
+            serde_json::json!({
+                "name": "Parent",
+                "trigger": { "type": "Manual" },
+                "steps": [{
+                    "name": "chain",
+                    "step_type": { "type": "TriggerWorkflow" },
+                    "sub_workflow_id": target
+                }],
+                "actions": [],
+                "safety": { "sandbox": false, "max_files": null, "max_lines": null, "require_approval": false }
+            })
+        };
+        let post = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflows")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let (_, created) = send(
+            state.clone(),
+            false,
+            post(body_for("ref:workflow:child-target")),
+        )
+        .await;
+        assert_eq!(
+            created["data"]["steps"][0]["sub_workflow_id"].as_str(),
+            Some("wf-child-local"),
+            "{created}"
+        );
+        let (_, refused) = send(state.clone(), false, post(body_for("ref:workflow:missing"))).await;
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ref:workflow:missing"),
+            "{refused}"
+        );
+
+        let (status, resolved) = send(
+            state,
+            false,
+            Request::builder()
+                .method("GET")
+                .uri("/api/resources/resolve?ref=workflow:child-target")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resolved["data"]["id"].as_str(), Some("wf-child-local"));
+    }
+
     /// 0.8.5 — `workflow_create_draft` MCP tool round-trip.
     ///
     /// Critical safety contract: when the MCP tool POSTs with

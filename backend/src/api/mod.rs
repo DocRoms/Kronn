@@ -61,6 +61,7 @@ pub mod projects;
 pub mod quick_apis;
 pub mod quick_execs;
 pub mod quick_prompts;
+pub mod resource_refs;
 pub mod rtk;
 pub mod rtk_state;
 pub mod setup;

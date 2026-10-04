@@ -212,6 +212,25 @@ tokens in every session and every sub-agent, and compete to trigger.
   already does for API configs [src: file: backend/src/api/workflows.rs:1977].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:251].
+- Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,
+  `prompt`, `skill`, `plugin`, `artifact`): the run's project first, then the
+  global scope; in each scope the identity table, then the slug publication
+  would give the resource's name (a page's own slug). `skill:` also finds a
+  `SKILL.md` in the project repository (`repository:<project>:<slug>`). Two
+  matches in one scope are refused as ambiguous
+  [src: file: backend/src/db/resource_identities.rs:146].
+  - Templated step fields write `{{ref:<kind>:<slug>}}`. The run resolves
+    every reference its steps, Quick Prompts and Quick APIs read before the
+    first step; an unknown one fails its step before launch, naming it.
+  - Structured id fields (`sub_workflow_id`, `quick_prompt_id`,
+    `quick_api_id`, batch and CollectApiData ids) are published as
+    `ref:<kind>:<slug>` and stored as local ids at save and import, because
+    graph validation needs literal ids. Importing a workflow whose target is
+    not imported yet is refused with the reference; import the target first.
+    A literal Page id is published as `{{ref:artifact:<slug>}}`.
+  - Scripts resolve one reference with
+    `GET /api/resources/resolve?ref=<kind>:<slug>&project=<id>`
+    [src: file: backend/src/core/resource_refs.rs:1].
 
 ## Secrets
 

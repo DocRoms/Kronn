@@ -80,6 +80,17 @@ Release notes for 0.9.3 and earlier are available in the
   inline Quick Exec sources of a CollectApiData step are checked, counted and
   fixable the same way.
 
+- Workflows name other resources by slug: `{{ref:<kind>:<slug>}}` in any
+  templated step field resolves at run time in the run's project, then the
+  global scope, for workflows, Quick Execs, Quick APIs, prompts, skills (the
+  repository's included), plugins and pages, and an unknown reference fails
+  its step before launch. Sub-workflow, trigger, Quick Prompt and Quick API
+  ids are written to `kronn/` as `ref:<kind>:<slug>` and stored as local ids
+  at save and import, so a workflow published from one machine and imported
+  on another runs its targets without editing.
+  `GET /api/resources/resolve?ref=&project=` resolves one for a script
+  (KT-917).
+
 ### Fixed
 
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them

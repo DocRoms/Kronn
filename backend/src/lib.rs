@@ -892,6 +892,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/export", get(api::setup::export_data))
         // ── Compact opaque-ID resolution (MCP token economy) ──
         .route("/api/resolve/{id}", get(api::id_resolver::resolve))
+        // KT-917: symbolic resource reference -> local id, per project.
+        .route("/api/resources/resolve", get(api::resource_refs::resolve))
         // Whole-DB restore: exports routinely exceed axum's ~2 MB default body
         // limit (a few hundred discussions ≈ 2 MB ZIP). Without this, any
         // non-trivial export fails the upload with "Error parsing
