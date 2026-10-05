@@ -236,12 +236,14 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    ciphertext.
 3. **Done.** `encryption_secret` is `serde(skip_serializing)`. It stays the
    in-process key every consumer reads; the only copy written to
-   `config.toml` is the one `config::retain_disk_key` keeps until a vault
-   reads the key back, the key decrypts every non-empty column, and either a
-   recovery passphrase exists or the sidecar holds the key too (a different
-   legacy key is kept). Without a recovery passphrase no local copy is
-   deleted; `recovery/status` exposes `key_copies_kept` / `config_holds_key`.
-   A locked boot keeps no key in memory (fail closed).
+   `config.toml` is the one `config::retain_disk_key` keeps until the key
+   decrypts every non-empty column and two independent copies remain without
+   it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
+   whose fingerprint matches); a different legacy key is kept. `mirror()`
+   never writes a vault holding another key; two keys that each decrypt data
+   stop the boot (resolved by `KRONN_REENCRYPT_FROM`). A locked boot keeps no
+   key in memory (fail closed); a stored auth token it cannot read locks the
+   API (423 `auth_locked`, recovery screen).
 4. **Done.** `tokens.keys[]` and `server.auth_token` live in
    `stored_credentials` (migration 217). The boot migration merges, writes,
    reads back, writes an encrypted backup of the old file
@@ -252,8 +254,10 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    table at boot and written back by every `config::save`. Reveal routes are
    unchanged.
 5. **Done (passphrase proof).** `recovery/set` refuses to replace an existing
-   `recovery.key` without `current_passphrase`; the human factor (D1) is not
-   part of 0.14.3.
+   `recovery.key` without `current_passphrase`; imports never replace it;
+   `recovery/restore` never swaps the key of a running instance (imported
+   secrets are re-encrypted instead). The human factor (D1) is not part of
+   0.14.3.
 6. **Done.** Dev builds exercise the keychain with `KRONN_USE_KEYCHAIN=1`
    (`keyvault.rs` `use_os_keychain`); outside macOS/Windows the default is off.
 

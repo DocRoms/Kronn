@@ -197,11 +197,25 @@ Release notes for 0.9.3 and earlier are available in the
   decrypts existing data, Kronn keeps running for a restore but holds no key,
   so nothing new is encrypted under a key that no vault keeps. Two keys that
   each decrypt part of the data stop the startup with nothing written, and a
-  vault holding another key is never overwritten. A stored API token that can
-  no longer be decrypted locks the API (only health and the recovery routes
-  answer) instead of leaving it open.
-- Replacing the recovery passphrase now asks for the current one, so the
-  `recovery.key` that restores the key cannot be swapped silently (KT-1007).
+  vault holding another key is never overwritten; starting once with
+  `KRONN_REENCRYPT_FROM=<fingerprint>` moves one key's data under the other
+  without deleting either. A stored API token that can no longer be decrypted
+  locks the API (only health and the recovery routes answer, the interface
+  shows a "Kronn is locked" restore screen, and an exposed install still
+  starts) instead of leaving it open; a credential start-up that fails locks
+  it too. Invalid key values are never adopted, and a missing `config.toml`
+  no longer offers a random key that could be kept for good.
+- Replacing the recovery passphrase now asks for the current one, and
+  `recovery.key` records which key it wraps, so a blob for another key never
+  counts as a recovery copy (KT-1007).
+- Restoring a recovery passphrase on a running instance no longer swaps its
+  key (which split secrets between two keys): an import keeps the source
+  machine's recovery data beside this machine's, and Plugins → "Re-encrypt
+  imported secrets" re-encrypts the imported secrets under this machine's key
+  (KT-1007).
+- Reset keeps a copy of the key that `config.toml` still has to hold and now
+  also clears execution-variable snapshots, stored credentials and GitHub
+  tokens (KT-1007).
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them
   what they need across the boundary: every variable it sets for the launch is
   listed in `WSLENV` (appended to the user's own list), and the Windows paths
@@ -484,12 +498,15 @@ Release notes for 0.9.3 and earlier are available in the
 - `config.toml` no longer holds secrets (KT-1007): provider and External API
   connection keys and the API auth token are stored encrypted in the database,
   and the encryption key stays in the OS keychain or the `encryption_key` file,
-  kept in `config.toml` only while no vault can hold it, or while a single
-  copy would remain without a recovery passphrase. The first start moves
+  kept in `config.toml` until two independent copies exist (two key stores, or
+  one plus a recovery passphrase for that key); a sidecar-only install
+  without a passphrase keeps it there. The first start moves
   existing values, checks each one decrypts back, keeps the previous file
   encrypted as `config.toml.pre-credential-store.enc`, and can be interrupted
   and rerun without loss. The `config.toml.backup` copy made before database
-  migrations is written owner-only and without credentials. See `docs/operations/key-management.md`.
+  migrations is written owner-only and without credentials. Downgrading to
+  0.14.2 hides the stored keys until the next upgrade. See
+  `docs/operations/key-management.md`.
 - Plugins page: one export and one import flow, the plugin bundle, where each
   plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
   export and the paste-a-spec import are gone, and a plugin is deleted from
