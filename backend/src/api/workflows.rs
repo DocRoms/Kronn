@@ -1515,8 +1515,9 @@ pub async fn exec_line_check(
     // the line and a save: never next to a refusal it cannot lift.
     let stdin_refused = stdin
         .is_some_and(|stdin| stdin_validation_error("", command, &req.args, stdin, true).is_some());
-    let stdin_needs_approval = stdin
-        .is_some_and(|stdin| stdin_validation_error("", command, &req.args, stdin, false).is_some());
+    let stdin_needs_approval = stdin.is_some_and(|stdin| {
+        stdin_validation_error("", command, &req.args, stdin, false).is_some()
+    });
     let unmodelled_program = match first_unsafe_placeholder(command, &req.args) {
         _ if stdin_refused => None,
         Some(InlineFinding::UnmodelledProgram(program, _)) => Some(program),
@@ -6874,12 +6875,27 @@ mod tests {
         assert_eq!(check("duckdb", vec!["db.duckdb"], None).await, None);
         // Never offered next to a refusal the approval cannot lift.
         assert_eq!(
-            check("git", vec!["-c", "core.sshCommand={{x}}", "fetch"], Some("{{y}}")).await,
+            check(
+                "git",
+                vec!["-c", "core.sshCommand={{x}}", "fetch"],
+                Some("{{y}}")
+            )
+            .await,
             None
         );
         assert_eq!(check("bash", vec!["-o", "{{x}}"], None).await, None);
-        assert_eq!(check("duckdb", vec!["{{x}}"], Some("{{y}}")).await.as_deref(), Some("duckdb"));
-        assert_eq!(check("bash", vec!["-ec", "cat"], Some("{{y}}")).await.as_deref(), Some("bash"));
+        assert_eq!(
+            check("duckdb", vec!["{{x}}"], Some("{{y}}"))
+                .await
+                .as_deref(),
+            Some("duckdb")
+        );
+        assert_eq!(
+            check("bash", vec!["-ec", "cat"], Some("{{y}}"))
+                .await
+                .as_deref(),
+            Some("bash")
+        );
     }
 
     #[test]

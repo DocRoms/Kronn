@@ -452,7 +452,8 @@ enum StdinReach {
 fn stdin_reach(cmd: &str, args: &[String]) -> StdinReach {
     // The shape alone decides where stdin goes; a value inside the code is
     // the argument check's refusal, not a reason to ask for an approval here.
-    let trusted = crate::core::argv_roles::trusted_shape(cmd, args, &vec![false; args.len()]).is_ok();
+    let trusted =
+        crate::core::argv_roles::trusted_shape(cmd, args, &vec![false; args.len()]).is_ok();
     if crate::core::argv_roles::is_data_only(cmd) || trusted {
         return StdinReach::Data;
     }
@@ -771,8 +772,7 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
                 });
         return shell_reads_stdin
             || interactive
-            || interpreter_script(cmd, args)
-                .is_none_or(crate::core::argv_roles::is_stdin_path);
+            || interpreter_script(cmd, args).is_none_or(crate::core::argv_roles::is_stdin_path);
     }
     match name.as_str() {
         "lua" | "luajit" | "tclsh" | "wish" | "osascript" | "rscript" => {
@@ -1044,8 +1044,10 @@ pub fn suggest_args(cmd: &str, args: &[String]) -> Result<Vec<String>, String> {
     let rest = &args[code.index + 1..];
     let rewritten = if is_shell(cmd) {
         // Only `-c SCRIPT` is trusted: shell flags move into the script.
-        let flags = shell_set_flags(&args[..code.index])
-            .ok_or_else(|| "correction manuelle requise : une option du shell n'a pas d'équivalent `set`".to_string())?;
+        let flags = shell_set_flags(&args[..code.index]).ok_or_else(|| {
+            "correction manuelle requise : une option du shell n'a pas d'équivalent `set`"
+                .to_string()
+        })?;
         let script = if flags.is_empty() {
             script.clone()
         } else {
@@ -1085,7 +1087,9 @@ fn shell_set_flags(head: &[String]) -> Option<String> {
             i += 2;
             continue;
         }
-        let cluster = arg.strip_prefix('-').filter(|rest| !rest.starts_with('-'))?;
+        let cluster = arg
+            .strip_prefix('-')
+            .filter(|rest| !rest.starts_with('-'))?;
         for c in cluster.chars() {
             if c == 'c' {
                 continue;
@@ -1873,18 +1877,34 @@ mod tests {
     fn only_the_trusted_shapes_take_a_value_without_a_human() {
         for (cmd, line) in [
             ("bash", vec!["-c", "echo \"$1\"", "_", "{{x}}"]),
-            ("sh", vec!["-c", "printf %s \"$1\"", "name", "{{x}}", "{{y}}"]),
-            ("python3", vec!["-c", "import sys; print(sys.argv[1])", "{{x}}"]),
+            (
+                "sh",
+                vec!["-c", "printf %s \"$1\"", "name", "{{x}}", "{{y}}"],
+            ),
+            (
+                "python3",
+                vec!["-c", "import sys; print(sys.argv[1])", "{{x}}"],
+            ),
             ("python3", vec!["tool.py", "--flag", "{{x}}"]),
-            ("node", vec!["-e", "console.log(process.argv[1])", "--", "{{x}}"]),
+            (
+                "node",
+                vec!["-e", "console.log(process.argv[1])", "--", "{{x}}"],
+            ),
             ("node", vec!["app.js", "{{x}}"]),
             ("echo", vec!["{{x}}"]),
             ("grep", vec!["--", "{{x}}", "file"]),
         ] {
-            assert_eq!(first_unsafe_placeholder(cmd, &args(&line)), None, "{cmd} {line:?}");
+            assert_eq!(
+                first_unsafe_placeholder(cmd, &args(&line)),
+                None,
+                "{cmd} {line:?}"
+            );
         }
         for (cmd, line) in [
-            ("bash", vec!["-o", "pipefail", "-c", "echo \"$1\"", "_", "{{x}}"]),
+            (
+                "bash",
+                vec!["-o", "pipefail", "-c", "echo \"$1\"", "_", "{{x}}"],
+            ),
             ("bash", vec!["-ec", "echo \"$1\"", "_", "{{x}}"]),
             ("bash", vec!["./run.sh", "{{x}}"]),
             ("python3", vec!["-X", "utf8", "tool.py", "{{x}}"]),
@@ -1905,7 +1925,11 @@ mod tests {
                 ),
                 "{cmd} {line:?}"
             );
-            assert_eq!(first_unsafe_placeholder_with(cmd, &line, true), None, "{cmd} {line:?}");
+            assert_eq!(
+                first_unsafe_placeholder_with(cmd, &line, true),
+                None,
+                "{cmd} {line:?}"
+            );
         }
         // Code, an option position or a program position stays refused,
         // approval or not.
@@ -1919,7 +1943,10 @@ mod tests {
             ("rm", vec!["-{{x}}", "file"]),
         ] {
             let line = args(&line);
-            assert!(first_unsafe_placeholder_with(cmd, &line, true).is_some(), "{cmd} {line:?}");
+            assert!(
+                first_unsafe_placeholder_with(cmd, &line, true).is_some(),
+                "{cmd} {line:?}"
+            );
         }
     }
 
@@ -1928,7 +1955,10 @@ mod tests {
     #[test]
     fn review_four_lines_need_a_human_or_are_refused() {
         for (cmd, line) in [
-            ("python3", vec!["--check-hash-based-pycs", "always", "-c", "print('{{x}}')"]),
+            (
+                "python3",
+                vec!["--check-hash-based-pycs", "always", "-c", "print('{{x}}')"],
+            ),
             ("python3", vec!["-i", "tool.py", "{{x}}"]),
             ("fish", vec!["-C", "{{x}}", "-c", "true"]),
             ("nu", vec!["--config", "{{x}}", "-c", "ls"]),
@@ -1950,7 +1980,10 @@ mod tests {
             ("npx", vec!["tool", "{{x}}"]),
             ("xargs", vec!["git", "{{x}}"]),
         ] {
-            assert!(first_unsafe_placeholder(cmd, &args(&line)).is_some(), "{cmd} {line:?}");
+            assert!(
+                first_unsafe_placeholder(cmd, &args(&line)).is_some(),
+                "{cmd} {line:?}"
+            );
         }
         // stdin: device paths, `-f -`, `python -i` read it as code.
         for (cmd, line) in [
@@ -1978,7 +2011,10 @@ mod tests {
             ("bash", vec!["-ec", "cat > /tmp/in.json"]),
         ] {
             let line = args(&line);
-            assert!(stdin_validation_error("s", cmd, &line, "{{x}}", false).is_some(), "{cmd} {line:?}");
+            assert!(
+                stdin_validation_error("s", cmd, &line, "{{x}}", false).is_some(),
+                "{cmd} {line:?}"
+            );
         }
         assert!(stdin_validation_error("s", "npx", &args(&["node"]), "{{x}}", true).is_none());
     }

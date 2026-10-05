@@ -1755,7 +1755,6 @@ pub fn is_data_only(cmd: &str) -> bool {
     DATA_ONLY_PROGRAMS.contains(&base)
 }
 
-
 /// An interpreter with no modelled argv (see [`UNMODELLED_EVALUATORS`]).
 pub fn is_unmodelled_evaluator(name: &str) -> bool {
     UNMODELLED_EVALUATORS.contains(&name)
@@ -2587,9 +2586,7 @@ mod tests {
             true
         )
         .is_some());
-        assert!(
-            rendered_refusal("s", "make", &templates, &line(&["--", "build"]), true).is_none()
-        );
+        assert!(rendered_refusal("s", "make", &templates, &line(&["--", "build"]), true).is_none());
     }
 
     #[test]
