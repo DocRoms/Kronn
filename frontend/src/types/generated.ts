@@ -6129,7 +6129,16 @@ kept_recovery_blobs: number,
  * The key is in use but the stored credentials could not be loaded at
  * start (disk full, unreadable config.toml): why, to fix before a restart.
  */
-credentials_unavailable: string | null, };
+credentials_unavailable: string | null,
+/**
+ * recovery.key is verified for ANOTHER key: it can be replaced without
+ * its passphrase (it is kept as recovery.previous-<ts>).
+ */
+recovery_other_key: boolean,
+/**
+ * config.toml could not be read at start and was kept aside: what and why.
+ */
+config_set_aside: string | null, };
 
 export type RedactedField = {
 /**
@@ -7112,7 +7121,12 @@ export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agen
 /**
  * Paths actually scanned, exposed to diagnose empty results and missing mounts.
  */
-scan_paths_explored: Array<string>, };
+scan_paths_explored: Array<string>,
+/**
+ * config.toml could not be read at this start and was kept aside: the
+ * notice the wizard shows (where it is, key and data intact).
+ */
+config_set_aside: string | null, };
 
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 

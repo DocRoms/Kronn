@@ -76,6 +76,9 @@ pub async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<Setup
             repos_detected: vec![], // Skip scan — projects page will load them
             default_scan_path: default_scan_path(),
             scan_paths_explored: config.scan.paths.clone(),
+            config_set_aside: config::config_dir()
+                .ok()
+                .and_then(|d| config::set_aside_notice(&d)),
         }));
     }
 
@@ -139,6 +142,9 @@ pub async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<Setup
         repos_detected,
         default_scan_path: default_scan_path(),
         scan_paths_explored: scan_paths,
+        config_set_aside: config::config_dir()
+            .ok()
+            .and_then(|d| config::set_aside_notice(&d)),
     }))
 }
 
@@ -1719,8 +1725,15 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
     // Only a blob known to wrap the key in use can open the exported secrets
     // elsewhere; any other is left out and the UI says so.
     let active_key = state.config.read().await.encryption_secret.clone();
-    let (recovery_code, export_warning) =
-        export_recovery_code(config::config_dir().ok().as_deref(), active_key.as_deref());
+    let carries_secrets = db_export
+        .mcp_configs
+        .iter()
+        .any(|c| !c.env_encrypted.is_empty());
+    let (recovery_code, export_warning) = export_recovery_code(
+        config::config_dir().ok().as_deref(),
+        active_key.as_deref(),
+        carries_secrets,
+    );
 
     let bytes = match build_export_zip(&data_json, &config_toml, recovery_code.as_deref()) {
         Ok(b) => b,
@@ -1744,18 +1757,26 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
 fn export_recovery_code(
     dir: Option<&std::path::Path>,
     key: Option<&str>,
+    carries_secrets: bool,
 ) -> (Option<String>, Option<&'static str>) {
-    let (Some(dir), Some(key)) = (dir, key) else {
-        return (None, None);
-    };
     use crate::core::recovery::{matches_key, RecoveryMatch};
-    match matches_key(dir, key) {
-        RecoveryMatch::Absent => (None, None),
-        RecoveryMatch::Matches => (
-            crate::core::recovery::load_blob(dir).map(|b| crate::core::recovery::to_code(&b)),
+    let state = match (dir, key) {
+        (Some(d), Some(k)) => Some((d, matches_key(d, k))),
+        _ => None,
+    };
+    match state {
+        Some((d, RecoveryMatch::Matches)) => (
+            crate::core::recovery::load_blob(d).map(|b| crate::core::recovery::to_code(&b)),
             None,
         ),
-        _ => (None, Some("recovery-not-bundled")),
+        // Encrypted secrets go out without a way to read them elsewhere.
+        Some((_, RecoveryMatch::Absent)) if carries_secrets => {
+            (None, Some("no-recovery-passphrase"))
+        }
+        Some((_, RecoveryMatch::Absent)) => (None, None),
+        Some(_) => (None, Some("recovery-not-bundled")),
+        None if carries_secrets => (None, Some("key-locked")),
+        None => (None, None),
     }
 }
 
@@ -2406,6 +2427,11 @@ pub struct RecoveryStatus {
     /// The key is in use but the stored credentials could not be loaded at
     /// start (disk full, unreadable config.toml): why, to fix before a restart.
     pub credentials_unavailable: Option<String>,
+    /// recovery.key is verified for ANOTHER key: it can be replaced without
+    /// its passphrase (it is kept as recovery.previous-<ts>).
+    pub recovery_other_key: bool,
+    /// config.toml could not be read at start and was kept aside: what and why.
+    pub config_set_aside: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2454,6 +2480,14 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
             _ => false,
         },
         credentials_unavailable: dir.and_then(crate::core::credential_store::boot_failure),
+        recovery_other_key: match (dir, key) {
+            (Some(d), Some(k)) => {
+                crate::core::recovery::matches_key(d, k)
+                    == crate::core::recovery::RecoveryMatch::OtherKey
+            }
+            _ => false,
+        },
+        config_set_aside: dir.and_then(config::set_aside_notice),
         copies: report.copies as u32,
         stale_sources: names(&report.stale_sources),
         invalid_sources: names(&report.invalid_sources),
@@ -2536,6 +2570,8 @@ pub async fn restore_recovery(
                      Restart Kronn; nothing was deleted."
                 )));
             }
+            // Loaded now: a failure recorded at start no longer applies.
+            crate::core::credential_store::record_boot_failure(&dir, None);
             if config.server.auth_token.is_some() {
                 config.server.auth_locked = false;
             }
@@ -2566,7 +2602,7 @@ pub async fn reencrypt_imported(
         Ok(d) => d,
         Err(e) => return Json(ApiResponse::err(e.to_string())),
     };
-    let config = state.config.read().await;
+    let mut config = state.config.write().await;
     match crate::core::keystore::reencrypt_imported(
         &config,
         &state.db,
@@ -2576,11 +2612,44 @@ pub async fn reencrypt_imported(
     )
     .await
     {
-        Ok(r) => Json(ApiResponse::ok(ReencryptResponse {
-            rewritten: r.rewritten as u32,
-            already_current: r.already_current as u32,
-            untouched: r.untouched as u32,
-        })),
+        Ok(r) => {
+            if r.rewritten > 0 {
+                // Stored credentials may be among the rewritten rows: reload the
+                // store so they appear now, not after a restart.
+                let outcome = crate::core::keystore::KeyOutcome::Resolved {
+                    source: "reencrypt",
+                };
+                let session = config
+                    .server
+                    .auth_token
+                    .clone()
+                    .filter(|_| config.server.auth_token_session_only);
+                if let Err(e) = crate::core::credential_store::boot(
+                    &mut config,
+                    state.db.clone(),
+                    &dir,
+                    &outcome,
+                    session.as_deref(),
+                    crate::core::credential_store::BootMode::Restore,
+                )
+                .await
+                {
+                    return Json(ApiResponse::err(format!(
+                        "The secrets were re-encrypted, but reloading the stored credentials \
+                         failed ({e:#}): restart Kronn to load them."
+                    )));
+                }
+                crate::core::credential_store::record_boot_failure(&dir, None);
+                if config.server.auth_token.is_some() {
+                    config.server.auth_locked = false;
+                }
+            }
+            Json(ApiResponse::ok(ReencryptResponse {
+                rewritten: r.rewritten as u32,
+                already_current: r.already_current as u32,
+                untouched: r.untouched as u32,
+            }))
+        }
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
 }
@@ -4261,8 +4330,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = crate::core::crypto::generate_secret();
         assert_eq!(
-            export_recovery_code(Some(dir.path()), Some(&key)),
+            export_recovery_code(Some(dir.path()), Some(&key), false),
             (None, None)
+        );
+        // C4-06: secrets without any recovery passphrase, or with the key locked, warn too.
+        assert_eq!(
+            export_recovery_code(Some(dir.path()), Some(&key), true),
+            (None, Some("no-recovery-passphrase"))
+        );
+        assert_eq!(
+            export_recovery_code(Some(dir.path()), None, true),
+            (None, Some("key-locked"))
         );
         recovery::save_blob(
             dir.path(),
@@ -4270,11 +4348,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            export_recovery_code(Some(dir.path()), Some(&key)),
+            export_recovery_code(Some(dir.path()), Some(&key), false),
             (None, Some("recovery-not-bundled"))
         );
         recovery::save_blob(dir.path(), &recovery::wrap_key(&key, "pw").unwrap()).unwrap();
-        let (code, warning) = export_recovery_code(Some(dir.path()), Some(&key));
+        let (code, warning) = export_recovery_code(Some(dir.path()), Some(&key), true);
         assert!(code.is_some() && warning.is_none());
     }
 

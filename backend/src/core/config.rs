@@ -89,28 +89,41 @@ pub async fn load() -> Result<Option<AppConfig>> {
         .await
         .context("Failed to read config file")?;
     let dir = config_dir()?;
-    if toml::from_str::<AppConfig>(&content).is_err()
-        && key_only_file(&content).ok().flatten().is_none()
-    {
-        // Not a config Kronn can read (manual edit, foreign tool): keep it aside
-        // untouched, salvage its key, and start as a first run.
-        let kept = set_aside_unreadable_config(&dir, &path)?;
-        let key = salvage_key_line(&content);
-        tracing::error!(
-            "config.toml could not be parsed; it is kept as {kept} (it may hold your key). \
-             Kronn starts as a first run{}",
-            if key.is_some() {
-                " with the key it held"
+    if let Err(schema_error) = toml::from_str::<AppConfig>(&content) {
+        if key_only_file(&content).ok().flatten().is_none() {
+            // Not a config Kronn can read (manual edit, foreign tool, a newer
+            // Kronn's values): keep it aside untouched, salvage its key, start
+            // as a first run, and tell the user (wizard / Settings).
+            let cause = if content.parse::<toml::Table>().is_err() {
+                "it is not valid TOML"
             } else {
-                ""
+                "it is valid TOML but not a configuration this Kronn understands"
+            };
+            let kept = set_aside_unreadable_config(&dir, &path)?;
+            let key = salvage_key_line(&content);
+            tracing::error!(
+                "config.toml was set aside as {kept}: {cause} ({schema_error}). Kronn starts as \
+                 a first run{}",
+                if key.is_some() {
+                    " with the key it held"
+                } else {
+                    ""
+                }
+            );
+            record_set_aside(
+                &dir,
+                format!(
+                    "config.toml could not be read ({cause}) and was kept as {kept}; your key and \
+                     data are intact, only the settings start over"
+                ),
+            );
+            if let Some(key) = key.as_deref() {
+                retain_disk_key(&dir, key);
             }
-        );
-        if let Some(key) = key.as_deref() {
-            retain_disk_key(&dir, key);
+            let mut config = default_config_without_key();
+            config.encryption_secret = key;
+            return Ok(Some(config));
         }
-        let mut config = default_config_without_key();
-        config.encryption_secret = key;
-        return Ok(Some(config));
     }
     if let Some(key) = key_only_file(&content)? {
         // Left by a reset that had to keep the key: first run, with that key.
@@ -282,19 +295,8 @@ fn write_config_atomic(
     ));
     // Owner-only from creation, never through a planted symlink, and removed
     // when the write or fsync fails.
-    super::keyvault::write_private_temp(&tmp, content)?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    #[cfg(unix)]
-    {
-        // Best-effort: fsync the dir so the rename itself survives a crash.
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
-        }
-    }
-    Ok(())
+    let _ = dir;
+    super::keyvault::write_private_atomic(&tmp, path, content)
 }
 
 /// Acquire an exclusive advisory lock on the data dir so exactly ONE backend
@@ -576,6 +578,27 @@ pub fn default_config() -> AppConfig {
     }
 }
 
+/// Per data directory, the notice about a config.toml kept aside at start.
+static SET_ASIDE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn record_set_aside(dir: &std::path::Path, notice: String) {
+    SET_ASIDE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(dir.to_path_buf(), notice);
+}
+
+/// The notice about a config.toml set aside at this start, if any.
+pub fn set_aside_notice(dir: &std::path::Path) -> Option<String> {
+    SET_ASIDE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(dir)
+        .cloned()
+}
+
 /// Move an unreadable config.toml to `config.toml.corrupt.<ts>` (owner-only).
 fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) -> Result<String> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
@@ -843,6 +866,27 @@ mod tests {
             .contains("x = [broken"));
         assert!(is_first_run().await.unwrap());
         release_disk_key(&tmp);
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// C4-09 — valid TOML that is not a Kronn config: set aside, and the
+    /// notice for the wizard / Settings is recorded with its cause.
+    #[tokio::test]
+    #[serial]
+    async fn a_schema_invalid_config_is_set_aside_with_a_notice() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("schema");
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        std::fs::write(tmp.join(CONFIG_FILE), "[server]\nport = \"not a number\"\n").unwrap();
+        let loaded = load().await.unwrap().expect("first run");
+        assert!(loaded.encryption_secret.is_none());
+        let notice = set_aside_notice(&tmp).expect("recorded");
+        assert!(
+            notice.contains("valid TOML but not a configuration"),
+            "{notice}"
+        );
+        assert!(notice.contains("config.toml.corrupt."), "{notice}");
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }

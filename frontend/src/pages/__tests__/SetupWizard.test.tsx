@@ -56,7 +56,7 @@ const makeStatus = (overrides: Partial<SetupStatus> = {}): SetupStatus => ({
   is_first_run: true,
   current_step: 'Agents',
   agents_detected: [],
-  scan_paths_explored: [],
+  scan_paths_explored: [], config_set_aside: null,
   repos_detected: [],
   scan_paths_set: false,
   default_scan_path: null,
@@ -360,7 +360,7 @@ describe('SetupWizard — step 1 (scan path configuration)', () => {
     vi.mocked(agentsApi.detect).mockResolvedValue([agent]);
     vi.mocked(setupApi.getStatus).mockResolvedValue(makeStatus({
       repos_detected: [],
-      scan_paths_explored: ['/host-home', '/workspace/git'],
+      scan_paths_explored: ['/host-home', '/workspace/git'], config_set_aside: null,
     }));
 
     await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
@@ -591,5 +591,9 @@ describe('SetupWizard — access step (KT-975)', () => {
     await toAccessStep([makeAgent({ name: 'Claude Code', agent_type: 'ClaudeCode' })]);
     await clickButton('Continuer');
     expect(document.body.textContent).toContain('Dépôts détectés');
+  });
+  it('says when config.toml was set aside at start', async () => {
+    const { getByTestId } = await wrap(<SetupWizard initialStatus={makeStatus({ config_set_aside: 'config.toml could not be read and was kept as config.toml.corrupt.1' })} onComplete={vi.fn()} />);
+    expect(getByTestId('setup-config-set-aside').textContent).toContain('config.toml.corrupt.1');
   });
 });

@@ -1,3 +1,4 @@
+import { exportAndDownload } from '../lib/exportDownload';
 import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
 import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
@@ -1959,20 +1960,7 @@ export function SettingsPage({
           <div className="flex-row gap-4">
             <button
               className="set-action-btn"
-              onClick={async () => {
-                try {
-                  const { blob, warning } = await configApi.exportData();
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.zip`;
-                  a.click();
-                  URL.revokeObjectURL(url);
-                  if (warning) toast(t('config.exportRecoveryWarning'), 'error');
-                } catch (err) {
-                  toast(err instanceof Error ? err.message : String(err), 'error');
-                }
-              }}
+              onClick={() => exportAndDownload(configApi.exportData, toast, t)}
             >
               <Download size={12} /> {t('config.export')}
             </button>

@@ -166,7 +166,7 @@ describe('App', () => {
       current_step: 'Complete' as const,
       agents_detected: [],
       scan_paths_set: true,
-      scan_paths_explored: [],
+      scan_paths_explored: [], config_set_aside: null,
       repos_detected: [],
       default_scan_path: '/home',
     };
@@ -205,7 +205,7 @@ describe('App', () => {
       current_step: 'Complete',
       agents_detected: [],
       scan_paths_set: true,
-      scan_paths_explored: [],
+      scan_paths_explored: [], config_set_aside: null,
       repos_detected: [],
       default_scan_path: '/home',
     });
@@ -248,7 +248,7 @@ describe('App', () => {
 
   it('opens a direct discussion mosaic without mounting the dashboard', async () => {
     window.location.hash = '#discussions/mosaic?discussion=a&discussion=b&layout=two-rows';
-    vi.mocked(setupApi.getStatus).mockResolvedValue({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, scan_paths_explored: [], repos_detected: [], default_scan_path: '/home' });
+    vi.mocked(setupApi.getStatus).mockResolvedValue({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, scan_paths_explored: [], config_set_aside: null, repos_detected: [], default_scan_path: '/home' });
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('standalone-discussion-mosaic')).toHaveTextContent('two-rows:a,b'));
     expect(screen.queryByTestId('dashboard')).toBeNull();
