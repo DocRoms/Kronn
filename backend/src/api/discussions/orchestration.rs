@@ -2198,6 +2198,9 @@ mod orchestrate_validation_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn orchestrate_rechecks_changed_catalog_before_the_next_round() {
+        // Waits on the events themselves; the ceiling only bounds a hang and
+        // stays generous for a loaded full-suite run.
+        const SYNC_CEILING: std::time::Duration = std::time::Duration::from_secs(60);
         let provider_a = MockServer::start().await;
         let provider_b = MockServer::start().await;
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
@@ -2215,7 +2218,7 @@ mod orchestrate_validation_tests {
                         release_rx
                             .lock()
                             .unwrap()
-                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .recv_timeout(SYNC_CEILING)
                             .expect("catalog mutation should release the first provider request");
                     }
                     ResponseTemplate::new(200).set_body_string(summary_sse("round A"))
@@ -2282,14 +2285,14 @@ mod orchestrate_validation_tests {
 
         tokio::task::spawn_blocking(move || {
             started_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(SYNC_CEILING)
                 .expect("first provider request should start before catalog mutation")
         })
         .await
         .expect("first-provider synchronization task should complete");
         set_catalog(&state, "connection-b", "model-b", &["video"]).await;
         release_tx.send(()).unwrap();
-        let body = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        let body = tokio::time::timeout(SYNC_CEILING * 2, run)
             .await
             .expect("orchestration should terminate after the later-round refusal")
             .expect("orchestration task should complete without panicking");
