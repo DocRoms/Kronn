@@ -1,7 +1,9 @@
 # Every child process is built in `core::cmd`, which gives it the environment
 # of its route (KT-1006, design note agent-secret-boundary §9). Constructing
 # or spawning a process any other way would inherit the backend's environment.
-# `allow-invalid`: libc paths absent on one platform (vfork on macOS, all on Windows).
+# `allow-invalid`: libc paths absent on one platform (vfork on macOS, all on
+# Windows), and the desktop-only entries (tauri), kept so both files ban the
+# same set.
 disallowed-methods = [
     { path = "std::process::Command::new", reason = "use core::cmd::{sync_cmd, git_cmd, sync_tool_cmd} with a ChildRoute" },
     { path = "tokio::process::Command::new", reason = "use core::cmd::{async_cmd, async_git_cmd, tool_cmd} with a ChildRoute" },
@@ -29,4 +31,10 @@ disallowed-methods = [
     { path = "libc::posix_spawn", reason = "spawn through core::cmd", allow-invalid = true },
     { path = "libc::posix_spawnp", reason = "spawn through core::cmd", allow-invalid = true },
     { path = "libc::system", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "tauri_plugin_shell::Shell::command", reason = "spawn through kronn::core::cmd", allow-invalid = true },
+    { path = "tauri_plugin_shell::Shell::sidecar", reason = "spawn through kronn::core::cmd", allow-invalid = true },
+    { path = "tauri_plugin_shell::Shell::open", reason = "use kronn::core::cmd::open_in_system", allow-invalid = true },
+    { path = "tauri::AppHandle::restart", reason = "relaunch through kronn::core::cmd::full_env_sync_cmd (SelfRestart)", allow-invalid = true },
+    { path = "tauri::AppHandle::request_restart", reason = "relaunch through kronn::core::cmd::full_env_sync_cmd (SelfRestart)", allow-invalid = true },
+    { path = "tauri::process::restart", reason = "relaunch through kronn::core::cmd::full_env_sync_cmd (SelfRestart)", allow-invalid = true },
 ]

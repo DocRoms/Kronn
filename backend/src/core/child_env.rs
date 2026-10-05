@@ -506,26 +506,37 @@ pub fn parent_var(name: &str) -> Option<OsString> {
         .find_map(|(key, value)| (key == name).then_some(value))
 }
 
-/// For a child that inherits the backend's environment (a declared
-/// exception): remove what no child may hold. `kronn_itself` (Kronn
-/// relaunching itself) keeps everything but the forbidden names; any other
-/// keeps no provider key, GitHub token or secret-looking name either.
-pub fn strip_inherited_secrets(command: &mut std::process::Command, kronn_itself: bool) {
-    for name in FORBIDDEN {
+/// Remove from a built command every credential it carries: provider keys,
+/// GitHub variables and any secret-looking name, owned by its route or not.
+pub fn drop_credentials(command: &mut std::process::Command) {
+    let names: Vec<OsString> = command
+        .get_envs()
+        .filter(|(_, value)| value.is_some())
+        .map(|(name, _)| name.to_os_string())
+        .filter(|name| {
+            name.to_str().is_none_or(|name| {
+                name_in(name, FORBIDDEN)
+                    || name_in(name, PROVIDER_KEYS)
+                    || name_in(name, GITHUB_ENV)
+                    || looks_secret(name)
+            })
+        })
+        .collect();
+    for name in names {
         command.env_remove(name);
     }
-    if kronn_itself {
-        return;
-    }
-    for (name, _) in parent_env() {
-        let Some(text) = name.to_str() else {
-            command.env_remove(&name);
-            continue;
-        };
-        if name_in(text, PROVIDER_KEYS) || name_in(text, GITHUB_ENV) || looks_secret(text) {
-            command.env_remove(&name);
-        }
-    }
+}
+
+/// The backend's variables whose name starts with one of `prefixes` and that
+/// do not look like a credential.
+pub fn parent_vars_with_prefixes(prefixes: &[&str]) -> Vec<(OsString, OsString)> {
+    parent_env()
+        .into_iter()
+        .filter(|(name, _)| {
+            name.to_str()
+                .is_some_and(|name| has_prefix(name, prefixes) && !looks_secret(name))
+        })
+        .collect()
 }
 
 /// Empty the child's environment and give it what its route inherits. Call

@@ -111,49 +111,42 @@ pub fn sync_tool_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
     sync_cmd(program, ChildRoute::Tool)
 }
 
-/// Why a process inherits the backend's environment instead of a route's.
-/// Each variant is a declared exception of the design note (§9); the test
-/// `full_env_cmd_sites_are_exactly_the_declared_exceptions` lists the call
-/// sites in both crates. No exception ever receives a secret: see
-/// [`child_env::strip_inherited_secrets`](crate::core::child_env::strip_inherited_secrets).
+/// A CLI asked for its version or its models: its agent's route, so it
+/// reads its own login (home, XDG and its config directories), minus every
+/// credential it would otherwise inherit (provider keys, GitHub variables,
+/// secret-looking names): a probe is not a configured launch. It starts in
+/// the temporary directory, never in a repository.
+pub fn discovery_cmd<S: AsRef<OsStr>>(
+    program: S,
+    family: crate::core::child_env::AgentFamily,
+) -> tokio::process::Command {
+    let mut cmd = async_cmd(program, ChildRoute::Agent(family));
+    crate::core::child_env::drop_credentials(cmd.as_std_mut());
+    cmd.current_dir(std::env::temp_dir());
+    cmd
+}
+
+/// Why a process inherits the backend's environment instead of a route's:
+/// the only declared exception of the design note (§9). The test
+/// `full_env_cmd_sites_are_exactly_the_declared_exceptions` lists its call
+/// sites in both crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FullEnvReason {
-    /// The document sidecar Kronn ships.
-    DocsSidecar,
-    /// A CLI asked which models it serves.
-    ModelDiscovery,
-    /// A CLI asked for its version.
-    VersionDiscovery,
     /// The desktop app relaunching itself: it keeps its own environment but
     /// the forbidden names (the caller hands the key override back).
     SelfRestart,
 }
 
-/// A process that inherits the backend's environment, for a declared
-/// [`FullEnvReason`] only, with every secret removed. It starts in the
-/// temporary directory, never in a repository (the backend's own directory
-/// may be one).
-pub fn full_env_cmd<S: AsRef<OsStr>>(program: S, reason: FullEnvReason) -> tokio::process::Command {
-    let mut cmd = raw_async(program.as_ref());
-    crate::core::child_env::strip_inherited_secrets(
-        cmd.as_std_mut(),
-        reason == FullEnvReason::SelfRestart,
-    );
-    if reason != FullEnvReason::SelfRestart {
-        cmd.current_dir(std::env::temp_dir());
-    }
-    cmd
-}
-
-/// [`full_env_cmd`] for a `std::process::Command`.
+/// A process that inherits the backend's environment minus the forbidden
+/// names, for a declared [`FullEnvReason`] only.
 pub fn full_env_sync_cmd<S: AsRef<OsStr>>(
     program: S,
     reason: FullEnvReason,
 ) -> std::process::Command {
+    let FullEnvReason::SelfRestart = reason;
     let mut cmd = raw_sync(program.as_ref());
-    crate::core::child_env::strip_inherited_secrets(&mut cmd, reason == FullEnvReason::SelfRestart);
-    if reason != FullEnvReason::SelfRestart {
-        cmd.current_dir(std::env::temp_dir());
+    for name in crate::core::child_env::FORBIDDEN {
+        cmd.env_remove(name);
     }
     cmd
 }
@@ -321,56 +314,37 @@ mod tests {
         files
     }
 
-    /// Exactly the exceptions design §9 declares inherit the environment,
-    /// in either crate; any other process needs a route to compile.
+    /// The one declared exception (Kronn relaunching itself) is the only
+    /// process that inherits the environment, in either crate.
     #[test]
     fn full_env_cmd_sites_are_exactly_the_declared_exceptions() {
-        let expected: &[(&str, &str, usize)] = &[
-            ("backend/src/agents/mod.rs", "VersionDiscovery", 4),
-            ("backend/src/core/docs_sidecar.rs", "DocsSidecar", 2),
-            (
-                "backend/src/core/model_catalog/claude_discovery.rs",
-                "ModelDiscovery",
-                2,
-            ),
-            (
-                "backend/src/core/model_catalog/codex_discovery.rs",
-                "ModelDiscovery",
-                1,
-            ),
-            ("backend/src/core/versions.rs", "VersionDiscovery", 1),
-            ("desktop/src/main.rs", "SelfRestart", 1),
-        ];
         let mut found: std::collections::BTreeMap<(String, String), usize> = Default::default();
         for (rel, text) in rust_sources() {
             if rel == "backend/src/core/cmd.rs" {
                 continue;
             }
-            for (at, _) in text.match_indices("full_env_") {
-                let rest = &text[at..];
-                let call = ["full_env_cmd", "full_env_sync_cmd"]
-                    .into_iter()
-                    .find(|name| rest.starts_with(name))
-                    .unwrap_or_else(|| panic!("{rel}: unknown full_env_ name"));
-                let after = &rest[call.len()..];
-                if after.starts_with(',') || after.starts_with('}') {
-                    continue; // an import
+            for name in ["full_env_cmd", "full_env_sync_cmd"] {
+                for (at, _) in text.match_indices(name) {
+                    let after = &text[at + name.len()..];
+                    if after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                        continue; // a longer identifier
+                    }
+                    assert!(after.starts_with('('), "{rel}: {name} used as a value");
+                    let reason_at = after
+                        .find("FullEnvReason::")
+                        .unwrap_or_else(|| panic!("{rel}: {name} without a FullEnvReason"));
+                    let reason: String = after[reason_at + "FullEnvReason::".len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    *found.entry((rel.clone(), reason)).or_default() += 1;
                 }
-                assert!(after.starts_with('('), "{rel}: {call} used as a value");
-                let reason_at = after
-                    .find("FullEnvReason::")
-                    .unwrap_or_else(|| panic!("{rel}: {call} without a FullEnvReason"));
-                let reason: String = after[reason_at + "FullEnvReason::".len()..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .collect();
-                *found.entry((rel.clone(), reason)).or_default() += 1;
             }
         }
-        let expected: std::collections::BTreeMap<(String, String), usize> = expected
-            .iter()
-            .map(|(file, reason, n)| ((file.to_string(), reason.to_string()), *n))
-            .collect();
+        let expected = std::collections::BTreeMap::from([(
+            ("desktop/src/main.rs".to_string(), "SelfRestart".to_string()),
+            1,
+        )]);
         assert_eq!(found, expected);
     }
 
@@ -396,37 +370,105 @@ mod tests {
         assert_eq!(found, expected);
     }
 
-    /// No exception receives a secret; only Kronn relaunching itself keeps
-    /// its provider keys, never the forbidden names (B4-04).
+    /// Both clippy files ban the same entry points, every way Tauri can
+    /// relaunch the app included (B5-05).
     #[test]
-    fn full_env_commands_never_carry_a_secret() {
-        use crate::core::child_env::{probe, FORBIDDEN};
-        let removed = |command: &std::process::Command, name: &str| {
-            command
-                .get_envs()
-                .any(|(key, value)| key == name && value.is_none())
+    fn both_clippy_files_ban_the_same_spawn_entry_points() {
+        let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let paths = |file: std::path::PathBuf| -> std::collections::BTreeSet<String> {
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .split("path = \"")
+                .skip(1)
+                .map(|rest| rest.split('"').next().unwrap().to_string())
+                .collect()
         };
-        let (sidecar, restart) = probe::with_secret_parent("/usr/bin", "/home/u", || {
+        let backend_paths = paths(backend.join("clippy.toml"));
+        let desktop_paths = paths(backend.join("../desktop/src-tauri/clippy.toml"));
+        assert_eq!(backend_paths, desktop_paths);
+        for restart in [
+            "tauri::AppHandle::restart",
+            "tauri::AppHandle::request_restart",
+            "tauri::process::restart",
+        ] {
+            assert!(desktop_paths.contains(restart), "{restart} is not banned");
+        }
+    }
+
+    /// A parent holding credentials under names no deny-list knows.
+    const UNLISTED_CREDENTIALS: &[(&str, &str)] = &[
+        ("PATH", "/usr/bin"),
+        ("HOME", "/home/u"),
+        ("MYSQL_PWD", "sentinel-mysql"),
+        ("DATABASE_URL", "postgres://u:p@h/d"),
+        ("DEPLOY_PASSPHRASE", "sentinel-passphrase"),
+        ("SENTRY_DSN", "https://key@sentry.example/1"),
+        ("ANTHROPIC_API_KEY", "sentinel-anthropic"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "sentinel-oauth"),
+        ("OPENAI_API_KEY", "sentinel-openai"),
+        ("AWS_SECRET_ACCESS_KEY", "sentinel-aws"),
+        ("KRONN_ENCRYPTION_KEK", "sentinel-kek"),
+        ("CLAUDE_CONFIG_DIR", "/home/u/.claude"),
+        ("CODEX_HOME", "/home/u/.codex"),
+        ("XDG_CONFIG_HOME", "/home/u/.config"),
+        ("KRONN_DOCS_LOG_LEVEL", "debug"),
+        ("PYTHONPATH", "/opt/docs"),
+    ];
+
+    fn set_names(command: &std::process::Command) -> Vec<String> {
+        command
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Discovery probes read their CLI's own login (config directories,
+    /// XDG) and nothing that is a credential, under any name (B5-08).
+    #[test]
+    fn discovery_probes_keep_their_login_and_no_credential() {
+        use crate::core::child_env::{with_parent_env, AgentFamily};
+        let (claude, codex, other) = with_parent_env(UNLISTED_CREDENTIALS, || {
             (
-                full_env_cmd("x", FullEnvReason::DocsSidecar),
-                full_env_sync_cmd("x", FullEnvReason::SelfRestart),
+                discovery_cmd("claude", AgentFamily::Claude),
+                discovery_cmd("codex", AgentFamily::Codex),
+                discovery_cmd("npx", AgentFamily::Other),
             )
         });
-        for name in probe::SECRET_NAMES {
-            assert!(
-                removed(sidecar.as_std(), name),
-                "{name} reaches an exception"
+        let allowed = |family: &str| -> Vec<&str> {
+            match family {
+                "claude" => vec!["PATH", "HOME", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR"],
+                "codex" => vec!["PATH", "HOME", "XDG_CONFIG_HOME", "CODEX_HOME"],
+                _ => vec!["PATH", "HOME", "XDG_CONFIG_HOME"],
+            }
+        };
+        for (family, command) in [
+            ("claude", claude.as_std()),
+            ("codex", codex.as_std()),
+            ("other", other.as_std()),
+        ] {
+            let mut got = set_names(command);
+            got.sort();
+            let mut want = allowed(family);
+            want.sort();
+            assert_eq!(got, want, "{family}");
+            assert_eq!(
+                command.get_current_dir(),
+                Some(std::env::temp_dir().as_path())
             );
         }
-        for name in FORBIDDEN {
-            assert!(removed(sidecar.as_std(), name), "{name}");
-            assert!(removed(&restart, name), "{name} reaches the relaunch");
+    }
+
+    /// The relaunched desktop is Kronn itself: its own environment, never
+    /// the forbidden names.
+    #[test]
+    fn the_self_restart_keeps_kronn_but_no_forbidden_name() {
+        let restart = full_env_sync_cmd("kronn", FullEnvReason::SelfRestart);
+        for name in crate::core::child_env::FORBIDDEN {
+            assert!(restart
+                .get_envs()
+                .any(|(key, value)| key == *name && value.is_none()));
         }
-        assert!(!removed(&restart, "ANTHROPIC_API_KEY"));
-        assert_eq!(
-            sidecar.as_std().get_current_dir(),
-            Some(std::env::temp_dir().as_path())
-        );
     }
 
     #[test]

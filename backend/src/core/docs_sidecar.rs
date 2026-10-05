@@ -31,8 +31,6 @@ use tokio::process::Child;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::core::cmd::{full_env_cmd, FullEnvReason};
-
 const BUNDLED_SIDECAR_ENV: &str = "KRONN_DOCS_SIDECAR";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,14 +112,7 @@ impl DocsSidecar {
         // stdout goes through a pipe so we can read the READY marker;
         // stderr is inherited so real errors land in the main backend
         // log without us having to re-forward them.
-        let mut cmd = match &program {
-            SidecarProgram::Bundled(path) => full_env_cmd(path, FullEnvReason::DocsSidecar),
-            SidecarProgram::PythonModule(path) => {
-                let mut cmd = full_env_cmd(path, FullEnvReason::DocsSidecar);
-                cmd.arg("-m").arg("kronn_docs.server");
-                cmd
-            }
-        };
+        let mut cmd = sidecar_command(&program);
         // The child keeps our end of its stdin pipe open while we live. A
         // SIGKILL or crash skips kill_on_drop, but the kernel still closes the
         // pipe, and the sidecar exits on that EOF instead of being orphaned.
@@ -275,9 +266,62 @@ async fn wait_for_ready(
     }
 }
 
+/// The sidecar process: the Tool route plus the operator's own
+/// `KRONN_DOCS_*` and `PYTHON*` settings, nothing else of the backend's
+/// environment (KT-1006).
+fn sidecar_command(program: &SidecarProgram) -> tokio::process::Command {
+    let mut cmd = match program {
+        SidecarProgram::Bundled(path) => crate::core::cmd::tool_cmd(path),
+        SidecarProgram::PythonModule(path) => {
+            let mut cmd = crate::core::cmd::tool_cmd(path);
+            cmd.arg("-m").arg("kronn_docs.server");
+            cmd
+        }
+    };
+    cmd.envs(crate::core::child_env::parent_vars_with_prefixes(&[
+        "KRONN_DOCS_",
+        "PYTHON",
+    ]));
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sidecar gets the Tool route and its own settings, no credential
+    /// under any name (B5-08).
+    #[test]
+    fn the_sidecar_gets_its_settings_and_no_credential() {
+        let parent: &[(&str, &str)] = &[
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/u"),
+            ("MYSQL_PWD", "sentinel-mysql"),
+            ("DATABASE_URL", "postgres://u:p@h/d"),
+            ("DEPLOY_PASSPHRASE", "sentinel-passphrase"),
+            ("ANTHROPIC_API_KEY", "sentinel-anthropic"),
+            ("KRONN_ENCRYPTION_KEK", "sentinel-kek"),
+            ("KRONN_DOCS_LOG_LEVEL", "debug"),
+            ("KRONN_DOCS_SECRET_TOKEN", "sentinel-docs"),
+            ("PYTHONPATH", "/opt/docs"),
+        ];
+        let command = crate::core::child_env::with_parent_env(parent, || {
+            sidecar_command(&SidecarProgram::Bundled(std::path::PathBuf::from(
+                "/opt/kronn-docs",
+            )))
+        });
+        let mut names: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["HOME", "KRONN_DOCS_LOG_LEVEL", "PATH", "PYTHONPATH"]
+        );
+    }
     use uuid::Uuid;
 
     fn test_dir(label: &str) -> PathBuf {
