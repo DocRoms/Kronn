@@ -6879,7 +6879,7 @@ mod tests {
         );
         assert_eq!(check("bash", vec!["-o", "{{x}}"], None).await, None);
         assert_eq!(check("duckdb", vec!["{{x}}"], Some("{{y}}")).await.as_deref(), Some("duckdb"));
-        assert_eq!(check("bash", vec!["-c", "cat"], Some("{{y}}")).await.as_deref(), Some("bash"));
+        assert_eq!(check("bash", vec!["-ec", "cat"], Some("{{y}}")).await.as_deref(), Some("bash"));
     }
 
     #[test]

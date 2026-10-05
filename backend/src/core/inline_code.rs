@@ -224,7 +224,7 @@ pub fn safe_recipe(path: &str) -> String {
          pour un shell, `[\"-c\", \"import sys; print(sys.argv[1])\", \"{{{{{path}}}}}\"]` pour Python, \
          `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{{{{path}}}}}\"]` pour Node (le `--` est \
          obligatoire), sans autre option, ou via `exec_stdin` à un programme de données ou à \
-         `python3`/`node` avec leur code inline ou un script"
+         l'une de ces formes (code inline ou script donné)"
     )
 }
 
@@ -440,8 +440,8 @@ pub fn stdin_validation_error(
 
 /// What a templated `exec_stdin` reaches.
 enum StdinReach {
-    /// A data-only program, or python3/node given their code inline or as a
-    /// script ([`crate::core::argv_roles::trusted_shape`]).
+    /// A data-only program, or a trusted shape: bash/sh/python3/node given
+    /// their code inline or as a script ([`crate::core::argv_roles::trusted_shape`]).
     Data,
     /// A program that may read it as code: refused, approval or not.
     Code,
@@ -450,11 +450,10 @@ enum StdinReach {
 }
 
 fn stdin_reach(cmd: &str, args: &[String]) -> StdinReach {
-    let tainted = tainted_templates(args);
-    let trusted = crate::core::argv_roles::trusted_shape(cmd, args, &tainted).is_ok();
-    if crate::core::argv_roles::is_data_only(cmd)
-        || (trusted && !is_shell(cmd))
-    {
+    // The shape alone decides where stdin goes; a value inside the code is
+    // the argument check's refusal, not a reason to ask for an approval here.
+    let trusted = crate::core::argv_roles::trusted_shape(cmd, args, &vec![false; args.len()]).is_ok();
+    if crate::core::argv_roles::is_data_only(cmd) || trusted {
         return StdinReach::Data;
     }
     if reads_program_from_stdin(cmd, args) {
@@ -1976,7 +1975,7 @@ mod tests {
             ("tar", vec!["-c", "-f", "o.tar", "-T", "-"]),
             ("docker", vec!["compose", "run", "svc"]),
             ("kubectl", vec!["exec", "-i", "pod", "--", "sh"]),
-            ("bash", vec!["-c", "cat > /tmp/in.json"]),
+            ("bash", vec!["-ec", "cat > /tmp/in.json"]),
         ] {
             let line = args(&line);
             assert!(stdin_validation_error("s", cmd, &line, "{{x}}", false).is_some(), "{cmd} {line:?}");
@@ -1984,10 +1983,10 @@ mod tests {
         assert!(stdin_validation_error("s", "npx", &args(&["node"]), "{{x}}", true).is_none());
     }
 
-    /// A templated stdin is data only for a data-only program or for
-    /// python3/node given their code inline or as a script.
+    /// A templated stdin is data only for a data-only program or a trusted
+    /// shape (bash/sh `-c`, python3, node given their code or a script).
     #[test]
-    fn a_templated_stdin_is_trusted_only_by_data_programs_and_python_or_node() {
+    fn a_templated_stdin_is_trusted_only_by_data_programs_and_trusted_shapes() {
         for (cmd, line) in [
             ("jq", vec!["."]),
             ("cat", vec![]),
@@ -2001,9 +2000,18 @@ mod tests {
                 "{cmd} {line:?}"
             );
         }
+        // A shell given its script with `-c` reads stdin as data, like python3.
+        for cmd in ["bash", "sh"] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&["-c", "cat > in.json"]), "{{x}}", false)
+                    .is_none(),
+                "{cmd}"
+            );
+        }
         // A shell reading its program from stdin stays refused when approved.
         assert!(stdin_validation_error("s", "bash", &[], "{{x}}", true).is_some());
         assert!(stdin_validation_error("s", "bash", &args(&["-s"]), "{{x}}", true).is_some());
+        assert!(stdin_validation_error("s", "sh", &args(&["-s", "a"]), "{{x}}", true).is_some());
     }
 
     #[test]

@@ -625,8 +625,9 @@ Release notes for 0.9.3 and earlier are available in the
   programs (KT-1017). Every other line, `git`, `make`, `docker`, `npx`,
   `bash -ec` and wrappers included, needs a human's approval; code, option
   and program positions stay refused, approved or not. A templated
-  `exec_stdin` is trusted only by data-only programs and the python3/node
-  shapes; `/dev/stdin`-style scripts, `-f -` and `python -i` count as code.
+  `exec_stdin` is trusted only by data-only programs and those shapes; a
+  shell reading its program from stdin, `/dev/stdin`-style scripts, `-f -`
+  and `python -i` count as code.
   An approved Quick Exec now runs from its page, and "Suggest a fix" moves
   shell flags such as `-e` into a `set` line.
 
