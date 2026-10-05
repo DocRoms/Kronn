@@ -44,12 +44,6 @@ fn is_python(cmd: &str) -> bool {
     lower.starts_with("python") || lower.starts_with("pypy")
 }
 
-/// Whether `cmd` is an interpreter with modelled inline code (shell,
-/// Python, Node, Bun, Deno, Perl, Ruby, PHP, PowerShell).
-pub fn is_interpreter(cmd: &str) -> bool {
-    inline_code_options(cmd).is_some()
-}
-
 fn is_node(cmd: &str) -> bool {
     matches!(base_name(cmd).as_str(), "node" | "nodejs")
 }
@@ -229,8 +223,8 @@ pub fn safe_recipe(path: &str) -> String {
          comme du code ni comme une option : `exec_args=[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{{{{path}}}}}\"]` \
          pour un shell, `[\"-c\", \"import sys; print(sys.argv[1])\", \"{{{{{path}}}}}\"]` pour Python, \
          `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{{{{path}}}}}\"]` pour Node (le `--` est \
-         obligatoire, comme pour perl, ruby et php), ou via `exec_stdin` à un programme qui lit \
-         stdin comme des données (jamais un shell ou un interpréteur sans script ni code inline)"
+         obligatoire), sans autre option, ou via `exec_stdin` à un programme de données ou à \
+         `python3`/`node` avec leur code inline ou un script"
     )
 }
 
@@ -289,13 +283,14 @@ fn refusal(subject: &str, cmd: &str, args: &[String], approved: bool) -> Option<
 /// The refusal for a value reaching an unmodelled program, with what to do.
 pub fn unmodelled_message(subject: &str, program: &str, path: &str) -> String {
     format!(
-        "{subject} : `{{{{{path}}}}}` est passé à `{program}`, un programme que Kronn ne sait pas \
-         analyser : rien ne garantit qu'il lit cet argument comme une simple donnée. Fais passer \
-         la valeur par un interpréteur modélisé ou un script qui la reçoit en argument (par \
-         exemple `bash -c '{program} \"$1\"' _ {{{{{path}}}}}` n'est sûr que si `{program}` traite \
-         son argument comme une donnée), ou fais approuver l'étape par un humain (« {program} \
-         reçoit des valeurs du run ; je confirme qu'il traite ses arguments comme de simples \
-         données »)."
+        "{subject} : `{{{{{path}}}}}` est passé à `{program}` dans une ligne que Kronn ne vérifie \
+         pas. Sans humain, une valeur n'est acceptée que par un programme de données (`echo`, \
+         `grep`, `jq`…) ou dans l'une de ces formes exactes, sans autre option : \
+         `bash -c SCRIPT NOM ARGS…`, `python3 -c CODE ARGS…`, `python3 SCRIPT ARGS…`, \
+         `node -e CODE -- ARGS…`, `node SCRIPT ARGS…` (code et script sans valeur). Passe la \
+         valeur en argument d'un script de cette forme, ou fais approuver l'étape par un humain \
+         (« {program} reçoit des valeurs du run ; je confirme qu'il traite ses arguments comme \
+         de simples données »)."
     )
 }
 
@@ -443,15 +438,42 @@ pub fn stdin_validation_error(
     ))
 }
 
-/// The first untrusted placeholder of `stdin` when `cmd args` runs stdin, or
-/// when stdin reaches a program Kronn does not model and no human approved it.
+/// What a templated `exec_stdin` reaches.
+enum StdinReach {
+    /// A data-only program, or python3/node given their code inline or as a
+    /// script ([`crate::core::argv_roles::trusted_shape`]).
+    Data,
+    /// A program that may read it as code: refused, approval or not.
+    Code,
+    /// Anything else: accepted only when a human approved the step.
+    Unchecked(String),
+}
+
+fn stdin_reach(cmd: &str, args: &[String]) -> StdinReach {
+    let tainted = tainted_templates(args);
+    let trusted = crate::core::argv_roles::trusted_shape(cmd, args, &tainted).is_ok();
+    if crate::core::argv_roles::is_data_only(cmd)
+        || (trusted && !is_shell(cmd))
+    {
+        return StdinReach::Data;
+    }
+    if reads_program_from_stdin(cmd, args) {
+        return StdinReach::Code;
+    }
+    StdinReach::Unchecked(
+        crate::core::argv_roles::launched_program(cmd, args)
+            .map_or_else(|| cmd.trim().to_string(), |(inner, _)| inner),
+    )
+}
+
+/// The first untrusted placeholder of `stdin` when it reaches code, or a
+/// program outside the trusted set that no human approved.
 fn stdin_finding(cmd: &str, args: &[String], stdin: &str, approved: bool) -> Option<String> {
     let finding = untrusted_in(stdin)?;
-    if approved && stdin_unmodelled_program(cmd, args).is_some() {
-        return None;
-    }
-    if !reads_program_from_stdin(cmd, args) {
-        return None;
+    match stdin_reach(cmd, args) {
+        StdinReach::Data => return None,
+        StdinReach::Unchecked(_) if approved => return None,
+        _ => {}
     }
     Some(match finding {
         Some(path) => format!("{{{{{path}}}}}"),
@@ -459,14 +481,13 @@ fn stdin_finding(cmd: &str, args: &[String], stdin: &str, approved: bool) -> Opt
     })
 }
 
-/// The program that reads stdin, after wrappers, when Kronn does not model it.
+/// The program a templated stdin reaches when only a human approval can let
+/// it through.
 pub fn stdin_unmodelled_program(cmd: &str, args: &[String]) -> Option<String> {
-    let program = crate::core::argv_roles::launched_program(cmd, args)
-        .map_or_else(|| cmd.trim().to_string(), |(inner, _)| inner);
-    let name = base_name(&program);
-    (!crate::core::argv_roles::is_modelled_program(&program)
-        && !crate::core::argv_roles::is_unmodelled_evaluator(&name))
-    .then_some(program)
+    match stdin_reach(cmd, args) {
+        StdinReach::Unchecked(program) => Some(program),
+        _ => None,
+    }
 }
 
 /// The identity of a stdin line for the unchanged-line exception: the
@@ -694,6 +715,21 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
         .iter()
         .filter(|arg| !arg.starts_with('-') || *arg == "-")
         .collect();
+    // The file named by one of `options` (`-f FILE`, `-fFILE`, `--file=FILE`).
+    let file_option = |options: &[&str]| -> Option<&str> {
+        args.iter().enumerate().find_map(|(i, arg)| {
+            options.iter().find_map(|option| {
+                if arg == option {
+                    args.get(i + 1).map(String::as_str)
+                } else if option.starts_with("--") {
+                    arg.strip_prefix(&format!("{option}="))
+                } else {
+                    arg.strip_prefix(option).filter(|rest| !rest.is_empty())
+                }
+            })
+        })
+    };
+    let stdin = |path: &str| crate::core::argv_roles::is_stdin_path(path);
     if let Some(parsing) = option_parsing(cmd) {
         if parsing == OptionParsing::Never {
             // PowerShell reads stdin unless `-File <script>` names a file.
@@ -722,12 +758,26 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
                 .iter()
                 .take_while(|arg| *arg != "--")
                 .any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('s'));
+        // `python -i` reads stdin as code after the script or the inline code.
+        let interactive = is_python(cmd)
+            && args
+                .iter()
+                .take_while(|arg| !arg.is_empty() && arg.starts_with('-') && *arg != "--")
+                .any(|arg| {
+                    !arg.starts_with("--")
+                        && arg[1..]
+                            .chars()
+                            .take_while(|c| !matches!(c, 'c' | 'm' | 'W' | 'X'))
+                            .any(|c| c == 'i')
+                });
         return shell_reads_stdin
-            || interpreter_script(cmd, args).is_none_or(|script| script == "-");
+            || interactive
+            || interpreter_script(cmd, args)
+                .is_none_or(crate::core::argv_roles::is_stdin_path);
     }
     match name.as_str() {
         "lua" | "luajit" | "tclsh" | "wish" | "osascript" | "rscript" => {
-            !has(&["-e"]) && operands.first().is_none_or(|first| first.as_str() == "-")
+            !has(&["-e"]) && operands.first().is_none_or(|first| stdin(first))
         }
         "r" => !has(&["-e", "-f", "--file"]),
         "sqlite" => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1 && !has(&["-cmd"]),
@@ -736,13 +786,12 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
                 || arg.starts_with("--execute=")
                 || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('e'))
         }),
-        "psql" => !has(&["-c", "--command", "-f", "--file"]),
+        "psql" => !has(&["-c", "--command"]) && file_option(&["-f", "--file"]).is_none_or(stdin),
         "make" | "gmake" | "bmake" => {
-            args.windows(2).any(|pair| {
-                matches!(pair[0].as_str(), "-f" | "--file" | "--makefile") && pair[1] == "-"
-            }) || args
-                .iter()
-                .any(|arg| arg == "--file=-" || arg == "--makefile=-")
+            file_option(&["-f", "--file", "--makefile"]).is_some_and(stdin)
+        }
+        "awk" | "gawk" | "mawk" | "nawk" | "sed" | "gsed" => {
+            file_option(&["-f", "--file"]).is_some_and(stdin)
         }
         "gdb" | "ssh" => true,
         "docker" | "podman" => args.iter().any(|arg| {
@@ -750,11 +799,7 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
                 || arg == "--interactive"
                 || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('i'))
         }),
-        // A program Kronn does not model may read stdin as code.
-        _ => {
-            crate::core::argv_roles::is_unmodelled_evaluator(&name)
-                || !crate::core::argv_roles::is_modelled_program(cmd)
-        }
+        _ => crate::core::argv_roles::is_unmodelled_evaluator(&name),
     }
 }
 
@@ -871,7 +916,7 @@ pub fn rendered_refusal(
 ) -> Option<String> {
     use crate::core::argv_roles::Role;
     let tainted = tainted_templates(templates);
-    let saved = crate::core::argv_roles::roles(cmd, templates, &tainted);
+    let saved = crate::core::argv_roles::model_roles(cmd, templates, &tainted);
     let option_like = (0..rendered.len()).find(|&i| {
         tainted.get(i).copied().unwrap_or(false)
             && saved.get(i) == Some(&Role::RuntimeOption)
@@ -999,7 +1044,15 @@ pub fn suggest_args(cmd: &str, args: &[String]) -> Result<Vec<String>, String> {
     let script = &args[code.index];
     let rest = &args[code.index + 1..];
     let rewritten = if is_shell(cmd) {
-        rewrite_shell(&args[..code.index], script, rest)
+        // Only `-c SCRIPT` is trusted: shell flags move into the script.
+        let flags = shell_set_flags(&args[..code.index])
+            .ok_or_else(|| "correction manuelle requise : une option du shell n'a pas d'équivalent `set`".to_string())?;
+        let script = if flags.is_empty() {
+            script.clone()
+        } else {
+            format!("set {flags}\n{script}")
+        };
+        rewrite_shell(&["-c".to_string()], &script, rest)
     } else if is_python(cmd) {
         rewrite_literals(&args[..code.index], script, rest, Language::Python)
     } else if is_node(cmd) {
@@ -1012,6 +1065,45 @@ pub fn suggest_args(cmd: &str, args: &[String]) -> Result<Vec<String>, String> {
         return manual("la réécriture laisserait une valeur dans le code");
     }
     Ok(rewritten)
+}
+
+/// The shell options before the script (`-ec`, `-o pipefail -c`) as the
+/// `set` arguments that give the same behaviour from inside the script, or
+/// `None` when one has no such equivalent.
+fn shell_set_flags(head: &[String]) -> Option<String> {
+    const SET_LETTERS: &str = "aefnuvxBC";
+    let mut letters = String::new();
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < head.len() {
+        let arg = head[i].as_str();
+        if arg == "-o" {
+            let name = head.get(i + 1)?;
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            names.push(format!("-o {name}"));
+            i += 2;
+            continue;
+        }
+        let cluster = arg.strip_prefix('-').filter(|rest| !rest.starts_with('-'))?;
+        for c in cluster.chars() {
+            if c == 'c' {
+                continue;
+            }
+            if !SET_LETTERS.contains(c) {
+                return None;
+            }
+            letters.push(c);
+        }
+        i += 1;
+    }
+    let mut parts = Vec::new();
+    if !letters.is_empty() {
+        parts.push(format!("-{letters}"));
+    }
+    parts.extend(names);
+    Some(parts.join(" "))
 }
 
 /// Shell: each untrusted placeholder becomes `"$N"` (or `$N` inside double
@@ -1534,8 +1626,8 @@ mod tests {
             )
             .unwrap(),
             args(&[
-                "-ec",
-                "printf '%s %s' \"a=$1\" \"$2\" \"$1\" {{run.id}}",
+                "-c",
+                "set -e\nprintf '%s %s' \"a=$1\" \"$2\" \"$1\" {{run.id}}",
                 "_",
                 "{{a}}",
                 "{{b}}"
@@ -1775,6 +1867,145 @@ mod tests {
         }
     }
 
+    /// Only five exact shapes, and the data-only programs, take a value
+    /// without a human; any other option, a templated script or code, or a
+    /// stdin script makes the line need an approval (or refuses it).
+    #[test]
+    fn only_the_trusted_shapes_take_a_value_without_a_human() {
+        for (cmd, line) in [
+            ("bash", vec!["-c", "echo \"$1\"", "_", "{{x}}"]),
+            ("sh", vec!["-c", "printf %s \"$1\"", "name", "{{x}}", "{{y}}"]),
+            ("python3", vec!["-c", "import sys; print(sys.argv[1])", "{{x}}"]),
+            ("python3", vec!["tool.py", "--flag", "{{x}}"]),
+            ("node", vec!["-e", "console.log(process.argv[1])", "--", "{{x}}"]),
+            ("node", vec!["app.js", "{{x}}"]),
+            ("echo", vec!["{{x}}"]),
+            ("grep", vec!["--", "{{x}}", "file"]),
+        ] {
+            assert_eq!(first_unsafe_placeholder(cmd, &args(&line)), None, "{cmd} {line:?}");
+        }
+        for (cmd, line) in [
+            ("bash", vec!["-o", "pipefail", "-c", "echo \"$1\"", "_", "{{x}}"]),
+            ("bash", vec!["-ec", "echo \"$1\"", "_", "{{x}}"]),
+            ("bash", vec!["./run.sh", "{{x}}"]),
+            ("python3", vec!["-X", "utf8", "tool.py", "{{x}}"]),
+            ("python3", vec!["-m", "http.server", "{{port}}"]),
+            ("python", vec!["tool.py", "{{x}}"]),
+            ("python3", vec!["/dev/stdin", "{{x}}"]),
+            ("perl", vec!["-e", "print @ARGV", "--", "{{x}}"]),
+            ("git", vec!["commit", "-m", "{{message}}"]),
+            ("env", vec!["A=1", "python3", "tool.py", "{{x}}"]),
+            ("sudo", vec!["rm", "--", "{{x}}"]),
+            ("make", vec!["{{target}}"]),
+        ] {
+            let line = args(&line);
+            assert!(
+                matches!(
+                    first_unsafe_placeholder(cmd, &line),
+                    Some(InlineFinding::UnmodelledProgram(..))
+                ),
+                "{cmd} {line:?}"
+            );
+            assert_eq!(first_unsafe_placeholder_with(cmd, &line, true), None, "{cmd} {line:?}");
+        }
+        // Code, an option position or a program position stays refused,
+        // approval or not.
+        for (cmd, line) in [
+            ("bash", vec!["-c", "echo \"{{x}}\""]),
+            ("python3", vec!["{{script}}", "a"]),
+            ("node", vec!["-e", "console.log('{{x}}')", "--"]),
+            ("node", vec!["-e", "console.log(1)", "x", "{{x}}"]),
+            ("env", vec!["{{cmd}}"]),
+            ("git", vec!["-c", "core.sshCommand={{x}}", "fetch"]),
+            ("rm", vec!["-{{x}}", "file"]),
+        ] {
+            let line = args(&line);
+            assert!(first_unsafe_placeholder_with(cmd, &line, true).is_some(), "{cmd} {line:?}");
+        }
+    }
+
+    /// Review 4: obscure options of programs the classifier models are no
+    /// longer trusted; each line needs a human or is refused outright.
+    #[test]
+    fn review_four_lines_need_a_human_or_are_refused() {
+        for (cmd, line) in [
+            ("python3", vec!["--check-hash-based-pycs", "always", "-c", "print('{{x}}')"]),
+            ("python3", vec!["-i", "tool.py", "{{x}}"]),
+            ("fish", vec!["-C", "{{x}}", "-c", "true"]),
+            ("nu", vec!["--config", "{{x}}", "-c", "ls"]),
+            ("psql", vec!["-o", "{{v}}", "-c", "select 1"]),
+            ("psql", vec!["--output={{v}}", "-c", "select 1"]),
+            ("sftp", vec!["-s", "{{v}}", "host"]),
+            ("rsync", vec!["-a", "src", "backup:/srv/{{name}}"]),
+            ("tar", vec!["-c", "-f", "o.tar", "-T{{v}}"]),
+            ("make", vec!["-f", "{{v}}"]),
+            ("make", vec!["-C", "{{v}}"]),
+            ("make", vec!["-I", "{{v}}"]),
+            ("git", vec!["-C", "{{v}}", "status"]),
+            ("git", vec!["--git-dir={{v}}", "status"]),
+            ("mysql", vec!["--defaults-file={{v}}", "db"]),
+            ("gdb", vec!["-D", "{{v}}", "./prog"]),
+            ("deno", vec!["run", "--seed", "1", "{{x}}", "main.ts"]),
+            ("stat", vec!["-f{{v}}", "x"]),
+            ("ls", vec!["-w{{v}}"]),
+            ("npx", vec!["tool", "{{x}}"]),
+            ("xargs", vec!["git", "{{x}}"]),
+        ] {
+            assert!(first_unsafe_placeholder(cmd, &args(&line)).is_some(), "{cmd} {line:?}");
+        }
+        // stdin: device paths, `-f -`, `python -i` read it as code.
+        for (cmd, line) in [
+            ("bash", vec!["/dev/stdin"]),
+            ("bash", vec!["/dev/fd/0"]),
+            ("python3", vec!["/proc/self/fd/0"]),
+            ("python3", vec!["-i", "tool.py"]),
+            ("psql", vec!["-f", "-"]),
+            ("awk", vec!["-f", "/dev/stdin"]),
+            ("sed", vec!["-f-"]),
+            ("make", vec!["-f", "/dev/stdin"]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", true).is_some(),
+                "{cmd} {line:?}"
+            );
+        }
+        // Launchers and other programs pass stdin on: a human must approve.
+        for (cmd, line) in [
+            ("npx", vec!["node"]),
+            ("xargs", vec!["git"]),
+            ("tar", vec!["-c", "-f", "o.tar", "-T", "-"]),
+            ("docker", vec!["compose", "run", "svc"]),
+            ("kubectl", vec!["exec", "-i", "pod", "--", "sh"]),
+            ("bash", vec!["-c", "cat > /tmp/in.json"]),
+        ] {
+            let line = args(&line);
+            assert!(stdin_validation_error("s", cmd, &line, "{{x}}", false).is_some(), "{cmd} {line:?}");
+        }
+        assert!(stdin_validation_error("s", "npx", &args(&["node"]), "{{x}}", true).is_none());
+    }
+
+    /// A templated stdin is data only for a data-only program or for
+    /// python3/node given their code inline or as a script.
+    #[test]
+    fn a_templated_stdin_is_trusted_only_by_data_programs_and_python_or_node() {
+        for (cmd, line) in [
+            ("jq", vec!["."]),
+            ("cat", vec![]),
+            ("python3", vec!["-c", "import sys; print(sys.stdin.read())"]),
+            ("python3", vec!["tool.py"]),
+            ("node", vec!["-e", "process.stdin.pipe(process.stdout)"]),
+            ("node", vec!["tool.js"]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", false).is_none(),
+                "{cmd} {line:?}"
+            );
+        }
+        // A shell reading its program from stdin stays refused when approved.
+        assert!(stdin_validation_error("s", "bash", &[], "{{x}}", true).is_some());
+        assert!(stdin_validation_error("s", "bash", &args(&["-s"]), "{{x}}", true).is_some());
+    }
+
     #[test]
     fn values_in_data_positions_are_accepted() {
         for (cmd, line) in [
@@ -1801,7 +2032,15 @@ mod tests {
             ("make", vec!["{{x}}"]),
             ("node", vec!["-e", "console.log({{run.id}})"]),
         ] {
-            assert_eq!(tainted_position(cmd, &line), None, "{cmd} {line:?}");
+            // Data to the program's model; outside the trusted shapes, an
+            // approval is still needed (see `only_the_trusted_shapes_…`).
+            let line = args(&line);
+            let tainted = tainted_templates(&line);
+            assert_eq!(
+                first_tainted_position_with(cmd, &line, &tainted, true),
+                None,
+                "{cmd} {line:?}"
+            );
         }
     }
 
@@ -1987,17 +2226,22 @@ mod tests {
             vec!["-cx", "echo \"$1\"", "_", "{{x}}"],
             vec!["-xc", "echo \"$1\"", "_", "{{x}}"],
         ] {
-            assert_eq!(
-                first_unsafe_placeholder("bash", &args(&line)),
-                None,
+            // Data to bash, but not the exact `-c` shape: approval needed.
+            assert!(
+                matches!(
+                    first_unsafe_placeholder("bash", &args(&line)),
+                    Some(InlineFinding::UnmodelledProgram(..))
+                ),
                 "{line:?}"
             );
         }
-        // Python does glue: `-cCODE` holds the code itself.
+        // Python does glue: `-cCODE` holds the code itself, so the value is
+        // data, though not in the exact `-c CODE` shape.
         assert_eq!(
-            first_unsafe_placeholder(
+            first_unsafe_placeholder_with(
                 "python3",
-                &args(&["-cimport sys; print(sys.argv[1])", "{{x}}"])
+                &args(&["-cimport sys; print(sys.argv[1])", "{{x}}"]),
+                true
             ),
             None
         );

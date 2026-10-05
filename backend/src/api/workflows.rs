@@ -1506,19 +1506,24 @@ async fn pin_exec_script_files(
 pub async fn exec_line_check(
     Json(req): Json<ExecLineCheckRequest>,
 ) -> Json<ApiResponse<ExecLineCheck>> {
+    use crate::core::inline_code::{
+        first_unsafe_placeholder, stdin_unmodelled_program, stdin_validation_error, InlineFinding,
+    };
     let command = req.command.trim();
-    let unmodelled_program =
-        match crate::core::inline_code::first_unsafe_placeholder(command, &req.args) {
-            Some(crate::core::inline_code::InlineFinding::UnmodelledProgram(program, _)) => {
-                Some(program)
-            }
-            _ => req.stdin.as_deref().and_then(|stdin| {
-                crate::core::inline_code::stdin_validation_error(
-                    "", command, &req.args, stdin, false,
-                )?;
-                crate::core::inline_code::stdin_unmodelled_program(command, &req.args)
-            }),
-        };
+    let stdin = req.stdin.as_deref();
+    // The approval is offered only when it is the one thing standing between
+    // the line and a save: never next to a refusal it cannot lift.
+    let stdin_refused = stdin
+        .is_some_and(|stdin| stdin_validation_error("", command, &req.args, stdin, true).is_some());
+    let stdin_needs_approval = stdin
+        .is_some_and(|stdin| stdin_validation_error("", command, &req.args, stdin, false).is_some());
+    let unmodelled_program = match first_unsafe_placeholder(command, &req.args) {
+        _ if stdin_refused => None,
+        Some(InlineFinding::UnmodelledProgram(program, _)) => Some(program),
+        Some(_) => None,
+        None if stdin_needs_approval => stdin_unmodelled_program(command, &req.args),
+        None => None,
+    };
     Json(ApiResponse::ok(ExecLineCheck { unmodelled_program }))
 }
 
@@ -6576,10 +6581,6 @@ mod tests {
             ("bash", vec!["-c", "echo \"$1\"", "_", "{{issue.title}}"]),
             (
                 "bash",
-                vec!["-ec", "printf '%s' \"$1\"", "_", "{{steps.a.output}}"],
-            ),
-            (
-                "bash",
                 vec!["-c", "echo run {{run.id}} at {{time.now|fmt:unix}}"],
             ),
             ("bash", vec!["-c", "make test && echo ok"]),
@@ -6587,16 +6588,40 @@ mod tests {
                 "python3",
                 vec!["-c", "import sys; print(sys.argv[1])", "{{issue.body}}"],
             ),
+            ("python3", vec!["tools/report.py", "{{issue.body}}"]),
             (
-                "python3",
-                vec!["-cimport sys; print(sys.argv[1])", "{{issue.body}}"],
+                "node",
+                vec!["-e", "console.log(process.argv[1])", "--", "{{issue.body}}"],
             ),
+            ("node", vec!["tools/report.js", "{{issue.body}}"]),
             ("echo", vec!["{{issue.title}}"]),
-            ("make", vec!["-C", "{{steps.a.output}}"]),
         ] {
             let chain = vec![mk_exec_step("inline", Some(cmd), args.clone(), None)];
             assert!(
                 validate_exec_steps(&chain, &[cmd.to_string()]).is_ok(),
+                "{cmd} {args:?}"
+            );
+        }
+        // Outside the exact shapes, a value needs a human's approval.
+        for (cmd, args) in [
+            (
+                "bash",
+                vec!["-ec", "printf '%s' \"$1\"", "_", "{{steps.a.output}}"],
+            ),
+            (
+                "python3",
+                vec!["-cimport sys; print(sys.argv[1])", "{{issue.body}}"],
+            ),
+            ("make", vec!["-C", "{{steps.a.output}}"]),
+        ] {
+            let mut step = mk_exec_step("inline", Some(cmd), args.clone(), None);
+            assert!(
+                validate_exec_steps(std::slice::from_ref(&step), &[cmd.to_string()]).is_err(),
+                "{cmd} {args:?}"
+            );
+            step.exec_unmodelled_args_approved = Some(true);
+            assert!(
+                validate_exec_steps(&[step], &[cmd.to_string()]).is_ok(),
                 "{cmd} {args:?}"
             );
         }
@@ -6847,6 +6872,14 @@ mod tests {
         );
         assert_eq!(check("cat", vec![], Some("{{issue.title}}")).await, None);
         assert_eq!(check("duckdb", vec!["db.duckdb"], None).await, None);
+        // Never offered next to a refusal the approval cannot lift.
+        assert_eq!(
+            check("git", vec!["-c", "core.sshCommand={{x}}", "fetch"], Some("{{y}}")).await,
+            None
+        );
+        assert_eq!(check("bash", vec!["-o", "{{x}}"], None).await, None);
+        assert_eq!(check("duckdb", vec!["{{x}}"], Some("{{y}}")).await.as_deref(), Some("duckdb"));
+        assert_eq!(check("bash", vec!["-c", "cat"], Some("{{y}}")).await.as_deref(), Some("bash"));
     }
 
     #[test]
@@ -6894,7 +6927,7 @@ mod tests {
         ));
         cases.push((
             "python3",
-            vec!["-cimport sys; print(sys.argv[1])", "{{issue.title}}"],
+            vec!["-c", "import sys; print(sys.argv[1])", "{{issue.title}}"],
             true,
         ));
         for setup in [false, true] {
@@ -6979,7 +7012,7 @@ mod tests {
         let chain = vec![mk_exec_step(
             "test",
             Some("cargo"),
-            vec!["test", "--", "{{steps.x.summary}}"],
+            vec!["test", "--", "--nocapture"],
             Some(120),
         )];
         assert!(validate_exec_steps(&chain, &["cargo".into()]).is_ok());

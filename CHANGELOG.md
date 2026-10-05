@@ -618,6 +618,17 @@ Release notes for 0.9.3 and earlier are available in the
   `{{run.id}}` / `{{time.now}}` always resolve to Kronn's own values
   (KT-1017). An approved CollectApiData source is no longer refused at run
   time.
+- Kronn now trusts a run value without a human only in five exact shapes,
+  `bash|sh -c SCRIPT NAME ARGS…`, `python3 -c CODE ARGS…`,
+  `python3 SCRIPT ARGS…`, `node -e CODE -- ARGS…` and `node SCRIPT ARGS…`,
+  with no other option and no value in the code or script, and in data-only
+  programs (KT-1017). Every other line, `git`, `make`, `docker`, `npx`,
+  `bash -ec` and wrappers included, needs a human's approval; code, option
+  and program positions stay refused, approved or not. A templated
+  `exec_stdin` is trusted only by data-only programs and the python3/node
+  shapes; `/dev/stdin`-style scripts, `-f -` and `python -i` count as code.
+  An approved Quick Exec now runs from its page, and "Suggest a fix" moves
+  shell flags such as `-e` into a `set` line.
 
 ### Changed
 

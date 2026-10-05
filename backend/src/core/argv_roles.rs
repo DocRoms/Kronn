@@ -1,13 +1,14 @@
 //! The role of each argument of an Exec command line: plain data, program
 //! text, an option the program still parses, or the program to run.
 //!
-//! A template value is safe only as data. This module knows how the
-//! programs that run other programs or evaluate program text read their
-//! argv: interpreters (through `inline_code`), wrappers that launch another
-//! command (`env`, `sudo`, `timeout`, `xargs`…), and other evaluators
-//! (`awk`, `sed`, `find -exec`, `git -c`, `ssh`, `docker run`, `npx`…).
-//! An unknown program gets every argument as data: argv is not parsed by a
-//! shell, so a value cannot become code there.
+//! A template value is safe only as data, and Kronn trusts it as data
+//! without a human only in a tiny, fully specified set: five exact
+//! interpreter shapes ([`trusted_shape`]) and the data-only programs. Every
+//! other value is [`Role::Unmodelled`]: refused unless a human approved the
+//! line. The program models below (interpreters through `inline_code`,
+//! wrappers, `awk`, `sed`, `find -exec`, `git -c`, `ssh`, `docker run`,
+//! `npx`…) only decide what no approval lifts: a value in code, at an option
+//! position or naming a program, and the run-time checks of rendered values.
 
 /// The program that receives argument `index`: the nearest program position
 /// before it (a wrapper's program, `find -exec`, `docker run`…), else `cmd`.
@@ -81,10 +82,110 @@ pub fn normalize_command(cmd: &str) -> String {
 
 const MAX_DEPTH: usize = 8;
 
+/// Why a command line is not one of the shapes Kronn trusts without a human.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Untrusted {
+    /// The program has no trusted shape.
+    Program,
+    /// An option outside the shape, or the shape's option missing.
+    Shape,
+    /// The inline code or the script path carries a template value.
+    TemplatedCode,
+    /// The script is stdin (`-`, `/dev/stdin`, `/dev/fd/0`…).
+    StdinScript,
+}
+
+/// The only lines whose values Kronn trusts without a human, matched exactly:
+/// `bash|sh -c SCRIPT [NAME ARGS…]`, `python3 -c CODE [ARGS…]`,
+/// `python3 SCRIPT [ARGS…]`, `node -e CODE [-- ARGS…]`, `node SCRIPT [ARGS…]`,
+/// where `SCRIPT`/`CODE` carry no outside value.
+pub fn trusted_shape(cmd: &str, args: &[String], tainted: &[bool]) -> Result<(), Untrusted> {
+    let literal = |i: usize| !tainted.get(i).copied().unwrap_or(false);
+    let code_then = |option: &str| -> Result<(), Untrusted> {
+        if args.first().map(String::as_str) != Some(option) || args.len() < 2 {
+            return Err(Untrusted::Shape);
+        }
+        if !literal(1) {
+            return Err(Untrusted::TemplatedCode);
+        }
+        Ok(())
+    };
+    let script = || -> Result<(), Untrusted> {
+        let Some(first) = args.first() else {
+            return Err(Untrusted::StdinScript);
+        };
+        if !literal(0) {
+            return Err(Untrusted::TemplatedCode);
+        }
+        if is_stdin_path(first) {
+            return Err(Untrusted::StdinScript);
+        }
+        if first.starts_with('-') {
+            return Err(Untrusted::Shape);
+        }
+        Ok(())
+    };
+    match trusted_program(cmd) {
+        Some("bash" | "sh") => code_then("-c"),
+        Some("python3") if args.first().is_some_and(|a| a == "-c") => code_then("-c"),
+        Some("python3") => script(),
+        Some("node") if args.first().is_some_and(|a| a == "-e") => {
+            code_then("-e")?;
+            if args.len() > 2 && args[2] != "--" {
+                return Err(Untrusted::Shape);
+            }
+            Ok(())
+        }
+        Some("node") => script(),
+        _ => Err(Untrusted::Program),
+    }
+}
+
+/// The trusted program `cmd` names, by exact base name.
+fn trusted_program(cmd: &str) -> Option<&'static str> {
+    let base = cmd.trim().rsplit(['/', '\\']).next().unwrap_or_default();
+    ["bash", "sh", "python3", "node"]
+        .into_iter()
+        .find(|name| *name == base)
+}
+
+/// A path that names stdin.
+pub fn is_stdin_path(path: &str) -> bool {
+    path == "-"
+        || path == "/dev/stdin"
+        || path.starts_with("/dev/fd/")
+        || (path.starts_with("/proc/") && path.contains("/fd/"))
+}
+
 /// The role of every argument of `cmd args`. `tainted` marks arguments that
 /// carry an outside value: they never end option parsing or name a program,
 /// since their rendered text is not known (or not trusted).
+///
+/// Only a trusted shape ([`trusted_shape`]) or a data-only program keeps a
+/// value as data without a human: on any other line, a value the model
+/// leaves as data is [`Role::Unmodelled`]. The model still decides the
+/// refusals no approval lifts (code, option and program positions).
 pub fn roles(cmd: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
+    let mut flags = tainted.to_vec();
+    flags.resize(args.len(), false);
+    let mut roles = model_roles(cmd, args, &flags);
+    if flags.iter().any(|value| *value)
+        && !is_data_only(cmd)
+        && trusted_shape(cmd, args, &flags).is_err()
+    {
+        for (role, value) in roles.iter_mut().zip(&flags) {
+            if *value && matches!(role, Role::Data | Role::RuntimeOption) {
+                *role = Role::Unmodelled;
+            }
+        }
+    }
+    roles
+}
+
+/// The roles the program model gives, before the trusted-shape rule: the
+/// run-time checks still use it on an approved line (an approved `git fetch
+/// {{remote}}` must not render to `--upload-pack=…`).
+pub fn model_roles(cmd: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
     let mut flags = tainted.to_vec();
     flags.resize(args.len(), false);
     roles_at(cmd, args, &flags, 0)
@@ -214,7 +315,7 @@ fn data_only_values(name: &str) -> &'static [char] {
         "touch" => &['d', 'r', 't'],
         "du" => &['d', 'B'],
         "df" => &['B', 't'],
-        "stat" => &['c', 'f'],
+        "stat" => &['c'],
         "base64" => &['w'],
         "seq" => &['f', 's'],
         "paste" => &['d'],
@@ -230,7 +331,6 @@ fn data_only_values(name: &str) -> &'static [char] {
         "uniq" => &['f', 's', 'w'],
         "basename" => &['s'],
         "diff" => &['U', 'C', 'I'],
-        "ls" => &['w', 'I'],
         "unzip" => &['d', 'P'],
         _ => &[],
     }
@@ -1644,7 +1744,7 @@ pub const DATA_ONLY_PROGRAMS: &[&str] = &[
 /// Whether `cmd` is a data-only program. The exact base name is compared,
 /// without the version-suffix stripping of [`normalize_command`]: `diff3`
 /// (which takes `--diff-program`) is not `diff`.
-fn is_data_only(cmd: &str) -> bool {
+pub fn is_data_only(cmd: &str) -> bool {
     let base = cmd
         .trim()
         .rsplit(['/', '\\'])
@@ -1655,60 +1755,6 @@ fn is_data_only(cmd: &str) -> bool {
     DATA_ONLY_PROGRAMS.contains(&base)
 }
 
-/// Whether the classifier models `cmd` explicitly: a known data-only
-/// program, a wrapper, an interpreter or evaluator it parses, or one it
-/// refuses values for. A value reaching any other program is refused unless
-/// a human approved the step.
-pub fn is_modelled_program(cmd: &str) -> bool {
-    let name = normalize_command(cmd);
-    is_data_only(cmd)
-        || wrapper(&name).is_some()
-        || crate::core::inline_code::is_interpreter(cmd)
-        || UNMODELLED_EVALUATORS.contains(&name.as_str())
-        || flag_spec(&name).is_some()
-        || matches!(
-            name.as_str(),
-            "awk"
-                | "gawk"
-                | "mawk"
-                | "nawk"
-                | "sed"
-                | "gsed"
-                | "osascript"
-                | "lua"
-                | "luajit"
-                | "tclsh"
-                | "wish"
-                | "rscript"
-                | "r"
-                | "find"
-                | "gfind"
-                | "git"
-                | "ssh"
-                | "docker"
-                | "podman"
-                | "npx"
-                | "bunx"
-                | "uvx"
-                | "npm"
-                | "pnpm"
-                | "yarn"
-                | "tar"
-                | "gtar"
-                | "bsdtar"
-                | "kubectl"
-                | "oc"
-                | "runuser"
-                | "parallel"
-                | "pip"
-                | "pipx"
-                | "uv"
-                | "go"
-                | "cargo"
-                | "gem"
-                | "deno"
-        )
-}
 
 /// An interpreter with no modelled argv (see [`UNMODELLED_EVALUATORS`]).
 pub fn is_unmodelled_evaluator(name: &str) -> bool {
@@ -2050,6 +2096,12 @@ mod tests {
         first_unsafe_placeholder(cmd, &line(items)).is_some()
     }
 
+    /// Accepted once a human approved the line: no refusal an approval
+    /// cannot lift (code, option or program position).
+    fn approvable(cmd: &str, items: &[&str]) -> bool {
+        crate::core::inline_code::first_unsafe_placeholder_with(cmd, &line(items), true).is_none()
+    }
+
     #[test]
     fn program_names_are_normalised() {
         for (raw, expected) in [
@@ -2138,7 +2190,7 @@ mod tests {
             ),
             ("xargs", vec!["-n", "1", "echo", "{{x}}"]),
         ] {
-            assert!(!refused(cmd, &items), "{cmd} {items:?}");
+            assert!(approvable(cmd, &items), "{cmd} {items:?}");
         }
     }
 
@@ -2212,7 +2264,7 @@ mod tests {
             ("docker", vec!["run", "--rm", "img", "echo", "{{x}}"]),
             ("npx", vec!["prettier", "--check", "out.txt"]),
         ] {
-            assert!(!refused(cmd, &items), "{cmd} {items:?}");
+            assert!(approvable(cmd, &items), "{cmd} {items:?}");
         }
     }
 
@@ -2244,15 +2296,15 @@ mod tests {
             "git",
             &templates,
             &line(&["fetch", "--upload-pack=touch x"]),
-            false
+            true
         )
         .is_some());
         assert!(
-            rendered_refusal("s", "git", &templates, &line(&["fetch", "origin"]), false).is_none()
+            rendered_refusal("s", "git", &templates, &line(&["fetch", "origin"]), true).is_none()
         );
         let templates = line(&["log", "--", "{{path}}"]);
         assert!(
-            rendered_refusal("s", "git", &templates, &line(&["log", "--", "-x"]), false).is_none()
+            rendered_refusal("s", "git", &templates, &line(&["log", "--", "-x"]), true).is_none()
         );
     }
 
@@ -2320,18 +2372,18 @@ mod tests {
             ("mysql", vec!["-u{{user}}", "-e", "select 1", "db"]),
             ("psql", vec!["{{db}}", "-c", "select 1"]),
         ] {
-            assert!(!refused(cmd, &items), "{cmd} {items:?}");
+            assert!(approvable(cmd, &items), "{cmd} {items:?}");
         }
     }
 
     #[test]
     fn an_operand_rendered_as_an_option_is_refused_but_an_option_value_is_not() {
         let templates = line(&["{{target}}"]);
-        assert!(rendered_refusal("s", "make", &templates, &line(&["--eval=x"]), false).is_some());
-        assert!(rendered_refusal("s", "make", &templates, &line(&["build"]), false).is_none());
+        assert!(rendered_refusal("s", "make", &templates, &line(&["--eval=x"]), true).is_some());
+        assert!(rendered_refusal("s", "make", &templates, &line(&["build"]), true).is_none());
         let templates = line(&["-u{{user}}", "db"]);
         assert!(
-            rendered_refusal("s", "mysql", &templates, &line(&["-ualice", "db"]), false).is_none()
+            rendered_refusal("s", "mysql", &templates, &line(&["-ualice", "db"]), true).is_none()
         );
     }
 
@@ -2520,7 +2572,7 @@ mod tests {
             ("deno", vec!["run", "app.ts", "{{x}}"]),
             ("perl", vec!["script.pl", "{{x}}"]),
         ] {
-            assert!(!refused(cmd, &items), "{cmd} {items:?}");
+            assert!(approvable(cmd, &items), "{cmd} {items:?}");
         }
     }
 
@@ -2532,32 +2584,12 @@ mod tests {
             "make",
             &templates,
             &line(&["--", "SHELL=/tmp/x"]),
-            false
+            true
         )
         .is_some());
         assert!(
-            rendered_refusal("s", "make", &templates, &line(&["--", "build"]), false).is_none()
+            rendered_refusal("s", "make", &templates, &line(&["--", "build"]), true).is_none()
         );
-    }
-
-    #[test]
-    fn modelled_programs_are_known_for_measurement() {
-        for name in [
-            "echo",
-            "bash",
-            "/usr/bin/python3",
-            "env",
-            "git",
-            "make",
-            "tar",
-            "watch",
-            "kubectl",
-        ] {
-            assert!(is_modelled_program(name), "{name}");
-        }
-        for name in ["mytool", "terraform", "aws"] {
-            assert!(!is_modelled_program(name), "{name}");
-        }
     }
 
     #[test]
@@ -2626,7 +2658,7 @@ mod tests {
             assert!(refused(program, &[option, "{{x}}"]), "{program} {option}");
         }
         for program in DATA_ONLY_PROGRAMS {
-            assert!(is_modelled_program(program), "{program}");
+            assert!(is_data_only(program), "{program}");
             assert!(!refused(program, &["{{x}}"]), "{program}");
         }
     }
@@ -2657,7 +2689,7 @@ mod tests {
             ("grep", vec!["-v{{x}}", "pattern"]),
             ("date", vec!["-{{x}}"]),
         ] {
-            assert!(refused(cmd, &items), "{cmd} {items:?}");
+            assert!(!approvable(cmd, &items), "{cmd} {items:?}");
         }
         for (cmd, items) in [
             ("git", vec!["commit", "-m{{msg}}"]),
@@ -2667,6 +2699,11 @@ mod tests {
             ("mysql", vec!["-u{{user}}", "db"]),
             ("psql", vec!["-U{{user}}", "-d{{db}}"]),
             ("curl", vec!["-H{{header}}", "https://example.org"]),
+        ] {
+            assert!(refused(cmd, &items), "{cmd} {items:?}");
+            assert!(approvable(cmd, &items), "{cmd} {items:?}");
+        }
+        for (cmd, items) in [
             ("head", vec!["-n{{count}}", "file"]),
             ("grep", vec!["-e{{pattern}}", "file"]),
             ("grep", vec!["--regexp={{pattern}}", "file"]),
@@ -2681,9 +2718,9 @@ mod tests {
         // argument: refused at run time.
         let templates = line(&["-u{{user}}", "-e", "select 1"]);
         let empty = line(&["-u", "-e", "select 1"]);
-        assert!(rendered_refusal("s", "mysql", &templates, &empty, false).is_some());
+        assert!(rendered_refusal("s", "mysql", &templates, &empty, true).is_some());
         let named = line(&["-uÉquipe 🦀", "-e", "select 1"]);
-        assert!(rendered_refusal("s", "mysql", &templates, &named, false).is_none());
+        assert!(rendered_refusal("s", "mysql", &templates, &named, true).is_none());
     }
 
     /// sqlite3 reads `--cmd` and `--init` like `-cmd` and `-init`.
@@ -2704,9 +2741,9 @@ mod tests {
     fn script_operands_after_the_file_are_a_command() {
         assert!(refused("script", &["-q", "out.log", "{{x}}"]));
         assert!(refused("script", &["-q", "out.log", "bash", "-c", "{{x}}"]));
-        assert!(!refused("script", &["-q", "{{log}}"]));
+        assert!(approvable("script", &["-q", "{{log}}"]));
         let templates = line(&["-q", "{{log}}"]);
-        assert!(rendered_refusal("s", "script", &templates, &line(&["-q", "-c"]), false).is_some());
+        assert!(rendered_refusal("s", "script", &templates, &line(&["-q", "-c"]), true).is_some());
     }
 
     /// jq reads its program from `-f` and modules from `-L`.
