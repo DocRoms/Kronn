@@ -298,6 +298,8 @@ jobs:
           swap-storage: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Install Linux deps for desktop compile check
         run: |
           sudo add-apt-repository -y universe
@@ -318,6 +320,10 @@ jobs:
       - name: cargo check — desktop crate
         working-directory: desktop/src-tauri
         run: cargo check --locked
+      # desktop/src-tauri/clippy.toml holds the desktop to the spawn rule.
+      - name: cargo clippy — desktop crate
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked -- -D warnings
 
   # ── Code-duplication ceiling (jscpd, all 3 languages) ──────────────────
   # Copy-paste detector across Rust + TS/TSX + Python. Baseline 2026-05-29 =

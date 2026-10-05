@@ -426,7 +426,9 @@ spawn without a route does not compile. `backend/clippy.toml` refuses
 `std::process::Command::new`, `tokio::process::Command::new`, the `open`
 crate's spawning functions and libc's `fork`/`exec*`/`posix_spawn*`/`system`
 outside `core/cmd.rs` (test code excepted), which also covers aliases and
-function pointers. The system opener goes through `cmd::open_in_system`
+function pointers; `desktop/src-tauri/clippy.toml` holds the desktop crate to
+the same rule (its `caffeinate` and login-shell PATH probe use the Tool
+route), and CI runs clippy on both crates. The system opener goes through `cmd::open_in_system`
 (Tool route). A caller that adds values after construction seals again.
 Routes beyond the agent and exec ones:
 

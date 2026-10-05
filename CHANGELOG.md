@@ -209,7 +209,9 @@ Release notes for 0.9.3 and earlier are available in the
   environment when it is built: a spawn without one does not compile, clippy
   refuses any other way to start a process (the system opener included), and
   the exceptions declared in the design note start in the temporary
-  directory, never in a repository. npm registry credentials
+  directory, never in a repository. The desktop app follows the same rule:
+  its sleep inhibitor and its login-shell PATH probe no longer pass the
+  desktop's whole environment on. npm registry credentials
   (`npm_config__auth` and its registry-scoped forms) are dropped like any
   other secret.
 - `git push` and `gh` PR creation use the project's own GitHub connection,
