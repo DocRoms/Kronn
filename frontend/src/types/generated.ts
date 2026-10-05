@@ -6031,8 +6031,17 @@ preview: string, };
 
 export type RecoveryStatus = { configured: boolean,
 /**
- * No recovery passphrase yet: Kronn keeps every local copy of the key
- * (vault and sidecar) and deletes none until one is set (KT-1007).
+ * `recovery.key` is known (by its fingerprint) to wrap the key in use. An
+ * older blob without fingerprint, or one for another key, is `false`.
+ */
+matches_key: boolean,
+/**
+ * No key in memory: restore is the way back (KT-1007).
+ */
+key_locked: boolean,
+/**
+ * No verified recovery passphrase: Kronn keeps every local copy of the key
+ * (vault, sidecar, config.toml when needed) and deletes none (KT-1007).
  */
 key_copies_kept: boolean,
 /**
@@ -6050,6 +6059,11 @@ kind: string, resource_id: string, name: string,
  * Dotted location, e.g. `api_headers.Authorization` or `args.3`.
  */
 field: string, };
+
+/**
+ * What `POST /api/config/recovery/reencrypt` did.
+ */
+export type ReencryptResponse = { rewritten: number, already_current: number, untouched: number, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 

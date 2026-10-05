@@ -937,6 +937,7 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/config/import",
     "/api/config/recovery/set",
     "/api/config/recovery/restore",
+    "/api/config/recovery/reencrypt",
     "/api/audit-runs/cleanup",
     "/api/api-call-logs/purge",
     "/api/debug/logs/clear",
@@ -1250,6 +1251,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/config/recovery/restore",
             post(api::setup::restore_recovery),
+        )
+        .route(
+            "/api/config/recovery/reencrypt",
+            post(api::setup::reencrypt_imported),
         )
         .route(
             "/api/config/scan-paths",

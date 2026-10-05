@@ -84,10 +84,11 @@ pub enum KeyBootError {
     },
     #[error(
         "Several encryption keys each decrypt part of Kronn's encrypted data: {details}. \
-         Nothing was changed: Kronn will not pick one, the other's data would be lost. Back up \
-         every copy (the OS keychain item {service}/{account}, the encryption_key file in the \
-         data directory, KRONN_ENCRYPTION_KEK, config.toml), then remove the key whose data you \
-         no longer need, or re-enter that data under the key you keep, and restart Kronn."
+         Nothing was changed: Kronn will not pick one, the other's data would be lost. To keep \
+         everything, start Kronn once with KRONN_REENCRYPT_FROM=<fingerprint of the key to \
+         retire>: its rows are re-encrypted under the other key, checked, and no key is \
+         deleted. Keep every copy (the OS keychain item {service}/{account}, the encryption_key \
+         file in the data directory, KRONN_ENCRYPTION_KEK, config.toml) until then."
     )]
     SeveralKeys {
         details: String,
@@ -142,8 +143,8 @@ enum Decision {
     /// Rows exist and nothing decrypts them → lock (fail-soft).
     Lock(usize),
     /// Several distinct keys each decrypt some rows: stop, write nothing.
-    /// (source, key fingerprint, rows it decrypts) per decrypting candidate.
-    Conflict(Vec<(&'static str, String, usize)>),
+    /// (key, source, key fingerprint, rows it decrypts) per decrypting candidate.
+    Conflict(Vec<(String, &'static str, String, usize)>),
 }
 
 fn decide(candidates: &[(String, &'static str)], columns: &[ColumnRows]) -> Decision {
@@ -174,11 +175,27 @@ fn decide(candidates: &[(String, &'static str)], columns: &[ColumnRows]) -> Deci
                 .iter()
                 .map(|(cand, src, n)| {
                     let fp = crypto::key_fingerprint_hex(cand).unwrap_or_else(|_| "?".into());
-                    (*src, fp, *n)
+                    ((*cand).clone(), *src, fp, *n)
                 })
                 .collect(),
         ),
     }
+}
+
+/// Env var naming (by fingerprint) the key whose rows the next boot moves under
+/// the other decrypting key, to resolve [`KeyBootError::SeveralKeys`].
+pub const ENV_REENCRYPT_FROM: &str = "KRONN_REENCRYPT_FROM";
+
+/// (from, to) keys when `KRONN_REENCRYPT_FROM` names exactly one of exactly two
+/// decrypting keys.
+fn reencrypt_request(found: &[(String, &'static str, String, usize)]) -> Option<(String, String)> {
+    let wanted = std::env::var(ENV_REENCRYPT_FROM).ok()?;
+    let wanted = wanted.trim();
+    if found.len() != 2 || wanted.is_empty() {
+        return None;
+    }
+    let from = found.iter().position(|(_, _, fp, _)| fp == wanted)?;
+    Some((found[from].0.clone(), found[1 - from].0.clone()))
 }
 
 /// True when `key` decrypts at least one sampled row of every non-empty column.
@@ -325,13 +342,34 @@ pub async fn reconcile_with(
     if let Some(legacy) = legacy.clone() {
         candidates.push((legacy, "legacy-config"));
     }
+    // A value that is not a 32-byte hex key can decrypt nothing and must never
+    // be adopted (all encryption would then fail).
+    candidates.retain(|(v, src)| {
+        let valid = crypto::parse_secret(v).is_ok();
+        if !valid {
+            tracing::error!("keystore: {src} holds a value that is not a valid key — ignored");
+        }
+        valid
+    });
     // De-dup by value (a key present in several tiers is one candidate).
     let mut seen = std::collections::HashSet::new();
     candidates.retain(|(v, _)| seen.insert(v.clone()));
 
-    let columns = collect_encrypted_rows(db).await?;
+    let mut columns = collect_encrypted_rows(db).await?;
+    let mut decision = decide(&candidates, &columns);
+    if let Decision::Conflict(found) = &decision {
+        if let Some((from, to)) = reencrypt_request(found) {
+            // The operator named the key to retire: move its rows, then decide again.
+            let report = reencrypt_rows(db, &from, &to).await?;
+            tracing::warn!(
+                "keystore: rows re-encrypted on request (KRONN_REENCRYPT_FROM): {report:?}"
+            );
+            columns = collect_encrypted_rows(db).await?;
+            decision = decide(&candidates, &columns);
+        }
+    }
 
-    let (key, outcome) = match decide(&candidates, &columns) {
+    let (key, outcome) = match decision {
         Decision::Mint => {
             tracing::info!("keystore: fresh install — minted a new encryption key");
             (crypto::generate_secret(), KeyOutcome::Minted)
@@ -347,7 +385,7 @@ pub async fn reconcile_with(
         Decision::Conflict(found) => {
             let details = found
                 .iter()
-                .map(|(src, fp, n)| format!("{src} holds key {fp} (decrypts {n} row(s))"))
+                .map(|(_, src, fp, n)| format!("{src} holds key {fp} (decrypts {n} row(s))"))
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(KeyBootError::SeveralKeys {
@@ -477,6 +515,23 @@ pub async fn recover_with_passphrase(
     };
 
     let key = recovery::unwrap_key(&blob, passphrase).map_err(|e| anyhow::anyhow!(e))?;
+    upgrade_local_blob_fingerprint(dir, &blob, &key);
+
+    // Restoring is for a locked instance. On a running one, another key would
+    // split the data between two keys; the same key changes nothing.
+    if let Some(active) = config.encryption_secret.as_deref() {
+        if active == key {
+            return Ok(KeyOutcome::Resolved {
+                source: "recovery-passphrase",
+            });
+        }
+        anyhow::bail!(
+            "Kronn is not locked: its encryption key is in use and this recovery code wraps \
+             another key. Restoring it would split your secrets between two keys. To read secrets \
+             imported from another machine, use 'Re-encrypt imported secrets' with that \
+             machine's passphrase instead. Nothing was changed."
+        );
+    }
 
     // The recovered key must match THIS instance's data (unless there's none).
     let columns = collect_encrypted_rows(db).await?;
@@ -502,6 +557,134 @@ pub async fn recover_with_passphrase(
     Ok(KeyOutcome::Resolved {
         source: "recovery-passphrase",
     })
+}
+
+/// A pre-0.14.3 `recovery.key` (no fingerprint) that the passphrase just
+/// unwrapped gets its fingerprint, so it can count as a verified copy.
+fn upgrade_local_blob_fingerprint(dir: &Path, used: &recovery::RecoveryBlob, key_hex: &str) {
+    let Some(local) = recovery::load_blob(dir) else {
+        return;
+    };
+    if local.fingerprint.is_some() || local.salt != used.salt || local.wrapped != used.wrapped {
+        return;
+    }
+    if let Ok(fp) = crypto::key_fingerprint_hex(key_hex) {
+        let upgraded = recovery::RecoveryBlob {
+            fingerprint: Some(fp),
+            ..local
+        };
+        if let Err(e) = recovery::save_blob(dir, &upgraded) {
+            tracing::warn!("keystore: could not record the recovery.key fingerprint: {e}");
+        }
+    }
+}
+
+/// What [`reencrypt_rows`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Reencrypted {
+    /// Rows moved from the old key to the new one.
+    pub rewritten: usize,
+    /// Rows already under the new key, left as they are.
+    pub already_current: usize,
+    /// Rows neither key decrypts, left as they are.
+    pub untouched: usize,
+}
+
+/// Re-encrypt every registered-column row that `from_hex` decrypts under
+/// `to_hex`, in one transaction. Each rewritten row is read back and must
+/// decrypt under `to_hex` to the same plaintext before the commit; rows the new
+/// key already decrypts, or neither key does, are never written.
+pub async fn reencrypt_rows(db: &Database, from_hex: &str, to_hex: &str) -> Result<Reencrypted> {
+    let from = crypto::parse_secret(from_hex).map_err(anyhow::Error::msg)?;
+    let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
+    if from == to {
+        anyhow::bail!("the source and target keys are the same");
+    }
+    db.with_conn(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        let mut report = Reencrypted::default();
+        for col in ENCRYPTED_COLUMNS {
+            let rows: Vec<(i64, String)> = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT rowid, {c} FROM {t} WHERE {c} IS NOT NULL AND {c} != ''",
+                    c = col.column,
+                    t = col.table
+                ))?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for (rowid, enc) in rows {
+                if crypto::decrypt(&enc, &to).is_ok() {
+                    report.already_current += 1;
+                    continue;
+                }
+                let Ok(plain) = crypto::decrypt(&enc, &from) else {
+                    report.untouched += 1;
+                    continue;
+                };
+                let fresh = crypto::encrypt(&plain, &to).map_err(anyhow::Error::msg)?;
+                tx.execute(
+                    &format!("UPDATE {} SET {} = ?1 WHERE rowid = ?2", col.table, col.column),
+                    rusqlite::params![fresh, rowid],
+                )?;
+                let back: String = tx.query_row(
+                    &format!("SELECT {} FROM {} WHERE rowid = ?1", col.column, col.table),
+                    [rowid],
+                    |r| r.get(0),
+                )?;
+                if crypto::decrypt(&back, &to).ok().as_deref() != Some(plain.as_str()) {
+                    anyhow::bail!(
+                        "{}.{} row {rowid} did not read back under the new key; nothing was changed",
+                        col.table,
+                        col.column
+                    );
+                }
+                report.rewritten += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(report)
+    })
+    .await
+}
+
+/// Re-encrypt secrets imported from another machine under this instance's key,
+/// using that machine's recovery passphrase. The instance key never changes.
+/// The blob comes from `recovery_code` or, failing that, the newest imported one.
+pub async fn reencrypt_imported(
+    config: &AppConfig,
+    db: &Database,
+    passphrase: &str,
+    recovery_code: Option<&str>,
+    dir: &Path,
+) -> Result<Reencrypted> {
+    let active = config.encryption_secret.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Kronn is locked: restore its own key first (Settings → Recovery), then re-encrypt \
+             the imported secrets"
+        )
+    })?;
+    let candidates: Vec<recovery::RecoveryBlob> = match recovery_code {
+        Some(code) if !code.trim().is_empty() => {
+            vec![recovery::from_code(code).map_err(|e| anyhow::anyhow!(e))?]
+        }
+        _ => recovery::imported_blobs(dir),
+    };
+    if candidates.is_empty() {
+        anyhow::bail!("no imported recovery data — paste the source machine's recovery code");
+    }
+    let source = candidates
+        .iter()
+        .find_map(|blob| recovery::unwrap_key(blob, passphrase).ok())
+        .ok_or_else(|| anyhow::anyhow!("Wrong recovery passphrase for the imported data"))?;
+    if source == active {
+        return Ok(Reencrypted::default());
+    }
+    let report = reencrypt_rows(db, &source, active).await?;
+    tracing::info!("keystore: imported secrets re-encrypted under this instance's key: {report:?}");
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -1170,6 +1353,222 @@ mod tests {
             config::retained_disk_key(tmp.path()),
             None,
             "then dropped from config.toml"
+        );
+    }
+
+    // ── restore vs re-encryption (imports carrying another machine's key) ──
+
+    /// An unlocked instance holding rows under its key K and imported rows
+    /// under K_src: restoring K_src is refused and changes nothing; the
+    /// re-encryption path brings every row under K and the reboot resolves.
+    #[tokio::test]
+    async fn restore_on_an_unlocked_instance_is_refused_and_reencryption_converges() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        let k_src = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        seed_snapshot(&db, &k_src).await; // imported, under the source key
+        let tmp = tempfile::tempdir().unwrap();
+        let (sidecar, cell) = mem_vault("sidecar", Some(&k));
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(cfg.encryption_secret.as_deref(), Some(k.as_str()));
+        let retained = config::retained_disk_key(tmp.path());
+
+        let imported = recovery::wrap_key(&k_src, "source pass").unwrap();
+        recovery::save_imported_blob(tmp.path(), &imported).unwrap();
+        let code = recovery::to_code(&imported);
+        let err = recover_with_passphrase(
+            &mut cfg,
+            &db,
+            &store,
+            "source pass",
+            Some(&code),
+            tmp.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("not locked"), "{err}");
+        assert_eq!(cfg.encryption_secret.as_deref(), Some(k.as_str()));
+        assert_eq!(cell.lock().unwrap().as_deref(), Some(k.as_str()));
+        assert_eq!(config::retained_disk_key(tmp.path()), retained);
+
+        // Same key: accepted, nothing changes.
+        let own = recovery::to_code(&recovery::wrap_key(&k, "own pass").unwrap());
+        recover_with_passphrase(&mut cfg, &db, &store, "own pass", Some(&own), tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(cfg.encryption_secret.as_deref(), Some(k.as_str()));
+
+        // Re-encryption with the source passphrase (newest imported blob).
+        let wrong = reencrypt_imported(&cfg, &db, "nope", None, tmp.path()).await;
+        assert!(wrong.is_err());
+        let report = reencrypt_imported(&cfg, &db, "source pass", None, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            Reencrypted {
+                rewritten: 1,
+                already_current: 1,
+                untouched: 0
+            }
+        );
+        let again = reencrypt_imported(&cfg, &db, "source pass", None, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(again.rewritten, 0, "idempotent");
+        // Every row now decrypts under K; the snapshot plaintext is intact.
+        let columns = collect_encrypted_rows(&db).await.unwrap();
+        assert!(decrypts_every_column(&k, &columns));
+        let enc: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT values_encrypted FROM execution_variable_snapshots",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            crypto::decrypt(&enc, &crypto::parse_secret(&k).unwrap()).unwrap(),
+            "{\"TOKEN\":\"v\"}"
+        );
+        // A reboot with both keys around resolves to K.
+        let mut fresh = config::default_config();
+        fresh.encryption_secret = Some(k_src.clone());
+        let outcome = reconcile_with(&mut fresh, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(outcome, KeyOutcome::Resolved { source: "sidecar" });
+
+        // A locked instance must restore its own key first.
+        let mut locked = config::default_config();
+        locked.encryption_secret = None;
+        assert!(
+            reencrypt_imported(&locked, &db, "source pass", None, tmp.path())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("locked")
+        );
+    }
+
+    #[tokio::test]
+    async fn reencrypt_rows_refuses_identical_keys_and_reports_rows_left_alone() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        assert!(reencrypt_rows(&db, &k, &k).await.is_err());
+        seed_row(&db, &crypto::generate_secret()).await; // a third key
+        let r = reencrypt_rows(&db, &crypto::generate_secret(), &k)
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            Reencrypted {
+                rewritten: 0,
+                already_current: 0,
+                untouched: 1
+            }
+        );
+    }
+
+    /// Two decrypting keys + KRONN_REENCRYPT_FROM naming one: its rows move
+    /// under the other, the boot resolves, and no vault is written or emptied.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reencrypt_from_resolves_two_keys_without_deleting_any() {
+        let db = Database::open_in_memory().unwrap();
+        let k1 = crypto::generate_secret();
+        let k2 = crypto::generate_secret();
+        seed_row(&db, &k1).await;
+        seed_snapshot(&db, &k2).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (keychain, kc) = mem_vault("keychain", Some(&k1));
+        let (sidecar, sc) = mem_vault("sidecar", Some(&k2));
+        let store = KeyStore::from_vaults(vec![keychain, sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+
+        std::env::set_var(
+            ENV_REENCRYPT_FROM,
+            crypto::key_fingerprint_hex(&k2).unwrap(),
+        );
+        let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
+        std::env::remove_var(ENV_REENCRYPT_FROM);
+        assert_eq!(
+            outcome.unwrap(),
+            KeyOutcome::Resolved { source: "keychain" }
+        );
+        assert_eq!(cfg.encryption_secret.as_deref(), Some(k1.as_str()));
+        assert_eq!(kc.lock().unwrap().as_deref(), Some(k1.as_str()));
+        assert_eq!(
+            sc.lock().unwrap().as_deref(),
+            Some(k2.as_str()),
+            "kept, not deleted"
+        );
+        assert!(decrypts_every_column(
+            &k1,
+            &collect_encrypted_rows(&db).await.unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_vault_value_is_never_adopted() {
+        let db = Database::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (sidecar, cell) = mem_vault("sidecar", Some("not-a-key"));
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(outcome, KeyOutcome::Minted);
+        let key = cfg.encryption_secret.clone().unwrap();
+        assert!(crypto::parse_secret(&key).is_ok());
+        assert_eq!(
+            cell.lock().unwrap().as_deref(),
+            Some("not-a-key"),
+            "not overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_with_an_old_blob_records_its_fingerprint() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let old = recovery::RecoveryBlob {
+            fingerprint: None,
+            ..recovery::wrap_key(&k, "pw").unwrap()
+        };
+        recovery::save_blob(tmp.path(), &old).unwrap();
+        assert_eq!(
+            recovery::matches_key(tmp.path(), &k),
+            recovery::RecoveryMatch::Unverified
+        );
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        recover_with_passphrase(
+            &mut cfg,
+            &db,
+            &KeyStore::from_vaults(vec![]),
+            "pw",
+            None,
+            tmp.path(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            recovery::matches_key(tmp.path(), &k),
+            recovery::RecoveryMatch::Matches
         );
     }
 

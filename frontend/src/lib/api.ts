@@ -262,7 +262,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
-import type { AgentFilesPolicy, ProjectAgentFiles, RecoveryStatus } from '../types/generated';
+import type { AgentFilesPolicy, ProjectAgentFiles, ReencryptResponse, RecoveryStatus } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -904,6 +904,10 @@ export const config = {
    *  optional — omitted, the local recovery sidecar is used. */
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
+  /** Re-encrypts secrets imported from another machine under this instance's
+   *  key, with that machine's passphrase (the instance key never changes). */
+  reencryptImported: (passphrase: string, recoveryCode?: string) =>
+    api<ReencryptResponse>('POST', '/config/recovery/reencrypt', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
   /** Batch storage weight for the discussions currently on screen. Sparse:
    * an id that holds nothing is absent from `weights`. Never call this to

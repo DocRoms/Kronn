@@ -2444,6 +2444,46 @@ pub async fn restore_recovery(
     }
 }
 
+/// What `POST /api/config/recovery/reencrypt` did.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ReencryptResponse {
+    pub rewritten: u32,
+    pub already_current: u32,
+    pub untouched: u32,
+}
+
+/// POST /api/config/recovery/reencrypt — re-encrypt secrets imported from
+/// another machine under THIS instance's key, with that machine's recovery
+/// passphrase (+ optional code; the newest imported blob otherwise). The
+/// instance key never changes. Auth-gated like the destructive endpoints.
+pub async fn reencrypt_imported(
+    State(state): State<AppState>,
+    Json(req): Json<RestoreRecoveryRequest>,
+) -> Json<ApiResponse<ReencryptResponse>> {
+    let dir = match config::config_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e.to_string())),
+    };
+    let config = state.config.read().await;
+    match crate::core::keystore::reencrypt_imported(
+        &config,
+        &state.db,
+        &req.passphrase,
+        req.recovery_code.as_deref(),
+        &dir,
+    )
+    .await
+    {
+        Ok(r) => Json(ApiResponse::ok(ReencryptResponse {
+            rewritten: r.rewritten as u32,
+            already_current: r.already_current as u32,
+            untouched: r.untouched as u32,
+        })),
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
 // ── Open URL in system browser ─────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
