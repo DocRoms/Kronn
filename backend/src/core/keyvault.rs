@@ -32,11 +32,24 @@ pub const KEYCHAIN_ACCOUNT: &str = "encryption_secret_v1";
 /// so a `config.toml` rewrite can never strip it.
 pub const SIDECAR_FILENAME: &str = "encryption_key";
 
+/// Why a vault could not be read. Distinct from "empty" (`Ok(None)`): a vault
+/// that errored may still hold the key, so it must never be minted over or
+/// written to.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VaultError {
+    /// The store exists but refused access (denied prompt, locked keychain).
+    #[error("access denied: {0}")]
+    Denied(String),
+    /// The store could not be reached or read (backend failure, I/O error).
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+}
+
 /// A place the encryption key can be persisted to and read from.
 ///
-/// `retrieve` returns `Ok(None)` both when the vault is *empty* and when it is
-/// *unavailable* (a keychain with no backend on WSL/Docker) — after logging the
-/// distinction — so the resolution ladder degrades instead of failing.
+/// `retrieve` returns `Ok(None)` only when the vault is genuinely *empty*. A
+/// denied or unreadable vault returns `Err` (a [`VaultError`]): it may hold
+/// the key, so callers must stop rather than treat it as empty.
 pub trait KeyVault: Send + Sync {
     fn name(&self) -> &'static str;
     fn retrieve(&self) -> Result<Option<String>>;
@@ -68,29 +81,26 @@ impl KeyVault for OsKeychain {
     }
 
     fn retrieve(&self) -> Result<Option<String>> {
-        let entry = match self.entry() {
-            Ok(e) => e,
-            // No keychain backend (WSL/Docker/headless) — degrade, don't fail.
-            Err(e) => {
-                tracing::warn!("keychain unavailable ({e}); falling through the ladder");
-                return Ok(None);
-            }
-        };
-        match entry.get_password() {
-            Ok(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
-            Ok(_) => Ok(None),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => {
-                tracing::warn!("keychain read failed ({e}); falling through the ladder");
-                Ok(None)
-            }
-        }
+        let entry = self
+            .entry()
+            .map_err(|e| VaultError::Unavailable(format!("{e:#}")))?;
+        keychain_read_result(entry.get_password())
     }
 
     fn store(&self, secret: &str) -> Result<()> {
         self.entry()?
             .set_password(secret)
             .context("write key to OS keychain")
+    }
+}
+
+/// Map a keychain read to the vault contract: only a missing item is "empty".
+fn keychain_read_result(read: keyring::Result<String>) -> Result<Option<String>> {
+    match read {
+        Ok(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(keyring::Error::NoStorageAccess(e)) => Err(VaultError::Denied(e.to_string()).into()),
+        Err(e) => Err(VaultError::Unavailable(e.to_string()).into()),
     }
 }
 
@@ -127,10 +137,10 @@ impl KeyVault for SidecarFile {
                 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => {
-                tracing::warn!("sidecar read failed ({e}); falling through the ladder");
-                Ok(None)
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                Err(VaultError::Denied(format!("{}: {e}", self.path.display())).into())
             }
+            Err(e) => Err(VaultError::Unavailable(format!("{}: {e}", self.path.display())).into()),
         }
     }
 
@@ -176,7 +186,14 @@ pub(crate) fn write_private_temp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()
     Ok(())
 }
 
-/// The ordered ladder of writable vaults/// The ordered ladder of writable vaults (keychain → sidecar), plus the
+/// A vault that could not be read during [`KeyStore::snapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultReadFailure {
+    pub vault: &'static str,
+    pub error: String,
+}
+
+/// The ordered ladder of writable vaults (keychain → sidecar), plus the
 /// read-only env override checked first.
 pub struct KeyStore {
     vaults: Vec<Box<dyn KeyVault>>,
@@ -189,12 +206,13 @@ pub struct KeyStore {
 /// "Always Allow" can never stick across dev-watcher restarts. The `0600` sidecar keeps
 /// the key durable in dev; signed release builds get the keychain tier, where
 /// the authorization DOES persist. `KRONN_USE_KEYCHAIN=1|0` overrides both ways
-/// (e.g. testing the keychain path from a dev build).
+/// (e.g. testing the keychain path from a dev build). Elsewhere than macOS and
+/// Windows the crate has no backend, so the default is off there.
 fn use_os_keychain() -> bool {
     match std::env::var("KRONN_USE_KEYCHAIN").ok().as_deref() {
         Some("1") | Some("true") => true,
         Some("0") | Some("false") => false,
-        _ => !cfg!(debug_assertions),
+        _ => !cfg!(debug_assertions) && cfg!(any(target_os = "macos", target_os = "windows")),
     }
 }
 
@@ -240,28 +258,70 @@ impl KeyStore {
     }
 
     /// Every tier's current value, for split-brain detection by the reconciler.
-    /// Includes the env tier first.
-    pub fn snapshot(&self) -> Vec<(&'static str, Option<String>)> {
+    /// Includes the env tier first. Fails on the first vault that cannot be
+    /// read: an unreadable vault may hold the key, so no decision can be made.
+    pub fn snapshot(
+        &self,
+    ) -> std::result::Result<Vec<(&'static str, Option<String>)>, VaultReadFailure> {
         let mut out: Vec<(&'static str, Option<String>)> = vec![("env", Self::env_override())];
         for v in &self.vaults {
-            out.push((v.name(), v.retrieve().unwrap_or(None)));
+            match v.retrieve() {
+                Ok(val) => out.push((v.name(), val)),
+                Err(error) => {
+                    return Err(VaultReadFailure {
+                        vault: v.name(),
+                        error: format!("{error:#}"),
+                    })
+                }
+            }
         }
-        out
+        Ok(out)
     }
 
-    /// Persist `secret` into every writable vault that doesn't already hold it.
-    /// Returns per-vault results; callers should warn loudly if EVERY tier
-    /// failed (no durable backup exists — e.g. WSL/Docker with no keychain and
-    /// an unwritable sidecar).
+    /// Whether `secret` can be read back from a durable tier (env or a vault).
+    pub fn holds(&self, secret: &str) -> bool {
+        Self::env_override().as_deref() == Some(secret)
+            || self
+                .vaults
+                .iter()
+                .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+    }
+
+    /// How many distinct durable copies read `secret` back: the env override and
+    /// each vault count once (config.toml is not counted here).
+    pub fn copies_of(&self, secret: &str) -> usize {
+        usize::from(Self::env_override().as_deref() == Some(secret))
+            + self
+                .vaults
+                .iter()
+                .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+                .count()
+    }
+
+    /// Whether the vault called `name` reads `secret` back.
+    pub fn holds_in(&self, name: &str, secret: &str) -> bool {
+        self.vaults
+            .iter()
+            .filter(|v| v.name() == name)
+            .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+    }
+
+    /// Persist `secret` into every EMPTY writable vault. A vault holding another
+    /// key, or whose read fails, is never written: its item may be the only copy
+    /// of that key. Returns per-vault results; callers should warn loudly if
+    /// EVERY tier failed (no durable backup exists).
     pub fn mirror(&self, secret: &str) -> Vec<(&'static str, Result<()>)> {
         self.vaults
             .iter()
             .map(|v| {
-                let already = match v.retrieve() {
-                    Ok(Some(cur)) => cur == secret,
-                    _ => false,
+                let res = match v.retrieve() {
+                    Ok(Some(cur)) if cur == secret => Ok(()),
+                    Ok(Some(_)) => Err(anyhow::anyhow!(
+                        "not written: the vault holds a different key"
+                    )),
+                    Ok(None) => v.store(secret),
+                    Err(e) => Err(e.context("not written: the vault could not be read first")),
                 };
-                let res = if already { Ok(()) } else { v.store(secret) };
                 (v.name(), res)
             })
             .collect()
@@ -278,29 +338,32 @@ mod tests {
         Value(String),
         Empty,
         Unavailable,
+        /// Holds a value but its read fails (denied prompt): a write would
+        /// replace the only copy.
+        Unreadable(String),
     }
 
     struct MockVault {
         name: &'static str,
-        state: Mutex<MockState>,
+        state: std::sync::Arc<Mutex<MockState>>,
     }
     impl MockVault {
         fn with_value(name: &'static str, v: &str) -> Self {
             Self {
                 name,
-                state: Mutex::new(MockState::Value(v.into())),
+                state: std::sync::Arc::new(Mutex::new(MockState::Value(v.into()))),
             }
         }
         fn empty(name: &'static str) -> Self {
             Self {
                 name,
-                state: Mutex::new(MockState::Empty),
+                state: std::sync::Arc::new(Mutex::new(MockState::Empty)),
             }
         }
         fn unavailable(name: &'static str) -> Self {
             Self {
                 name,
-                state: Mutex::new(MockState::Unavailable),
+                state: std::sync::Arc::new(Mutex::new(MockState::Unavailable)),
             }
         }
     }
@@ -313,6 +376,7 @@ mod tests {
                 MockState::Value(v) => Ok(Some(v.clone())),
                 MockState::Empty => Ok(None),
                 MockState::Unavailable => anyhow::bail!("vault unavailable"),
+                MockState::Unreadable(_) => Err(VaultError::Denied("prompt denied".into()).into()),
             }
         }
         fn store(&self, secret: &str) -> Result<()> {
@@ -398,7 +462,7 @@ mod tests {
             boxed(MockVault::with_value("keychain", "AAAA")),
             boxed(MockVault::with_value("sidecar", "BBBB")),
         ]);
-        let snap = ks.snapshot();
+        let snap = ks.snapshot().unwrap();
         assert_eq!(snap[0], ("env", None));
         assert_eq!(snap[1], ("keychain", Some("AAAA".to_string())));
         assert_eq!(snap[2], ("sidecar", Some("BBBB".to_string())));
@@ -409,10 +473,82 @@ mod tests {
 
     #[test]
     #[serial]
-    fn snapshot_degrades_unavailable_vault_to_none() {
+    fn snapshot_fails_on_an_unreadable_vault_instead_of_reading_it_as_empty() {
         std::env::remove_var(ENV_KEK);
-        let ks = KeyStore::from_vaults(vec![boxed(MockVault::unavailable("keychain"))]);
-        assert_eq!(ks.snapshot(), vec![("env", None), ("keychain", None)]);
+        let ks = KeyStore::from_vaults(vec![
+            boxed(MockVault::with_value("sidecar", "sk")),
+            boxed(MockVault::unavailable("keychain")),
+        ]);
+        let failure = ks.snapshot().unwrap_err();
+        assert_eq!(failure.vault, "keychain");
+        assert!(failure.error.contains("vault unavailable"), "{failure:?}");
+    }
+
+    #[test]
+    #[serial]
+    fn mirror_never_writes_into_a_vault_whose_read_failed() {
+        std::env::remove_var(ENV_KEK);
+        let state = std::sync::Arc::new(Mutex::new(MockState::Unreadable("OLD".into())));
+        let keychain = MockVault {
+            name: "keychain",
+            state: state.clone(),
+        };
+        let ks = KeyStore::from_vaults(vec![boxed(keychain), boxed(MockVault::empty("sidecar"))]);
+        let results = ks.mirror("NEW");
+        assert!(
+            results[0].1.is_err(),
+            "the unreadable vault reports an error"
+        );
+        assert!(results[1].1.is_ok());
+        // The unreadable vault still holds its own value: no overwrite.
+        let MockState::Unreadable(held) = &*state.lock().unwrap() else {
+            panic!("the unreadable vault was written");
+        };
+        assert_eq!(held, "OLD");
+    }
+
+    #[test]
+    #[serial]
+    fn holds_reads_back_env_and_vaults() {
+        std::env::remove_var(ENV_KEK);
+        let ks = KeyStore::from_vaults(vec![
+            boxed(MockVault::unavailable("keychain")),
+            boxed(MockVault::with_value("sidecar", "KEY")),
+        ]);
+        assert!(ks.holds("KEY"));
+        assert!(!ks.holds("OTHER"));
+        assert!(ks.holds_in("sidecar", "KEY"));
+        assert_eq!(ks.copies_of("KEY"), 1);
+        assert!(!ks.holds_in("keychain", "KEY"));
+        std::env::set_var(ENV_KEK, "OTHER");
+        assert!(ks.holds("OTHER"));
+        assert_eq!(ks.copies_of("OTHER"), 1, "env only");
+        std::env::remove_var(ENV_KEK);
+    }
+
+    #[test]
+    fn keychain_reads_map_only_a_missing_item_to_empty() {
+        assert_eq!(
+            keychain_read_result(Ok(" k1 ".into())).unwrap(),
+            Some("k1".into())
+        );
+        assert_eq!(keychain_read_result(Ok("  ".into())).unwrap(), None);
+        assert_eq!(
+            keychain_read_result(Err(keyring::Error::NoEntry)).unwrap(),
+            None
+        );
+        let denied = keychain_read_result(Err(keyring::Error::NoStorageAccess("locked".into())))
+            .unwrap_err();
+        assert!(matches!(
+            denied.downcast_ref::<VaultError>(),
+            Some(VaultError::Denied(_))
+        ));
+        let failed =
+            keychain_read_result(Err(keyring::Error::PlatformFailure("boom".into()))).unwrap_err();
+        assert!(matches!(
+            failed.downcast_ref::<VaultError>(),
+            Some(VaultError::Unavailable(_))
+        ));
     }
 
     #[test]
@@ -426,7 +562,25 @@ mod tests {
         let results = ks.mirror("KEY");
         assert!(results.iter().all(|(_, r)| r.is_ok()));
         assert_eq!(ks.primary(), Some(("KEY".to_string(), "keychain")));
-        assert_eq!(ks.snapshot()[2].1, Some("KEY".to_string()));
+        assert_eq!(ks.snapshot().unwrap()[2].1, Some("KEY".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn mirror_never_overwrites_a_vault_holding_another_key() {
+        std::env::remove_var(ENV_KEK);
+        let ks = KeyStore::from_vaults(vec![
+            boxed(MockVault::with_value("keychain", "K1")),
+            boxed(MockVault::with_value("sidecar", "K2")),
+        ]);
+        let results = ks.mirror("K1");
+        assert!(results[0].1.is_ok());
+        assert!(
+            results[1].1.is_err(),
+            "a different key is reported, not replaced"
+        );
+        let snap = ks.snapshot().unwrap();
+        assert_eq!(snap[2].1.as_deref(), Some("K2"));
     }
 
     #[test]
@@ -505,11 +659,34 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_read_error_degrades_to_none() {
+    fn sidecar_read_error_is_an_error_not_empty() {
         let dir = tempfile::tempdir().unwrap();
         let sc = SidecarFile::in_dir(dir.path());
         std::fs::create_dir(sc.path()).unwrap();
-        assert_eq!(sc.retrieve().unwrap(), None);
+        let err = sc.retrieve().unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<VaultError>(),
+            Some(VaultError::Unavailable(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_permission_denied_is_reported_as_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sc = SidecarFile::in_dir(dir.path());
+        sc.store("cafebabe").unwrap();
+        std::fs::set_permissions(sc.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let res = sc.retrieve();
+        std::fs::set_permissions(sc.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Root reads through 0o000; only assert the classification when refused.
+        if let Err(err) = res {
+            assert!(matches!(
+                err.downcast_ref::<VaultError>(),
+                Some(VaultError::Denied(_))
+            ));
+        }
     }
 
     #[test]

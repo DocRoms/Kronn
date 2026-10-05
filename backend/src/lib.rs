@@ -31,6 +31,77 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
+/// Resolve the encryption key and load the stored credentials, right after the
+/// database opens. Both startup paths call this; an `Err` must stop the boot:
+/// continuing could mint or mirror over the only copy of the key (KT-1007).
+/// `env_auth_token` (an operator-set `KRONN_AUTH_TOKEN`, already removed from
+/// the environment) becomes the stored token when none exists, and enables auth.
+pub async fn resolve_key_and_credentials(
+    config: &mut AppConfig,
+    database: &Arc<Database>,
+    env_auth_token: Option<String>,
+) -> anyhow::Result<()> {
+    let key_outcome = match crate::core::keystore::reconcile(config, database).await {
+        Ok(outcome) => {
+            tracing::info!("Encryption key reconciled: {outcome:?}");
+            outcome
+        }
+        Err(e) => {
+            tracing::error!("{e:#}");
+            return Err(e);
+        }
+    };
+    let dir = crate::core::config::config_dir()?;
+    match crate::core::credential_store::boot(
+        config,
+        database.clone(),
+        &dir,
+        &key_outcome,
+        env_auth_token.as_deref(),
+    )
+    .await
+    {
+        Ok(result) => tracing::info!("Credential store: {result:?}"),
+        Err(e) if crate::core::credential_store::is_armed(&dir) => tracing::error!(
+            "Credential store armed, but finishing its migration failed (the next start \
+             completes it): {e:#}"
+        ),
+        Err(e) => {
+            tracing::error!("Credential store not armed, config.toml left as it is: {e:#}");
+            // A stored token we did not load is "auth locked", never "no auth".
+            if config.server.auth_token.is_none()
+                && crate::core::credential_store::stored_auth_token_exists(database)
+                    .await
+                    .unwrap_or(true)
+            {
+                config.server.auth_locked = true;
+            }
+        }
+    }
+    if crate::core::credential_store::is_armed(&dir) {
+        // A different stored token wins (with a warning), as config.toml did before.
+        crate::core::config::adopt_env_auth_token(&mut config.server, env_auth_token);
+    } else if let Some(token) = env_auth_token.filter(|t| !t.is_empty()) {
+        // Store not armed (key locked): the operator's token serves this session
+        // only, never written in plaintext nor replacing the stored one.
+        if config.server.auth_token.is_none() {
+            config.server.auth_token = Some(token);
+            config.server.auth_token_session_only = true;
+        }
+        config.server.auth_enabled = true;
+    }
+    if config.server.auth_token.is_some() {
+        config.server.auth_locked = false;
+    } else if config.server.auth_locked {
+        tracing::error!(
+            "API auth is LOCKED: the stored auth token cannot be decrypted. Every route except \
+             health and the recovery routes is refused until the key is restored (Settings → \
+             Recovery, or POST /api/config/recovery/restore)."
+        );
+    }
+    Ok(())
+}
+
 /// Persist named connections for legacy provider configuration before runtime
 /// state is constructed. Both standalone and embedded startup paths call this
 /// shared bootstrap after key reconciliation.
@@ -468,8 +539,14 @@ async fn auth_middleware(
     }
 
     // Skip auth for WebSocket endpoint — ws.rs handles authentication
-    // via invite code verification in the first Presence message.
+    // via invite code verification in the first Presence message. A credential
+    // presented anyway must be the operator token: a bridge token never opens
+    // the event bus, and a wrong one never falls back to loopback trust.
     if request.uri().path() == "/api/ws" {
+        let query = request.uri().query().map(str::to_owned);
+        if let Some(status) = ws_credential_refusal(&state, &headers, query.as_deref()).await {
+            return Err(status);
+        }
         return Ok(next.run(request).await);
     }
 
@@ -487,7 +564,24 @@ async fn auth_middleware(
     let auth_enabled = config.server.auth_enabled;
     let expected_token = config.server.auth_token.clone();
     let strict_localhost = config.server.auth_strict_localhost;
+    let auth_locked = config.server.auth_locked && auth_enabled && expected_token.is_none();
     drop(config);
+
+    // A stored token that cannot be decrypted is not "auth off": only the routes
+    // that bring the key back stay open, and only to a local caller.
+    if auth_locked {
+        let local = !strict_localhost && request_is_local_ip(&headers, &request);
+        let bridge_bearer = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|token| token.starts_with(crate::core::bridge_token::TOKEN_PREFIX));
+        // A bridge token never reaches the recovery routes, locked or not.
+        if !bridge_bearer && auth_locked_allows(request.uri().path(), local) {
+            return Ok(next.run(request).await);
+        }
+        return Ok(auth_locked_refusal());
+    }
 
     // Trust primitives, computed once. `local_trusted` is the self-hosted bypass
     // (a request from a local IP, unless the user opted into strict-localhost);
@@ -527,6 +621,83 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     }
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Routes reachable while auth is locked: the recovery status and restore,
+/// from a local caller (health is answered before the auth check).
+const AUTH_LOCKED_ROUTES: &[&str] = &[
+    "/api/config/recovery/status",
+    "/api/config/recovery/restore",
+];
+
+fn auth_locked_allows(path: &str, local_caller: bool) -> bool {
+    local_caller && AUTH_LOCKED_ROUTES.contains(&path)
+}
+
+fn auth_locked_refusal() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::LOCKED,
+        axum::Json(serde_json::json!({
+            "success": false,
+            "data": null,
+            "error_code": "auth_locked",
+            "error": "API authentication is locked: the stored auth token cannot be decrypted \
+                      until the encryption key is restored (Settings → Recovery, or POST \
+                      /api/config/recovery/restore with the recovery passphrase)."
+        })),
+    )
+        .into_response()
+}
+
+/// The refusal for a WebSocket upgrade presenting a credential (bearer header
+/// or `token` query) other than the operator token: 403 for a live bridge
+/// token, 401 for anything else. `None` = no credential, or the operator's.
+async fn ws_credential_refusal(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Option<StatusCode> {
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let query_token = query.and_then(|query| {
+        query.split('&').find_map(|pair| {
+            pair.strip_prefix("token=")
+                .map(crate::core::bridge_token::percent_decode)
+        })
+    });
+    let presented: Vec<String> = bearer.into_iter().chain(query_token).collect();
+    if presented.is_empty() {
+        return None;
+    }
+    let (expected, locked) = {
+        let config = state.config.read().await;
+        let server = &config.server;
+        (
+            server.auth_token.clone(),
+            server.auth_locked && server.auth_enabled && server.auth_token.is_none(),
+        )
+    };
+    // Locked, no credential can be checked: refused like every other route.
+    if locked {
+        return Some(StatusCode::LOCKED);
+    }
+    if presented
+        .iter()
+        .all(|credential| expected.as_deref() == Some(credential.as_str()))
+    {
+        return None;
+    }
+    if presented
+        .iter()
+        .any(|credential| crate::core::bridge_token::lookup(credential).is_some())
+    {
+        return Some(StatusCode::FORBIDDEN);
+    }
+    Some(StatusCode::UNAUTHORIZED)
 }
 
 /// Largest JSON body a bridge-token request may carry (its ids are read before
@@ -609,16 +780,8 @@ async fn bridge_gate(
     let resolver = grant.clone();
     let project = state
         .db
-        .with_read_conn(move |conn| {
-            if let Some(project) = resolver.cached_project() {
-                return Ok(Ok(project));
-            }
-            let resolved = bridge_token::resolve_scope_project(conn, &resolver.scope)?;
-            if let Ok(project) = &resolved {
-                resolver.cache_project(project.clone());
-            }
-            Ok(resolved)
-        })
+        // Re-read on every call: a deleted discussion or run kills the token.
+        .with_read_conn(move |conn| bridge_token::resolve_scope_project(conn, &resolver.scope))
         .await;
     let project = match project {
         Ok(Ok(project)) => project,
@@ -644,11 +807,12 @@ async fn bridge_gate(
     };
     let ids = bridge_token::collect_ids(route, &path_params, query.as_deref(), json.as_ref());
     let checked = grant.clone();
+    let bound = project.clone();
     let decision = state
         .db
         .with_read_conn(move |conn| {
             Ok(
-                bridge_token::authorize(&checked, route, project.as_deref(), &ids, |kind, id| {
+                bridge_token::authorize(&checked, route, bound.as_deref(), &ids, |kind, id| {
                     bridge_token::residence(conn, kind, id).map_err(|error| {
                         bridge_token::Refusal(format!("scope lookup failed: {error}"))
                     })
@@ -673,13 +837,98 @@ async fn bridge_gate(
         tracing::info!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
             "bridge token effect");
     }
+    // Handlers that pick a project themselves read the grant's instead.
+    parts.extensions.insert(bridge_token::BridgeCaller {
+        token_id: grant.id.clone(),
+        project: project.clone(),
+    });
     let response = next
         .run(axum::extract::Request::from_parts(parts, body))
         .await;
     if pattern == "/api/disc/create" && response.status().is_success() {
         return adopt_created_discussion(&grant, response).await;
     }
+    if bridge_token::scopes_response(route) && response.status().is_success() {
+        return scope_bridge_response(state, grant, project, response).await;
+    }
     response
+}
+
+/// Lists, searches and lookups answer a bridge token with its project's
+/// resources only: entries outside it are dropped, a lone object outside it
+/// is refused. The handler's data is read back, never trusted as scoped.
+async fn scope_bridge_response(
+    state: &AppState,
+    grant: std::sync::Arc<crate::core::bridge_token::BridgeGrant>,
+    project: Option<String>,
+    response: axum::response::Response,
+) -> axum::response::Response {
+    use crate::core::bridge_token;
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, BRIDGE_BODY_LIMIT).await else {
+        return bridge_refusal(StatusCode::INTERNAL_SERVER_ERROR, "response too large");
+    };
+    let Ok(mut envelope) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        // Not JSON (raw text such as a convention document): nothing scoped.
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let Some(data) = envelope.get_mut("data").filter(|data| !data.is_null()) else {
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let discussions = bridge_token::discussions_to_resolve(data);
+    let resolved = bridge_token::resolved_resource(data);
+    let lookup = state
+        .db
+        .with_read_conn(move |conn| {
+            let mut projects = HashMap::new();
+            for id in discussions {
+                if let Some(bridge_token::Residence::Projects(found)) =
+                    bridge_token::residence(conn, bridge_token::Kind::Discussion, &id)?
+                {
+                    projects.insert(id, found.into_iter().next());
+                } else if conn
+                    .query_row("SELECT 1 FROM discussions WHERE id = ?1", [&id], |_| Ok(()))
+                    .is_ok()
+                {
+                    projects.insert(id, None);
+                }
+            }
+            let place = match resolved {
+                Some((kind, id)) => {
+                    Some((kind, id.clone(), bridge_token::residence(conn, kind, &id)?))
+                }
+                None => None,
+            };
+            Ok((projects, place))
+        })
+        .await;
+    let Ok((projects, place)) = lookup else {
+        return bridge_refusal(StatusCode::SERVICE_UNAVAILABLE, "bridge scope check failed");
+    };
+    if let Some((kind, id, residence)) = place {
+        let ids = [(kind, id)];
+        let mut known = Some(residence);
+        let route = bridge_token::route_for("GET", "/api/resolve/{id}").expect("listed route");
+        if let Err(refusal) =
+            bridge_token::authorize(&grant, route, project.as_deref(), &ids, |_, _| {
+                Ok(known.take().flatten())
+            })
+        {
+            return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
+        }
+    }
+    if let Err(refusal) = bridge_token::scope_response(data, &grant, project.as_deref(), &projects)
+    {
+        return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
+    }
+    let Ok(scoped) = serde_json::to_vec(&envelope) else {
+        return bridge_refusal(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response encoding failed",
+        );
+    };
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(scoped))
 }
 
 /// A discussion a launch creates becomes one of its own, so it can write there.
@@ -714,6 +963,7 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/config/import",
     "/api/config/recovery/set",
     "/api/config/recovery/restore",
+    "/api/config/recovery/reencrypt",
     "/api/audit-runs/cleanup",
     "/api/api-call-logs/purge",
     "/api/debug/logs/clear",
@@ -1031,6 +1281,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/config/embed-origins",
             get(api::live_pages::embed_origins).post(api::live_pages::change_embed_origins),
+        )
+        .route(
+            "/api/config/recovery/reencrypt",
+            post(api::setup::reencrypt_imported),
         )
         .route(
             "/api/config/scan-paths",
@@ -1715,6 +1969,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::workflows::unsafe_steps),
         )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
+        .route(
+            "/api/workflows/exec-scripts/status",
+            post(api::workflows::exec_script_status),
+        )
         .route(
             "/api/workflows/test-batch-step",
             post(api::workflows::test_batch_step),
@@ -2779,8 +3037,17 @@ mod cancel_guard_tests {
 
 #[cfg(test)]
 mod auth_tests {
-    use super::{auth_allows, is_local_ip};
+    use super::{auth_allows, auth_locked_allows, is_local_ip};
     use axum::http::Method;
+
+    #[test]
+    fn locked_auth_opens_only_the_recovery_routes_to_a_local_caller() {
+        assert!(auth_locked_allows("/api/config/recovery/status", true));
+        assert!(auth_locked_allows("/api/config/recovery/restore", true));
+        assert!(!auth_locked_allows("/api/config/recovery/restore", false));
+        assert!(!auth_locked_allows("/api/config/recovery/set", true));
+        assert!(!auth_locked_allows("/api/projects", true));
+    }
 
     // ── auth_allows decision matrix (I9 + passe D: destructive-op gating) ────
     const RESET: &str = "/api/setup/reset";

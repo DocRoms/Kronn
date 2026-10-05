@@ -164,8 +164,12 @@ impl KronnToolExecutor {
                             )
                         }
                     };
-                let Json(response) =
-                    crate::api::workflows::create(State(self.state.clone()), Json(request)).await;
+                let Json(response) = crate::api::workflows::create_as(
+                    self.state.clone(),
+                    request,
+                    crate::api::workflows::WorkflowWriter::Agent,
+                )
+                .await;
                 unwrap_api(call, response.success, response.data, response.error)
             }
             "workflow_get" | "workflow_update" => {
@@ -203,10 +207,11 @@ impl KronnToolExecutor {
                         Ok(r) => r,
                         Err(e) => return fail(call, format!("Invalid workflow patch: {e}")),
                     };
-                let Json(response) = crate::api::workflows::update(
-                    State(self.state.clone()),
-                    Path(saved.id),
-                    Json(request),
+                let Json(response) = crate::api::workflows::update_as(
+                    self.state.clone(),
+                    saved.id,
+                    request,
+                    crate::api::workflows::WorkflowWriter::Agent,
                 )
                 .await;
                 unwrap_api(call, response.success, response.data, response.error)

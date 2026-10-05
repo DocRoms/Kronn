@@ -8,9 +8,28 @@ const mocks = vi.hoisted(() => ({
   launchAction: vi.fn(),
 }));
 
+const catalog = vi.hoisted(() => ({
+  getWorkflow: vi.fn(),
+  detect: vi.fn(),
+}));
+
 vi.mock('../../lib/api', () => ({
   discussionActions: { get: vi.fn(), cancel: vi.fn(), launch: vi.fn() },
   pages: mocks,
+  workflows: { get: catalog.getWorkflow },
+  agents: { detect: catalog.detect },
+}));
+vi.mock('../AgentSwitchPicker', () => ({
+  AgentSwitchPicker: ({ currentAgent, availableAgents, onChange, ariaLabel }: {
+    currentAgent: string; availableAgents: string[]; onChange: (agent: string) => Promise<void>; ariaLabel: string;
+  }) => (
+    <select aria-label={ariaLabel} value={currentAgent} onChange={event => void onChange(event.target.value)}>
+      {availableAgents.map(agent => <option key={agent} value={agent}>{agent}</option>)}
+    </select>
+  ),
+}));
+vi.mock('../ModelCatalogPicker', () => ({
+  ModelCatalogPicker: () => null,
 }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({
@@ -112,7 +131,11 @@ describe('LivePageActionCard', () => {
       />,
     );
 
-    expect(screen.getByDisplayValue('disc.action.resolvedAtLaunch')).toBeDisabled();
+    // KT-1024 — a Page-resolved value is listed in the folded line, never a greyed field.
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    const resolved = screen.getByTestId('action-card-resolved');
+    expect(resolved).not.toHaveAttribute('open');
+    expect(resolved.querySelector('summary')).toHaveTextContent('disc.action.resolvedValues.one');
     // The row is named on the card, and its value is still resolved from the Page.
     expect(screen.getByTestId('action-card-row')).toHaveTextContent('KT-538');
     expect(screen.getByText(/dynamicBinding.*KT-538/)).toBeInTheDocument();
@@ -121,6 +144,38 @@ describe('LivePageActionCard', () => {
       'page-action:page-1:ticket',
       { variables: {}, bindings: { ticket: 'KT-538' } },
     ));
+  });
+
+  it('folds Page-resolved values apart from the fields the reader fills', () => {
+    render(
+      <LivePageActionCard
+        action={action({ values: [
+          {
+            name: 'debrief', label: 'Debrief', placeholder: '', description: null,
+            required: false, allow_manual_override: false, provenance: 'user_input',
+          },
+          {
+            name: 'ticket', label: 'Ticket', placeholder: '', description: 'Clicked row',
+            required: true, allow_manual_override: false, provenance: 'dynamic_binding',
+            source_ref: '<page.dataset.tickets.find(key).id>',
+          },
+          {
+            name: 'token', label: 'Token', placeholder: '', description: null,
+            required: false, allow_manual_override: false, provenance: 'project_env',
+            source_ref: '<env.TOKEN>',
+          },
+        ] })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
+    expect(screen.getByRole('textbox', { name: 'Debrief' })).toBeEnabled();
+    const resolved = screen.getByTestId('action-card-resolved');
+    expect(resolved.querySelector('summary')).toHaveTextContent('disc.action.resolvedValues.other:2');
+    expect(resolved).toHaveTextContent('Ticket');
+    expect(resolved).toHaveTextContent('Clicked row');
+    expect(resolved).toHaveTextContent('disc.action.projectEnv:<env.TOKEN>');
   });
 
   it('keeps a terminal action anchored and explains a stale Page revision', () => {
@@ -187,5 +242,43 @@ describe('LivePageActionCard', () => {
       />,
     );
     expect(screen.queryByTestId('action-card-relaunch')).not.toBeInTheDocument();
+  });
+});
+
+/// KT-1025 — the Live Page card is the same component: same step agents block.
+describe('LivePageActionCard — step agents', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    catalog.getWorkflow.mockResolvedValue({
+      id: 'wf-1',
+      steps: [{ id: 'step-1', name: 'implement', step_type: { type: 'Agent' }, agent: 'ClaudeCode' }],
+    });
+    catalog.detect.mockResolvedValue([
+      { agent_type: 'ClaudeCode', enabled: true, installed: true, runtime_available: false },
+      { agent_type: 'Codex', enabled: true, installed: false, runtime_available: true },
+    ]);
+    mocks.launchAction.mockResolvedValue(action({ state: 'launching' }));
+  });
+
+  const workflowAction = () => action({ kind: 'workflow', target_id: 'wf-1' });
+
+  it('launches with the row selector only when no agent changed', async () => {
+    render(<LivePageActionCard action={workflowAction()} bindings={{ ticket: 'KT-1' }} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    await screen.findByTestId('action-card-step-agents');
+    fireEvent.click(screen.getByRole('button', { name: /disc\.action\.launch/ }));
+    await waitFor(() => expect(mocks.launchAction).toHaveBeenCalledWith(
+      'page-action:page-1:ticket',
+      { variables: {}, bindings: { ticket: 'KT-1' } },
+    ));
+  });
+
+  it('adds the chosen agent to the launch', async () => {
+    render(<LivePageActionCard action={workflowAction()} bindings={{ ticket: 'KT-1' }} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    fireEvent.change(await screen.findByRole('combobox', { name: 'disc.action.stepAgents.agentFor:implement' }), { target: { value: 'Codex' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.action\.launch/ }));
+    await waitFor(() => expect(mocks.launchAction).toHaveBeenCalledWith(
+      'page-action:page-1:ticket',
+      { variables: {}, bindings: { ticket: 'KT-1' }, step_agents: { 'step-1': { agent: 'Codex' } } },
+    ));
   });
 });

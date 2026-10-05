@@ -353,6 +353,7 @@ fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
         multi_agent_review: None,
         room_id: None,
         read_only_repos: vec![],
+        exec_script_files: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     }
 }

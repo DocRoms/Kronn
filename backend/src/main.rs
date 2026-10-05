@@ -13,13 +13,16 @@ use kronn::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load config FIRST (before tracing init) so `debug_mode` can influence
-    // the tracing filter's default level. This is a tiny re-order vs. the
-    // historical flow — `config::load()` doesn't emit logs itself, so we
-    // can afford to run it silently.
+    // Exactly ONE backend per data dir, taken before `config::load()` (which
+    // may rewrite config.toml): a second process must not write anything.
+    // Held for the whole process lifetime.
+    let data_dir_lock = config::acquire_data_dir_lock()?;
+
+    // Load config before tracing init so `debug_mode` can influence the
+    // tracing filter's default level; `config::load()` emits no logs.
     let mut app_config = match config::load().await? {
         Some(cfg) => cfg,
-        None => config::default_config(),
+        None => config::default_config_without_key(),
     };
 
     // 0.8.7 anti-hallucination — arm the process-global mode flag from config
@@ -128,9 +131,20 @@ async fn main() -> anyhow::Result<()> {
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
     // leaves this process's environment: children never inherit the admin
     // token. Kronn-launched agents receive a scoped bridge token per launch.
-    let env_token = std::env::var("KRONN_AUTH_TOKEN").ok();
-    std::env::remove_var("KRONN_AUTH_TOKEN");
-    kronn::core::config::adopt_env_auth_token(&mut app_config.server, env_token);
+    let env_token = kronn::core::config::take_env_auth_token();
+
+    // Open database
+    let database = Arc::new(Database::open().expect("Failed to open database"));
+    tracing::info!(
+        "Database opened at {}/kronn.db",
+        config::config_dir().unwrap().display()
+    );
+
+    // Resolve the encryption key now that the DB is open — `config::load`
+    // deliberately never mints one — then load the encrypted credentials. Runs
+    // before the auth-token handling below, which reads the stored token.
+    kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
+
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
     } else {
@@ -162,28 +176,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
         exposed,
         app_config.server.auth_enabled,
-        app_config.server.auth_token.is_some(),
+        app_config.server.auth_token_or_lock(),
         ack_insecure,
     ) {
         tracing::error!("{msg}");
         return Err(anyhow::anyhow!(msg));
     }
-
-    // Exactly ONE backend per data dir. Refuse to start if another instance
-    // already holds the lock — prevents two processes (a stale one, or P2P peers
-    // sharing a synced dir) racing on config.toml / the key / the DB. Held for
-    // the whole process lifetime; released when the application state drops at exit.
-    let data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
-        tracing::error!("{e}");
-        e
-    })?;
-
-    // Open database
-    let database = Arc::new(Database::open().expect("Failed to open database"));
-    tracing::info!(
-        "Database opened at {}/kronn.db",
-        config::config_dir().unwrap().display()
-    );
 
     // KT-619 — an operator who lost the admin secret asks for a new one by
     // creating `recover-admin-secret` in the private directory; this honours it
@@ -225,17 +223,6 @@ async fn main() -> anyhow::Result<()> {
         Err(error) => tracing::warn!(
             "Publication bootstrap unavailable ({error}); important cards cannot be published until it exists"
         ),
-    }
-
-    // Resolve/repair the encryption key now that the DB is open — `config::load`
-    // deliberately never mints one. This adopts the legacy config.toml key,
-    // restores it from the keychain/sidecar, or mints on a genuinely empty
-    // install, and NEVER regenerates a key over existing encrypted data (the
-    // silent regen that orphaned every secret on 2026-06-30). Fail-soft: an
-    // unresolvable key locks only the token subsystem, it never blocks boot.
-    match kronn::core::keystore::reconcile(&mut app_config, &database).await {
-        Ok(outcome) => tracing::info!("Encryption key reconciled: {outcome:?}"),
-        Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
     }
 
     // Before any launch: which projects hand their agents a GitHub token (D2).

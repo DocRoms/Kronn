@@ -85,7 +85,9 @@ pub async fn update(
     };
     // An unchanged stored line stays saveable (it is still refused at run
     // time); a new or changed one must be safe.
-    let unchanged = existing.command == request.command.trim() && existing.args == request.args;
+    let unchanged = existing.name == request.name.trim()
+        && existing.command == request.command.trim()
+        && existing.args == request.args;
     if !unchanged {
         if let Some(error) = inline_code_error(&request) {
             return Json(ApiResponse::err(error));
@@ -616,6 +618,9 @@ pub async fn import(
         variables: item.variables.clone(),
     };
     if let Err(error) = validate_request(&validation) {
+        return Json(ApiResponse::err(error));
+    }
+    if let Some(error) = inline_code_error(&validation) {
         return Json(ApiResponse::err(error));
     }
     let now = Utc::now();

@@ -218,27 +218,48 @@ Security only helps if the user can see it:
   item, with the action that unlocks it.
 - The GitHub connection shows its real scope or "scope not verified" (4.5).
 
-### Layer C — storage consolidation (KT-1007, before any file removal)
+### Layer C — storage consolidation (KT-1007) — implemented in 0.14.3
 
-DoD items, each with a test:
-1. One registry of every encrypted column (MCP configs, connections,
-   execution-variable snapshots, the new credentials table). `collect_encrypted_rows`
-   reads all of it; a test compares the registry with the schema so a new
-   encrypted column cannot be forgotten.
-2. `KeyVault::retrieve` distinguishes `Empty` from `Denied`/`Unavailable`.
-   Reconcile never mints a key while any registered column holds ciphertext and
-   never `mirror()`s into a vault that errored; startup stops with an
-   actionable message instead.
-3. `encryption_secret` is no longer serialized and reconcile stops setting it,
-   in the same change as any file deletion.
-4. `tokens.keys[].value` and `server.auth_token` move to an encrypted table.
-   The migration decrypts every moved value back before rewriting
-   `config.toml`, is interrupt-safe and idempotent (rerun, partial, already
-   migrated), and keeps a backup protected by the recovery passphrase.
-5. `recovery/set` refuses to replace an existing `recovery.key` without the
-   current recovery passphrase or the human factor.
-6. Dev builds test the Keychain path with the existing `KRONN_USE_KEYCHAIN=1`
-   (`keyvault.rs:172-177`).
+Operator view: [`operations/key-management.md`](../operations/key-management.md).
+
+1. **Done.** `keystore::ENCRYPTED_COLUMNS` lists every encrypted column
+   (`mcp_configs.env_encrypted`, `execution_variable_snapshots.values_encrypted`,
+   `stored_credentials.value_encrypted`,
+   `project_github_connections.token_encrypted`); `collect_encrypted_rows` samples all
+   of them, and `encrypted_column_registry_matches_the_schema` fails when a
+   column named `*encrypted*`/`*cipher*` is missing from the registry.
+2. **Done.** `KeyVault::retrieve` returns `Ok(None)` only for an empty vault;
+   denied or unreadable vaults return a `VaultError`. `KeyStore::snapshot`
+   fails on the first unreadable vault and the reconciler stops the boot with
+   `KeyBootError::VaultUnreadable` (both mains exit); `mirror()` never writes
+   a vault whose read failed. Mint/adopt only when no registered column holds
+   ciphertext.
+3. **Done.** `encryption_secret` is `serde(skip_serializing)`. It stays the
+   in-process key every consumer reads; the only copy written to
+   `config.toml` is the one `config::retain_disk_key` keeps until the key
+   decrypts every non-empty column and two independent copies remain without
+   it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
+   whose fingerprint matches); a different legacy key is kept. `mirror()`
+   never writes a vault holding another key; two keys that each decrypt data
+   stop the boot (resolved by `KRONN_REENCRYPT_FROM`). A locked boot keeps no
+   key in memory (fail closed); a stored auth token it cannot read locks the
+   API (423 `auth_locked`, recovery screen).
+4. **Done.** `tokens.keys[]` and `server.auth_token` live in
+   `stored_credentials` (migration 217). The boot migration merges, writes,
+   reads back, writes an encrypted backup of the old file
+   (`config.toml.pre-credential-store.enc`, `0600`, under the instance key,
+   hence recoverable through the recovery passphrase), then rewrites
+   `config.toml`; it also scrubs the DB migration runner's plaintext
+   `config.toml.backup`. Readers keep using the live config, filled from the
+   table at boot and written back by every `config::save`. Reveal routes are
+   unchanged.
+5. **Done (passphrase proof).** `recovery/set` refuses to replace an existing
+   `recovery.key` without `current_passphrase`; imports never replace it;
+   `recovery/restore` never swaps the key of a running instance (imported
+   secrets are re-encrypted instead). The human factor (D1) is not part of
+   0.14.3.
+6. **Done.** Dev builds exercise the keychain with `KRONN_USE_KEYCHAIN=1`
+   (`keyvault.rs` `use_os_keychain`); outside macOS/Windows the default is off.
 
 ### Layer D — files out of reach (KT-990, KT-969)
 
@@ -375,7 +396,10 @@ on the direct route and the Claude/Codex adapters (`try_spawn`), native ACP
 agents (`native_command`), the task-worker auth probes, the project and
 discussion exec routes, workflow Exec steps (setup included), workspace
 lifecycle hooks, Quick Exec (task validations included) and the API-call
-credential CLIs. Each path has a test that inspects the final environment;
+credential CLIs, and every `git` process (`core::cmd` gives git its own policy:
+the base allow-list plus git's identity, config and prompt variables, never a
+repository selector), since a repository's hooks, filters and drivers run
+inside git. Each path has a test that inspects the final environment;
 the seal runs after every other `.env()` of the launch. Agents
 under Docker run in the backend container through the same `try_spawn`; there
 is no separate container spawn path. Each child starts from `env_clear()`, gets
@@ -414,6 +438,18 @@ only for resources in its scope: ids in the path, the query and the top-level
 JSON body. Writes to a discussion need one of the launch's own discussions (or
 one it created through `disc/create`); reads need the token's project;
 effectful routes need the token's project and are logged with the token id.
+Ids are resolved the way the handler resolves them before the check (`KT-12`
+task references, an execution named by its task), and an id that resolves to
+nothing is refused, never let through. Reads are scoped after the handler
+runs: list, search and lookup responses drop entries outside the token's
+project (by their project fields, or the project of the discussion they name),
+and a lone object outside it is refused; `/api/resolve/{id}` is checked against
+the resource it names. `agent-api/call` runs for the token's project, never one
+taken from the body or the chosen config, and refuses a config that project
+cannot see. The token's discussion or run is re-read on every call, so deleting
+it kills the token at once. The WebSocket bus refuses a bridge token (403) and
+any credential other than the operator token (401); without a credential it
+keeps loopback trust.
 A workflow trigger that names no project gets the token's project added to its
 body, so a shared or multi-project workflow runs for that project (KT-851
 resolution) and one that does not serve it is refused. A

@@ -649,6 +649,12 @@ pub struct WorkflowStep {
     /// the main `exec_command` only, not `exec_setup_command`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_stdin: Option<String>,
+    /// KT-918 — repository files the main command runs (the entry script and
+    /// the modules it loads), relative to the repository of the workflow's
+    /// home project. Each carries the approved content hash; the step runs a
+    /// verified copy and fails before running when a file no longer matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_script_files: Vec<ExecScriptFile>,
 
     // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
     // Only meaningful when `step_type == JsonData`. Zéro token, zéro
@@ -1132,7 +1138,7 @@ pub struct PublishPageDataWrite {
     pub key_field: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentSettings {
     /// Explicit model override (expert mode). Takes priority over tier.
@@ -1854,6 +1860,56 @@ pub struct WorkflowSummary {
     pub created_at: DateTime<Utc>,
 }
 
+/// One repository file an Exec step runs (KT-918): its repository-relative
+/// path and the approved content hash. An empty hash is pinned to the current
+/// content when the workflow is saved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExecScriptFile {
+    pub path: String,
+    #[serde(default)]
+    pub sha256: String,
+}
+
+/// Where a declared file stands against its approved hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ExecScriptFileState {
+    /// The file matches its approved hash.
+    Approved,
+    /// The file changed since approval: the step refuses to run.
+    Changed,
+    /// No hash yet: saving the workflow approves the current content.
+    Pending,
+    /// Missing, outside the repository or behind an escaping symlink.
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExecScriptFileStatus {
+    pub path: String,
+    pub state: ExecScriptFileState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// `POST /api/workflows/exec-scripts/status`: the declared files of one step
+/// checked against the home project's repository.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ExecScriptStatusRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
+    pub files: Vec<ExecScriptFile>,
+}
+
 /// An Exec command line that interpolates a template value into inline code
 /// (`bash -c`, `python3 -c`…). It is refused at run time; `suggested_args`
 /// is a provably equivalent rewrite, `manual_fix` says why there is none.
@@ -1974,7 +2030,31 @@ pub struct TriggerWorkflowRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub project_id: Option<String>,
+    /// This run's agent for some Agent steps, keyed by step id or name
+    /// (KT-1025). Stored on the run; the workflow is never modified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub step_agents: Option<StepAgents>,
 }
+
+/// The agent one Agent step runs on for a single run (KT-1025). It replaces
+/// the step's agent, model and effort; every other step setting is kept.
+/// `None` for model or effort means the agent's default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+#[ts(export)]
+pub struct StepAgentOverride {
+    pub agent: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<String>,
+}
+
+/// Step id or name → the agent it runs on for this run (KT-1025).
+pub type StepAgents = ::std::collections::HashMap<String, StepAgentOverride>;
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.
 /// Designed to be saved to disk, mailed, attached to a Github issue, etc.

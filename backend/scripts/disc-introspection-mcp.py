@@ -2389,15 +2389,14 @@ TOOLS = [
     {
         "name": "workflow_trigger",
         "description": (
-            "Launch a Kronn workflow run from MCP — same effect as the UI's "
-            "Trigger button, JSON-only. Returns `{run_id, workflow_id, "
+            "Launch a Kronn workflow run, like the UI's Trigger button. "
+            "Returns `{run_id, workflow_id, "
             "workflow_name, status, started_at, expected_duration_ms?, "
-            "samples, next_check}`. Find the id with `workflow_list`; the "
-            "workflow must be enabled.\n\n"
+            "samples, next_check}`. The workflow must be enabled.\n\n"
             "⚠ Honour `next_check.wait_seconds` before calling "
             "`workflow_run_status`: naive 10s polling on a 2-min workflow "
-            "burns ~13× more tokens than this hint schedules.\n\n"
-            "Variables and confidence levels: "
+            "burns ~13× more tokens.\n\n"
+            "Variables, agents, confidence: "
             "`tool_manual({tool: \"workflow_trigger\"})`."
         ),
         "inputSchema": {
@@ -2409,7 +2408,11 @@ TOOLS = [
                 },
                 "variables": {
                     "type": "object",
-                    "description": "Manual-launch variables as a flat key→value map (string values only).",
+                    "description": "Manual-launch variables: a flat map of string values.",
+                },
+                "step_agents": {
+                    "type": "object",
+                    "description": "{step: {agent, model?, reasoning_effort?}}, this run only.",
                 },
             },
             "required": ["workflow_id"],
@@ -8716,6 +8719,10 @@ def call_workflow_trigger(args):
         # uses HashMap<String, String> ; non-string LLM outputs get
         # str()'d here so a {{count}}-typed-as-int doesn't 400.
         body["variables"] = {str(k): str(v) for k, v in variables.items()}
+    step_agents = args.get("step_agents")
+    if isinstance(step_agents, dict) and step_agents:
+        # Forwarded as-is: the backend names any malformed entry.
+        body["step_agents"] = step_agents
     return _unwrap(_http("POST", "/api/mcp/workflow-trigger", body))
 
 
@@ -10098,7 +10105,7 @@ TOOL_MANUALS["workflow_run_status"] = (
     "`steps[]` carries, per step: name, status, started_at, duration_ms, tokens_used (number or null), tokens_status when measurement is in progress/partial/unavailable, a 200-char output excerpt, and step_type. A null token count means not measured — never zero.\n\nThe `next_check` hint adapts: projection-anchored while the run is within its average duration, fixed backoff after it overshoots.\n\nFor BATCH workflows the individual child discussions are not listed here. Call `workflow_run_discussions({run_id})` for the child `disc_id`s, then `disc_load_other` on each. For linear workflows `steps[]` is enough.\n\nFor short runs, `workflow_wait_for_completion` gets the final verdict in a single call instead of a poll loop."
 )
 TOOL_MANUALS["workflow_trigger"] = (
-    "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies."
+    "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies.\n\n`step_agents` changes the agent of some Agent steps for this run only: `{\"<step id or name>\": {\"agent\": \"Codex\", \"model\": \"…\", \"reasoning_effort\": \"…\"}}`. Omitted model or effort means the agent's default. The workflow is never modified; the step keeps its budget and tools. An unknown step, a non-Agent step, an agent not installed or enabled, or tools/budget the agent cannot apply is refused before the run starts."
 )
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 TOOL_MANUALS["media_generate"] = (

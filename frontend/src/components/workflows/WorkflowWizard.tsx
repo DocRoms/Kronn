@@ -38,6 +38,7 @@ import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
+import { ExecScriptFilesEditor } from './ExecScriptFilesEditor';
 import { WorkflowProjectScopeControl } from './WorkflowProjectScopeControl';
 import '../../pages/WorkflowsPage.css';
 import { SkillVariablesBadge } from '../SkillVariablesBadge';
@@ -2749,6 +2750,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           onChange={e => updateStep(i, { exec_args: e.target.value.split('\n').filter(s => s.length > 0) })}
                           placeholder={t('wiz.execArgsPlaceholder')}
                           aria-label={t('wiz.execArgs')}
+                        />
+                        <ExecScriptFilesEditor
+                          key={step.id ?? `exec-scripts-${i}`}
+                          files={step.exec_script_files ?? []}
+                          projectId={projectId}
+                          onChange={files => updateStep(i, { exec_script_files: files })}
                         />
                         <div className="mt-1 mb-2 text-xs text-ghost flex-wrap flex-row gap-1">
                           <span>{t('wiz.clickToInsert')} :</span>

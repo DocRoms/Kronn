@@ -20,14 +20,18 @@ struct InlineCodeOptions {
     case_insensitive: bool,
 }
 
+/// The normalised program name (path, case, `.exe` and version suffix
+/// removed), see [`crate::core::argv_roles::normalize_command`].
 fn base_name(cmd: &str) -> String {
-    cmd.trim().to_ascii_lowercase()
+    crate::core::argv_roles::normalize_command(cmd)
 }
 
 fn is_shell(cmd: &str) -> bool {
     SHELLS.contains(&base_name(cmd).as_str())
 }
 
+/// Any Python: `python`, `python3.12`, `pypy3`, and explicitly every name
+/// that starts with `python` or `pypy` (`python3-dbg`, `pythonw`).
 fn is_python(cmd: &str) -> bool {
     let lower = base_name(cmd);
     lower.starts_with("python") || lower.starts_with("pypy")
@@ -132,43 +136,54 @@ pub enum InlineFinding {
     /// A value sits where the interpreter still reads options, so it could
     /// turn into an option or into code once rendered (`{{mode}}` → `-c`).
     OptionPosition(String),
+    /// A value names the program to run (`{{cmd}}`, `env {{cmd}}`).
+    TemplatedExecutable(String),
 }
 
-/// The first unsafe placeholder in the inline code of `cmd args`, if any.
-/// Inside code a value can always find a context where it runs (heredoc,
-/// eval, nested quotes), whatever filter it went through, so only
-/// `{{run.id}}` and `{{time.now…}}` are accepted.
+/// The first unsafe placeholder of `cmd args`, if any: in the program name,
+/// in program text (only `{{run.id}}` and `{{time.now…}}` are accepted
+/// there, whatever filter a value went through), where the program still
+/// reads options, or where it names a program to run.
 pub fn first_unsafe_placeholder(cmd: &str, args: &[String]) -> Option<InlineFinding> {
-    if let Some(finding) = first_unsafe_code_placeholder(cmd, args) {
-        return Some(finding);
-    }
-    let index = first_tainted_option_position(cmd, args, &tainted_templates(args))?;
-    let path = crate::workflows::template::placeholder_paths(&args[index])
-        .ok()
-        .and_then(|paths| {
-            paths
-                .into_iter()
-                .find(|path| !is_trusted_template_path(path))
+    if let Some(finding) = untrusted_in(cmd) {
+        return Some(match finding {
+            Some(path) => InlineFinding::TemplatedExecutable(path),
+            None => InlineFinding::Malformed,
         });
-    Some(match path {
-        Some(path) => InlineFinding::OptionPosition(path),
-        None => InlineFinding::Malformed,
-    })
-}
-
-fn first_unsafe_code_placeholder(cmd: &str, args: &[String]) -> Option<InlineFinding> {
-    for code in inline_code_args(cmd, args) {
-        let Ok(paths) = crate::workflows::template::placeholder_paths(&args[code.index]) else {
-            return Some(InlineFinding::Malformed);
-        };
-        if let Some(path) = paths
-            .into_iter()
-            .find(|path| !is_trusted_template_path(path))
-        {
-            return Some(InlineFinding::Untrusted(path));
+    }
+    let tainted = tainted_templates(args);
+    let roles = crate::core::argv_roles::roles(cmd, args, &tainted);
+    let finding_at = |index: usize, make: fn(String) -> InlineFinding| {
+        Some(match untrusted_in(&args[index]).flatten() {
+            Some(path) => make(path),
+            None => InlineFinding::Malformed,
+        })
+    };
+    use crate::core::argv_roles::Role;
+    // Program text first: its message is the most specific.
+    if let Some(index) = (0..args.len()).find(|&i| tainted[i] && roles[i] == Role::Code) {
+        return finding_at(index, InlineFinding::Untrusted);
+    }
+    for index in (0..args.len()).filter(|&i| tainted[i]) {
+        match roles[index] {
+            Role::Executable => return finding_at(index, InlineFinding::TemplatedExecutable),
+            Role::Option => return finding_at(index, InlineFinding::OptionPosition),
+            _ => {}
         }
     }
     None
+}
+
+/// `Some(Some(path))` for the first untrusted placeholder in `text`,
+/// `Some(None)` for a malformed one, `None` when `text` is safe.
+fn untrusted_in(text: &str) -> Option<Option<String>> {
+    match crate::workflows::template::placeholder_paths(text) {
+        Ok(paths) => paths
+            .into_iter()
+            .find(|path| !is_trusted_template_path(path))
+            .map(Some),
+        Err(_) => Some(None),
+    }
 }
 
 /// The recipe shown with every refusal.
@@ -218,6 +233,11 @@ fn refusal(subject: &str, cmd: &str, args: &[String]) -> Option<String> {
              {}.",
             safe_recipe(&path)
         )),
+        InlineFinding::TemplatedExecutable(path) => Some(format!(
+            "{subject} : `{{{{{path}}}}}` choisirait le programme exécuté — le programme d'une \
+             étape Exec (et celui qu'un `env`, `sudo`, `xargs`, `find -exec` ou `docker run` \
+             lance) doit être écrit en clair ; seules ses données peuvent venir d'une valeur."
+        )),
     }
 }
 
@@ -234,9 +254,9 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             return;
         };
         let placeholder = match &finding {
-            InlineFinding::Untrusted(path) | InlineFinding::OptionPosition(path) => {
-                format!("{{{{{path}}}}}")
-            }
+            InlineFinding::Untrusted(path)
+            | InlineFinding::OptionPosition(path)
+            | InlineFinding::TemplatedExecutable(path) => format!("{{{{{path}}}}}"),
             InlineFinding::Malformed => String::new(),
         };
         let (suggested_args, manual_fix) = match suggest_args(cmd, args) {
@@ -254,6 +274,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             reason: match finding {
                 InlineFinding::Untrusted(_) => "inline_code_interpolation".into(),
                 InlineFinding::OptionPosition(_) => "option_position_interpolation".into(),
+                InlineFinding::TemplatedExecutable(_) => "templated_executable".into(),
                 InlineFinding::Malformed => "malformed_placeholder".into(),
             },
             suggested_args,
@@ -417,54 +438,45 @@ fn code_option(options: &InlineCodeOptions, arg: &str) -> Option<bool> {
     Some(!options.case_insensitive && at + c.len_utf8() < cluster.len())
 }
 
-/// The first argument that carries an outside value (`tainted`) while `cmd`
-/// may still read it as an option or as code. Values are safe only after the
-/// inline code (shells, Python), after `--`, or after a script file. A
-/// tainted argument never ends option parsing itself: at save time it is a
-/// placeholder, at run time its rendered text is not trusted.
-pub fn first_tainted_option_position(
-    cmd: &str,
-    args: &[String],
-    tainted: &[bool],
-) -> Option<usize> {
+/// Where an interpreter's arguments become plain data (`args.len()` when
+/// never). A tainted argument never ends option parsing: at save time it is
+/// a placeholder, at run time its rendered text is not trusted.
+fn interpreter_data_start(cmd: &str, args: &[String], tainted: &[bool]) -> Option<usize> {
     let parsing = option_parsing(cmd)?;
     let options = inline_code_options(cmd)?;
     let is_tainted = |i: usize| tainted.get(i).copied().unwrap_or(false);
     if parsing == OptionParsing::Never {
-        return (0..args.len()).find(|&i| is_tainted(i));
+        return Some(args.len());
     }
     let values = value_options(cmd);
     let mut i = 0;
     while i < args.len() {
         if is_tainted(i) {
-            return Some(i);
+            i += 1;
+            continue;
         }
         let arg = &args[i];
         if arg == "--" {
             // Shells and Python read the script name right after `--`.
-            if parsing == OptionParsing::StopsAtCodeOrScript && is_tainted(i + 1) {
-                return Some(i + 1);
-            }
-            return None;
+            return Some(if parsing == OptionParsing::StopsAtCodeOrScript {
+                (i + 2).min(args.len())
+            } else {
+                i + 1
+            });
         }
         if arg.len() > 1 && arg.starts_with('-') {
             if let Some(attached) = code_option(&options, arg) {
-                if !attached && is_tainted(i + 1) {
-                    return Some(i + 1);
-                }
+                let after = if attached { i + 1 } else { i + 2 };
                 if parsing == OptionParsing::StopsAtCodeOrScript {
-                    return None;
+                    return Some(after.min(args.len()));
                 }
-                i += if attached { 1 } else { 2 };
+                i = after;
                 continue;
             }
             if values.contains(&arg.as_str()) {
-                if is_tainted(i + 1) {
-                    return Some(i + 1);
-                }
                 // `python -m module`: what follows is the module's argv.
                 if is_python(cmd) && arg == "-m" {
-                    return None;
+                    return Some((i + 2).min(args.len()));
                 }
                 i += 2;
                 continue;
@@ -473,18 +485,52 @@ pub fn first_tainted_option_position(
             continue;
         }
         match parsing {
-            OptionParsing::StopsAtCodeOrScript => return None,
+            OptionParsing::StopsAtCodeOrScript => return Some(i + 1),
             OptionParsing::StopsAtDashDashOrScript(extensions)
                 if extensions
                     .iter()
                     .any(|ext| arg.to_ascii_lowercase().ends_with(ext)) =>
             {
-                return None
+                return Some(i + 1)
             }
             _ => i += 1,
         }
     }
-    None
+    Some(args.len())
+}
+
+/// Roles of an interpreter's arguments: program text (the inline code and
+/// its option), option positions until the data start, data after.
+pub(crate) fn interpreter_roles(
+    cmd: &str,
+    args: &[String],
+    tainted: &[bool],
+) -> Option<Vec<crate::core::argv_roles::Role>> {
+    use crate::core::argv_roles::Role;
+    let start = interpreter_data_start(cmd, args, tainted)?;
+    let mut roles = vec![Role::Option; args.len()];
+    roles[start..].fill(Role::Data);
+    for code in inline_code_args(cmd, args) {
+        if code.index < start {
+            roles[code.index] = Role::Code;
+        }
+    }
+    Some(roles)
+}
+
+/// The first argument that carries an outside value (`tainted`) while `cmd`
+/// may still read it as an option, as code or as a program to run.
+pub fn first_tainted_option_position(
+    cmd: &str,
+    args: &[String],
+    tainted: &[bool],
+) -> Option<usize> {
+    use crate::core::argv_roles::Role;
+    let roles = crate::core::argv_roles::roles(cmd, args, tainted);
+    (0..args.len()).find(|&i| {
+        tainted.get(i).copied().unwrap_or(false)
+            && !matches!(roles[i], Role::Data | Role::RuntimeOption)
+    })
 }
 
 /// Which template arguments carry a value from outside Kronn.
@@ -500,21 +546,32 @@ fn tainted_templates(args: &[String]) -> Vec<bool> {
 }
 
 /// Run-time check on the rendered argv, with the provenance of each field:
-/// a field rendered from an outside value must sit in a data position of
-/// the structure the interpreter will really parse.
+/// a field rendered from an outside value must sit in a data position, both
+/// in the saved structure and in the structure the program will really
+/// parse, and an operand the program reads as an option when it starts with
+/// `-` (git, find) must not start with `-`.
 pub fn rendered_refusal(
     step: &str,
     cmd: &str,
     templates: &[String],
     rendered: &[String],
 ) -> Option<String> {
+    use crate::core::argv_roles::Role;
     let tainted = tainted_templates(templates);
-    let index = first_tainted_option_position(cmd, rendered, &tainted)?;
+    let saved = crate::core::argv_roles::roles(cmd, templates, &tainted);
+    let option_like = (0..rendered.len()).find(|&i| {
+        tainted.get(i).copied().unwrap_or(false)
+            && saved.get(i) == Some(&Role::RuntimeOption)
+            && rendered[i].starts_with('-')
+    });
+    let index = first_tainted_option_position(cmd, rendered, &tainted)
+        .or_else(|| first_tainted_option_position(cmd, templates, &tainted))
+        .or(option_like)?;
     Some(format!(
         "Exec step `{step}` refusé avant exécution : l'argument #{index} de `{cmd}` vient d'une \
          valeur extérieure et tombe là où `{cmd}` lit encore des options ou du code. Ouvre le \
          workflow et applique la correction proposée, ou place les valeurs après le code inline \
-         (`bash -c`, `python3 -c`) ou après `--` (node, perl, ruby, php)."
+         (`bash -c`, `python3 -c`) ou après `--` (node, perl, ruby, php, git)."
     ))
 }
 
@@ -566,7 +623,11 @@ fn placeholders(script: &str) -> Result<Vec<Placeholder>, String> {
 /// or the reason no rewrite is provably equivalent ("manual fix required").
 /// Benign values keep the same output; hostile ones stay data.
 pub fn suggest_args(cmd: &str, args: &[String]) -> Result<Vec<String>, String> {
-    let codes = inline_code_args(cmd, args);
+    let start = interpreter_data_start(cmd, args, &tainted_templates(args)).unwrap_or(0);
+    let codes: Vec<InlineCode> = inline_code_args(cmd, args)
+        .into_iter()
+        .filter(|code| code.index < start)
+        .collect();
     let unsafe_codes: Vec<InlineCode> = codes
         .iter()
         .copied()
@@ -671,7 +732,13 @@ fn rewrite_shell(head: &[String], script: &str, rest: &[String]) -> Result<Vec<S
             ShellContext::Double { whole: false } if nested => return manual(
                 "la valeur est dans une chaîne qu'un interpréteur imbriqué peut lire comme du code",
             ),
-            ShellContext::Plain => false,
+            // Unquoted, the original word-splits and globs the value (an
+            // empty value vanishes, spaces collapse): `"$1"` would not be
+            // equivalent. A `|sh` value was already one quoted word.
+            ShellContext::Plain if placeholder.shell_filter => false,
+            ShellContext::Plain => {
+                return manual("une valeur hors guillemets (le shell la découpe en mots)")
+            }
             ShellContext::Double { .. } => true,
             ShellContext::Single => return manual("une valeur entre guillemets simples"),
             ShellContext::Substitution => {
@@ -1096,9 +1163,13 @@ mod tests {
     #[test]
     fn shell_values_move_to_positional_arguments_in_order() {
         assert_eq!(
-            suggest_args("bash", &args(&["-c", "echo {{x}}"])).unwrap(),
+            suggest_args("bash", &args(&["-c", "echo \"{{x}}\""])).unwrap(),
             args(&["-c", "echo \"$1\"", "_", "{{x}}"])
         );
+        // Unquoted, the original word-splits the value: not equivalent.
+        assert!(suggest_args("bash", &args(&["-c", "echo {{x}}"]))
+            .unwrap_err()
+            .contains("hors guillemets"));
         assert_eq!(
             suggest_args(
                 "bash",
@@ -1112,7 +1183,7 @@ mod tests {
                 "bash",
                 &args(&[
                     "-ec",
-                    "printf '%s %s' \"a={{a}}\" {{b|sh}} {{a}} {{run.id}}"
+                    "printf '%s %s' \"a={{a}}\" {{b|sh}} \"{{a}}\" {{run.id}}"
                 ])
             )
             .unwrap(),
@@ -1145,10 +1216,10 @@ mod tests {
         assert_eq!(
             suggest_args(
                 "sh",
-                &args(&["-c", "echo \"$1\" {{x ?? \"none\"}}", "me", "one"])
+                &args(&["-c", "echo \"$1\" \"{{x ?? 'none'}}\"", "me", "one"])
             )
             .unwrap(),
-            args(&["-c", "echo \"$1\" \"$2\"", "me", "one", "{{x ?? \"none\"}}"])
+            args(&["-c", "echo \"$1\" \"$2\"", "me", "one", "{{x ?? 'none'}}"])
         );
     }
 
@@ -1296,7 +1367,7 @@ mod tests {
     #[test]
     fn migrated_lines_keep_benign_output_and_never_run_a_hostile_value() {
         for (cmd, original) in [
-            ("bash", vec!["-c", "echo start {{x}} end"]),
+            ("bash", vec!["-c", "echo start \"{{x}}\" end"]),
             ("bash", vec!["-ec", "printf '%s\\n' \"value: {{x}}\""]),
             ("python3", vec!["-c", "print('{{x}}')"]),
             ("node", vec!["-e", "console.log(\"{{x}}\")"]),
@@ -1413,5 +1484,140 @@ mod tests {
             reason.starts_with("correction manuelle requise"),
             "{reason}"
         );
+    }
+
+    /// Runs `cmd line` with the template values set; `None` when the
+    /// interpreter is not installed.
+    fn run_case(
+        cmd: &str,
+        line: &[String],
+        values: &[(&str, &str)],
+        dir: &std::path::Path,
+    ) -> Option<(Option<i32>, String)> {
+        let mut ctx = TemplateContext::new();
+        for (name, value) in values {
+            ctx.set(*name, *value);
+        }
+        let rendered: Vec<String> = line
+            .iter()
+            .map(|arg| ctx.render_strict(arg).unwrap())
+            .collect();
+        let output = crate::core::cmd::sync_cmd(cmd)
+            .args(&rendered)
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        Some((
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ))
+    }
+
+    /// Differential proof of each auto-fix family: on a corpus of benign
+    /// values (those the original line itself treats as plain text), the
+    /// rewritten line prints the same thing and exits the same way. The
+    /// shapes include the 13 fixes found on real workflows.
+    #[cfg(unix)]
+    #[test]
+    fn suggested_fixes_are_equivalent_on_a_value_corpus() {
+        // Shell double quotes: everything but `"`, `$`, backtick, backslash.
+        let shell_double = [
+            "simple",
+            "two  words",
+            "it's",
+            "é🦀 unicode",
+            "",
+            "-n",
+            "--version",
+            "line1\nline2",
+            " leading",
+            "a*b",
+            "bob",
+        ];
+        // A `|sh` value is one quoted word: quotes and `$` are benign too.
+        let shell_filtered = [
+            "simple",
+            "say \"hi\"",
+            "it's",
+            "$HOME",
+            "",
+            "-n",
+            "a  b",
+            "é🦀",
+        ];
+        // Python single-quoted literal: everything but `'`, backslash, newline.
+        let python_single = [
+            "simple",
+            "two  words",
+            "say \"hi\"",
+            "é🦀",
+            "",
+            "-n",
+            "--version",
+            " x",
+        ];
+        // JavaScript double-quoted literal: everything but `"`, backslash, newline.
+        let node_double = [
+            "simple",
+            "two  words",
+            "it's",
+            "é🦀",
+            "",
+            "-x",
+            "--eval=1",
+            " x",
+        ];
+        let cases: Vec<(&str, Vec<&str>, &[&str])> = vec![
+            // Real shapes: skip_note, isown, setup, prnum, skip_check.
+            ("bash", vec!["-c", "n=\"{{x}}\"\nif [ -f \".kronn/skip-$n\" ]; then echo \"A $n\"; else echo \"B $n\"; fi"], &shell_double),
+            ("bash", vec!["-c", "a=\"$(python3 -c 'print(\"bob\")')\"\nif [ \"$a\" = \"{{x}}\" ]; then printf true; else printf false; fi"], &shell_double),
+            ("bash", vec!["-c", "set -e\nn=\"{{x}}\"\nwt=\".kronn/shadow-pr-$n\"\necho \"setup OK PR=$n wt=$wt\""], &shell_double),
+            ("bash", vec!["-c", "printf %s \"{{x}}\""], &shell_double),
+            ("bash", vec!["-c", "set -euo pipefail\nn=\"{{x}}\"\nh=\"{{y}}\"\nsb=.kronn/r\nif [ -f \"$sb/done-$n-$h\" ]; then echo ALREADY; exit 5; fi\necho \"NEW $n $h\""], &shell_double),
+            ("bash", vec!["-ec", "printf '%s\\n' \"value: {{x}}\""], &shell_double),
+            ("sh", vec!["-c", "echo start {{x|sh}} end"], &shell_filtered),
+            ("python3", vec!["-c", "print('{{x}}')"], &python_single),
+            ("python3", vec!["-c", "import json; print(json.dumps({'v': '{{x}}'}))"], &python_single),
+            ("python3", vec!["-c", "x = '{{x}}'\nprint(len(x), x.upper())"], &python_single),
+            ("node", vec!["-e", "console.log(\"{{x}}\")"], &node_double),
+            ("node", vec!["-e", "const v = \"{{x}}\"; console.log(v.length, JSON.stringify(v))"], &node_double),
+        ];
+        for (cmd, original, corpus) in cases {
+            let original = args(&original);
+            let rewritten = suggest_args(cmd, &original)
+                .unwrap_or_else(|why| panic!("{cmd} {original:?}: {why}"));
+            for value in corpus {
+                let dir = tempfile::tempdir().unwrap();
+                let values = [("x", *value), ("y", "second")];
+                let Some(before) = run_case(cmd, &original, &values, dir.path()) else {
+                    eprintln!("{cmd} is not installed here; skipped");
+                    break;
+                };
+                let after = run_case(cmd, &rewritten, &values, dir.path()).unwrap();
+                assert_eq!(
+                    before, after,
+                    "{cmd} {value:?}\n{original:?}\n{rewritten:?}"
+                );
+            }
+        }
+    }
+
+    /// Why an unquoted value gets no automatic fix: the original word-splits
+    /// it, so `"$1"` prints something else for an empty or spaced value.
+    #[cfg(unix)]
+    #[test]
+    fn an_unquoted_shell_value_diverges_and_stays_manual() {
+        let original = args(&["-c", "echo start {{x}} end"]);
+        let naive = args(&["-c", "echo start \"$1\" end", "_", "{{x}}"]);
+        let dir = tempfile::tempdir().unwrap();
+        for value in ["", "a  b"] {
+            let values = [("x", value)];
+            assert_ne!(
+                run_case("bash", &original, &values, dir.path()),
+                run_case("bash", &naive, &values, dir.path()),
+                "{value:?}"
+            );
+        }
+        assert!(suggest_args("bash", &original).is_err());
     }
 }

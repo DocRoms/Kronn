@@ -36,6 +36,23 @@ fn resolve_windows_program(program: &OsStr) -> Option<PathBuf> {
     which::which(s).ok()
 }
 
+/// Whether `program` is git, which runs repository-controlled code (hooks,
+/// filters, fsmonitor, diff drivers) inside its own process.
+fn is_git(program: &OsStr) -> bool {
+    std::path::Path::new(program)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("git"))
+}
+
+/// Every git process gets the built git environment instead of the backend's
+/// (KT-1006): a repository hook never sees Kronn's key or a provider key.
+fn isolate_git(program: &OsStr, command: &mut std::process::Command) {
+    if is_git(program) {
+        crate::core::child_env::isolate(command, crate::core::child_env::ChildRoute::Git);
+    }
+}
+
 /// Create a `tokio::process::Command` that won't flash a console window on Windows.
 ///
 /// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, `PathBuf`, …)
@@ -46,12 +63,13 @@ pub fn async_cmd<S: AsRef<OsStr>>(program: S) -> tokio::process::Command {
     #[cfg(target_os = "windows")]
     let mut cmd = match resolved {
         Some(path) => tokio::process::Command::new(path),
-        None => tokio::process::Command::new(program),
+        None => tokio::process::Command::new(program.as_ref()),
     };
     #[cfg(not(target_os = "windows"))]
-    let cmd = tokio::process::Command::new(program);
+    let mut cmd = tokio::process::Command::new(&program);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
+    isolate_git(program.as_ref(), cmd.as_std_mut());
     cmd
 }
 
@@ -64,15 +82,16 @@ pub fn sync_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
     #[cfg(target_os = "windows")]
     let mut cmd = match resolved {
         Some(path) => std::process::Command::new(path),
-        None => std::process::Command::new(program),
+        None => std::process::Command::new(program.as_ref()),
     };
     #[cfg(not(target_os = "windows"))]
-    let cmd = std::process::Command::new(program);
+    let mut cmd = std::process::Command::new(&program);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    isolate_git(program.as_ref(), &mut cmd);
     cmd
 }
 
@@ -85,6 +104,62 @@ mod tests {
         let cmd = async_cmd("echo");
         // Just verify it doesn't panic — creation_flags is Windows-only
         drop(cmd);
+    }
+
+    /// A repository hook runs inside git's process: it never sees a variable
+    /// outside the git allow-list (synthetic sentinels, no real secret).
+    #[cfg(unix)]
+    #[test]
+    fn a_git_hook_runs_without_the_backend_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = tempfile::tempdir().unwrap();
+        // Also in the real process environment: without the policy, git would
+        // inherit it from there. A name nothing else in the suite reads.
+        std::env::set_var("KRONN_HOOK_SENTINEL_API_KEY", "sentinel-real-env");
+        let git = |args: &[&str]| {
+            let output = crate::core::child_env::with_parent_env(
+                &[
+                    ("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"),
+                    ("HOME", repo.path().to_str().unwrap()),
+                    ("GIT_AUTHOR_NAME", "Fixture"),
+                    ("GIT_AUTHOR_EMAIL", "fixture@example.invalid"),
+                    ("GIT_COMMITTER_NAME", "Fixture"),
+                    ("GIT_COMMITTER_EMAIL", "fixture@example.invalid"),
+                    ("KRONN_AUTH_TOKEN", "sentinel-admin"),
+                    ("KRONN_ENCRYPTION_KEK", "sentinel-kek"),
+                    ("ANTHROPIC_API_KEY", "sentinel-provider"),
+                    ("GH_TOKEN", "sentinel-github"),
+                    ("GIT_DIR", "/sentinel/elsewhere"),
+                ],
+                || sync_cmd("git").args(args).current_dir(repo.path()).output(),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        let hook = repo.path().join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nfor v in KRONN_HOOK_SENTINEL_API_KEY KRONN_AUTH_TOKEN KRONN_ENCRYPTION_KEK ANTHROPIC_API_KEY GH_TOKEN; do\n  eval \"val=\\${$v-}\"\n  if [ -n \"$val\" ]; then echo \"$v leaked\" >&2; exit 1; fi\ndone\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(repo.path().join("f.txt"), "x").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-q", "-m", "fixture"]);
+        std::env::remove_var("KRONN_HOOK_SENTINEL_API_KEY");
+    }
+
+    #[test]
+    fn only_git_gets_the_git_policy() {
+        assert!(is_git(OsStr::new("git")));
+        assert!(is_git(OsStr::new("/usr/bin/git")));
+        assert!(!is_git(OsStr::new("gitk")));
+        assert!(!is_git(OsStr::new("echo")));
     }
 
     #[test]

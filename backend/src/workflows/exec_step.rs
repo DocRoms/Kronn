@@ -31,6 +31,7 @@
 //! Note on cross-platform: uses `crate::core::cmd::async_cmd` which
 //! auto-resolves `npx`/`git` on Windows and applies CREATE_NO_WINDOW.
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
@@ -74,6 +75,54 @@ fn exec_child(program: &str, github_env: &[(String, String)]) -> tokio::process:
     command
 }
 
+/// The main command of a step running approved repository scripts (KT-918):
+/// it is told where the worktree is, since its cwd is the approved copy.
+fn approved_script_child(
+    program: &str,
+    github_env: &[(String, String)],
+    work_dir: &str,
+    copy_dir: &Path,
+) -> tokio::process::Command {
+    use crate::core::approved_scripts::{SCRIPTS_DIR_ENV, WORKTREE_ENV};
+    let mut command = async_cmd(program);
+    crate::core::child_env::isolate_with_github_and_values(
+        command.as_std_mut(),
+        crate::core::child_env::ChildRoute::WorkflowExec,
+        github_env,
+        &[
+            (WORKTREE_ENV, std::ffi::OsStr::new(work_dir)),
+            (SCRIPTS_DIR_ENV, copy_dir.as_os_str()),
+        ],
+    );
+    command
+}
+
+/// Verifies the step's declared files against their approved hashes and
+/// copies them into the run's artifacts directory; the copy is the cwd.
+fn prepare_approved_scripts(
+    step: &WorkflowStep,
+    carrying_repository: Option<&str>,
+    ctx: &TemplateContext,
+) -> Result<PathBuf, String> {
+    let root = carrying_repository
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+        .ok_or_else(|| {
+            "declares repository scripts but its workflow has no home project to read them from"
+                .to_string()
+        })?;
+    let artifacts = ctx
+        .get("run.artifacts_dir")
+        .filter(|dir| !dir.trim().is_empty())
+        .ok_or_else(|| {
+            "the run has no artifacts directory to hold the approved copy of its scripts"
+                .to_string()
+        })?;
+    let dest = crate::core::approved_scripts::copy_dir(Path::new(artifacts), &step.name);
+    crate::core::approved_scripts::prepare_copy(Path::new(root), &step.exec_script_files, &dest)?;
+    Ok(dest)
+}
+
 pub async fn execute_exec_step(
     step: &WorkflowStep,
     workflow_allowlist: &[String],
@@ -107,6 +156,7 @@ pub async fn execute_exec_step_with_output_limit(
         ctx,
         output_limit_bytes,
         &github_env,
+        None,
     )
     .await
 }
@@ -114,12 +164,15 @@ pub async fn execute_exec_step_with_output_limit(
 /// A workflow Exec step: the workflow author chose the command, so it gets
 /// the project's GitHub token when the project is connected, and none
 /// otherwise (D2). Other callers keep the inherited environment.
+/// `carrying_repository` is the home project's checkout, where declared
+/// repository scripts are read from (KT-918).
 pub async fn execute_exec_step_for_project(
     step: &WorkflowStep,
     workflow_allowlist: &[String],
     work_dir: &str,
     ctx: &TemplateContext,
     project_id: Option<&str>,
+    carrying_repository: Option<&str>,
 ) -> StepOutcome {
     let github_env = crate::core::github_connection::env_for_launch(project_id).await;
     execute_exec_step_inner(
@@ -129,6 +182,7 @@ pub async fn execute_exec_step_for_project(
         ctx,
         MAX_OUTPUT_BYTES,
         &github_env,
+        carrying_repository,
     )
     .await
 }
@@ -144,6 +198,7 @@ async fn execute_exec_step_inner(
     ctx: &TemplateContext,
     output_limit_bytes: usize,
     github_env: &[(String, String)],
+    carrying_repository: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
     let output_limit_bytes = output_limit_bytes.clamp(1, MAX_COLLECT_OUTPUT_BYTES);
@@ -242,6 +297,19 @@ async fn execute_exec_step_inner(
             step.name, trimmed_workdir
         ));
     }
+
+    // KT-918 — declared repository files run from a verified copy; a file
+    // that changed since approval stops the step before anything runs.
+    let approved_copy = if step.exec_script_files.is_empty() {
+        None
+    } else {
+        match prepare_approved_scripts(step, carrying_repository, ctx) {
+            Ok(dir) => Some(dir),
+            Err(error) => {
+                return fail(step, start, format!("Exec step `{}`: {error}", step.name));
+            }
+        }
+    };
 
     // ── Render args via the template engine ──
     let mut rendered_args: Vec<String> = Vec::with_capacity(step.exec_args.len());
@@ -470,9 +538,12 @@ async fn execute_exec_step_inner(
         _ => None,
     };
 
-    let mut cmd = exec_child(raw_command, github_env);
+    let mut cmd = match approved_copy.as_deref() {
+        Some(copy) => approved_script_child(raw_command, github_env, work_dir, copy),
+        None => exec_child(raw_command, github_env),
+    };
     cmd.args(&rendered_args)
-        .current_dir(work_dir)
+        .current_dir(approved_copy.as_deref().unwrap_or(Path::new(work_dir)))
         .stdin(if stdin_bytes.is_some() {
             std::process::Stdio::piped()
         } else {
@@ -898,6 +969,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            exec_script_files: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -914,9 +986,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let work_dir = dir.path().to_str().unwrap();
 
-        let off =
-            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-off"))
-                .await;
+        let off = execute_exec_step_for_project(
+            &step,
+            &allow,
+            work_dir,
+            &ctx,
+            Some("r16-exec-off"),
+            None,
+        )
+        .await;
         assert_eq!(
             off.result.status,
             RunStatus::Failed,
@@ -927,11 +1005,12 @@ mod tests {
 
         set_grant("r16-exec-on", GithubConnectionMode::GhLogin, None);
         let on =
-            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-on")).await;
+            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-on"), None)
+                .await;
         assert_eq!(on.result.status, RunStatus::Success, "{}", on.result.output);
         assert!(on.result.output.contains("gho_machineTOKEN"));
 
-        let none = execute_exec_step_for_project(&step, &allow, work_dir, &ctx, None).await;
+        let none = execute_exec_step_for_project(&step, &allow, work_dir, &ctx, None, None).await;
         assert_eq!(
             none.result.status,
             RunStatus::Failed,
@@ -1591,5 +1670,60 @@ mod tests {
             "cat with null stdin must EOF immediately, not hang: {}",
             outcome.result.output
         );
+    }
+
+    // KT-918 — the approved copy is the module root for Python too: a helper
+    // found through the cwd is the approved one, never the worktree's.
+    #[tokio::test]
+    async fn a_python_script_imports_its_approved_helper_from_the_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let entry = "import os, sys\nsys.path.insert(0, os.getcwd())\nimport helper\n\
+            print('SENTINEL=' + helper.V + ' WT=' + os.environ['KRONN_WORKTREE'])\n";
+        std::fs::write(home.path().join("entry.py"), entry).unwrap();
+        std::fs::write(home.path().join("helper.py"), "V = 'APPROVED'\n").unwrap();
+        std::fs::write(worktree.path().join("entry.py"), entry).unwrap();
+        std::fs::write(worktree.path().join("helper.py"), "V = 'MUTATED'\n").unwrap();
+        let mut step = exec_step("py", Some("python3"), vec!["entry.py"], None);
+        step.exec_script_files = vec![
+            ExecScriptFile {
+                path: "entry.py".into(),
+                sha256: String::new(),
+            },
+            ExecScriptFile {
+                path: "helper.py".into(),
+                sha256: String::new(),
+            },
+        ];
+        crate::core::approved_scripts::validate_and_pin(home.path(), &mut step.exec_script_files)
+            .unwrap();
+        let mut ctx = TemplateContext::new();
+        ctx.set("run.artifacts_dir", artifacts.path().to_string_lossy());
+        let allow = vec!["python3".to_string()];
+        let work_dir = worktree.path().to_string_lossy().to_string();
+        let home_dir = home.path().to_string_lossy().to_string();
+
+        let outcome =
+            execute_exec_step_for_project(&step, &allow, &work_dir, &ctx, None, Some(&home_dir))
+                .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("SENTINEL=APPROVED"),
+            "{}",
+            outcome.result.output
+        );
+        assert!(outcome.result.output.contains(&format!("WT={work_dir}")));
+
+        // Without a carrying repository the declared scripts cannot be verified.
+        let refused =
+            execute_exec_step_for_project(&step, &allow, &work_dir, &ctx, None, None).await;
+        assert_eq!(refused.result.status, RunStatus::Failed);
+        assert!(refused.result.output.contains("no home project"));
     }
 }

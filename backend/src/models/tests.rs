@@ -860,6 +860,7 @@ fn workflow_step_api_call_roundtrip() {
         multi_agent_review: None,
         room_id: None,
         read_only_repos: vec![],
+        exec_script_files: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     };
     let json = serde_json::to_string(&step).unwrap();

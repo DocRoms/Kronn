@@ -961,17 +961,25 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        for (cost_field, expected) in [(r#","cost":0.0015"#, Some(3_000)), ("", None)] {
+        const PRICED: &str = r#","cost":0.0015"#;
+        // A response without a cost makes the sum partial: the run's cost is unknown.
+        for (cost_fields, expected) in [
+            ([PRICED, PRICED], Some(3_000)),
+            (["", ""], None),
+            ([PRICED, ""], None),
+            (["", PRICED], None),
+        ] {
             let server = MockServer::start().await;
             let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let requests_for_mock = requests.clone();
-            let usage = format!(
-                r#"{{"choices":[],"usage":{{"prompt_tokens":100,"completion_tokens":10{cost_field}}}}}"#
-            );
             Mock::given(method("POST"))
                 .and(path("/v1/chat/completions"))
                 .respond_with(move |_: &wiremock::Request| {
                     let first = requests_for_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                    let usage = format!(
+                        r#"{{"choices":[],"usage":{{"prompt_tokens":100,"completion_tokens":10{}}}}}"#,
+                        cost_fields[usize::from(!first)]
+                    );
                     let frame = if first {
                         r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"mcp_list","arguments":"{}"}}]}}]}"#
                     } else {
@@ -1009,7 +1017,7 @@ mod tests {
             assert_eq!(
                 process.reported_cost_usd_micros(),
                 expected,
-                "{cost_field:?}"
+                "{cost_fields:?}"
             );
         }
     }

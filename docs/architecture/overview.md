@@ -510,7 +510,7 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 - `StepOutputFormat::TypedSchema` (JSON-schema-validated step output).
 - `Workflow.artifacts` + `---ARTIFACT:name---` envelope persisted to workspace files.
 - `StepType::Gate` (`WaitingApproval` + `POST /api/workflows/.../decide` + optional webhook).
-- `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c` by Kronn itself; an allowlisted interpreter's inline script, e.g. `bash -c`, refuses every template placeholder at save time except `{{run.id}}` and `{{time.now…}}`, attached forms like `-cCODE` and `--eval=CODE` included; values travel as later argv entries, never where the interpreter still reads options: after a shell's or Python's inline code, after `--` (required for Node, Perl, Ruby, PHP), or after a script file). One classifier (`backend/src/core/inline_code.rs`) serves the save-time validator, the run-time refusal in `exec_step.rs` (every trigger, Quick Exec included) and `GET /api/workflows/{id}/unsafe-steps`, which also returns the suggested positional rewrite or the reason a manual fix is required; an update keeps an unchanged unsafe line so unrelated edits still save.
+- `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c` by Kronn itself; an allowlisted interpreter's inline script, e.g. `bash -c`, refuses every template placeholder at save time except `{{run.id}}` and `{{time.now…}}`, attached forms like `-cCODE` and `--eval=CODE` included; values travel as later argv entries, never where the interpreter still reads options: after a shell's or Python's inline code, after `--` (required for Node, Perl, Ruby, PHP), or after a script file). `backend/src/core/argv_roles.rs` gives each argument its role (data, program text, option position, program to run) and unwraps launchers (`env`, `sudo`, `timeout`, `xargs`…) and other evaluators (`awk`, `sed`, `find -exec`, `git -c`, `ssh`, `docker run`, `npx`); an unknown program keeps its arguments as data, a templated program is always refused. Every write path (create, update, bundle, workflow/Artifact/Quick Exec/`kronn/` imports) runs this check; a config restore keeps its lines, flagged and refused at run time. One classifier (`backend/src/core/inline_code.rs`) serves the save-time validator, the run-time refusal in `exec_step.rs` (every trigger, Quick Exec included) and `GET /api/workflows/{id}/unsafe-steps`, which also returns the suggested positional rewrite or the reason a manual fix is required; an update keeps an unchanged unsafe line so unrelated edits still save.
 - `ConditionAction::Goto { max_iterations }` loops + `WorkflowRun.state` (`---STATE:k=v---`, `{{state.X}}`, `{{iter.X}}`).
 - `Workflow.on_failure` rollback steps (only on `Failed`, not on `Cancelled`/`StoppedByGuard`/Gate-reject).
 - Per-item Export/Import for Workflows + Quick Prompts. Workflow bundle v2
@@ -747,3 +747,20 @@ WorkflowRunner (per run)
   → run workspace hooks: before_remove
   → emit SSE events throughout for real-time UI updates
 ```
+
+**Agents chosen at launch (KT-1025).** A manual launch (`POST
+/api/workflows/{id}/trigger`, a discussion or Live Page action launch, MCP
+`workflow_trigger`) may carry `step_agents`: step id or name → `{agent, model?,
+reasoning_effort?}`. It is checked before any snapshot or run row exists:
+unknown or non-Agent step, a step named twice, an agent that is not installed
+and enabled, a `Custom` agent (its named connection is chosen in the workflow),
+declared `tools` or a kept `max_tokens`/effort the agent cannot apply, or a
+model the catalogue refuses. The choice is stored in the run's
+`trigger_context.__step_agents__` (keyed by step id, unchanged steps dropped),
+never in the workflow. `execute_run` applies it to the run's copy after the
+approval check, so a Gate approval or an interrupted resume — which reload the
+definition from the database — keep it, and the step provenance names the agent
+actually used. Only agent, model and effort are replaced; tier, budget, tools
+stay, and a named connection stays only while the agent does.
+`[src: file: backend/src/workflows/step_agents.rs]`
+`[src: file: backend/src/api/workflows.rs]`

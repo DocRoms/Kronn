@@ -1992,7 +1992,16 @@ fn import_document(
             );
             // The editor's save-time rules: approval must never see a
             // definition the editor would have refused.
-            crate::api::workflows::validate_workflow_for_import(&resource)
+            // A re-import keeps the stored workflow's unchanged unsafe lines.
+            let kept = match existing_id.as_deref() {
+                Some(id) => crate::db::workflows::get_workflow(conn, id)?
+                    .map(|stored| {
+                        crate::api::workflows::kept_lines(&stored.steps, &stored.on_failure)
+                    })
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            crate::api::workflows::validate_workflow_for_import_keeping(&resource, &kept)
                 .map_err(anyhow::Error::msg)?;
             let local = crate::db::workflows::list_workflows(conn)?;
             crate::api::workflows::validate_imported_sub_workflow_graph(&resource, &local)
@@ -2043,6 +2052,27 @@ fn import_document(
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
             resource.project_id = Some(project_id.to_string());
             resource.updated_at = now;
+            // Same inline-code rule as the Quick Exec form; a re-import of an
+            // unchanged stored line stays possible (still refused at run time).
+            let unchanged = match existing_id.as_deref() {
+                Some(id) => {
+                    crate::db::quick_execs::get_quick_exec(conn, id)?.is_some_and(|stored| {
+                        stored.name == resource.name
+                            && stored.command == resource.command
+                            && stored.args == resource.args
+                    })
+                }
+                None => false,
+            };
+            if !unchanged {
+                if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
+                    &resource.name,
+                    &resource.command,
+                    &resource.args,
+                ) {
+                    anyhow::bail!(error);
+                }
+            }
             if existing_id.is_some() {
                 crate::db::quick_execs::update_quick_exec(conn, &resource)?;
             } else {
@@ -3342,6 +3372,100 @@ mod tests {
             .unwrap(),
             redacted_fields: vec![],
         }
+    }
+
+    /// KT-1017 — a `kronn/` import refuses an unsafe inline line in a
+    /// workflow or a Quick Exec, and keeps one only when re-importing over
+    /// the exact same stored line.
+    #[tokio::test]
+    async fn a_kronn_import_refuses_unsafe_inline_lines_unless_unchanged() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let unsafe_steps = serde_json::json!([
+            {"name": "greet", "step_type": {"type": "Exec"}, "exec_command": "bash",
+             "exec_args": ["-c", "echo \"{{issue.title}}\""]}
+        ]);
+        let workflow_doc = |slug: &str, steps: serde_json::Value| {
+            let mut document = workflow_document(slug, steps);
+            document.resource["exec_allowlist"] = serde_json::json!(["bash"]);
+            document
+        };
+        let exec_doc =
+            |args: serde_json::Value| crate::core::repository_resources::RepositoryDocument {
+                schema_version: 1,
+                kind: ProjectRepositoryResourceKind::QuickExec,
+                slug: "ticket-exec".into(),
+                updated_at: Utc::now(),
+                requires: vec![],
+                resource: {
+                    let mut exec = serde_json::to_value(sample_exec("foreign-project")).unwrap();
+                    exec["command"] = serde_json::json!("python3");
+                    exec["args"] = args;
+                    exec
+                },
+                redacted_fields: vec![],
+            };
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                let key = crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                let workflow = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &workflow_doc("unsafe", unsafe_steps.clone()),
+                )
+                .map_err(|e| e.to_string());
+                let exec = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &exec_doc(serde_json::json!(["-c", "print('{{ticket}}')"])),
+                )
+                .map_err(|e| e.to_string());
+                // A stored legacy workflow mapped to the same slug: re-importing
+                // the identical line is kept, a changed placeholder is not.
+                let mut stored =
+                    sample_workflow_json("wf-legacy", "legacy", "project-1", unsafe_steps.clone());
+                stored.exec_allowlist = vec!["bash".into()];
+                crate::db::workflows::insert_workflow(conn, &stored)?;
+                crate::db::resource_identities::upsert(
+                    conn,
+                    &key,
+                    ProjectRepositoryResourceKind::Workflow.identity_kind(),
+                    "legacy",
+                    "wf-legacy",
+                )?;
+                let same = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &workflow_doc("legacy", unsafe_steps.clone()),
+                )
+                .map_err(|e| e.to_string());
+                let changed = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &workflow_doc(
+                        "legacy",
+                        serde_json::json!([
+                            {"name": "greet", "step_type": {"type": "Exec"}, "exec_command": "bash",
+                             "exec_args": ["-c", "echo \"{{issue.body}}\""]}
+                        ]),
+                    ),
+                )
+                .map_err(|e| e.to_string());
+                Ok::<_, anyhow::Error>((workflow, exec, same, changed))
+            })
+            .await
+            .unwrap();
+        let (workflow, exec, same, changed) = outcome;
+        assert!(workflow.unwrap_err().contains("script inline"));
+        assert!(exec.unwrap_err().contains("{{ticket}}"));
+        same.expect("an unchanged stored line stays importable");
+        assert!(changed.unwrap_err().contains("script inline"));
     }
 
     #[tokio::test]

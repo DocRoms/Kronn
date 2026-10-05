@@ -1,5 +1,7 @@
 pub mod agent_skill;
 pub mod anti_halluc;
+pub mod approved_scripts;
+pub mod argv_roles;
 pub mod audit_detectors;
 pub mod audit_mcp_filter;
 pub mod audit_validation;
@@ -13,6 +15,7 @@ pub mod config;
 pub mod content_memo;
 pub mod context_audit;
 pub mod context_files;
+pub mod credential_store;
 pub mod crypto;
 pub mod dependency_updates;
 pub mod desktop_port;

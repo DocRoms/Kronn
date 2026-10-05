@@ -1,6 +1,6 @@
 // The banner tells an install without run retention that its database only grows.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const { configApi } = vi.hoisted(() => ({
   configApi: { getServerConfig: vi.fn(), dbUsage: vi.fn() },
@@ -49,13 +49,15 @@ describe('RunRetentionBanner', () => {
     expect(await screen.findByTestId('run-retention-banner')).toBeInTheDocument();
   });
 
-  it('stays hidden once dismissed, and the dismissal is synced', () => {
+  it('stays hidden once dismissed, and the dismissal is synced', async () => {
     const { rerender } = render(<RunRetentionBanner retentionDays={0} onOpenSetting={vi.fn()} />);
+    await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByText('config.runRetentionBannerDismiss'));
     expect(screen.queryByTestId('run-retention-banner')).toBeNull();
     expect(localStorage.getItem(RUN_RETENTION_BANNER_KEY)).toBe('1');
     expect(isSyncedKey(RUN_RETENTION_BANNER_KEY, false)).toBe(true);
     rerender(<RunRetentionBanner retentionDays={0} onOpenSetting={vi.fn()} />);
+    await act(async () => { await Promise.resolve(); });
     expect(screen.queryByTestId('run-retention-banner')).toBeNull();
   });
 

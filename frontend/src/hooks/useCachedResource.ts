@@ -7,6 +7,10 @@ interface Entry {
 
 // Survives unmounts: reopening a project shows its last result at once.
 const cache = new Map<string, Entry>();
+// The newest request ticket per key, shared by every mount: a response that is
+// not from the newest ticket is stale and must not reach the cache.
+const latest = new Map<string, number>();
+let tickets = 0;
 
 /** Cache key of a project's overview Git status. */
 export const projectGitCacheKey = (projectId: string) => `git-status:${projectId}`;
@@ -14,11 +18,14 @@ export const projectGitCacheKey = (projectId: string) => `git-status:${projectId
 /** Drop one resource whose last value is no longer true (the branch just changed). */
 export function invalidateCachedResource(key: string) {
   cache.delete(key);
+  // A request still in flight predates the invalidation.
+  latest.set(key, ++tickets);
 }
 
 /** Test hook: forget every cached resource. */
 export function clearCachedResources() {
   cache.clear();
+  latest.clear();
 }
 
 interface Options<T> {
@@ -48,7 +55,10 @@ export function useCachedResource<T>({ key, load }: Options<T>) {
     inFlight.current = me;
     setRefreshing(true);
     setError(false);
+    const ticket = ++tickets;
+    latest.set(resource, ticket);
     const publish = (value: T) => {
+      if (latest.get(resource) !== ticket) return;
       cache.set(resource, { value, at: Date.now() });
       rerender();
     };
@@ -76,6 +86,7 @@ export function useCachedResource<T>({ key, load }: Options<T>) {
   const refresh = useCallback(() => (key === null ? Promise.resolve() : run(key, true)), [key, run]);
   const set = useCallback((value: T) => {
     if (key === null) return;
+    latest.set(key, ++tickets);
     cache.set(key, { value, at: Date.now() });
     rerender();
   }, [key]);

@@ -778,6 +778,13 @@ async fn execute_run_body(
         })
         .await?;
     let mut workflow_in_project = workflow_in_run_project(workflow, run);
+    // KT-1025 — the agents chosen at launch live on the run, so a Gate approval
+    // or a resume, which reload the definition, still run on them.
+    if super::step_agents::from_run(run).is_some() {
+        let mut chosen = workflow_in_project.into_owned();
+        super::step_agents::apply_from_run(&mut chosen, run);
+        workflow_in_project = std::borrow::Cow::Owned(chosen);
+    }
     // KT-851 — a multi-project workflow keeps Quick Prompt/API references
     // symbolic; they resolve in this run's project.
     if crate::core::resource_refs::has_structured_references(&workflow_in_project) {
@@ -908,6 +915,44 @@ async fn execute_run_body(
         }
     } else {
         (String::new(), None)
+    };
+    // KT-918 — declared scripts are read from the carrying repository's
+    // checkout, never from the run's worktree.
+    let declares_scripts = workflow
+        .steps
+        .iter()
+        .chain(workflow.on_failure.iter())
+        .any(|step| !step.exec_script_files.is_empty());
+    // The launch may already carry the run's project in `project_id`; the
+    // stored definition keeps the home project, which carries the scripts.
+    let carrying_project_id = if declares_scripts {
+        let workflow_id = workflow.id.clone();
+        db.with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &workflow_id))
+            .await?
+            .map(|stored| stored.project_id)
+            .unwrap_or_else(|| workflow.project_id.clone())
+    } else {
+        None
+    };
+    let carrying_repository: Option<String> = match carrying_project_id {
+        Some(pid) if declares_scripts => {
+            let path = if workflow.project_id.as_deref() == Some(pid.as_str()) {
+                Some(project_path.clone())
+            } else {
+                db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+                    .await?
+                    .map(|project| project.path)
+            };
+            path.filter(|path| !path.is_empty()).map(|path| {
+                let resolved = crate::core::scanner::resolve_host_path(&path);
+                if resolved.exists() {
+                    resolved.to_string_lossy().to_string()
+                } else {
+                    path
+                }
+            })
+        }
+        _ => None,
     };
 
     // 0.7.0 Phase 4 — detect resume: a non-empty step_results means
@@ -1341,19 +1386,8 @@ async fn execute_run_body(
                 .iter()
                 .filter(|s| matches!(s.step_type, StepType::Agent))
             {
-                // A LiteLLM proxy is a server the user declares, reachable
-                // anywhere: it needs no local `litellm` binary.
-                let declared_proxy = matches!(step.agent, crate::models::AgentType::LiteLlm)
-                    && agents_config
-                        .lite_llm
-                        .base_url
-                        .as_deref()
-                        .is_some_and(|url| !url.trim().is_empty());
                 let ok = routed
-                    || declared_proxy
-                    || usable
-                        .iter()
-                        .any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
+                    || super::step_agents::agent_can_launch(&step.agent, &usable, agents_config);
                 if !ok {
                     missing.push((step.name.clone(), format!("{:?}", step.agent)));
                 }
@@ -2201,6 +2235,7 @@ async fn execute_run_body(
                         &work_dir,
                         &ctx,
                         workflow.project_id.as_deref(),
+                        carrying_repository.as_deref(),
                     )
                     .await
                 }
@@ -3132,6 +3167,7 @@ async fn execute_run_body(
                         &work_dir,
                         &ctx,
                         workflow.project_id.as_deref(),
+                        carrying_repository.as_deref(),
                     )
                     .await
                 }
@@ -4281,6 +4317,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            exec_script_files: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -4626,6 +4663,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            exec_script_files: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -7623,6 +7661,329 @@ mod tests {
         );
     }
 
+    // ─── KT-1025 — agents chosen at launch ───────────────────────────────
+
+    /// An ACP turn that answers at once, whatever agent it stands in for.
+    struct AnsweringTurn;
+
+    #[async_trait::async_trait]
+    impl crate::acp::AcpTransport for AnsweringTurn {
+        async fn initialize(
+            &self,
+            _: crate::acp::AcpInitialize,
+        ) -> Result<crate::acp::AcpNegotiatedCapabilities, crate::acp::AcpError> {
+            Ok(crate::acp::AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: std::collections::BTreeSet::from([
+                    crate::acp::AcpCapability::Sessions,
+                    crate::acp::AcpCapability::Streaming,
+                    crate::acp::AcpCapability::Cancellation,
+                    crate::acp::AcpCapability::McpInjection,
+                ]),
+            })
+        }
+        async fn create_session(
+            &self,
+        ) -> Result<crate::acp::AcpSessionTarget, crate::acp::AcpError> {
+            crate::acp::AcpSessionTarget::new(crate::acp::AcpAgent::ClaudeCode, "answering-turn")
+        }
+        async fn config_options(&self) -> Vec<crate::acp::AcpConfigOption> {
+            Vec::new()
+        }
+        async fn set_config_option(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn resume_session(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn prompt(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            events: tokio::sync::mpsc::Sender<crate::acp::AcpSessionEvent>,
+        ) -> Result<(), crate::acp::AcpError> {
+            use crate::acp::AcpSessionEvent;
+            let _ = events.send(AcpSessionEvent::TextDelta("done".into())).await;
+            let _ = events.send(AcpSessionEvent::Completed).await;
+            Ok(())
+        }
+        async fn cancel(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+    }
+
+    /// A project with an answering agent route, and a workflow whose Agent
+    /// steps all run on Claude Code: `draft`, a Gate, then `final`.
+    async fn launch_choice_fixture(
+        state: &crate::AppState,
+        id: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::agents::runner::test_acp_routes::RouteGuard,
+        Workflow,
+    ) {
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(state, &format!("proj-{id}"), repo.path()).await;
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let work_dir =
+            crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
+        let route = crate::agents::runner::test_acp_routes::route(
+            &work_dir,
+            std::sync::Arc::new(AnsweringTurn),
+        );
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-{id}");
+        workflow.project_id = Some(format!("proj-{id}"));
+        let mut draft = fake_step("draft");
+        draft.id = Some(STEP_DRAFT.into());
+        draft.prompt_template = "Draft".into();
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        let mut last = fake_step("final");
+        last.id = Some(STEP_FINAL.into());
+        last.prompt_template = "Finish".into();
+        workflow.steps = vec![draft, gate, last];
+        (repo, route, workflow)
+    }
+
+    // Stored workflows keep only UUID step ids.
+    const STEP_DRAFT: &str = "6f1c2a1e-0d6b-4f0e-9a51-1025000000d1";
+    const STEP_FINAL: &str = "6f1c2a1e-0d6b-4f0e-9a51-1025000000f1";
+
+    fn launch_choice_trigger(model: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "manual",
+            crate::workflows::step_agents::TRIGGER_CONTEXT_KEY: {
+                STEP_DRAFT: { "agent": "Codex", "model": model },
+                STEP_FINAL: { "agent": "Codex", "model": model },
+            }
+        })
+    }
+
+    async fn stored_workflow(state: &crate::AppState, id: &str) -> Workflow {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn stored_run(state: &crate::AppState, id: &str) -> WorkflowRun {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &id))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_launch_agent_choice_survives_a_gate_pause_reloaded_from_the_database() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, _route, workflow) = launch_choice_fixture(&state, "launch-gate").await;
+        let mut run = pending_run("run-launch-gate", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        run.trigger_context = Some(launch_choice_trigger("gpt-test-b"));
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("runs to the gate");
+        assert_eq!(
+            run.status,
+            RunStatus::WaitingApproval,
+            "{:?}",
+            run.step_results
+        );
+        assert_eq!(run.step_results[0].step_agent, Some(AgentType::Codex));
+
+        // What the gate decide route does: claim, then both reloaded from the database.
+        let claimed_id = run.id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::claim_waiting_run(conn, &claimed_id, &RunStatus::Running)
+            })
+            .await
+            .unwrap();
+        let reloaded_workflow = stored_workflow(&state, &workflow.id).await;
+        let mut reloaded_run = stored_run(&state, &run.id).await;
+        reloaded_run.status = RunStatus::Running;
+        resume_run(
+            state.clone(),
+            &reloaded_workflow,
+            &mut reloaded_run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("approval resumes");
+
+        assert_eq!(
+            reloaded_run.status,
+            RunStatus::Success,
+            "{:?}",
+            reloaded_run.step_results
+        );
+        let last = reloaded_run.step_results.last().unwrap();
+        assert_eq!(last.step_name, "final");
+        assert_eq!(last.step_agent, Some(AgentType::Codex));
+        let attempt = last
+            .agent_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.attempts.last())
+            .expect("the step records its attempt");
+        assert_eq!(attempt.agent, AgentType::Codex);
+        assert_eq!(attempt.requested_model.as_deref(), Some("gpt-test-b"));
+
+        let unchanged = stored_workflow(&state, &workflow.id).await;
+        assert!(unchanged
+            .steps
+            .iter()
+            .filter(|step| matches!(step.step_type, StepType::Agent))
+            .all(|step| step.agent == AgentType::ClaudeCode));
+        assert_eq!(
+            unchanged.steps[0]
+                .agent_settings
+                .as_ref()
+                .and_then(|s| s.model.clone()),
+            None,
+            "the workflow keeps its own model"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_launch_agent_choice_survives_an_interrupted_resume() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, _route, mut workflow) = launch_choice_fixture(&state, "launch-resume").await;
+        workflow.steps.remove(1);
+        let mut run = pending_run("run-launch-resume", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        run.status = RunStatus::Interrupted;
+        run.trigger_context = Some(launch_choice_trigger("gpt-test-r"));
+        run.step_results.push(fake_result("draft"));
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let reloaded_workflow = stored_workflow(&state, &workflow.id).await;
+        let mut reloaded_run = stored_run(&state, &run.id).await;
+        claim_interrupted_run(&state, &mut reloaded_run, false)
+            .await
+            .expect("claim");
+        resume_interrupted_run(
+            state.clone(),
+            &reloaded_workflow,
+            &mut reloaded_run,
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("resume");
+
+        assert_eq!(
+            reloaded_run.status,
+            RunStatus::Success,
+            "{:?}",
+            reloaded_run.step_results
+        );
+        let last = reloaded_run.step_results.last().unwrap();
+        assert_eq!(last.step_name, "final");
+        assert_eq!(last.step_agent, Some(AgentType::Codex));
+    }
+
+    #[tokio::test]
+    async fn a_manual_launch_stores_its_agent_choice_on_the_run_and_refuses_a_wrong_one() {
+        let (state, _, _) = test_state_and_configs();
+        // A declared LiteLLM proxy needs no local binary, so the check passes anywhere.
+        state.config.write().await.agents.lite_llm.base_url = Some("http://127.0.0.1:9".into());
+        let (_repo, _route, workflow) = launch_choice_fixture(&state, "launch-store").await;
+        let wf_db = workflow.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+        let choice = |agent: AgentType| crate::models::StepAgentOverride {
+            agent,
+            model: Some("m-1".into()),
+            reasoning_effort: None,
+        };
+
+        let (_, run) = crate::api::workflows::create_manual_run(
+            &state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                step_agents: [("final".to_string(), choice(AgentType::LiteLlm))].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("admitted");
+        let stored = stored_run(&state, &run.id).await;
+        let chosen = crate::workflows::step_agents::from_run(&stored).expect("stored on the run");
+        assert_eq!(chosen[STEP_FINAL].agent, AgentType::LiteLlm);
+        assert_eq!(chosen[STEP_FINAL].model.as_deref(), Some("m-1"));
+        assert_eq!(
+            stored_workflow(&state, &workflow.id).await.steps[2].agent,
+            AgentType::ClaudeCode
+        );
+
+        for (key, expected) in [("review", "only Agent steps"), ("ghost", "no step `ghost`")] {
+            let refused = crate::api::workflows::create_manual_run(
+                &state,
+                &workflow.id,
+                Default::default(),
+                Default::default(),
+                crate::core::launch_context::LaunchContext {
+                    step_agents: [(key.to_string(), choice(AgentType::LiteLlm))].into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(refused.contains(expected), "{refused}");
+        }
+        let workflow_id = workflow.id.clone();
+        let runs = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::list_runs_paginated(conn, &workflow_id, None, None)
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1, "a refused choice creates no run");
+    }
+
     #[tokio::test]
     async fn an_interrupted_resume_continues_a_global_workflow_in_its_launch_project() {
         let (state, tokens, agents) = test_state_and_configs();
@@ -8203,6 +8564,364 @@ mod tests {
         );
         assert_eq!(run.status, RunStatus::Cancelled, "{:?}", run.step_results);
         assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
+
+    // ─── KT-918 — approved repository scripts ────────────────────────────
+
+    fn write_file(root: &std::path::Path, relative: &str, text: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// An entry that loads its helper through a path built from its cwd, the
+    /// dynamic import a copy alone would not cover.
+    const SCRIPT_ENTRY: &str = "const fs = require('fs');\n\
+        const h = require(process.cwd() + '/lib/helper.cjs');\n\
+        fs.writeFileSync(require('path').join(process.env.KRONN_WORKTREE, 'ran'), h);\n\
+        console.log('SENTINEL=' + h + ' WT=' + process.env.KRONN_WORKTREE);\n";
+
+    async fn create_script_workflow(
+        state: &crate::AppState,
+        home: &str,
+        scope: Option<serde_json::Value>,
+        files: &[&str],
+    ) -> Result<Workflow, String> {
+        let mut request = serde_json::json!({
+            "name": format!("scripts-{home}"),
+            "project_id": home,
+            "trigger": {"type": "Manual"},
+            "exec_allowlist": ["node"],
+            "steps": [{
+                "name": "framing",
+                "step_type": {"type": "Exec"},
+                "agent": "ClaudeCode",
+                "prompt_template": "",
+                "exec_command": "node",
+                "exec_args": ["scripts/entry.cjs"],
+                "exec_script_files": files
+                    .iter()
+                    .map(|path| serde_json::json!({"path": path}))
+                    .collect::<Vec<_>>(),
+            }],
+        });
+        if let Some(scope) = scope {
+            request["project_scope"] = scope;
+        }
+        let request: crate::models::CreateWorkflowRequest =
+            serde_json::from_value(request).unwrap();
+        let response = crate::api::workflows::create_as(
+            state.clone(),
+            request,
+            crate::api::workflows::WorkflowWriter::Human,
+        )
+        .await
+        .0;
+        match response.data {
+            Some(workflow) if response.success => Ok(workflow),
+            _ => Err(response.error.unwrap_or_default()),
+        }
+    }
+
+    async fn run_scripts(
+        state: &crate::AppState,
+        workflow: &Workflow,
+        project: &str,
+    ) -> WorkflowRun {
+        let (_, tokens, agents) = test_state_and_configs();
+        let (wf, mut run) = crate::api::workflows::create_manual_run(
+            state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                requested_project_id: Some(project.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("admitted");
+        execute_run(
+            state.clone(),
+            &wf,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        run
+    }
+
+    #[tokio::test]
+    async fn an_approved_script_loads_its_approved_helper_not_the_worktree_one() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        let target = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        // The run's checkout holds modified copies at the same paths.
+        write_file(
+            target.path(),
+            "scripts/entry.cjs",
+            "console.log('MUTATED ENTRY');\n",
+        );
+        write_file(
+            target.path(),
+            "lib/helper.cjs",
+            "module.exports = 'MUTATED';\n",
+        );
+        insert_project_at(&state, "proj-kt918-home", home.path()).await;
+        insert_project_at(&state, "proj-kt918-target", target.path()).await;
+        let workflow = create_script_workflow(
+            &state,
+            "proj-kt918-home",
+            Some(serde_json::json!({"type": "Projects", "project_ids": ["proj-kt918-target"]})),
+            &["scripts/entry.cjs", "lib/helper.cjs"],
+        )
+        .await
+        .expect("saved");
+        let pinned = &workflow.steps[0].exec_script_files;
+        assert!(
+            pinned.iter().all(|file| file.sha256.len() == 64),
+            "{pinned:?}"
+        );
+
+        let run = run_scripts(&state, &workflow, "proj-kt918-target").await;
+
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Success, "{output}");
+        assert!(output.contains("SENTINEL=APPROVED"), "{output}");
+        assert!(!output.contains("MUTATED"), "{output}");
+        assert!(
+            output.contains(&format!("WT={}", target.path().display())),
+            "{output}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.path().join("ran")).unwrap(),
+            "APPROVED"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_one_line_change_to_the_script_or_a_module_blocks_the_run_and_names_the_file() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        insert_project_at(&state, "proj-kt918-drift", home.path()).await;
+        let workflow = create_script_workflow(
+            &state,
+            "proj-kt918-drift",
+            None,
+            &["scripts/entry.cjs", "lib/helper.cjs"],
+        )
+        .await
+        .expect("saved");
+
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n// x\n",
+        );
+        let run = run_scripts(&state, &workflow, "proj-kt918-drift").await;
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Failed, "{output}");
+        assert!(
+            output.contains("`lib/helper.cjs` changed since approval"),
+            "{output}"
+        );
+        assert!(
+            !home.path().join("ran").exists(),
+            "the step must not have run"
+        );
+
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        write_file(
+            home.path(),
+            "scripts/entry.cjs",
+            &format!("{SCRIPT_ENTRY}// x\n"),
+        );
+        let run = run_scripts(&state, &workflow, "proj-kt918-drift").await;
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Failed, "{output}");
+        assert!(
+            output.contains("`scripts/entry.cjs` changed since approval"),
+            "{output}"
+        );
+        assert!(
+            !home.path().join("ran").exists(),
+            "the step must not have run"
+        );
+
+        // Restored content matches the approval again.
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        let run = run_scripts(&state, &workflow, "proj-kt918-drift").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+    }
+
+    #[tokio::test]
+    async fn a_script_saved_by_an_agent_does_not_run_until_a_human_approves_it() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        insert_project_at(&state, "proj-kt918-agent", home.path()).await;
+        let request: crate::models::CreateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({
+                "name": "agent-draft", "project_id": "proj-kt918-agent",
+                "trigger": {"type": "Manual"}, "exec_allowlist": ["node"],
+                "steps": [{"name": "framing", "step_type": {"type": "Exec"},
+                    "agent": "ClaudeCode", "prompt_template": "", "exec_command": "node",
+                    "exec_args": ["scripts/entry.cjs"],
+                    "exec_script_files": [{"path": "scripts/entry.cjs"}, {"path": "lib/helper.cjs"}]}],
+            }))
+            .unwrap();
+        let response = crate::api::workflows::create_as(
+            state.clone(),
+            request,
+            crate::api::workflows::WorkflowWriter::Agent,
+        )
+        .await
+        .0;
+        let workflow = response.data.expect("saved");
+        assert!(workflow.steps[0]
+            .exec_script_files
+            .iter()
+            .all(|file| file.sha256.is_empty()));
+
+        let run = run_scripts(&state, &workflow, "proj-kt918-agent").await;
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Failed, "{output}");
+        assert!(output.contains("no approved hash"), "{output}");
+        assert!(
+            !home.path().join("ran").exists(),
+            "the step must not have run"
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_refuses_a_script_outside_the_repository_or_behind_an_escaping_symlink() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(outside.path(), "secret.cjs", "x");
+        insert_project_at(&state, "proj-kt918-save", home.path()).await;
+
+        let error = create_script_workflow(&state, "proj-kt918-save", None, &["../secret.cjs"])
+            .await
+            .unwrap_err();
+        assert!(error.contains("relative to the repository"), "{error}");
+        let error =
+            create_script_workflow(&state, "proj-kt918-save", None, &["scripts/missing.cjs"])
+                .await
+                .unwrap_err();
+        assert!(error.contains("scripts/missing.cjs"), "{error}");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.cjs"),
+                home.path().join("scripts/leak.cjs"),
+            )
+            .unwrap();
+            let error =
+                create_script_workflow(&state, "proj-kt918-save", None, &["scripts/leak.cjs"])
+                    .await
+                    .unwrap_err();
+            assert!(error.contains("outside the repository"), "{error}");
+        }
+        let request: crate::models::CreateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({
+                "name": "no-project", "project_id": null, "trigger": {"type": "Manual"},
+                "exec_allowlist": ["node"],
+                "steps": [{"name": "s", "step_type": {"type": "Exec"}, "agent": "ClaudeCode",
+                    "prompt_template": "", "exec_command": "node",
+                    "exec_script_files": [{"path": "scripts/entry.cjs"}]}],
+            }))
+            .unwrap();
+        let response = crate::api::workflows::create_as(
+            state.clone(),
+            request,
+            crate::api::workflows::WorkflowWriter::Human,
+        )
+        .await
+        .0;
+        assert!(!response.success);
+        assert!(
+            response
+                .error
+                .unwrap_or_default()
+                .contains("need a project"),
+            "a script needs a carrying repository"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_step_editor_reads_each_file_state() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(home.path(), "lib/helper.cjs", "module.exports = 1;\n");
+        insert_project_at(&state, "proj-kt918-status", home.path()).await;
+        let workflow = create_script_workflow(
+            &state,
+            "proj-kt918-status",
+            None,
+            &["scripts/entry.cjs", "lib/helper.cjs"],
+        )
+        .await
+        .expect("saved");
+        write_file(home.path(), "lib/helper.cjs", "module.exports = 2;\n");
+        let mut files = workflow.steps[0].exec_script_files.clone();
+        files.push(crate::models::ExecScriptFile {
+            path: "scripts/new.cjs".into(),
+            sha256: String::new(),
+        });
+        let request = crate::models::ExecScriptStatusRequest {
+            project_id: Some("proj-kt918-status".into()),
+            files,
+        };
+        let response = crate::api::workflows::exec_script_status(
+            axum::extract::State(state.clone()),
+            axum::Json(request),
+        )
+        .await
+        .0;
+        let states: Vec<_> = response
+            .data
+            .unwrap()
+            .into_iter()
+            .map(|status| (status.path, status.state))
+            .collect();
+        use crate::models::ExecScriptFileState::*;
+        assert_eq!(
+            states,
+            vec![
+                ("scripts/entry.cjs".to_string(), Approved),
+                ("lib/helper.cjs".to_string(), Changed),
+                ("scripts/new.cjs".to_string(), Invalid),
+            ]
+        );
     }
 }
 

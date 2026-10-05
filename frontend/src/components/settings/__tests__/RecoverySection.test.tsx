@@ -79,6 +79,31 @@ describe('RecoverySection', () => {
     expect(toast).toHaveBeenCalledWith('settings.recovery.saved', 'success');
   });
 
+  it('replacing an existing passphrase requires and sends the current one', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ configured: true });
+    config.setRecovery.mockResolvedValue({ recovery_code: 'KRECOV1.new.code' });
+    render(<RecoverySection toast={toast} t={t} />);
+
+    const current = await screen.findByTestId('recovery-current');
+    fireEvent.change(screen.getByTestId('recovery-passphrase'), { target: { value: 'second-long-pass' } });
+    fireEvent.change(screen.getByTestId('recovery-confirm'), { target: { value: 'second-long-pass' } });
+    const save = screen.getByTestId('recovery-save') as HTMLButtonElement;
+    expect(save.disabled).toBe(true); // current passphrase missing
+
+    fireEvent.change(current, { target: { value: 'first-long-pass' } });
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+
+    await waitFor(() => expect(screen.getByTestId('recovery-code')).toBeTruthy());
+    expect(config.setRecovery).toHaveBeenCalledWith('second-long-pass', 'first-long-pass');
+  });
+
+  it('does not ask for a current passphrase on first set', async () => {
+    render(<RecoverySection toast={toast} t={t} />);
+    await screen.findByTestId('recovery-passphrase');
+    expect(screen.queryByTestId('recovery-current')).toBeNull();
+  });
+
   it('surfaces a backend error via toast and shows no code', async () => {
     config.setRecovery.mockRejectedValue(new Error('no active encryption key'));
     render(<RecoverySection toast={toast} t={t} />);

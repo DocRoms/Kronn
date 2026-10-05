@@ -41,6 +41,38 @@ const CODE_PREFIX: &str = "KRECOV1";
 pub struct RecoveryBlob {
     pub salt: [u8; SALT_LEN],
     pub wrapped: String,
+    /// `crypto::key_fingerprint_hex` of the wrapped key, in clear, so the boot
+    /// can tell whether this blob recovers the key in use without the
+    /// passphrase. `None` for blobs written before 0.14.3 (unverified).
+    pub fingerprint: Option<String>,
+}
+
+/// How the local `recovery.key` relates to a given key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryMatch {
+    Absent,
+    /// Present but not parseable.
+    Unreadable,
+    /// An older blob without a fingerprint: it may or may not wrap the key.
+    Unverified,
+    Matches,
+    /// Wraps another key: it cannot restore this one.
+    OtherKey,
+}
+
+/// Whether `recovery.key` in `dir` is known to recover `key_hex`.
+pub fn matches_key(dir: &Path, key_hex: &str) -> RecoveryMatch {
+    if !is_configured(dir) {
+        return RecoveryMatch::Absent;
+    }
+    let Some(blob) = load_blob(dir) else {
+        return RecoveryMatch::Unreadable;
+    };
+    match (blob.fingerprint, crypto::key_fingerprint_hex(key_hex)) {
+        (None, _) => RecoveryMatch::Unverified,
+        (Some(fp), Ok(active)) if fp == active => RecoveryMatch::Matches,
+        _ => RecoveryMatch::OtherKey,
+    }
 }
 
 /// Argon2id with PINNED params (not `Argon2::default()`, whose defaults could
@@ -77,6 +109,7 @@ pub fn wrap_key(key_hex: &str, passphrase: &str) -> Result<RecoveryBlob, String>
     Ok(RecoveryBlob {
         salt,
         wrapped: wrapped?,
+        fingerprint: Some(crypto::key_fingerprint_hex(key_hex)?),
     })
 }
 
@@ -97,13 +130,17 @@ pub fn unwrap_key(blob: &RecoveryBlob, passphrase: &str) -> Result<String, Strin
 /// off-machine. Safe to expose — useless without the passphrase.
 pub fn to_code(blob: &RecoveryBlob) -> String {
     // `wrapped` is standard base64 (no '.'), so '.' is an unambiguous delimiter.
-    format!("{}.{}.{}", CODE_PREFIX, B64.encode(blob.salt), blob.wrapped)
+    let base = format!("{}.{}.{}", CODE_PREFIX, B64.encode(blob.salt), blob.wrapped);
+    match &blob.fingerprint {
+        Some(fp) => format!("{base}.{fp}"),
+        None => base,
+    }
 }
 
 /// Parse a recovery code back into a blob.
 pub fn from_code(code: &str) -> Result<RecoveryBlob, String> {
     let parts: Vec<&str> = code.trim().split('.').collect();
-    if parts.len() != 3 || parts[0] != CODE_PREFIX {
+    if !(parts.len() == 3 || parts.len() == 4) || parts[0] != CODE_PREFIX {
         return Err("Invalid recovery code format".into());
     }
     let salt_bytes = B64
@@ -120,20 +157,71 @@ pub fn from_code(code: &str) -> Result<RecoveryBlob, String> {
     }
     let mut salt = [0u8; SALT_LEN];
     salt.copy_from_slice(&salt_bytes);
+    let fingerprint = match parts.get(3) {
+        Some(fp) if fp.len() == 16 && fp.chars().all(|c| c.is_ascii_hexdigit()) => {
+            Some(fp.to_string())
+        }
+        Some(_) => return Err("Invalid recovery code fingerprint".into()),
+        None => None,
+    };
     Ok(RecoveryBlob {
         salt,
         wrapped: parts[2].to_string(),
+        fingerprint,
     })
 }
 
 /// Persist the recovery code to the `0600` sidecar in `dir` (atomic temp+rename
 /// in the same dir, mirroring `keyvault::SidecarFile`).
 pub fn save_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<()> {
+    save_blob_as(dir, RECOVERY_FILENAME, blob)
+}
+
+/// Like [`save_blob`] under another file name (imported blobs never replace
+/// this machine's `recovery.key`).
+pub fn save_blob_as(dir: &Path, filename: &str, blob: &RecoveryBlob) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(RECOVERY_FILENAME);
-    let tmp = dir.join(format!(".{}.tmp", RECOVERY_FILENAME));
+    let path = dir.join(filename);
+    let tmp = dir.join(format!(".{filename}.tmp"));
     crate::core::keyvault::write_private_temp(&tmp, to_code(blob).as_bytes())?;
     std::fs::rename(&tmp, &path)
+}
+
+/// File-name prefix of blobs carried by imported backups (another machine's key).
+pub const IMPORTED_PREFIX: &str = "recovery.imported-";
+
+/// Store an imported blob under a new timestamped name; never replaces
+/// `recovery.key` nor an earlier import. Returns the file name.
+pub fn save_imported_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<String> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
+    let mut name = format!("{IMPORTED_PREFIX}{stamp}.key");
+    let mut n = 1;
+    while dir.join(&name).exists() {
+        name = format!("{IMPORTED_PREFIX}{stamp}-{n}.key");
+        n += 1;
+    }
+    save_blob_as(dir, &name, blob)?;
+    Ok(name)
+}
+
+/// Imported blobs, newest first.
+pub fn imported_blobs(dir: &Path) -> Vec<RecoveryBlob> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(IMPORTED_PREFIX) && n.ends_with(".key"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.reverse();
+    names
+        .into_iter()
+        .filter_map(|n| std::fs::read_to_string(dir.join(n)).ok())
+        .filter_map(|code| from_code(&code).ok())
+        .collect()
 }
 
 /// Load the recovery blob from the sidecar, or `None` if absent/unreadable.
@@ -230,6 +318,29 @@ mod tests {
     }
 
     #[test]
+    fn the_fingerprint_tells_which_key_a_blob_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = a_key();
+        assert_eq!(matches_key(dir.path(), &key), RecoveryMatch::Absent);
+        let blob = wrap_key(&key, "pp").unwrap();
+        save_blob(dir.path(), &blob).unwrap();
+        assert_eq!(matches_key(dir.path(), &key), RecoveryMatch::Matches);
+        assert_eq!(matches_key(dir.path(), &a_key()), RecoveryMatch::OtherKey);
+        // Round trip keeps the fingerprint; a pre-0.14.3 code has none.
+        assert_eq!(from_code(&to_code(&blob)).unwrap(), blob);
+        let old = RecoveryBlob {
+            fingerprint: None,
+            ..blob
+        };
+        assert_eq!(to_code(&old).split('.').count(), 3);
+        save_blob(dir.path(), &old).unwrap();
+        assert_eq!(matches_key(dir.path(), &key), RecoveryMatch::Unverified);
+        std::fs::write(dir.path().join(RECOVERY_FILENAME), "garbage").unwrap();
+        assert_eq!(matches_key(dir.path(), &key), RecoveryMatch::Unreadable);
+        assert!(from_code("KRECOV1.AAAAAAAAAAAAAAAAAAAAAA==.x.nothex").is_err());
+    }
+
+    #[test]
     fn wrong_salt_is_rejected() {
         // A blob whose salt was swapped derives a different KEK → unwrap fails.
         let key = a_key();
@@ -238,6 +349,7 @@ mod tests {
         let frankenstein = RecoveryBlob {
             salt: other.salt,
             wrapped: good.wrapped,
+            fingerprint: None,
         };
         assert!(unwrap_key(&frankenstein, "pp").is_err());
     }

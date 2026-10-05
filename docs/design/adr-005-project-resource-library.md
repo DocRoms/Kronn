@@ -179,6 +179,26 @@ artifacts directory before execution, never read from the target worktree;
 the profile (KT-920) is the target project's, read from its base branch, not
 from the run's worktree a pull request can modify.
 
+**Implementation note (KT-918, 0.14.3).** An Exec step lists its entry
+script and the modules it loads in `exec_script_files` (`{path, sha256}`,
+relative to the home project's checkout). The hashes live in the step, so
+they enter the workflow's approval hash and a published file carries them as
+references, never the content. Saving validates each path (relative, inside
+the repository, no symlink leading out, regular file under 4 MiB) and pins an
+empty hash to the current content when a human saves; an agent's save (bridge
+token or Kronn agent tool) leaves it empty, and the step refuses to run. Before each execution the runner reads the
+home project's checkout (the stored definition's `project_id`, not the run's
+project), checks every hash, and writes the verified bytes to
+`{{run.artifacts_dir}}/approved-scripts/<step>/`; a mismatch fails the step
+before anything runs, naming the file. The main command runs with that copy
+as its working directory and receives `KRONN_WORKTREE` (the run's checkout)
+and `KRONN_APPROVED_SCRIPTS_DIR` through the child environment builder.
+Paths built from the cwd resolve in the copy; absolute imports, paths built
+from `KRONN_WORKTREE` and interpreter search paths outside the copy (Node's
+parent `node_modules`, Python's site-packages) are not covered
+[src: file: backend/src/core/approved_scripts.rs:1]
+[src: file: backend/src/workflows/exec_step.rs:102].
+
 ### Other resources
 
 QA, artifacts, directives and profiles live in `kronn/` with the same identity,
