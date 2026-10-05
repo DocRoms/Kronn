@@ -2859,6 +2859,10 @@ pub struct AgentStartConfig<'a> {
     /// Working directory for the agent. If `None`, defaults to `project_path`.
     pub work_dir: Option<&'a str>,
     pub read_only_repos: &'a [String],
+    /// Plain directories made readable, never writable, under the same policy
+    /// as `read_only_repos` but without a Git checkout (KT-910: the run's
+    /// artifacts directory). Kronn-owned paths only, never user input.
+    pub read_only_dirs: &'a [String],
     pub prompt: &'a str,
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
@@ -3026,6 +3030,7 @@ impl<'a> AgentStartConfig<'a> {
             tokens,
             work_dir: None,
             read_only_repos: &[],
+            read_only_dirs: &[],
             full_access: false,
             skill_ids: &[],
             repository_skills: &[],
@@ -3512,19 +3517,22 @@ pub fn task_worker_route_policy(
 
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
-    if config.task_worker_context.is_some() && !config.read_only_repos.is_empty() {
+    let has_read_only_paths =
+        !config.read_only_repos.is_empty() || !config.read_only_dirs.is_empty();
+    if config.task_worker_context.is_some() && has_read_only_paths {
         return Err(
             "read_only_repos is a workflow Agent policy, not a task-worker override".into(),
         );
     }
-    let read_only_repos = if config.read_only_repos.is_empty() {
+    let read_only_repos = if !has_read_only_paths {
         None
     } else {
         let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
-        super::read_only_repos::ReadOnlyRepos::resolve(
+        super::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
             config.agent_type,
             &work_dir,
             config.read_only_repos,
+            config.read_only_dirs,
         )?
     };
     super::generation_settings::validate(

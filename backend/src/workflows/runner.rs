@@ -640,6 +640,18 @@ async fn execute_run_with_notify_policy(
         notify_security_policy,
     )
     .await;
+    // KT-910 — the artifacts directory goes with the run once it can no
+    // longer execute; a paused or interrupted run keeps it.
+    if !matches!(
+        run.status,
+        RunStatus::Pending
+            | RunStatus::Running
+            | RunStatus::WaitingApproval
+            | RunStatus::Interrupted
+    ) || (result.is_err() && run.status != RunStatus::WaitingApproval)
+    {
+        super::run_artifacts::remove(&run.id);
+    }
     // An error settles the run as failed: its worktree goes now, not at the
     // next boot. An inherited worktree belongs to the parent run.
     if result.is_err() && !is_inherited_workspace && run.status != RunStatus::WaitingApproval {
@@ -1242,6 +1254,14 @@ async fn execute_run_body(
     }
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set("run.id", run.id.clone());
+    // KT-910 — Exec steps write here, Agent steps that name it read it.
+    match super::run_artifacts::ensure(&run.id) {
+        Ok(dir) => ctx.set("run.artifacts_dir", dir.to_string_lossy().to_string()),
+        Err(error) => tracing::warn!(
+            run_id = %run.id,
+            "run artifacts directory unavailable: {error}"
+        ),
+    }
     // KT-917 — `{{ref:<kind>:<slug>}}` resolves in this run's project; an
     // unresolved one stays unknown so strict rendering fails its step.
     let refs_workflow = workflow.clone();
@@ -7295,6 +7315,85 @@ mod tests {
         let output = &run.step_results.last().unwrap().output;
         assert!(output.contains("ref:workflow:no-such-workflow"), "{output}");
         assert!(!marker.exists(), "the command must not have been launched");
+    }
+
+    // ─── KT-910 — the run's artifacts directory ──────────────────────────
+
+    #[tokio::test]
+    async fn an_exec_step_writes_an_image_the_next_steps_find_and_the_run_end_removes() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-artifacts", repo.path()).await;
+        let image = repo.path().join("capture.png");
+        std::fs::write(&image, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+        let image_arg = image.to_string_lossy().to_string();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-artifacts".into();
+        workflow.project_id = Some("proj-artifacts".into());
+        workflow.exec_allowlist = vec!["cp".into(), "ls".into()];
+        workflow.steps = vec![
+            exec_step(
+                "capture",
+                "cp",
+                &[image_arg.as_str(), "{{run.artifacts_dir}}/S1.png"],
+            ),
+            exec_step("list", "ls", &["{{run.artifacts_dir}}"]),
+        ];
+        let mut run = pending_run("run-artifacts-1", &workflow.id);
+        run.project_id = Some("proj-artifacts".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+        let dir = super::super::run_artifacts::dir_for(&run.id).unwrap();
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(
+            run.step_results[1].output.contains("S1.png"),
+            "{:?}",
+            run.step_results
+        );
+        assert!(!dir.exists(), "the directory goes with the ended run");
+        assert!(!image.starts_with(&dir));
+    }
+
+    #[test]
+    fn only_a_claude_or_codex_step_naming_the_directory_reads_it() {
+        let mut ctx = TemplateContext::new();
+        ctx.set("run.artifacts_dir", "/data/run-artifacts/run-1");
+        let mut step = fake_step("constat");
+        step.agent = AgentType::ClaudeCode;
+        let prompt = "Look at /data/run-artifacts/run-1/S1.png";
+        assert_eq!(
+            crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, prompt),
+            vec!["/data/run-artifacts/run-1".to_string()]
+        );
+        assert!(
+            crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, "No files.").is_empty()
+        );
+        step.agent = AgentType::GeminiCli;
+        assert!(crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, prompt).is_empty());
+        step.agent = AgentType::Codex;
+        assert_eq!(
+            crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, prompt).len(),
+            1
+        );
+        assert!(crate::workflows::steps::artifacts_read_only_dirs(
+            &step,
+            &TemplateContext::new(),
+            prompt
+        )
+        .is_empty());
     }
 
     // ─── KT-851 — one workflow, several projects ─────────────────────────

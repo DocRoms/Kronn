@@ -83,6 +83,29 @@ pub(crate) fn step_model_override(
         })
 }
 
+/// KT-910 — the run's artifacts directory, granted read-only to a Claude Code
+/// or Codex step whose prompt names it. Other agents get no grant: their
+/// launch has no read-only policy to carry it.
+pub(crate) fn artifacts_read_only_dirs(
+    step: &WorkflowStep,
+    ctx: &TemplateContext,
+    prompt: &str,
+) -> Vec<String> {
+    match ctx.get("run.artifacts_dir") {
+        Some(dir)
+            if !dir.is_empty()
+                && prompt.contains(dir)
+                && matches!(
+                    step.agent,
+                    crate::models::AgentType::ClaudeCode | crate::models::AgentType::Codex
+                ) =>
+        {
+            vec![dir.to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Build the full agent-ready prompt for a step: template render +
 /// output-format addendum + triage addendum.
 /// Does NOT append the signal-protocol instructions — those depend on
@@ -232,6 +255,7 @@ pub async fn execute_step(
     {
         return outcome;
     }
+    let artifact_dirs = artifacts_read_only_dirs(step, ctx, &prompt);
 
     // Auto-inject on_result signal instructions into the prompt
     let valid_rules: Vec<_> = step
@@ -398,6 +422,7 @@ pub async fn execute_step(
             project_path,
             work_dir,
             &prompt,
+            &artifact_dirs,
             tokens_config,
             full_access,
             model_tiers,
@@ -502,6 +527,7 @@ pub async fn execute_step(
                             project_path,
                             work_dir,
                             &repair_prompt,
+                            &artifact_dirs,
                             tokens_config,
                             full_access,
                             model_tiers,
@@ -611,6 +637,7 @@ pub async fn execute_step(
                                 project_path,
                                 work_dir,
                                 &prompt,
+                                &artifact_dirs,
                                 tokens_config,
                                 full_access,
                                 model_tiers,
@@ -1116,6 +1143,7 @@ async fn run_agent_with_timeout(
     project_path: &str,
     work_dir: &str,
     prompt: &str,
+    read_only_dirs: &[String],
     tokens_config: &TokensConfig,
     full_access: bool,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
@@ -1160,6 +1188,7 @@ async fn run_agent_with_timeout(
             activity: activity.cloned(),
             work_dir: Some(work_dir),
             read_only_repos: &step.read_only_repos,
+            read_only_dirs,
             full_access,
             skill_ids: &step.skill_ids,
             directive_ids: &step.directive_ids,
@@ -1751,6 +1780,7 @@ async fn run_multi_agent_debate(
             project_path,
             work_dir,
             &rprompt,
+            &[],
             tokens_config,
             full_access,
             model_tiers,
@@ -1823,6 +1853,7 @@ async fn run_multi_agent_debate(
             project_path,
             work_dir,
             &aprompt,
+            &[],
             tokens_config,
             full_access,
             model_tiers,

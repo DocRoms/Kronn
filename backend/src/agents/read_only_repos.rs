@@ -9,12 +9,24 @@ pub(crate) struct ReadOnlyRepos {
 }
 
 impl ReadOnlyRepos {
+    #[cfg(test)]
     pub(crate) fn resolve(
         agent: &AgentType,
         work_dir: &Path,
         declared: &[String],
     ) -> Result<Option<Self>, String> {
-        if declared.is_empty() {
+        Self::resolve_with_dirs(agent, work_dir, declared, &[])
+    }
+
+    /// `declared` Git checkouts plus plain `dirs` (no Git metadata, e.g. the
+    /// run's artifacts directory), all read-only under one policy.
+    pub(crate) fn resolve_with_dirs(
+        agent: &AgentType,
+        work_dir: &Path,
+        declared: &[String],
+        dirs: &[String],
+    ) -> Result<Option<Self>, String> {
+        if declared.is_empty() && dirs.is_empty() {
             return Ok(None);
         }
         if !matches!(agent, AgentType::ClaudeCode | AgentType::Codex) {
@@ -25,6 +37,23 @@ impl ReadOnlyRepos {
         }
         let work_dir = canonical_directory(work_dir)?;
         let mut roots = Vec::new();
+        for location in dirs {
+            let path = Path::new(location);
+            if !path.is_absolute() {
+                return Err(format!(
+                    "read-only directory must be absolute: {location:?}"
+                ));
+            }
+            let root = canonical_directory(path)?;
+            if work_dir.starts_with(&root) || root.starts_with(&work_dir) {
+                return Err(format!(
+                    "read-only directory {} overlaps the writable working directory {}",
+                    root.display(),
+                    work_dir.display()
+                ));
+            }
+            push_unique(&mut roots, root);
+        }
         for location in declared {
             let path = crate::core::scanner::resolve_host_path(location);
             if !path.is_absolute() || location.trim().is_empty() {
@@ -408,5 +437,66 @@ mod tests {
         assert!(policy
             .roots
             .contains(&repo.join(".git").canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn a_plain_directory_is_readable_and_never_writable() {
+        let (temp, work, _repo) = fixture();
+        let artifacts = temp.path().join("run artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        std::fs::write(artifacts.join("shot.png"), [0x89, b'P', b'N', b'G']).unwrap();
+        let artifacts = artifacts.canonicalize().unwrap();
+        let dirs = [artifacts.display().to_string()];
+        let policy = ReadOnlyRepos::resolve_with_dirs(&AgentType::ClaudeCode, &work, &[], &dirs)
+            .unwrap()
+            .expect("a directory alone needs the policy");
+        let args = policy.args(&AgentType::ClaudeCode, &work);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == artifacts.to_str().unwrap()));
+        let settings: serde_json::Value =
+            serde_json::from_str(&args[args.iter().position(|a| a == "--settings").unwrap() + 1])
+                .unwrap();
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!([format!("Edit(/{}/**)", artifacts.display())])
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyWrite"],
+            serde_json::json!([artifacts])
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["allowWrite"],
+            serde_json::json!([work])
+        );
+        let codex = policy.args(&AgentType::Codex, &work).join(" ");
+        assert!(
+            codex.contains(&format!(
+                "{}=\"read\"",
+                serde_json::to_string(&artifacts).unwrap()
+            )),
+            "{codex}"
+        );
+        assert!(
+            !codex.contains("--add-dir"),
+            "--add-dir is a write grant in Codex"
+        );
+
+        for bad in [
+            "relative/dir".to_string(),
+            work.display().to_string(),
+            temp.path().display().to_string(),
+        ] {
+            assert!(
+                ReadOnlyRepos::resolve_with_dirs(
+                    &AgentType::ClaudeCode,
+                    &work,
+                    &[],
+                    std::slice::from_ref(&bad)
+                )
+                .is_err(),
+                "{bad}"
+            );
+        }
     }
 }

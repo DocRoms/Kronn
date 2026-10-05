@@ -527,6 +527,14 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // KT-910 — artifacts directories of runs that ended or no longer exist.
+    let swept =
+        kronn::workflows::run_artifacts::sweep(&state.db, interrupted_ttl_days, chrono::Utc::now())
+            .await;
+    if swept > 0 {
+        tracing::info!(swept, "Run artifacts directories removed");
+    }
+
     // Checkouts deleted without git (or nested inside a removed run worktree)
     // leave admin entries that slow every `git worktree` call.
     let pruned = kronn::workflows::workspace::prune_orphan_worktrees(&state.db).await;
