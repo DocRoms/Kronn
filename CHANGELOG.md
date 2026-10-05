@@ -263,9 +263,27 @@ Release notes for 0.9.3 and earlier are available in the
   machine's recovery data beside this machine's, and Plugins → "Re-encrypt
   imported secrets" re-encrypts the imported secrets under this machine's key
   (KT-1007).
-- Reset keeps a copy of the key that `config.toml` still has to hold and now
-  also clears execution-variable snapshots, stored credentials and GitHub
-  tokens (KT-1007).
+- Reset keeps a copy of the key that `config.toml` still has to hold, keeps
+  the API token so a network-exposed instance stays authenticated, clears
+  execution-variable snapshots, provider keys and GitHub tokens, and reports
+  a failure instead of answering success (KT-1007).
+- Re-importing this machine's own backup no longer deletes the stored GitHub
+  tokens of its projects, and an import runs in one transaction: a failing
+  project or MCP insert leaves the previous data in place (KT-1007).
+- While the encryption key is locked, no provider key, connection key or API
+  token is ever written to `config.toml` in clear: such changes are refused,
+  key auto-discovery waits, and an operator's `KRONN_AUTH_TOKEN` serves the
+  session only (KT-1007).
+- The same key written in upper and lower case is one key (it used to stop
+  the start-up as "several keys"), a damaged key value no longer crashes the
+  start-up, and an older `config.toml.backup` is kept under a timestamped
+  name instead of being overwritten (KT-1007).
+- The locked screen tells a remote visitor to open Kronn on its machine,
+  restores a lost key, or sets a new API token when only the stored token is
+  unreadable (even with strict localhost); Settings → Recovery restores a
+  locked key and warns when `recovery.key` protects another key or a key
+  store holds another key, and a banner appears when secrets are locked
+  (KT-1007).
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them
   what they need across the boundary: every variable it sets for the launch is
   listed in `WSLENV` (appended to the user's own list), and the Windows paths

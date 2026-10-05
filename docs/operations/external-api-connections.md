@@ -115,7 +115,7 @@ encrypted with the instance key in the `stored_credentials` table since 0.14.3
 (KT-1007): `config::save` stores them there, reads them back, and writes
 `config.toml` without them. `#[ts(skip)]` only keeps the value out of the
 generated TypeScript model. See [key-management.md](key-management.md).
-[src: file: backend/src/core/credential_store.rs:245-283]
+[src: file: backend/src/core/credential_store.rs:295-349]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry and

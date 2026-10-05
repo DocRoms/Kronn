@@ -241,7 +241,9 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
    whose fingerprint matches); a different legacy key is kept. `mirror()`
    never writes a vault holding another key; two keys that each decrypt data
-   stop the boot (resolved by `KRONN_REENCRYPT_FROM`). A locked boot keeps no
+   stop the boot (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
+   Keys compare in one canonical spelling; the env variable is not counted as
+   a persisted copy; recovery blobs carry a checksummed fingerprint. A locked boot keeps no
    key in memory (fail closed); a stored auth token it cannot read locks the
    API (423 `auth_locked`, recovery screen).
 4. **Done.** `tokens.keys[]` and `server.auth_token` live in
