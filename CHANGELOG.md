@@ -213,6 +213,10 @@ Release notes for 0.9.3 and earlier are available in the
   placeholder or a `TODO:` marker, the final review skips the `TEMPLATE.md`
   gabarits like the document gate does, and no root redirector is written
   toward a missing `docs/AGENTS.md`.
+  The 800-word budget of the documentation skeleton now counts raw words, HTML
+  comments included, because that is what the agent reads; the skeleton went
+  from 892 raw words to under 800 by dropping comments that repeated visible
+  guidance (KT-934).
 
 
 
