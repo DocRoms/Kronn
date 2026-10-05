@@ -8,7 +8,10 @@
 use crate::models::{UnsafeExecStep, WorkflowStep};
 
 /// Shells whose `-c` argument is a script.
-const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "fish", "ksh", "ash"];
+const SHELLS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "fish", "ksh", "ash", "mksh", "yash", "csh", "tcsh", "xonsh",
+    "nu", "elvish",
+];
 
 /// Inline-code options of an interpreter: the short option letters (also
 /// valid inside a cluster such as `-ec`, or with the code attached, as in
@@ -18,6 +21,10 @@ struct InlineCodeOptions {
     long: &'static [&'static str],
     /// PowerShell takes single-dash long names, abbreviated, any case.
     case_insensitive: bool,
+    /// The code may be glued to its option (`python -cCODE`). Shells never
+    /// glue `-c`: in `bash -cx`, `x` is another flag and the script is the
+    /// next operand.
+    glued: bool,
 }
 
 /// The normalised program name (path, case, `.exe` and version suffix
@@ -43,24 +50,27 @@ fn is_node(cmd: &str) -> bool {
 
 fn inline_code_options(cmd: &str) -> Option<InlineCodeOptions> {
     let lower = base_name(cmd);
-    let (letters, long, case_insensitive): (&[char], &[&str], bool) =
-        if is_shell(cmd) || is_python(cmd) {
-            (&['c'], &["--command"], false)
-        } else if matches!(lower.as_str(), "node" | "nodejs" | "bun" | "deno") {
-            (&['e', 'p'], &["--eval", "--print"], false)
-        } else if matches!(lower.as_str(), "ruby" | "perl") {
-            (&['e', 'E'], &[], false)
-        } else if lower == "php" {
-            (&['r'], &[], false)
-        } else if matches!(lower.as_str(), "pwsh" | "powershell") {
-            (&['c', 'e'], &[], true)
-        } else {
-            return None;
-        };
+    let (letters, long, case_insensitive, glued): (&[char], &[&str], bool, bool) = if is_shell(cmd)
+    {
+        (&['c'], &["--command"], false, false)
+    } else if is_python(cmd) {
+        (&['c'], &["--command"], false, true)
+    } else if matches!(lower.as_str(), "node" | "nodejs" | "bun" | "deno") {
+        (&['e', 'p'], &["--eval", "--print"], false, true)
+    } else if matches!(lower.as_str(), "ruby" | "perl") {
+        (&['e', 'E'], &[], false, true)
+    } else if lower == "php" {
+        (&['r'], &[], false, true)
+    } else if matches!(lower.as_str(), "pwsh" | "powershell") {
+        (&['c', 'e'], &[], true, false)
+    } else {
+        return None;
+    };
     Some(InlineCodeOptions {
         letters,
         long,
         case_insensitive,
+        glued,
     })
 }
 
@@ -97,10 +107,7 @@ pub fn inline_code_args(cmd: &str, args: &[String]) -> Vec<InlineCode> {
             });
             match hit {
                 // PowerShell names are words (`-Command`), never attached code.
-                Some((at, c)) => (
-                    true,
-                    !options.case_insensitive && at + c.len_utf8() < cluster.len(),
-                ),
+                Some((at, c)) => (true, options.glued && at + c.len_utf8() < cluster.len()),
                 None => (false, false),
             }
         } else {
@@ -193,7 +200,8 @@ pub fn safe_recipe(path: &str) -> String {
          comme du code ni comme une option : `exec_args=[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{{{{path}}}}}\"]` \
          pour un shell, `[\"-c\", \"import sys; print(sys.argv[1])\", \"{{{{{path}}}}}\"]` pour Python, \
          `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{{{{path}}}}}\"]` pour Node (le `--` est \
-         obligatoire, comme pour perl, ruby et php), ou via `exec_stdin`"
+         obligatoire, comme pour perl, ruby et php), ou via `exec_stdin` à un programme qui lit \
+         stdin comme des données (jamais un shell ou un interpréteur sans script ni code inline)"
     )
 }
 
@@ -290,6 +298,32 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                 step.exec_setup_command.as_deref(),
                 &step.exec_setup_args,
             );
+            let command = step
+                .exec_command
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default();
+            if let Some(stdin) = step.exec_stdin.as_deref() {
+                if let Some(placeholder) = stdin_finding(command, &step.exec_args, stdin) {
+                    found.push(UnsafeExecStep {
+                        step_name: step.name.clone(),
+                        on_failure,
+                        phase: "stdin".to_string(),
+                        source_alias: None,
+                        command: command.to_string(),
+                        args: stdin_line(&step.exec_args, stdin),
+                        placeholder,
+                        reason: "stdin_program".into(),
+                        suggested_args: None,
+                        manual_fix: Some(
+                            "correction manuelle requise : le programme lit son code sur stdin ; \
+                             donne-lui un script ou du code inline sans valeur, et passe la \
+                             valeur en argument séparé"
+                                .into(),
+                        ),
+                    });
+                }
+            }
         }
         crate::models::StepType::CollectApiData => {
             for source in step
@@ -312,6 +346,42 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
     found
 }
 
+/// Save-time refusal of an `exec_stdin` that the program would run as code.
+pub fn stdin_validation_error(
+    step: &str,
+    cmd: &str,
+    args: &[String],
+    stdin: &str,
+) -> Option<String> {
+    let path = stdin_finding(cmd, args, stdin)?;
+    Some(format!(
+        "Step Exec « {step} » : `{cmd}` lit son programme sur stdin, et `exec_stdin` y place \
+         `{path}` — la valeur serait exécutée. Donne le code au programme (script ou code inline \
+         sans valeur) et passe la valeur en argument séparé, ou fais lire stdin par un code qui \
+         la traite comme des données (`[\"-c\", \"import sys; print(sys.stdin.read())\"]`)."
+    ))
+}
+
+/// The first untrusted placeholder of `stdin` when `cmd args` runs stdin.
+fn stdin_finding(cmd: &str, args: &[String], stdin: &str) -> Option<String> {
+    let finding = untrusted_in(stdin)?;
+    if !reads_program_from_stdin(cmd, args) {
+        return None;
+    }
+    Some(match finding {
+        Some(path) => format!("{{{{{path}}}}}"),
+        None => "un placeholder mal formé".to_string(),
+    })
+}
+
+/// The identity of a stdin line for the unchanged-line exception: the
+/// program's arguments followed by the stdin template.
+pub fn stdin_line(args: &[String], stdin: &str) -> Vec<String> {
+    let mut line = args.to_vec();
+    line.push(stdin.to_string());
+    line
+}
+
 /// Every unsafe command line of a workflow, main chain then rollback chain.
 pub fn classify_workflow(
     steps: &[WorkflowStep],
@@ -332,14 +402,14 @@ pub fn runtime_refusal(step: &WorkflowStep) -> Option<String> {
     } else {
         format!("`{}`", finding.placeholder)
     };
-    let phase = if finding.phase == "setup" {
-        " (setup)"
-    } else {
-        ""
+    let phase = match finding.phase.as_str() {
+        "setup" => " (setup)",
+        "stdin" => " (stdin)",
+        _ => "",
     };
     Some(format!(
-        "Exec step `{}`{phase} refusé avant exécution : `{}` reçoit {what} dans son code inline ou \
-         là où il lit encore ses options, qu'une valeur hostile (titre de ticket, sortie d'étape) \
+        "Exec step `{}`{phase} refusé avant exécution : `{}` reçoit {what} dans son code (inline ou \
+         stdin) ou là où il lit encore ses options, qu'une valeur hostile (titre de ticket, sortie d'étape) \
          pourrait faire exécuter. \
          Ouvre le workflow et applique la correction proposée (« Proposer une correction »), \
          ou {}.",
@@ -435,7 +505,7 @@ fn code_option(options: &InlineCodeOptions, arg: &str) -> Option<bool> {
         options.letters.contains(c)
             || (options.case_insensitive && options.letters.contains(&c.to_ascii_lowercase()))
     })?;
-    Some(!options.case_insensitive && at + c.len_utf8() < cluster.len())
+    Some(options.glued && at + c.len_utf8() < cluster.len())
 }
 
 /// Where an interpreter's arguments become plain data (`args.len()` when
@@ -497,6 +567,128 @@ fn interpreter_data_start(cmd: &str, args: &[String], tainted: &[bool]) -> Optio
         }
     }
     Some(args.len())
+}
+
+/// Whether `cmd args` reads its program text from stdin, so `exec_stdin`
+/// would be code: a shell or interpreter with neither inline code nor a
+/// script operand (or with the script `-`), a SQL client without a query
+/// option, `make -f -`, a remote shell without a command, and so on.
+/// Wrappers are followed to the program they launch.
+pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
+    if let Some((inner, inner_args)) = crate::core::argv_roles::launched_program(cmd, args) {
+        return reads_program_from_stdin(&inner, &inner_args);
+    }
+    let name = base_name(cmd);
+    let has = |options: &[&str]| {
+        args.iter().any(|arg| {
+            options
+                .iter()
+                .any(|option| arg == option || arg.starts_with(&format!("{option}=")))
+        })
+    };
+    let operands: Vec<&String> = args
+        .iter()
+        .filter(|arg| !arg.starts_with('-') || *arg == "-")
+        .collect();
+    if let Some(parsing) = option_parsing(cmd) {
+        if parsing == OptionParsing::Never {
+            // PowerShell reads stdin unless `-File <script>` names a file.
+            let names_code = args.iter().any(|arg| {
+                let lower = arg.to_ascii_lowercase();
+                matches!(lower.as_str(), "-c" | "-e" | "-ec")
+                    || lower.starts_with("-com")
+                    || lower.starts_with("-enc")
+            });
+            return !names_code
+                && !args.windows(2).any(|pair| {
+                    matches!(pair[0].to_ascii_lowercase().as_str(), "-file" | "-f")
+                        && pair[1] != "-"
+                });
+        }
+        let start = interpreter_data_start(cmd, args, &[]).unwrap_or(args.len());
+        if inline_code_args(cmd, args)
+            .iter()
+            .any(|code| code.index < start)
+        {
+            return false;
+        }
+        // `sh -s`: commands come from stdin whatever operands follow.
+        let shell_reads_stdin = is_shell(cmd)
+            && args
+                .iter()
+                .take_while(|arg| *arg != "--")
+                .any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('s'));
+        return shell_reads_stdin
+            || interpreter_script(cmd, args).is_none_or(|script| script == "-");
+    }
+    match name.as_str() {
+        "lua" | "luajit" | "tclsh" | "wish" | "osascript" | "rscript" => {
+            !has(&["-e"]) && operands.first().is_none_or(|first| first.as_str() == "-")
+        }
+        "r" => !has(&["-e", "-f", "--file"]),
+        "sqlite" => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1 && !has(&["-cmd"]),
+        "mysql" | "mariadb" => !args.iter().any(|arg| {
+            arg == "--execute"
+                || arg.starts_with("--execute=")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('e'))
+        }),
+        "psql" => !has(&["-c", "--command", "-f", "--file"]),
+        "make" | "gmake" | "bmake" => {
+            args.windows(2).any(|pair| {
+                matches!(pair[0].as_str(), "-f" | "--file" | "--makefile") && pair[1] == "-"
+            }) || args
+                .iter()
+                .any(|arg| arg == "--file=-" || arg == "--makefile=-")
+        }
+        "gdb" | "ssh" => true,
+        "docker" | "podman" => args.iter().any(|arg| {
+            arg == "-i"
+                || arg == "--interactive"
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('i'))
+        }),
+        _ => crate::core::argv_roles::is_unmodelled_evaluator(&name),
+    }
+}
+
+/// The script operand of an interpreter (file, `-` for stdin, or the
+/// module of `python -m`), if any.
+fn interpreter_script<'a>(cmd: &str, args: &'a [String]) -> Option<&'a str> {
+    let parsing = option_parsing(cmd)?;
+    let options = inline_code_options(cmd)?;
+    let values = value_options(cmd);
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            return args.get(i + 1).map(String::as_str);
+        }
+        if arg.len() > 1 && arg.starts_with('-') {
+            if code_option(&options, arg).is_some() {
+                return None;
+            }
+            if values.contains(&arg) {
+                if is_python(cmd) && arg == "-m" {
+                    return args.get(i + 1).map(String::as_str);
+                }
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        match parsing {
+            OptionParsing::StopsAtDashDashOrScript(extensions)
+                if arg != "-"
+                    && !extensions
+                        .iter()
+                        .any(|ext| arg.to_ascii_lowercase().ends_with(ext)) =>
+            {
+                i += 1;
+            }
+            _ => return Some(arg),
+        }
+    }
+    None
 }
 
 /// Roles of an interpreter's arguments: program text (the inline code and
@@ -562,6 +754,7 @@ pub fn rendered_refusal(
     let option_like = (0..rendered.len()).find(|&i| {
         tainted.get(i).copied().unwrap_or(false)
             && saved.get(i) == Some(&Role::RuntimeOption)
+            && !templates[i].starts_with('-')
             && rendered[i].starts_with('-')
     });
     let index = first_tainted_option_position(cmd, rendered, &tainted)
@@ -1407,6 +1600,9 @@ mod tests {
     fn a_templated_argument_where_options_are_still_read_is_refused() {
         for (cmd, line) in [
             ("python3", vec!["{{mode}}", "{{issue.title}}"]),
+            ("bash", vec!["-cx", "{{x}}"]),
+            ("sh", vec!["-vc", "{{x}}"]),
+            ("bash", vec!["-ec", "{{x}}", "_"]),
             ("bash", vec!["{{mode}}", "echo hi"]),
             ("bash", vec!["-o", "{{opt}}", "-c", "echo hi"]),
             ("python3", vec!["-W", "{{x}}", "script.py"]),
@@ -1619,5 +1815,116 @@ mod tests {
             );
         }
         assert!(suggest_args("bash", &original).is_err());
+    }
+
+    #[test]
+    fn a_shell_never_glues_its_script_to_c() {
+        // `bash -cx SCRIPT`: `x` is a flag, the script is the next operand.
+        for line in [["-cx", "{{x}}"], ["-vc", "{{x}}"], ["-ce", "{{x}}"]] {
+            let line = args(&line);
+            assert!(
+                matches!(
+                    first_unsafe_placeholder("bash", &line),
+                    Some(InlineFinding::Untrusted(_))
+                ),
+                "{line:?}"
+            );
+        }
+        for line in [
+            vec!["-cx", "echo \"$1\"", "_", "{{x}}"],
+            vec!["-xc", "echo \"$1\"", "_", "{{x}}"],
+        ] {
+            assert_eq!(
+                first_unsafe_placeholder("bash", &args(&line)),
+                None,
+                "{line:?}"
+            );
+        }
+        // Python does glue: `-cCODE` holds the code itself.
+        assert_eq!(
+            first_unsafe_placeholder(
+                "python3",
+                &args(&["-cimport sys; print(sys.argv[1])", "{{x}}"])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn programs_that_read_their_code_on_stdin_are_detected() {
+        for (cmd, line) in [
+            ("bash", vec![]),
+            ("sh", vec!["-s", "--", "a"]),
+            ("bash", vec!["-o", "pipefail"]),
+            ("python3", vec!["-"]),
+            ("python3", vec![]),
+            ("node", vec![]),
+            ("perl", vec!["-w"]),
+            ("env", vec!["A=1", "bash"]),
+            ("timeout", vec!["5", "python3"]),
+            ("mysql", vec!["db"]),
+            ("psql", vec!["db"]),
+            ("sqlite3", vec!["db.sqlite"]),
+            ("make", vec!["-f", "-"]),
+            ("lua", vec![]),
+            ("bc", vec![]),
+            ("crontab", vec!["-"]),
+            ("pwsh", vec!["-NoProfile"]),
+        ] {
+            assert!(
+                reads_program_from_stdin(cmd, &args(&line)),
+                "{cmd} {line:?}"
+            );
+        }
+        for (cmd, line) in [
+            ("bash", vec!["./run.sh"]),
+            ("bash", vec!["-c", "cat"]),
+            ("python3", vec!["-c", "import sys; print(sys.stdin.read())"]),
+            ("python3", vec!["tool.py"]),
+            ("python3", vec!["-m", "json.tool"]),
+            ("node", vec!["app.js"]),
+            ("cat", vec![]),
+            ("jq", vec!["."]),
+            ("mysql", vec!["-e", "select 1", "db"]),
+            ("psql", vec!["-c", "select 1"]),
+            ("sqlite3", vec!["db.sqlite", ".tables"]),
+            ("make", vec!["build"]),
+            ("pwsh", vec!["-File", "s.ps1"]),
+        ] {
+            assert!(
+                !reads_program_from_stdin(cmd, &args(&line)),
+                "{cmd} {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_templated_stdin_is_refused_only_where_it_is_code() {
+        assert!(stdin_validation_error("s", "bash", &[], "{{issue.title}}").is_some());
+        assert!(
+            stdin_validation_error("s", "python3", &args(&["-"]), "x {{issue.title}}").is_some()
+        );
+        assert!(stdin_validation_error("s", "bash", &[], "echo {{run.id}}").is_none());
+        assert!(stdin_validation_error(
+            "s",
+            "python3",
+            &args(&["-c", "import sys; print(sys.stdin.read())"]),
+            "{{issue.title}}"
+        )
+        .is_none());
+        assert!(
+            stdin_validation_error("s", "jq", &args(&["."]), "{{steps.fetch.data_json}}").is_none()
+        );
+        let step = crate::models::WorkflowStep {
+            name: "run".into(),
+            step_type: crate::models::StepType::Exec,
+            exec_command: Some("bash".into()),
+            exec_stdin: Some("echo {{issue.title}}".into()),
+            ..Default::default()
+        };
+        let found = classify_step(&step, false);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].phase, "stdin");
+        assert!(runtime_refusal(&step).unwrap().contains("(stdin)"));
     }
 }

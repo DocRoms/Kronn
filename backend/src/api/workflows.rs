@@ -1297,6 +1297,29 @@ fn validate_exec_steps_keeping(
                 MAX_ARGS
             ));
         }
+        if let Some(stdin) = s.exec_stdin.as_deref() {
+            let line = crate::core::inline_code::stdin_line(&s.exec_args, stdin);
+            let kept_stdin = is_grandfathered_line(
+                kept,
+                rollback,
+                index,
+                &s.name,
+                "stdin",
+                None,
+                Some(cmd),
+                &line,
+            );
+            if !kept_stdin {
+                if let Some(error) = crate::core::inline_code::stdin_validation_error(
+                    &s.name,
+                    cmd,
+                    &s.exec_args,
+                    stdin,
+                ) {
+                    return Err(error);
+                }
+            }
+        }
         if !is_grandfathered(kept, rollback, index, s, "main") {
             if let Some(error) =
                 crate::core::inline_code::validation_error(&s.name, cmd, &s.exec_args)
@@ -6429,6 +6452,17 @@ mod tests {
                 "{cmd} {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_templated_stdin_for_a_program_that_runs_stdin_is_refused() {
+        let mut step = mk_exec_step("run", Some("bash"), vec![], None);
+        step.exec_stdin = Some("echo {{issue.title}}".into());
+        let err = validate_exec_steps(std::slice::from_ref(&step), &["bash".into()]).unwrap_err();
+        assert!(err.contains("stdin"), "{err}");
+        let mut data = mk_exec_step("run", Some("jq"), vec!["."], None);
+        data.exec_stdin = Some("{{steps.fetch.data_json}}".into());
+        assert!(validate_exec_steps(&[data], &["jq".into()]).is_ok());
     }
 
     #[test]

@@ -9,6 +9,27 @@
 //! An unknown program gets every argument as data: argv is not parsed by a
 //! shell, so a value cannot become code there.
 
+/// The program a wrapper launches and its arguments (`env A=1 bash -s` →
+/// `bash`, `["-s"]`), following nested wrappers; `None` when `cmd` is not a
+/// wrapper or names no program.
+pub fn launched_program(cmd: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+    let mut current: Option<(String, Vec<String>)> = None;
+    let (mut cmd, mut args) = (cmd.to_string(), args.to_vec());
+    for _ in 0..MAX_DEPTH {
+        let Some(spec) = wrapper(&normalize_command(&cmd)) else {
+            break;
+        };
+        let roles = wrapper_roles(&spec, &args, &vec![false; args.len()], 0);
+        let Some(index) = roles.iter().position(|role| *role == Role::Executable) else {
+            break;
+        };
+        cmd = args[index].clone();
+        args = args[index + 1..].to_vec();
+        current = Some((cmd.clone(), args.clone()));
+    }
+    current
+}
+
 /// What an argument is to the program that receives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -79,8 +100,13 @@ fn roles_at(cmd: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<R
         "git" => git_roles(args, tainted),
         "ssh" => ssh_roles(args, tainted),
         "docker" | "podman" => docker_roles(args, tainted, depth),
-        "npx" => npx_roles(args, tainted, depth),
-        _ => vec![Role::Data; args.len()],
+        "npx" | "bunx" => npx_roles(args, tainted, depth),
+        "npm" | "pnpm" | "yarn" => package_manager_roles(&name, args, tainted, depth),
+        _ if UNMODELLED_EVALUATORS.contains(&name.as_str()) => vec![Role::Option; args.len()],
+        _ => match flag_spec(&name) {
+            Some(spec) => flag_roles(args, tainted, &spec),
+            None => vec![Role::Data; args.len()],
+        },
     }
 }
 
@@ -849,6 +875,321 @@ fn npx_roles(args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
     roles
 }
 
+// ─── Programs that take code in an option ────────────────────────────────────
+
+/// How the operands (non-option arguments) of a [`flag_roles`] program are read.
+#[derive(Clone, Copy)]
+enum Operands {
+    /// Every operand has this role.
+    All(Role),
+    /// The first operand is the program to run, the rest are its data.
+    ProgramThenData,
+    /// The first operand has this role, every later one is code (sqlite3 SQL).
+    FirstThenCode(Role),
+}
+
+/// A program whose code arrives through options.
+struct FlagSpec {
+    /// Options whose value (attached after `=` or the next argument) is code.
+    code: &'static [&'static str],
+    /// Short letters that take code, alone or in a cluster (`rsync -avze`).
+    short_code: &'static [char],
+    /// `+command` arguments are code (vim).
+    plus_is_code: bool,
+    /// A templated `NAME=value` operand assigns code (make variables expand
+    /// `$(shell …)`).
+    assignments_are_code: bool,
+    operands: Operands,
+}
+
+fn flag_roles(args: &[String], tainted: &[bool], spec: &FlagSpec) -> Vec<Role> {
+    let mut roles = vec![Role::Option; args.len()];
+    let mut operand = 0;
+    let mut i = 0;
+    let operand_role = |index: usize| match spec.operands {
+        Operands::All(role) => role,
+        Operands::ProgramThenData if index == 0 => Role::Executable,
+        Operands::ProgramThenData => Role::Data,
+        Operands::FirstThenCode(role) if index == 0 => role,
+        Operands::FirstThenCode(_) => Role::Code,
+    };
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if is_tainted(tainted, i) {
+            if is_option(arg) {
+                // `-x{{v}}` / `--opt={{v}}`: the author wrote the option, the
+                // value is the outside part.
+                let cluster = arg.strip_prefix('-').unwrap_or_default();
+                let code = spec.code.iter().any(|option| {
+                    arg.starts_with(option) && !arg.starts_with("--")
+                        || arg.starts_with(&format!("{option}="))
+                }) || (!arg.starts_with("--")
+                    && cluster
+                        .chars()
+                        .next()
+                        .is_some_and(|c| spec.short_code.contains(&c)));
+                roles[i] = if code { Role::Code } else { Role::Data };
+                i += 1;
+                continue;
+            }
+            roles[i] = if (spec.assignments_are_code && is_assignment(arg))
+                || (spec.plus_is_code && arg.starts_with('+'))
+            {
+                Role::Code
+            } else {
+                operand_role(operand)
+            };
+            operand += 1;
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            for (j, role) in roles.iter_mut().enumerate().skip(i + 1) {
+                *role = match spec.operands {
+                    Operands::FirstThenCode(_) => Role::Code,
+                    _ if j == i + 1
+                        && matches!(spec.operands, Operands::ProgramThenData)
+                        && operand == 0 =>
+                    {
+                        Role::Executable
+                    }
+                    _ => Role::Data,
+                };
+            }
+            return roles;
+        }
+        if spec.plus_is_code && arg.starts_with('+') {
+            roles[i] = Role::Code;
+            i += 1;
+            continue;
+        }
+        if is_option(arg) {
+            let name = long_name(arg);
+            if spec.code.contains(&name) {
+                roles[i] = Role::Code;
+                if !arg.contains('=') && i + 1 < args.len() {
+                    roles[i + 1] = Role::Code;
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            }
+            if !arg.starts_with("--") {
+                let cluster = arg.strip_prefix('-').unwrap_or_default();
+                if let Some((at, c)) = cluster
+                    .char_indices()
+                    .find(|(_, c)| spec.short_code.contains(c))
+                {
+                    roles[i] = Role::Code;
+                    if at + c.len_utf8() == cluster.len() && i + 1 < args.len() {
+                        roles[i + 1] = Role::Code;
+                        i += 1;
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        roles[i] = operand_role(operand);
+        operand += 1;
+        i += 1;
+    }
+    roles
+}
+
+/// npm / pnpm / yarn: `exec`, `x`, `dlx` run a program (and `-c`/`--call` a
+/// command line), `install`/`add` fetch and run package code, `run` picks a
+/// script by name. Other subcommands read operands as data unless they look
+/// like options once rendered.
+fn package_manager_roles(name: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
+    let mut roles = vec![Role::Option; args.len()];
+    let mut i = 0;
+    while i < args.len() {
+        if is_tainted(tainted, i) {
+            i += 1;
+            continue;
+        }
+        let arg = args[i].as_str();
+        if is_option(arg) {
+            let takes_value = matches!(
+                long_name(arg),
+                "--prefix" | "-C" | "--dir" | "--workspace" | "-w" | "--filter" | "-F" | "--cwd"
+            ) && !arg.contains('=');
+            i += if takes_value { 2 } else { 1 };
+            continue;
+        }
+        break;
+    }
+    let subcommand = args.get(i).map(String::as_str).unwrap_or_default();
+    if i >= args.len() || is_tainted(tainted, i) {
+        return roles;
+    }
+    let rest = i + 1;
+    match subcommand {
+        "exec" if name == "yarn" => roles[rest..].fill(Role::Code),
+        "exec" | "x" | "dlx" => {
+            let inner = npx_roles(&args[rest..], &tainted[rest..], depth + 1);
+            roles[rest..].copy_from_slice(&inner);
+        }
+        "install" | "i" | "add" | "ci" | "update" | "up" | "upgrade" | "link" => {
+            for (j, role) in roles.iter_mut().enumerate().skip(rest) {
+                *role = if is_tainted(tainted, j) {
+                    Role::Executable
+                } else {
+                    Role::Data
+                };
+            }
+        }
+        "run" | "run-script" | "rr" => {
+            // The script name selects code; values go after `--`.
+            let dash = (rest..args.len()).find(|&j| !is_tainted(tainted, j) && args[j] == "--");
+            if let Some(dash) = dash {
+                roles[dash + 1..].fill(Role::Data);
+            }
+        }
+        _ if name == "yarn" && !matches!(subcommand, "info" | "why" | "list" | "outdated") => {
+            // `yarn <script>` runs a script by name.
+        }
+        _ => {
+            for (j, role) in roles.iter_mut().enumerate().skip(rest) {
+                *role = if is_tainted(tainted, j) {
+                    Role::RuntimeOption
+                } else {
+                    Role::Data
+                };
+            }
+        }
+    }
+    roles
+}
+
+/// Interpreters and evaluators without a modelled argv: a value anywhere in
+/// their arguments is refused rather than assumed to be data.
+const UNMODELLED_EVALUATORS: &[&str] = &[
+    "bc",
+    "dc",
+    "expect",
+    "julia",
+    "ghci",
+    "runghc",
+    "runhaskell",
+    "racket",
+    "guile",
+    "sbcl",
+    "clisp",
+    "ecl",
+    "erl",
+    "escript",
+    "elixir",
+    "iex",
+    "groovy",
+    "scala",
+    "kotlin",
+    "kotlinc",
+    "jshell",
+    "swift",
+    "ocaml",
+    "jjs",
+    "rhino",
+    "tcc",
+    "emacs",
+    "ed",
+    "cmd",
+    "wscript",
+    "cscript",
+    "mshta",
+    "crontab",
+    "at",
+    "batch",
+];
+
+/// An interpreter with no modelled argv (see [`UNMODELLED_EVALUATORS`]).
+pub fn is_unmodelled_evaluator(name: &str) -> bool {
+    UNMODELLED_EVALUATORS.contains(&name)
+}
+
+fn flag_spec(name: &str) -> Option<FlagSpec> {
+    let spec = |code, short_code, operands| FlagSpec {
+        code,
+        short_code,
+        plus_is_code: false,
+        assignments_are_code: false,
+        operands,
+    };
+    Some(match name {
+        "make" | "gmake" | "bmake" => FlagSpec {
+            code: &["--eval", "-E"],
+            short_code: &[],
+            plus_is_code: false,
+            assignments_are_code: true,
+            operands: Operands::All(Role::RuntimeOption),
+        },
+        "gdb" => spec(
+            &[
+                "-ex",
+                "--ex",
+                "-iex",
+                "--iex",
+                "--eval-command",
+                "--init-eval-command",
+                "-x",
+                "--command",
+                "-ix",
+                "--init-command",
+                "-p",
+                "--pid",
+            ],
+            &[],
+            Operands::ProgramThenData,
+        ),
+        "tar" | "gtar" | "bsdtar" => spec(
+            &[
+                "--to-command",
+                "--checkpoint-action",
+                "--use-compress-program",
+                "-I",
+                "--rsh-command",
+                "--info-script",
+                "--new-volume-script",
+                "-F",
+            ],
+            &[],
+            Operands::All(Role::RuntimeOption),
+        ),
+        "rsync" => spec(
+            &["--rsh", "--rsync-path"],
+            &['e'],
+            Operands::All(Role::RuntimeOption),
+        ),
+        "curl" => spec(&["-K", "--config"], &[], Operands::All(Role::RuntimeOption)),
+        "vim" | "vi" | "nvim" | "ex" | "view" | "gvim" | "vimdiff" => FlagSpec {
+            code: &["-c", "--cmd", "-S", "-u", "-U", "-s", "-w", "-W"],
+            short_code: &[],
+            plus_is_code: true,
+            assignments_are_code: false,
+            operands: Operands::All(Role::Option),
+        },
+        "sqlite" => spec(
+            &["-cmd", "-init"],
+            &[],
+            Operands::FirstThenCode(Role::RuntimeOption),
+        ),
+        "mysql" | "mariadb" => spec(
+            &["--execute", "--init-command", "--init-command-add"],
+            &['e'],
+            Operands::All(Role::RuntimeOption),
+        ),
+        "psql" => spec(
+            &["--command", "--file", "--set", "--variable"],
+            &['c', 'f', 'v'],
+            Operands::All(Role::RuntimeOption),
+        ),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1059,5 +1400,82 @@ mod tests {
         assert!(rendered_refusal("s", "git", &templates, &line(&["fetch", "origin"])).is_none());
         let templates = line(&["log", "--", "{{path}}"]);
         assert!(rendered_refusal("s", "git", &templates, &line(&["log", "--", "-x"])).is_none());
+    }
+
+    #[test]
+    fn programs_taking_code_in_options_are_classified() {
+        for (cmd, items) in [
+            ("make", vec!["--eval={{x}}"]),
+            ("make", vec!["--eval", "{{x}}"]),
+            ("gmake", vec!["-E", "{{x}}", "all"]),
+            ("make", vec!["CFLAGS={{x}}", "all"]),
+            ("npm", vec!["exec", "-c", "{{x}}"]),
+            ("npm", vec!["exec", "--call={{x}}"]),
+            ("npm", vec!["exec", "{{pkg}}"]),
+            ("npm", vec!["x", "--", "{{pkg}}"]),
+            ("pnpm", vec!["dlx", "{{x}}"]),
+            ("pnpm", vec!["exec", "-c", "{{x}}"]),
+            ("yarn", vec!["dlx", "{{x}}"]),
+            ("yarn", vec!["exec", "{{x}}"]),
+            ("bunx", vec!["{{x}}"]),
+            ("npm", vec!["install", "{{pkg}}"]),
+            ("npm", vec!["run", "{{script}}"]),
+            ("yarn", vec!["{{script}}"]),
+            ("gdb", vec!["-ex", "{{x}}", "--batch"]),
+            ("gdb", vec!["--eval-command={{x}}", "./prog"]),
+            ("gdb", vec!["--batch", "{{program}}"]),
+            ("tar", vec!["--to-command={{x}}", "-xf", "a.tar"]),
+            (
+                "tar",
+                vec!["--checkpoint-action=exec={{x}}", "-cf", "a.tar", "dir"],
+            ),
+            ("tar", vec!["-I", "{{x}}", "-cf", "a.tar", "dir"]),
+            ("rsync", vec!["-e", "{{x}}", "a", "b"]),
+            ("rsync", vec!["-avze", "{{x}}", "a", "b"]),
+            ("rsync", vec!["--rsh={{x}}", "a", "b"]),
+            ("curl", vec!["-K", "{{x}}"]),
+            ("curl", vec!["--config={{x}}"]),
+            ("vim", vec!["-c", "{{x}}", "f"]),
+            ("vim", vec!["+{{x}}", "f"]),
+            ("nvim", vec!["{{file}}"]),
+            ("ex", vec!["--cmd", "{{x}}"]),
+            ("sqlite3", vec!["db.sqlite", "{{sql}}"]),
+            ("sqlite3", vec!["-cmd", "{{x}}", "db.sqlite"]),
+            ("mysql", vec!["-e", "{{x}}"]),
+            ("mysql", vec!["--execute={{x}}", "db"]),
+            ("psql", vec!["-c", "{{x}}"]),
+            ("psql", vec!["-v", "name={{x}}", "-f", "q.sql"]),
+            ("crontab", vec!["{{x}}"]),
+            ("at", vec!["{{x}}"]),
+            ("bc", vec!["{{x}}"]),
+            ("julia", vec!["{{x}}"]),
+        ] {
+            assert!(refused(cmd, &items), "{cmd} {items:?}");
+        }
+        for (cmd, items) in [
+            ("make", vec!["{{target}}"]),
+            ("make", vec!["-C", "dir", "{{target}}"]),
+            ("npm", vec!["run", "build", "--", "{{x}}"]),
+            ("npm", vec!["audit", "{{x}}"]),
+            ("gdb", vec!["--batch", "-ex", "bt", "./prog", "{{core}}"]),
+            ("tar", vec!["-xf", "{{archive}}"]),
+            ("rsync", vec!["-av", "{{src}}", "dst"]),
+            ("curl", vec!["-o", "out", "{{url}}"]),
+            ("vim", vec!["--", "{{file}}"]),
+            ("sqlite3", vec!["{{db}}", ".tables"]),
+            ("mysql", vec!["-u{{user}}", "-e", "select 1", "db"]),
+            ("psql", vec!["{{db}}", "-c", "select 1"]),
+        ] {
+            assert!(!refused(cmd, &items), "{cmd} {items:?}");
+        }
+    }
+
+    #[test]
+    fn an_operand_rendered_as_an_option_is_refused_but_an_option_value_is_not() {
+        let templates = line(&["{{target}}"]);
+        assert!(rendered_refusal("s", "make", &templates, &line(&["--eval=x"])).is_some());
+        assert!(rendered_refusal("s", "make", &templates, &line(&["build"])).is_none());
+        let templates = line(&["-u{{user}}", "db"]);
+        assert!(rendered_refusal("s", "mysql", &templates, &line(&["-ualice", "db"])).is_none());
     }
 }

@@ -1614,6 +1614,41 @@ mod tests {
         }
     }
 
+    /// Review findings, executed: a shell script after `-cx`, and a
+    /// templated stdin given to a program that runs stdin, never run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clustered_c_script_and_a_stdin_program_are_refused_before_running() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue("touch pwned", "", "1", "https://tracker.test/1", &[]);
+        let clustered = exec_step("greet", Some("bash"), vec!["-cx", "{{issue.title}}"], None);
+        let mut stdin = exec_step("greet", Some("bash"), vec![], None);
+        stdin.exec_stdin = Some("{{issue.title}}".into());
+        let mut python_stdin = exec_step("greet", Some("python3"), vec!["-"], None);
+        python_stdin.exec_stdin = Some("import os; os.system('{{issue.title}}')".into());
+        for step in [clustered, stdin, python_stdin] {
+            let dir = tempfile::tempdir().unwrap();
+            let outcome = execute_exec_step(
+                &step,
+                &["bash".to_string(), "python3".to_string()],
+                &dir.path().to_string_lossy(),
+                &ctx,
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                RunStatus::Failed,
+                "{}",
+                outcome.result.output
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "nothing ran"
+            );
+        }
+    }
+
     /// The envelope escapes stdout; markers must still come back as printed.
     #[cfg(unix)]
     #[tokio::test]
