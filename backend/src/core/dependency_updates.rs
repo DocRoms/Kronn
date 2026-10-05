@@ -1,3 +1,4 @@
+use crate::core::child_env::{self, ChildRoute};
 use crate::core::cmd::async_cmd;
 use crate::models::{
     DependencyCheckStatus, DependencyManagerUpdate, DependencyUpdatePackage,
@@ -415,7 +416,17 @@ fn prioritize_compose_services(output: &str) -> Vec<String> {
     services
 }
 
-fn configure_background_command(command: &mut tokio::process::Command, directory: &Path) {
+/// A dependency-check process: the environment built for `route` (the
+/// repository's config runs inside package managers), non-interactive
+/// settings, then `extra`; sealed last.
+fn background_command(
+    program: &str,
+    directory: &Path,
+    route: ChildRoute,
+    extra: &[(&str, &str)],
+) -> tokio::process::Command {
+    let mut command = async_cmd(program);
+    child_env::reset(command.as_std_mut(), route);
     command
         .current_dir(directory)
         .env("CI", "1")
@@ -423,7 +434,10 @@ fn configure_background_command(command: &mut tokio::process::Command, directory
         .env("TERM", "dumb")
         .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
         .env("COMPOSER_NO_INTERACTION", "1")
+        .envs(extra.iter().copied())
         .kill_on_drop(true);
+    child_env::seal(command.as_std_mut(), route, &[]);
+    command
 }
 
 /// Composer is frequently project-local inside a Docker Compose PHP service
@@ -435,9 +449,8 @@ async fn composer_via_compose(
     args: &[&str],
 ) -> Result<std::process::Output, CommandFailure> {
     let root = compose_root(manifest).ok_or(CommandFailure::Unavailable)?;
-    let mut list = async_cmd("docker");
+    let mut list = background_command("docker", &root, ChildRoute::Docker, &[]);
     list.args(["compose", "ps", "--services", "--status", "running"]);
-    configure_background_command(&mut list, &root);
     let listed = capture_command(&mut list, CONTAINER_DISCOVERY_TIMEOUT).await?;
     if !listed.status.success() {
         return Err(CommandFailure::Unavailable);
@@ -445,7 +458,7 @@ async fn composer_via_compose(
 
     let services = prioritize_compose_services(&String::from_utf8_lossy(&listed.stdout));
     for service in services {
-        let mut probe = async_cmd("docker");
+        let mut probe = background_command("docker", &root, ChildRoute::Docker, &[]);
         probe.args([
             "compose",
             "exec",
@@ -455,7 +468,6 @@ async fn composer_via_compose(
             "--version",
             "--no-ansi",
         ]);
-        configure_background_command(&mut probe, &root);
         let Ok(probed) = capture_command(&mut probe, CONTAINER_DISCOVERY_TIMEOUT).await else {
             continue;
         };
@@ -463,10 +475,9 @@ async fn composer_via_compose(
             continue;
         }
 
-        let mut command = async_cmd("docker");
+        let mut command = background_command("docker", &root, ChildRoute::Docker, &[]);
         command.args(["compose", "exec", "-T", &service, "composer"]);
         command.args(args);
-        configure_background_command(&mut command, &root);
         return capture_command(&mut command, CHECK_TIMEOUT).await;
     }
     Err(CommandFailure::Unavailable)
@@ -494,9 +505,8 @@ async fn composer_via_standalone_container(
     manifest: &DetectedManifest,
     args: &[&str],
 ) -> Result<std::process::Output, CommandFailure> {
-    let mut command = async_cmd("docker");
+    let mut command = background_command("docker", &manifest.directory, ChildRoute::Docker, &[]);
     command.args(standalone_composer_args(manifest, args));
-    configure_background_command(&mut command, &manifest.directory);
     capture_command(&mut command, COMPOSER_CONTAINER_TIMEOUT).await
 }
 
@@ -631,6 +641,32 @@ fn parse_renovate_updates(
     Ok(by_manifest)
 }
 
+/// The local Renovate run: npx fetches and runs it inside the repository.
+fn renovate_command(root: &Path, enabled_managers: &[&str]) -> tokio::process::Command {
+    let mut command = background_command(
+        "npx",
+        root,
+        ChildRoute::DependencyCheck,
+        &[
+            ("LOG_LEVEL", "debug"),
+            ("LOG_FORMAT", "json"),
+            ("RENOVATE_REQUIRE_CONFIG", "optional"),
+        ],
+    );
+    command.args([
+        "--yes",
+        "--package",
+        RENOVATE_NODE_PACKAGE,
+        "--package",
+        RENOVATE_PACKAGE,
+        "renovate",
+        "--platform=local",
+        "--onboarding=false",
+        &format!("--enabled-managers={}", enabled_managers.join(",")),
+    ]);
+    command
+}
+
 async fn renovate_dependency_updates(
     root: &Path,
     manifests: &[DetectedManifest],
@@ -644,23 +680,7 @@ async fn renovate_dependency_updates(
     enabled.sort_unstable();
     enabled.dedup();
 
-    let mut command = async_cmd("npx");
-    command.args([
-        "--yes",
-        "--package",
-        RENOVATE_NODE_PACKAGE,
-        "--package",
-        RENOVATE_PACKAGE,
-        "renovate",
-        "--platform=local",
-        "--onboarding=false",
-        &format!("--enabled-managers={}", enabled.join(",")),
-    ]);
-    configure_background_command(&mut command, root);
-    command
-        .env("LOG_LEVEL", "debug")
-        .env("LOG_FORMAT", "json")
-        .env("RENOVATE_REQUIRE_CONFIG", "optional");
+    let mut command = renovate_command(root, &enabled);
     let output = capture_command(&mut command, FALLBACK_CHECK_TIMEOUT).await?;
     parse_renovate_updates(&String::from_utf8_lossy(&output.stdout), manifests)
         .map_err(|_| CommandFailure::Error)
@@ -721,9 +741,13 @@ async fn check_manifest(manifest: DetectedManifest) -> DependencyManagerUpdate {
         ),
     };
 
-    let mut command = async_cmd(program);
+    let mut command = background_command(
+        program,
+        &manifest.directory,
+        ChildRoute::DependencyCheck,
+        &[],
+    );
     command.args(&args);
-    configure_background_command(&mut command, &manifest.directory);
     let output = match capture_command(&mut command, CHECK_TIMEOUT).await {
         Err(CommandFailure::Unavailable) if manifest.kind == ManagerKind::Composer => {
             match composer_via_compose(&manifest, &args).await {
@@ -1037,6 +1061,69 @@ fn parse_poetry_outdated(output: &str) -> Result<Vec<DependencyUpdatePackage>, (
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A package manager runs the repository's config: it gets the
+    /// dependency-check environment, never the backend's (KT-1006).
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_check_runs_without_the_backend_environment() {
+        use crate::core::child_env::probe;
+        probe::plant_real_sentinel();
+        let bin = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::write(project.path().join("package.json"), "{}").unwrap();
+        let out = probe::env_dumping_program(bin.path(), "npm");
+        let path = format!("{}:/usr/bin:/bin", bin.path().display());
+        let manifest = DetectedManifest {
+            kind: ManagerKind::JavaScript,
+            project_root: project.path().to_path_buf(),
+            directory: project.path().to_path_buf(),
+            relative_path: "package.json".into(),
+            covers_nested: false,
+        };
+        let mut parent = probe::parent_with_secrets(&path, "/home/u");
+        parent.push(("GOPROXY".into(), "https://proxy.example".into()));
+        let borrowed: Vec<(&str, &str)> = parent
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        crate::core::child_env::with_parent_env(&borrowed, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(check_manifest(manifest))
+        });
+        let recorded = probe::read_dump(&out);
+        probe::assert_dump_without_secrets(&recorded, &[]);
+        assert_eq!(recorded.get("CI").map(String::as_str), Some("1"));
+        assert_eq!(
+            recorded.get("GOPROXY").map(String::as_str),
+            Some("https://proxy.example"),
+            "a package manager keeps its registry settings"
+        );
+    }
+
+    #[test]
+    fn renovate_and_docker_helpers_build_their_environment() {
+        use crate::core::child_env::probe;
+        let dir = tempfile::TempDir::new().unwrap();
+        let (renovate, docker) = probe::with_secret_parent("/usr/bin", "/home/u", || {
+            (
+                renovate_command(dir.path(), &["npm"]),
+                background_command("docker", dir.path(), ChildRoute::Docker, &[]),
+            )
+        });
+        probe::assert_built_without_secrets(renovate.as_std(), "/usr/bin", &[]);
+        probe::assert_built_without_secrets(docker.as_std(), "/usr/bin", &[]);
+        let renovate_env = probe::env_of(renovate.as_std());
+        assert_eq!(
+            renovate_env
+                .get("RENOVATE_REQUIRE_CONFIG")
+                .map(String::as_str),
+            Some("optional")
+        );
+    }
 
     #[test]
     fn detects_root_workspace_once_and_nested_composer_projects() {
