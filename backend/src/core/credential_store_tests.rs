@@ -85,19 +85,37 @@ fn write_0142_config(dir: &Path, key: &str) -> String {
         toml::to_string_pretty(&cfg).unwrap()
     );
     std::fs::write(dir.join("config.toml"), &text).unwrap();
-    // The DB migration runner's own plaintext copy, as left on disk.
-    std::fs::write(dir.join("config.toml.backup"), &text).unwrap();
+    // The DB migration runner's copy: credentials already out, key still in.
+    std::fs::write(
+        dir.join("config.toml.backup"),
+        without_credentials(&text).unwrap(),
+    )
+    .unwrap();
     text
 }
 
-/// Ciphertext in the two pre-existing encrypted columns.
+/// Ciphertext in every pre-existing encrypted column.
 async fn seed_ciphertext(db: &Database, key: &str) {
     let mut env = std::collections::HashMap::new();
     env.insert("GITHUB_TOKEN".to_string(), MCP_SECRET.to_string());
     let mcp = crate::db::mcps::encrypt_env(&env, key).unwrap();
     let parsed = crypto::parse_secret(key).unwrap();
     let snapshot = crypto::encrypt(SNAPSHOT_SECRET, &parsed).unwrap();
+    let github =
+        crate::core::github_connection::encrypt_stored_token("github_pat_fixture0006", key)
+            .unwrap();
     db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) \
+             VALUES ('p1', 'p1', '/nowhere', datetime('now'), datetime('now'))",
+            [],
+        )?;
+        crate::db::github_connections::set_mode(
+            conn,
+            "p1",
+            crate::models::GithubConnectionMode::StoredToken,
+            Some(&github),
+        )?;
         conn.execute(
             "INSERT INTO mcp_servers (id, name, transport) VALUES ('s1','github','stdio')",
             [],

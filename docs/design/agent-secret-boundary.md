@@ -224,7 +224,8 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
 
 1. **Done.** `keystore::ENCRYPTED_COLUMNS` lists every encrypted column
    (`mcp_configs.env_encrypted`, `execution_variable_snapshots.values_encrypted`,
-   `stored_credentials.value_encrypted`); `collect_encrypted_rows` samples all
+   `stored_credentials.value_encrypted`,
+   `project_github_connections.token_encrypted`); `collect_encrypted_rows` samples all
    of them, and `encrypted_column_registry_matches_the_schema` fails when a
    column named `*encrypted*`/`*cipher*` is missing from the registry.
 2. **Done.** `KeyVault::retrieve` returns `Ok(None)` only for an empty vault;

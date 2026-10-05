@@ -442,7 +442,8 @@ Release notes for 0.9.3 and earlier are available in the
   copy would remain without a recovery passphrase. The first start moves
   existing values, checks each one decrypts back, keeps the previous file
   encrypted as `config.toml.pre-credential-store.enc`, and can be interrupted
-  and rerun without loss. See `docs/operations/key-management.md`.
+  and rerun without loss. The `config.toml.backup` copy made before database
+  migrations is written owner-only and without credentials. See `docs/operations/key-management.md`.
 - Plugins page: one export and one import flow, the plugin bundle, where each
   plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
   export and the paste-a-spec import are gone, and a plugin is deleted from

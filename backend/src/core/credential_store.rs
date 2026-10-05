@@ -443,6 +443,30 @@ pub fn read_backup(path: &Path, key_hex: &str) -> Result<String> {
     decrypt_value(encrypted.trim(), key_hex)
 }
 
+/// `text` with the auth token and every provider key removed, for the copy the
+/// DB migration runner keeps: written scrubbed from the start, so no failure
+/// later can leave credentials in it. `None` when `text` is not valid TOML.
+pub fn without_credentials(text: &str) -> Option<String> {
+    let mut table = text.parse::<toml::Table>().ok()?;
+    strip_credential_fields(&mut table);
+    toml::to_string_pretty(&table).ok()
+}
+
+/// Remove the auth token and provider keys from a parsed config.toml.
+fn strip_credential_fields(table: &mut toml::Table) -> bool {
+    let mut changed = false;
+    if let Some(server) = table.get_mut("server").and_then(|v| v.as_table_mut()) {
+        changed |= server.remove("auth_token").is_some();
+    }
+    if let Some(tokens) = table.get_mut("tokens").and_then(|v| v.as_table_mut()) {
+        for legacy in ["anthropic", "openai", "google"] {
+            changed |= tokens.remove(legacy).is_some();
+        }
+        changed |= tokens.remove("keys").is_some();
+    }
+    changed
+}
+
 /// Remove credentials from the DB migration runner's plaintext copy. Its
 /// `encryption_secret` goes only when it is the key in use and config.toml no
 /// longer needs one; any other key is kept, since rows may depend on it.
@@ -459,16 +483,7 @@ fn scrub_migration_backup(dir: &Path, key_hex: &str) -> Result<()> {
     let Ok(mut table) = text.parse::<toml::Table>() else {
         return Ok(());
     };
-    let mut changed = false;
-    if let Some(server) = table.get_mut("server").and_then(|v| v.as_table_mut()) {
-        changed |= server.remove("auth_token").is_some();
-    }
-    if let Some(tokens) = table.get_mut("tokens").and_then(|v| v.as_table_mut()) {
-        for legacy in ["anthropic", "openai", "google"] {
-            changed |= tokens.remove(legacy).is_some();
-        }
-        changed |= tokens.remove("keys").is_some();
-    }
+    let mut changed = strip_credential_fields(&mut table);
     let same_key = table
         .get("encryption_secret")
         .and_then(|v| v.as_str())

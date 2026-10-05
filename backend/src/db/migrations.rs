@@ -837,6 +837,28 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
+/// token and provider keys (KT-1007): the copy never holds credentials, even if
+/// the credential store boot that follows fails.
+fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
+    let cfg = dir.join("config.toml");
+    let text = match std::fs::read_to_string(&cfg) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let Some(scrubbed) = crate::core::credential_store::without_credentials(&text) else {
+        // Unparseable: no copy at all rather than a plaintext one.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "config.toml is not valid TOML; no backup written",
+        ));
+    };
+    let tmp = dir.join(".config.toml.backup.tmp");
+    crate::core::keyvault::write_private_temp(&tmp, scrubbed.as_bytes())?;
+    std::fs::rename(&tmp, dir.join("config.toml.backup"))
+}
+
 /// Apply one migration inside the caller-owned transaction.
 ///
 /// Migration 136 originally shipped on the 0.11 development branch with only
@@ -1097,12 +1119,8 @@ fn run_with_backup_checked(
                 // holds auth_token + other config a bad migration/crash could
                 // strand. Best-effort; absence is fine (Docker/env configs).
                 if let Some(dir) = path.parent() {
-                    let cfg = dir.join("config.toml");
-                    if cfg.exists() {
-                        let cfg_backup = dir.join("config.toml.backup");
-                        if let Err(e) = std::fs::copy(&cfg, &cfg_backup) {
-                            tracing::warn!("Failed to backup config.toml before migration: {}", e);
-                        }
+                    if let Err(e) = backup_config_without_credentials(dir) {
+                        tracing::warn!("Failed to backup config.toml before migration: {}", e);
                     }
                 }
             }
@@ -2944,9 +2962,15 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch("CREATE TABLE t(id INTEGER);").unwrap();
         }
-        // Co-located config.toml holding a secret-ish value.
+        // A 0.14.2 config.toml holding credentials next to ordinary settings.
         let cfg = dir.path().join("config.toml");
-        std::fs::write(&cfg, "auth_token = \"tok-123\"\n").unwrap();
+        std::fs::write(
+            &cfg,
+            "language = \"fr\"\n\n[server]\nport = 3140\nauth_token = \"tok-123\"\n\n\
+             [tokens]\nanthropic = \"sk-legacy\"\n\n[[tokens.keys]]\nid = \"k\"\nname = \"n\"\n\
+             provider = \"anthropic\"\nvalue = \"sk-ant-456\"\nactive = true\n",
+        )
+        .unwrap();
 
         let conn = Connection::open(&db_path).unwrap();
         run_with_backup(&conn, Some(&db_path)).expect("migrations should succeed");
@@ -2956,10 +2980,27 @@ mod tests {
             cfg_backup.exists(),
             "config.toml must be snapshotted before migrations"
         );
-        assert_eq!(
-            std::fs::read_to_string(&cfg_backup).unwrap(),
-            "auth_token = \"tok-123\"\n",
-            "config backup must be a faithful copy"
-        );
+        let copy = std::fs::read_to_string(&cfg_backup).unwrap();
+        for secret in ["tok-123", "sk-legacy", "sk-ant-456"] {
+            assert!(!copy.contains(secret), "credential in the backup: {copy}");
+        }
+        assert!(copy.contains("language = \"fr\"") && copy.contains("port = 3140"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&cfg_backup).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn an_unparseable_config_toml_gets_no_backup_rather_than_a_plaintext_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "auth_token = [broken").unwrap();
+        assert!(backup_config_without_credentials(dir.path()).is_err());
+        assert!(!dir.path().join("config.toml.backup").exists());
+        let empty = tempfile::tempdir().unwrap();
+        backup_config_without_credentials(empty.path()).unwrap();
+        assert!(!empty.path().join("config.toml.backup").exists());
     }
 }

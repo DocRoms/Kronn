@@ -87,8 +87,9 @@ pub enum KeyBootError {
 fn vault_hint(vault: &str) -> &'static str {
     match vault {
         "keychain" => {
-            "Unlock the OS keychain and allow Kronn when it asks; to use the copy in the data \
-             directory instead, start Kronn with KRONN_USE_KEYCHAIN=0."
+            "Unlock the OS keychain and choose Allow when it asks about Kronn. To use the copy \
+             in the Kronn data directory instead, start Kronn with KRONN_USE_KEYCHAIN=0 (macOS \
+             app, from a terminal: open --env KRONN_USE_KEYCHAIN=0 -a Kronn)."
         }
         "sidecar" => {
             "Make the encryption_key file in the Kronn data directory readable by your account \
@@ -654,7 +655,9 @@ mod tests {
             val: crypto::generate_secret(),
         })]);
         let tmp = tempfile::tempdir().unwrap();
-        let outcome = reconcile_with(&mut cfg, &db, &wrong, tmp.path()).await.unwrap();
+        let outcome = reconcile_with(&mut cfg, &db, &wrong, tmp.path())
+            .await
+            .unwrap();
         assert_eq!(outcome, KeyOutcome::Locked { encrypted_rows: 1 });
 
         let mut cfg = config::default_config();
@@ -663,7 +666,9 @@ mod tests {
             name: "sidecar",
             val: k.clone(),
         })]);
-        let outcome = reconcile_with(&mut cfg, &db, &right, tmp.path()).await.unwrap();
+        let outcome = reconcile_with(&mut cfg, &db, &right, tmp.path())
+            .await
+            .unwrap();
         assert_eq!(outcome, KeyOutcome::Resolved { source: "sidecar" });
     }
 
