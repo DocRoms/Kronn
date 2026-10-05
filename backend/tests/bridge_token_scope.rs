@@ -439,7 +439,7 @@ async fn every_route_family_refuses_another_project_s_resource() {
             Some(json!({"title": "x"})),
         ),
         ("GET", "/api/discussions/room-b/participants", None),
-        ("GET", "/api/disc/load_other?discussion_id=room-b", None),
+        ("GET", "/api/disc/load_other?disc_id=room-b", None),
         ("GET", "/api/planning/tasks/task-b", None),
         (
             "POST",
@@ -1487,7 +1487,7 @@ async fn a_general_discussion_is_private_to_its_launches() {
     let token = guard.value().to_owned();
     for path in [
         "/api/discussions/room-g/meta",
-        "/api/disc/load_other?discussion_id=room-g",
+        "/api/disc/load_other?disc_id=room-g",
     ] {
         let (status, _) = call(&app, "GET", path, Some(&token), None).await;
         assert_eq!(status, 403, "{path}");
@@ -1504,6 +1504,15 @@ async fn a_general_discussion_is_private_to_its_launches() {
     )
     .await;
     assert_eq!(status, 200, "its own launch reads it");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/disc/load_other?disc_id=room-g",
+        Some(own.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "the key the handler reads is the one checked");
 }
 
 /// E-01 — a launch that owns nothing reads catalogues only.
@@ -1557,4 +1566,592 @@ async fn a_non_json_body_is_refused() {
         response.contains("a bridge-token request body must be JSON"),
         "refused by the gate, before any handler: {response}"
     );
+}
+
+// ─── Layer B round 3 (review-layer-b3) ──────────────────────────────────────
+
+async fn send(
+    app: &Router,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Option<&str>,
+) -> (u16, String) {
+    let mut builder = Request::builder().method(method).uri(path);
+    for (name, value) in headers {
+        builder = builder.header(*name, value);
+    }
+    let mut request = builder
+        .body(body.map_or_else(Body::empty, |body| Body::from(body.to_owned())))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40404))));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Default deny — an invented id field naming another project's resource is
+/// refused, in the body at any depth and in the query.
+#[tokio::test]
+async fn an_unknown_id_field_is_refused_for_a_token() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for body in [
+        json!({"name": "x", "foo_id": "wf-b"}),
+        json!({"name": "x", "steps": [{"name": "s", "widget": {"foo_id": "room-b"}}]}),
+    ] {
+        let (status, response) =
+            call(&app, "PUT", "/api/workflows/wf-a", Some(&token), Some(body)).await;
+        assert_eq!(status, 403, "{response}");
+        assert!(!response.to_string().contains("room-b"), "{response}");
+    }
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions?foo_id=room-b",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// B3-01 — an import step's own `id`, or an object's `id`, equal to another
+/// project's resource never hides the reference that names it.
+#[tokio::test]
+async fn an_import_cannot_hide_a_reference_behind_an_internal_id() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    for workflow in [
+        json!({"id": "w", "steps": [{"id": "wf-b", "name": "s", "sub_workflow_id": "wf-b"}]}),
+        json!({"id": "w", "steps": [{"id": "s", "name": "s", "room_id": "room-b",
+            "options": [{"id": "room-b"}]}]}),
+    ] {
+        let content = json!({"kind": "kronn.workflow", "version": 2, "workflow": workflow,
+            "referenced_workflows": [], "referenced_quick_prompts": []})
+        .to_string();
+        let (status, response) = call(
+            &app,
+            "POST",
+            "/api/workflows/import",
+            Some(guard.value()),
+            Some(json!({"content": content})),
+        )
+        .await;
+        assert_eq!(status, 403, "{response}");
+    }
+}
+
+fn collect_step(quick_exec_id: &str) -> Value {
+    json!({"name": "collect", "step_type": {"type": "CollectApiData"},
+        "collect_api_data": {"sources": [{"alias": "x", "quick_exec_id": quick_exec_id}]}})
+}
+
+/// B3-02 — a saved Quick Exec of another project, named by a token on update
+/// or import, is refused at the gate; an import by the operator is refused by
+/// the handler.
+#[tokio::test]
+async fn another_project_s_quick_exec_is_refused_in_a_workflow() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let body = json!({"name": "x", "exec_allowlist": ["echo"], "steps": [collect_step("qe-b")]});
+    let (status, response) =
+        call(&app, "PUT", "/api/workflows/wf-a", Some(&token), Some(body)).await;
+    assert_eq!(status, 403, "{response}");
+    // A real export, rewritten to name p2's saved Quick Exec.
+    let (status, mut envelope) = call(&app, "GET", "/api/workflows/wf-a/export", None, None).await;
+    assert_eq!(status, 200, "{envelope}");
+    // A pre-0.10 bundle keeps refs it does not carry: the legacy path.
+    envelope["version"] = json!(2);
+    envelope["workflow"]["exec_allowlist"] = json!(["echo"]);
+    envelope["workflow"]["steps"] = json!([collect_step("qe-b")]);
+    let content = envelope.to_string();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows/import",
+        Some(&token),
+        Some(json!({"content": content.clone()})),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    // No token: the handler's own rule, the same as on create.
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows/import",
+        None,
+        Some(json!({"content": content, "project_id": "p1"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["success"], false, "{response}");
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("autre projet")),
+        "{response}"
+    );
+}
+
+/// B3-03 — a token's media generation without a discussion lands in a new
+/// discussion of the token's project, which the token then owns.
+#[tokio::test]
+async fn a_token_s_media_discussion_lands_in_its_project() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        kronn::db::external_api_connections::insert(
+            conn,
+            &kronn::models::ExternalApiConnection {
+                id: "media-conn".into(),
+                display_name: "Media".into(),
+                mention_alias: "media".into(),
+                endpoint: Some("http://127.0.0.1:1".into()),
+                credential_slug: "media".into(),
+                origin_preset: kronn::models::ExternalApiConnectionPreset::OpenRouter,
+                economy_model: None,
+                default_model: None,
+                reasoning_model: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                image_model: Some("stub/image".into()),
+                video_model: None,
+                media_endpoint: None,
+            },
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/media/generate",
+        Some(&token),
+        Some(json!({"modality": "image", "prompt": "a lighthouse"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let created = response["data"]["discussion_id"]
+        .as_str()
+        .expect("a discussion")
+        .to_owned();
+    let project = query_one(
+        &db,
+        "SELECT project_id FROM discussions WHERE id = ?1",
+        created.clone(),
+    )
+    .await;
+    assert_eq!(project.as_deref(), Some("p1"));
+    let job_project = query_one(
+        &db,
+        "SELECT project_id FROM media_jobs WHERE discussion_id = ?1",
+        created.clone(),
+    )
+    .await;
+    assert_eq!(job_project.as_deref(), Some("p1"));
+    let (status, meta) = call(
+        &app,
+        "GET",
+        &format!("/api/discussions/{created}/meta"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{meta}");
+}
+
+/// B3-04 / B3-05 / B-10 — every route reaching a discussion through a
+/// caller-supplied session resolves it first: a p2 session is refused, nothing
+/// is written, and the refusal never names the p2 room.
+#[tokio::test]
+async fn session_keyed_routes_refuse_another_project_s_session() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let joined = json!({"source_agent": "Codex", "source_session_id": "sess-b"});
+    let bound = json!({"source_agent": "Codex", "source_session_id": "sess-b-bind"});
+    let merge = |base: &Value, extra: Value| {
+        let mut merged = base.clone();
+        merged
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        merged
+    };
+    let cases: Vec<(&str, &str, Option<Value>)> = vec![
+        (
+            "POST",
+            "/api/discussions/peer-join",
+            Some(json!({"token": "kr-join-room-b", "agent_type": "Codex", "session_id": "x"})),
+        ),
+        (
+            "POST",
+            "/api/discussions/peer-leave",
+            Some(json!({"agent_type": "Codex", "session_id": "sess-b"})),
+        ),
+        (
+            "POST",
+            "/api/discussions/peer-resume",
+            Some(json!({"agent_type": "Codex", "session_id": "sess-b", "resume_token": "x"})),
+        ),
+        (
+            "POST",
+            "/api/discussions/orchestrator-return-resume",
+            Some(json!({"agent_type": "Codex", "session_id": "sess-b", "resume_token": "x"})),
+        ),
+        (
+            "POST",
+            "/api/disc/workspace",
+            Some(merge(&joined, json!({"workspace_path": "/tmp/x"}))),
+        ),
+        (
+            "GET",
+            "/api/disc/workspace?source_agent=Codex&source_session_id=sess-b",
+            None,
+        ),
+        (
+            "POST",
+            "/api/disc/workspace/history-lease",
+            Some(merge(&joined, json!({"action": "acquire"}))),
+        ),
+        (
+            "POST",
+            "/api/disc/link",
+            Some(merge(&bound, json!({"disc_id": "room-a"}))),
+        ),
+        (
+            "POST",
+            "/api/disc/link",
+            Some(merge(
+                &bound,
+                json!({"disc_id": "room-a", "force_reassign": true}),
+            )),
+        ),
+        (
+            "POST",
+            "/api/disc/unlink",
+            Some(merge(&bound, json!({"disc_id": "room-a"}))),
+        ),
+        (
+            "POST",
+            "/api/disc/transfer-session",
+            Some(merge(
+                &bound,
+                json!({"from_disc_id": "room-a", "to_disc_id": "room-a2", "confirm_transfer": true}),
+            )),
+        ),
+        (
+            "POST",
+            "/api/orchestration/accept-offer",
+            Some(merge(&joined, json!({"offer_id": "offer-b"}))),
+        ),
+        (
+            "GET",
+            "/api/disc/find_by_session?source_agent=Codex&source_session_id=sess-b-bind",
+            None,
+        ),
+        (
+            "GET",
+            "/api/disc/session-status?source_agent=Codex&source_session_id=sess-b-bind",
+            None,
+        ),
+    ];
+    let mut covered = std::collections::HashSet::new();
+    for (method, path, body) in cases {
+        let (status, response) = call(&app, method, path, Some(&token), body.clone()).await;
+        assert_eq!(status, 403, "{method} {path} {body:?}: {response}");
+        assert!(
+            !response.to_string().contains("room-b"),
+            "{path} names the other room: {response}"
+        );
+        covered.insert((method, path.split('?').next().unwrap()));
+    }
+    for (method, pattern) in kronn::core::bridge_token::SESSION_KEYED_ROUTES {
+        assert!(
+            covered.contains(&(*method, *pattern)),
+            "{method} {pattern} has no p2-session case"
+        );
+    }
+    // An unknown session reaches no room: refused on a write.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/disc/workspace",
+        Some(&token),
+        Some(
+            json!({"source_agent": "Codex", "source_session_id": "nobody",
+            "workspace_path": "/tmp/x"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let written = query_one(
+        &db,
+        "SELECT CAST(COUNT(*) AS TEXT) FROM discussion_workspaces WHERE disc_id = ?1",
+        "room-b".into(),
+    )
+    .await;
+    assert_eq!(written.as_deref(), Some("0"));
+    let binding = query_one(
+        &db,
+        "SELECT disc_id FROM disc_source_history \
+         WHERE source_session_id = ?1 AND unlinked_at IS NULL",
+        "sess-b-bind".into(),
+    )
+    .await;
+    assert_eq!(binding.as_deref(), Some("room-b"), "binding unchanged");
+}
+
+/// B3-04 — a task the workspace is set for must be the token's.
+#[tokio::test]
+async fn a_workspace_task_ref_of_another_project_is_refused() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at) \
+             VALUES (902, 'room-a', 'Codex', 'sess-a', 'peer', 'active', '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    for task in ["task-b", "KT-9002"] {
+        let (status, response) = call(
+            &app,
+            "POST",
+            "/api/disc/workspace",
+            Some(guard.value()),
+            Some(
+                json!({"source_agent": "Codex", "source_session_id": "sess-a",
+                "workspace_path": "/tmp/x", "task_ref": task}),
+            ),
+        )
+        .await;
+        assert_eq!(status, 403, "{task}: {response}");
+    }
+}
+
+/// B3-06 — a body that is not an `ApiResponse` envelope is scoped too, and an
+/// export bundling another project's dependency is refused whole.
+#[tokio::test]
+async fn an_export_bundling_another_project_s_dependency_is_refused() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let token_guard = bridge_for("room-a");
+    let token = token_guard.value().to_owned();
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/api/workflows/wf-a/export",
+        &[("authorization", format!("Bearer {token}"))],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "a self-contained export: {body}");
+    for steps in [
+        json!([{"name": "child", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-b"}]),
+        json!([collect_step("qe-b")]),
+        json!([{"name": "qp", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-b"}]),
+    ] {
+        let steps_json = steps.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE workflows SET steps_json = ?1 WHERE id = 'wf-a'",
+                [&steps_json],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (status, body) = send(
+            &app,
+            "GET",
+            "/api/workflows/wf-a/export",
+            &[("authorization", format!("Bearer {token}"))],
+            None,
+        )
+        .await;
+        assert_eq!(status, 403, "{steps}: {body}");
+        assert!(!body.contains("qe-b") && !body.contains("qp-b"), "{body}");
+    }
+}
+
+/// B3-07 / B3-08 — a bridge token is taken by the gate whatever the scheme's
+/// case, and never reaches a route answered before it.
+#[tokio::test]
+async fn a_bridge_token_never_bypasses_the_gate() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for scheme in ["bearer", "BEARER", "Bearer"] {
+        let (status, _) = send(
+            &app,
+            "GET",
+            "/api/config/export",
+            &[("authorization", format!("{scheme} {token}"))],
+            None,
+        )
+        .await;
+        assert_eq!(status, 403, "{scheme}: an off-list route");
+        let (status, _) = send(
+            &app,
+            "GET",
+            "/api/discussions/room-a/meta",
+            &[("authorization", format!("{scheme} {token}"))],
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{scheme}: its own room");
+    }
+    for header in [
+        format!("Basic {token}"),
+        format!("Token {token}"),
+        token.clone(),
+    ] {
+        let (status, _) = send(
+            &app,
+            "GET",
+            "/api/discussions/room-a/meta",
+            &[("authorization", header.clone())],
+            None,
+        )
+        .await;
+        assert_eq!(status, 403, "{header}");
+    }
+    for path in ["/api/disc/claim-by-token", "/api/disc/fetch-file"] {
+        let (status, _) = send(
+            &app,
+            "POST",
+            path,
+            &[
+                ("authorization", format!("bearer {token}")),
+                ("content-type", "application/json".into()),
+            ],
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, 403, "{path}");
+    }
+}
+
+/// B3-14 — a token's learning proposal is its project's; a preference (every
+/// project) is refused.
+#[tokio::test]
+async fn a_learning_proposal_is_forced_into_the_token_s_project() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let proposal = |kind: &str, project: Option<&str>| {
+        let mut body = json!({"claim": "c", "kind": kind,
+            "evidence": [{"kind": "user", "ref": "2026-10-05 the user said so"}]});
+        if let Some(project) = project {
+            body["project_id"] = json!(project);
+        }
+        body
+    };
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/learnings/propose",
+        Some(&token),
+        Some(proposal("preference", None)),
+    )
+    .await;
+    assert_eq!(status, 403, "a preference");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/learnings/propose",
+        Some(&token),
+        Some(proposal("fact", Some("p2"))),
+    )
+    .await;
+    assert_eq!(status, 403, "another project");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/learnings/propose",
+        Some(&token),
+        Some(proposal("fact", None)),
+    )
+    .await;
+    assert_eq!(status, 200, "forced into p1: {response}");
+}
+
+/// B3-18 — the bound project is frozen at first use: moving the room to
+/// another project kills the token.
+#[tokio::test]
+async fn a_room_moved_to_another_project_kills_its_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE discussions SET project_id = 'p2' WHERE id = 'room-a'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 401, "{response}");
+    assert!(
+        response.to_string().contains("project changed"),
+        "{response}"
+    );
+}
+
+/// B3-19 — a write without a Content-Type is refused, never forwarded unread.
+#[tokio::test]
+async fn a_write_without_a_content_type_is_refused() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let body = append("room-b", "no-content-type").to_string();
+    let (status, response) = send(
+        &app,
+        "POST",
+        "/api/disc/append",
+        &[("authorization", format!("Bearer {}", guard.value()))],
+        Some(&body),
+    )
+    .await;
+    // Refused by the gate itself, not left to whatever the handler extracts.
+    assert_eq!(status, 415, "{response}");
+    assert!(
+        response.contains("a bridge-token request body must be JSON"),
+        "{response}"
+    );
+    let appended = query_one(
+        &db,
+        "SELECT CAST(COUNT(*) AS TEXT) FROM messages WHERE discussion_id = ?1",
+        "room-b".into(),
+    )
+    .await;
+    assert_eq!(appended.as_deref(), Some("0"));
 }

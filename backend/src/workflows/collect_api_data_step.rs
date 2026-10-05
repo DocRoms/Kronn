@@ -912,6 +912,80 @@ mod tests {
         assert!(summary.contains("does not exist"), "{summary}");
     }
 
+    #[tokio::test]
+    async fn a_saved_quick_exec_of_another_project_never_runs() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for id in ["p1", "p2"] {
+                conn.execute(
+                    "INSERT INTO projects(id, name, path, created_at, updated_at) \
+                     VALUES (?1, ?1, ?1, ?2, ?2)",
+                    rusqlite::params![id, now],
+                )?;
+            }
+            crate::db::quick_execs::insert_quick_exec(
+                conn,
+                &crate::models::QuickExec {
+                    id: "qe-p2".into(),
+                    name: "echo".into(),
+                    icon: String::new(),
+                    description: String::new(),
+                    project_id: Some("p2".into()),
+                    command: "echo".into(),
+                    args: vec!["p2".into()],
+                    timeout_secs: 5,
+                    output_format: CollectQuickExecOutputFormat::Text,
+                    variables: Vec::new(),
+                    pinned: false,
+                    unmodelled_args_approved: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            Arc::new(db),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let mut foreign = source("foreign", true);
+        foreign.quick_api_id = String::new();
+        foreign.quick_exec_id = "qe-p2".into();
+        let step = WorkflowStep {
+            name: "collect".into(),
+            step_type: StepType::CollectApiData,
+            collect_api_data: Some(CollectApiDataConfig {
+                sources: vec![foreign],
+                concurrent_limit: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let result = execute_collect_api_data_step(
+            &step,
+            Some("p1"),
+            &state,
+            &TemplateContext::new(),
+            ApiCallLogContext::workflow(),
+            &["echo".to_string()],
+            "",
+        )
+        .await
+        .result;
+        assert_eq!(result.status, RunStatus::Failed);
+        let envelope = super::super::step_output_format::parse_envelope_for_test(&result.output);
+        let error = envelope["data"]["meta"]["sources"][0]["error"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(error.contains("another project"), "{error}");
+    }
+
     #[test]
     fn http_and_parse_failures_keep_source_identity_in_the_result() {
         let step = WorkflowStep {
