@@ -202,7 +202,14 @@ Release notes for 0.9.3 and earlier are available in the
   that bundles another project's resource is refused; refusals no longer name
   another project's ids; the bearer scheme is read case-insensitively and a
   token never reaches the peer-only routes; a token's media discussion and
-  learning proposal land in its project.
+  learning proposal land in its project. A page or room a workflow step names
+  through a template must belong to the run's project, whoever triggered it;
+  the keys of a caller's own maps (variables, an external API's path, query
+  and headers) are no longer read as Kronn ids; the plugin overview and a
+  page's feeding workflows show a token only its project's; any discussion the
+  token owns, deleted or moved, ends it; its planning writes are recorded as
+  an agent's; a plan proposal from a room only touches that room's project's
+  tasks, creates its tasks there and names the project on its card.
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task

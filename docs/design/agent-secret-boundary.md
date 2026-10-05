@@ -499,11 +499,12 @@ in memory, including a launch that owns no discussion, execution or run (that
 token reads the global catalogues and nothing else); a launch whose token cannot
 be minted does not start. The token is bound to the launch's discussions, task
 execution and workflow run, else to its declared project, and its project is
-frozen on first use: the scope's resources must all sit in one project, and a
-later change (a discussion moved, the first one deleted) kills the token. It dies
+frozen on first use. On every call, every discussion it owns (its launch's and
+the ones it created through `disc/create` or `media/generate`), its execution
+and its run are re-read: all must still exist and sit in the frozen project.
+One of them deleted, or moved to another project, kills the token. It also dies
 when the launch's process handle is dropped, when the launch is cancelled, after
-12 hours whatever happens, when its discussion or run is deleted (re-read on
-every call), and on restart. The operator token is compared in constant time on
+12 hours whatever happens, and on restart. The operator token is compared in constant time on
 the HTTP and WebSocket paths. The bridge reads `KRONN_BRIDGE_TOKEN` first and
 falls back to `KRONN_AUTH_TOKEN` for host sessions.
 
@@ -518,7 +519,13 @@ carries in `content`. *Default deny on id fields*: a key that looks like an id
 reviewed `PLAIN_ID_KEYS` (a caller's own session, idempotency keys, model and
 library ids, git refs), the own `id` of a step, option or DoD item, or inside a
 caller's own data (`OPAQUE_KEYS`: an external API body, a dataset, a schema);
-the query follows the same rule. In an import, only the resources the bundle
+the keys of a caller's own maps (`USER_KEYED_KEYS`: template variables, an
+external API's path, query and headers, per-step choices) are names, and only
+their values are walked; the query follows the same rule. A value that reaches
+Kronn through a template is checked where it is rendered: a PublishPageData
+page and an Agent step's room must belong to the run's project, on every run
+whoever triggered it; a project-less page or room is allowed to a project-less
+run, or when the workflow names it literally. In an import, only the resources the bundle
 lists are internal, per kind (`workflow.id` and `referenced_workflows` for
 workflows, `referenced_quick_prompts`, `_quick_apis`, `_quick_execs`,
 `_pages`); a room, config or connection is never internal. A non-JSON body is
@@ -558,7 +565,12 @@ kind, never the other project's id. Then:
   ones it does not bundle like a create does, and a run refuses one of another
   project; a token's learning proposal is forced into its project and never a
   preference; its media generation without a discussion creates one in its
-  project, which the token then owns.
+  project, which the token then owns;
+- *planning*: a token's planning write is recorded as an agent's, whatever
+  actor it names; a `kronn-plan-action` fence posted in a room may only touch
+  tasks of the room's project (an item naming another is refused on arrival
+  and again at apply), a created task lands in the room's project, and the card
+  names that project.
 
 *Responses.* Every response is scoped, whatever the verb and its shape (an
 `ApiResponse` through its `data`, any other JSON body as a whole): an object
@@ -566,7 +578,9 @@ naming any resource outside the scope, at any depth, is dropped from its list
 (only the count paired with that list follows) or refused when it is the
 response itself; an object naming an id that resolves to nothing is hidden. A
 workflow export is all or nothing: one bundled dependency outside the scope
-refuses it. The discussion list, the task
+refuses it. The plugin overview shows a token only the configs its project
+may use, that project's customised contexts, and no server detected in
+another project; a page's feeding workflows are scoped like a workflow list. The discussion list, the task
 list and the discussion search filter in the query, so pages stay full.
 
 The WebSocket bus refuses a bridge token (403) and any credential other than the
