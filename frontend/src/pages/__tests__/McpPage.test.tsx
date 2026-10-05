@@ -1774,6 +1774,43 @@ describe('McpPage', () => {
     expect(payload.custom_spec.name).toBe('MyAPI');
     expect(payload.custom_spec.base_url).toBe('https://my.example.com');
     expect(payload.custom_spec.fields).toEqual([{ label: 'My Token', value: 'secret123' }]);
+    expect(payload.custom_spec.default_headers).toEqual([]);
+  });
+
+  it('Custom API: declared default headers are sent, blank rows are dropped', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom',
+      name: 'Custom API',
+      description: 'Define your own API.',
+      transport: 'ApiOnly',
+      env_keys: [],
+      tags: ['custom', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'You',
+      official: false,
+    };
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement);
+    fireEvent.change(screen.getByPlaceholderText(/Salesforce Sales API/), { target: { value: 'Notion' } });
+    fireEvent.change(screen.getByPlaceholderText(/my-org\.salesforce\.com/), { target: { value: 'https://api.notion.com/v1' } });
+
+    fireEvent.click(screen.getByText('Ajouter un header'));
+    fireEvent.click(screen.getByText('Ajouter un header'));
+    expect(screen.getAllByTestId('mcp-custom-header-row')).toHaveLength(2);
+    fireEvent.change(screen.getAllByPlaceholderText('Nom du header (ex. Notion-Version)')[0], { target: { value: 'Notion-Version' } });
+    fireEvent.change(screen.getAllByPlaceholderText('Valeur ou ${ENV.CLE}')[0], { target: { value: '2025-09-03' } });
+
+    fireEvent.click(screen.getByText('Enregistrer'));
+    await act(async () => { await Promise.resolve(); });
+
+    const payload = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.custom_spec.default_headers).toEqual([{ name: 'Notion-Version', value: '2025-09-03' }]);
   });
 
   // ─── KT-831 — single scope editor at add time, opened fiche, merge ──
@@ -1991,6 +2028,33 @@ describe('McpPage', () => {
     expect(screen.getByText('Remplacer')).toBeTruthy();
     expect(screen.queryByPlaceholderText('Valeur')).toBeNull();
     expect(mcpsApi.revealSecrets).not.toHaveBeenCalled();
+  });
+
+  it('Modifier le plugin: pre-fills default headers and saves them back', async () => {
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const serverId = 'custom-notion-abc12345';
+    const server = makeCustomServer(serverId, 'Notion');
+    server.api_spec!.default_headers = [{ name: 'Notion-Version', value: '${ENV.NOTION_VERSION}' }];
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [makeConfig('cfg-notion', serverId, 'Notion', { env_keys: ['API_KEY'] })],
+      customized_contexts: [],
+      incompatibilities: [], incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notion — Voir les détails' }));
+    await act(async () => { fireEvent.click(screen.getByTitle('Modifier le plugin')); });
+    await screen.findByText(/Enregistrer les modifications/, undefined, { timeout: 2000 });
+
+    expect(screen.getByDisplayValue('Notion-Version')).toBeTruthy();
+    expect(screen.getByDisplayValue('${ENV.NOTION_VERSION}')).toBeTruthy();
+
+    fireEvent.click(screen.getByText(/Enregistrer les modifications/));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const [, spec] = (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(spec.default_headers).toEqual([{ name: 'Notion-Version', value: '${ENV.NOTION_VERSION}' }]);
   });
 
   it('Modifier le plugin: the 👁 reveals the stored value read-only (coherent with the card)', async () => {

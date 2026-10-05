@@ -33,6 +33,34 @@ nonempty parse failures and pagination ending with an empty response.
 [src: file: backend/src/workflows/api_call_executor.rs:1725-1736]
 [src: file: backend/src/workflows/api_call_executor.rs:3765]
 
+## Default headers declared on a plugin
+
+Some APIs reject every request that lacks a fixed header: Notion answers
+`400 missing_version` without `Notion-Version`, GitHub expects
+`X-GitHub-Api-Version`, some vendors require an `Accept` value. An API plugin
+declares these once in `ApiSpec.default_headers` (`[{name, value}]`), and the
+broker sends them on every call whatever the auth scheme: `ApiCall`,
+`BatchApiCall`, `CollectApiData`, Quick APIs and the `api_call` MCP tool all go
+through the same executor. A value is a literal or contains `${ENV.KEY}`
+references to the config's fields, resolved server-side; a missing field fails
+the call before anything is sent. A header of the same name given on the call
+itself (`api_headers`) wins, and a header the auth already sends is never
+replaced. Values are attached as sensitive headers.
+[src: file: backend/src/models/mcp.rs:86-98]
+[src: file: backend/src/workflows/api_call_executor.rs:189]
+[src: file: backend/src/workflows/api_call_executor.rs:976-995]
+
+Custom API plugins edit them in **Headers sent on every call**, and the 🪄
+helper proposes them from the docs or a curl example. Create, update, file
+import and bundle import share one validation: at most 20 headers, a valid and
+unique name, never a header Kronn owns (`Authorization`, `Host`,
+`Content-Length`, hop-by-hop ones) nor the one the auth scheme injects, every
+`${ENV.KEY}` declared as a field, and no literal value for a name that looks
+like a credential, so a plugin export never carries a secret. Agents only see
+the header names in their API context, never the values.
+[src: file: backend/src/api/mcps.rs:941-1063]
+[src: file: backend/src/core/mcp_scanner.rs:3988]
+
 ## Binary responses (images and other files)
 
 By default every 2xx body is parsed as JSON, so an image fails with

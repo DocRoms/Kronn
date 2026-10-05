@@ -98,6 +98,21 @@ describe('buildContextBlock — fresh context attached to every message', () => 
     expect(block).toContain('extract  : $.pages[*].title');
   });
 
+  it('names the plugin default headers so the agent does not repeat them', () => {
+    const notion: McpServer = {
+      ...fakeServer,
+      api_spec: {
+        ...fakeServer.api_spec!,
+        default_headers: [{ name: 'Notion-Version', value: '${ENV.NOTION_VERSION}' }],
+      },
+    };
+    const block = buildContextBlock(notion, mkStep(), undefined, undefined, t);
+    expect(block).toContain('- wf.apicall.helper.sys.pluginHeaders : Notion-Version');
+    expect(block).not.toContain('${ENV.NOTION_VERSION}');
+    expect(buildContextBlock(fakeServer, mkStep(), undefined, undefined, t))
+      .not.toContain('wf.apicall.helper.sys.pluginHeaders');
+  });
+
   it('embeds the last test error verbatim (so the agent can debug "why 400")', () => {
     const block = buildContextBlock(
       fakeServer,

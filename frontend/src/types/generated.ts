@@ -451,6 +451,13 @@ export type ApiCallStatus = "OK" | "ERROR" | "RateLimited" | "TimedOut";
  */
 export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, };
 
+/**
+ * Fixed request header declared on an API plugin. `value` is a literal
+ * or contains `${ENV.KEY}` references to the config's fields, resolved
+ * server-side so the value never reaches agent prompts.
+ */
+export type ApiDefaultHeader = { name: string, value: string, };
+
 export type ApiEndpoint = { path: string,
 /**
  * `"GET"`, `"POST"`, etc. Kept free-form to avoid constraining agents
@@ -503,7 +510,13 @@ docs_url?: string | null,
  * in the config's encrypted env and surfaced to agents only as
  * `${ENV.KEY}` broker references — never as literal prompt values.
  */
-config_keys?: Array<ApiConfigKey>, };
+config_keys?: Array<ApiConfigKey>,
+/**
+ * Headers the broker sends on every call, whatever the auth kind
+ * (e.g. Notion's mandatory `Notion-Version`). A header given on the
+ * call itself overrides the default of the same name.
+ */
+default_headers?: Array<ApiDefaultHeader>, };
 
 export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: ScanConfig, agents: AgentsConfig,
 /**
@@ -1131,7 +1144,11 @@ fields?: Array<CustomApiField>,
  * method, description}` (matches the existing `ApiEndpoint`
  * shape).
  */
-endpoints?: Array<ApiEndpoint>, };
+endpoints?: Array<ApiEndpoint>,
+/**
+ * Headers sent on every call (see `ApiSpec::default_headers`).
+ */
+default_headers?: Array<ApiDefaultHeader>, };
 
 /**
  * One Quick API declared inside a bundle.
@@ -1748,7 +1765,11 @@ fields?: Array<CustomApiField>,
  * method, description}` (matches the existing `ApiEndpoint`
  * shape).
  */
-endpoints?: Array<ApiEndpoint>, };
+endpoints?: Array<ApiEndpoint>,
+/**
+ * Headers sent on every call (see `ApiSpec::default_headers`).
+ */
+default_headers?: Array<ApiDefaultHeader>, };
 
 export type DailyUsage = { date: string, tokens: number, cost: CostAggregate, anthropic: number, openai: number, google: number, mistral: number, amazon: number, github: number, };
 

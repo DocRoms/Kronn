@@ -181,6 +181,29 @@ describe('applyToCustomForm', () => {
     const result = applyToCustomForm({ endpoints: 'not-an-array' });
     expect(result.endpoints).toBeUndefined();
   });
+
+  it('extracts trimmed default headers and drops blank names and Authorization', () => {
+    const result = applyToCustomForm({
+      default_headers: [
+        { name: ' Notion-Version ', value: ' 2025-09-03 ' },
+        { name: 'Accept' },
+        { name: '', value: 'orphan' },
+        { name: 'authorization', value: 'Bearer leaked' },
+        'not-an-object',
+        { name: 42, value: 'x' },
+      ],
+    });
+    expect(result.default_headers).toEqual([
+      { name: 'Notion-Version', value: '2025-09-03' },
+      { name: 'Accept', value: '' },
+    ]);
+  });
+
+  it('omits default headers when none survive or the payload is not an array', () => {
+    expect(applyToCustomForm({ default_headers: [] }).default_headers).toBeUndefined();
+    expect(applyToCustomForm({ default_headers: [{ name: 'Authorization', value: 'x' }] }).default_headers).toBeUndefined();
+    expect(applyToCustomForm({ default_headers: { name: 'Accept' } }).default_headers).toBeUndefined();
+  });
 });
 
 describe('buildSystemPrompt', () => {
@@ -202,12 +225,21 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('compare a discriminating field of the response');
     expect(prompt).toContain('❔ unverified:');
   });
+
+  it('teaches the agent to propose required fixed headers as default_headers', () => {
+    const translate = (key: string) => en[key] ?? key;
+    const prompt = buildSystemPrompt(translate);
+
+    expect(prompt).toContain('"default_headers": [');
+    expect(prompt).toContain('Notion-Version');
+    expect(prompt).toContain('NEVER put Authorization or a secret there');
+  });
 });
 
 describe('buildContextBlock', () => {
   it('emits "(empty)" placeholders for blank fields', () => {
     const block = buildContextBlock(
-      { name: '', base_url: '', description: '', docs_url: '', fields: [], endpoints: [] },
+      { name: '', base_url: '', description: '', docs_url: '', fields: [], endpoints: [], default_headers: [] },
       t,
     );
     expect(block).toContain('mcp.custom.helper.ctx.header');
@@ -216,6 +248,28 @@ describe('buildContextBlock', () => {
     expect(block).toContain('mcp.custom.helper.ctx.noFields');
     // 0.8.6 — endpoints line surfaces the "needs research" hint to the agent.
     expect(block).toContain('mcp.custom.helper.ctx.noEndpoints');
+    expect(block).toContain('mcp.custom.helper.ctx.noHeaders');
+  });
+
+  it('lists declared default headers so the agent does not re-emit them', () => {
+    const block = buildContextBlock(
+      {
+        name: 'Notion',
+        base_url: 'https://api.notion.com/v1',
+        description: '',
+        docs_url: '',
+        fields: [],
+        endpoints: [],
+        default_headers: [
+          { name: 'Notion-Version', value: '2025-09-03' },
+          { name: '', value: 'half-typed row' },
+        ],
+      },
+      t,
+    );
+    expect(block).toContain('  - Notion-Version: 2025-09-03');
+    expect(block).not.toContain('half-typed row');
+    expect(block).not.toContain('mcp.custom.helper.ctx.noHeaders');
   });
 
   it('lists the current fields with ✓ when filled', () => {
@@ -230,6 +284,7 @@ describe('buildContextBlock', () => {
           { label: 'OrgID', value: '' },
         ],
         endpoints: [],
+        default_headers: [],
       },
       t,
     );
@@ -258,6 +313,7 @@ describe('buildContextBlock', () => {
           { path: '/sixth-endpoint', method: 'GET', description: '' },
           { path: '/seventh', method: 'POST', description: '' },
         ],
+        default_headers: [],
       },
       t,
     );
@@ -280,6 +336,7 @@ const baseSnapshot = {
   docs_url: '',
   fields: [{ label: '', value: '' }],
   endpoints: [],
+  default_headers: [],
 };
 
 const renderHelper = (
@@ -362,6 +419,7 @@ describe('CustomApiAiHelper — render', () => {
           docs_url: '',
           fields: [{ label: 'Token', value: 'sec' }, { label: 'OrgID', value: '' }],
           endpoints: [],
+          default_headers: [],
         }}
         onApply={vi.fn()}
         installedAgents={['ClaudeCode']}

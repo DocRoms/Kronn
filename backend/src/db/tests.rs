@@ -1231,6 +1231,7 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
                     method: "GET".into(),
                     description: "x".into(),
                 }],
+                default_headers: vec![],
             }),
         },
         // User never created a config for this one — sync must NOT
@@ -1257,6 +1258,7 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
                 docs_url: None,
                 config_keys: vec![],
                 endpoints: vec![],
+                default_headers: vec![],
             }),
         },
     ];

@@ -51,6 +51,7 @@ const baseSnapshot: CustomApiAiHelperProps['formSnapshot'] = {
   docs_url: '',
   fields: [{ label: '', value: '' }],
   endpoints: [],
+  default_headers: [],
 };
 
 function renderHelper(over: Partial<CustomApiAiHelperProps> = {}) {

@@ -1891,12 +1891,67 @@ args = ["@example/old-mcp"]
                     placeholder: "example.com".into(),
                     description: "Host tracked".into(),
                 }],
+                default_headers: vec![],
             }),
         };
         let mut env = HashMap::new();
         env.insert("TEST_API_KEY".into(), "supersecret-123".into());
         env.insert("TEST_HOST".into(), "example.com".into());
         (server, env)
+    }
+
+    #[test]
+    fn build_api_context_block_names_default_headers_without_values() {
+        use crate::models::*;
+        let (mut server, mut env) = api_server("custom-notion", "https://api.notion.com/v1");
+        let spec = server.api_spec.as_mut().unwrap();
+        spec.config_keys.push(ApiConfigKey {
+            env_key: "NOTION_VERSION".into(),
+            label: "Notion-Version".into(),
+            placeholder: String::new(),
+            description: "API version".into(),
+        });
+        spec.default_headers = vec![ApiDefaultHeader {
+            name: "Notion-Version".into(),
+            value: "${ENV.NOTION_VERSION}".into(),
+        }];
+        env.insert("NOTION_VERSION".into(), "2025-09-03".into());
+
+        let out = build_api_context_block(&[(server, "cfg-1".into(), env)]);
+        assert!(
+            out.contains(
+                "Headers sent automatically by `api_call` (do not pass them): `Notion-Version`."
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("2025-09-03"),
+            "header values stay server-side: {out}"
+        );
+        assert!(
+            !out.contains("${ENV.NOTION_VERSION}"),
+            "a key already sent as a header must not be offered as a query param: {out}"
+        );
+        assert!(out.contains("${ENV.TEST_HOST}"), "{out}");
+    }
+
+    #[test]
+    fn build_api_context_block_does_not_offer_auth_keys_as_query_params() {
+        let (server, env) = api_server("api-test", "https://api.example.com");
+        let mut server = server;
+        server
+            .api_spec
+            .as_mut()
+            .unwrap()
+            .config_keys
+            .push(crate::models::ApiConfigKey {
+                env_key: "TEST_API_KEY".into(),
+                label: "API key".into(),
+                placeholder: String::new(),
+                description: "secret".into(),
+            });
+        let out = build_api_context_block(&[(server, "cfg-1".into(), env)]);
+        assert!(!out.contains("${ENV.TEST_API_KEY}"), "{out}");
     }
 
     #[test]
@@ -2039,6 +2094,7 @@ args = ["@example/old-mcp"]
                 }],
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         };
         let out = build_api_context_block(&[(server, "cfg-1".into(), HashMap::new())]);
@@ -2144,6 +2200,7 @@ args = ["@example/old-mcp"]
                     }],
                     docs_url: None,
                     config_keys: vec![],
+                    default_headers: vec![],
                 }),
             };
             let out = build_api_context_block(&[(server, format!("cfg-{idx}"), env.clone())]);
@@ -2184,6 +2241,7 @@ args = ["@example/old-mcp"]
                     placeholder: String::new(),
                     description: String::new(),
                 }],
+                default_headers: vec![],
             }),
         };
         let mut env = HashMap::new();
@@ -2629,6 +2687,7 @@ args = ["@example/old-mcp"]
                     placeholder: "examplecorp".into(),
                     description: "Tenant id".into(),
                 }],
+                default_headers: vec![],
             }),
         };
         let mut env_with_token = env.clone();
@@ -2674,6 +2733,7 @@ args = ["@example/old-mcp"]
                 }],
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         };
         let mut env = std::collections::HashMap::new();
@@ -2713,6 +2773,7 @@ args = ["@example/old-mcp"]
                 }],
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         };
         let mut env = std::collections::HashMap::new();
@@ -2787,6 +2848,7 @@ args = ["@example/old-mcp"]
                 }],
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         };
         let mut env = std::collections::HashMap::new();
@@ -2830,6 +2892,7 @@ args = ["@example/old-mcp"]
                 }],
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         };
         let srv_ok = mk_srv("ok-plugin", "https://a.com");

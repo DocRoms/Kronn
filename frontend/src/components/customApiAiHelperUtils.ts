@@ -1,4 +1,4 @@
-import type { ApiEndpoint, CustomApiField, CustomApiPayload } from '../types/generated';
+import type { ApiDefaultHeader, ApiEndpoint, CustomApiField, CustomApiPayload } from '../types/generated';
 
 export type Translator = (key: string, ...args: (string | number)[]) => string;
 
@@ -9,6 +9,7 @@ export interface CustomApiFormSnapshot {
   docs_url: string;
   fields: CustomApiField[];
   endpoints: ApiEndpoint[];
+  default_headers: ApiDefaultHeader[];
 }
 
 export function buildSystemPrompt(t: Translator): string {
@@ -35,11 +36,16 @@ KRONN:APPLY
     {"path": "/sobjects/Account", "method": "GET", "description": "List accounts"},
     {"path": "/sobjects/Contact", "method": "POST", "description": "Create contact"},
     {"path": "/query", "method": "GET", "description": "SOQL query"}
+  ],
+  "default_headers": [
+    {"name": "Accept", "value": "application/json"}
   ]
 }
 \`\`\`
 
 ${t('mcp.custom.helper.sys.endpoints')}
+
+${t('mcp.custom.helper.sys.headers')}
 
 ${t('mcp.custom.helper.sys.verify')}
 
@@ -58,6 +64,10 @@ export function buildContextBlock(snapshot: CustomApiFormSnapshot, t: Translator
     ? t('mcp.custom.helper.ctx.noEndpoints')
     : snapshot.endpoints.slice(0, 5).map(e => `  - ${e.method} ${e.path}`).join('\n')
       + (snapshot.endpoints.length > 5 ? `\n  - … (+${snapshot.endpoints.length - 5})` : '');
+  const declaredHeaders = snapshot.default_headers.filter(h => h.name.trim());
+  const headersLine = declaredHeaders.length === 0
+    ? t('mcp.custom.helper.ctx.noHeaders')
+    : declaredHeaders.map(h => `  - ${h.name}: ${h.value}`).join('\n');
   return `${t('mcp.custom.helper.ctx.header')}
 - name        : ${snapshot.name || t('mcp.custom.helper.ctx.empty')}
 - base_url    : ${snapshot.base_url || t('mcp.custom.helper.ctx.empty')}
@@ -66,7 +76,9 @@ export function buildContextBlock(snapshot: CustomApiFormSnapshot, t: Translator
 - fields      :
 ${fieldsLine}
 - endpoints   :
-${endpointsLine}`;
+${endpointsLine}
+- default_headers :
+${headersLine}`;
 }
 
 export function applyToCustomForm(parsed: Record<string, unknown>): Partial<CustomApiPayload> {
@@ -107,6 +119,21 @@ export function applyToCustomForm(parsed: Record<string, unknown>): Partial<Cust
       }
     }
     if (endpoints.length > 0) updates.endpoints = endpoints;
+  }
+  if (Array.isArray(parsed.default_headers)) {
+    const headers: ApiDefaultHeader[] = [];
+    for (const raw of parsed.default_headers) {
+      if (!raw || typeof raw !== 'object') continue;
+      const header = raw as Record<string, unknown>;
+      if (typeof header.name !== 'string' || !header.name.trim()) continue;
+      // Credentials belong to the auth section; the backend refuses them too.
+      if (header.name.trim().toLowerCase() === 'authorization') continue;
+      headers.push({
+        name: header.name.trim(),
+        value: typeof header.value === 'string' ? header.value.trim() : '',
+      });
+    }
+    if (headers.length > 0) updates.default_headers = headers;
   }
   return updates;
 }

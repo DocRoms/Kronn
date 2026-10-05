@@ -166,6 +166,19 @@ Release notes for 0.9.3 and earlier are available in the
   is stored on the run, so it still applies after a Gate approval or a resume,
   and the step shows the agent it really ran on; the workflow is never
   modified.
+- API plugins can declare headers sent on every call, whatever their
+  authentication: Notion's mandatory `Notion-Version`, GitHub's
+  `X-GitHub-Api-Version`, a required `Accept`. Without one, such an API
+  refused every request (Notion: `400 missing_version`) and each workflow
+  step or agent had to repeat it. Custom API plugins edit them in the new
+  **Headers sent on every call** section, as a literal or `${ENV.KEY}` from
+  a field; a header given on a call overrides the default. The 🪄 helper and
+  the Workflow architect now look for such a header in the docs and propose
+  it. Validation refuses credentials, `Authorization`, `Host`, duplicates and
+  undeclared fields, and now also runs on bundle imports, which skipped the
+  check refusing CLI-token authentication.
+- Agents no longer see an API's authentication keys, or keys already sent as
+  headers, listed as "pass as query params" in their API context.
 
 ### Fixed
 

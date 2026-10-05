@@ -167,7 +167,7 @@ pub async fn execute_api_call_step_core(
 
     // Resolve auth first — even if a subsequent step fails, surfacing an
     // auth error now is far more actionable than an opaque 401 later.
-    let auth = match resolve_auth(&spec.auth, env) {
+    let mut auth = match resolve_auth(&spec.auth, env) {
         Ok(a) => a,
         Err(msg) => return fail(step, start, msg),
     };
@@ -186,6 +186,9 @@ pub async fn execute_api_call_step_core(
             Ok(h) => h,
             Err(e) => return fail(step, start, format!("Template render error (headers): {e}")),
         };
+    if let Err(msg) = apply_default_headers(&mut auth, &spec.default_headers, &extra_headers, env) {
+        return fail(step, start, msg);
+    }
     let body = match render_body(&step.api_body, ctx).and_then(|b| match b {
         None => Ok(None),
         Some(v) => substitute_env_in_value(&v, env).map(Some),
@@ -973,6 +976,29 @@ pub fn resolve_auth(
         }
     }
     Ok(out)
+}
+
+/// Adds the plugin's default headers to the resolved auth (so their values
+/// are marked sensitive), unless the call or the auth already sends the
+/// same header name.
+fn apply_default_headers(
+    auth: &mut ResolvedAuth,
+    defaults: &[ApiDefaultHeader],
+    call_headers: &HashMap<String, String>,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    for header in defaults {
+        let same = |name: &String| name.eq_ignore_ascii_case(&header.name);
+        let sent_by_auth = auth.headers.keys().any(same)
+            || (auth.bearer.is_some() && header.name.eq_ignore_ascii_case("authorization"));
+        if sent_by_auth || call_headers.keys().any(same) {
+            continue;
+        }
+        let value = crate::core::oauth2_cache::substitute_env_in_string(&header.value, env)
+            .map_err(|e| format!("Default header `{}`: {e}", header.name))?;
+        auth.headers.insert(header.name.clone(), value);
+    }
+    Ok(())
 }
 
 /// Minimal `{ENV_KEY}` substitution used by `ApiAuthKind::OAuth2` extra
@@ -2067,6 +2093,7 @@ mod tests {
                 endpoints,
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         }
     }
@@ -2702,6 +2729,149 @@ mod tests {
     }
 
     // ─── execute_api_call_step_core (HTTP wiremock) ─────────────────
+
+    fn notion_like_plugin(base_url: &str) -> McpServer {
+        let mut plugin = mk_plugin(
+            base_url,
+            ApiAuthKind::Bearer {
+                env_key: "BEARER_TOKEN".into(),
+            },
+            vec![mk_endpoint("GET", "/users/me")],
+        );
+        plugin.api_spec.as_mut().unwrap().default_headers = vec![
+            ApiDefaultHeader {
+                name: "Notion-Version".into(),
+                value: "${ENV.NOTION_VERSION}".into(),
+            },
+            ApiDefaultHeader {
+                name: "X-Static".into(),
+                value: "fixed".into(),
+            },
+        ];
+        plugin
+    }
+
+    fn notion_env() -> HashMap<String, String> {
+        HashMap::from([
+            ("BEARER_TOKEN".to_string(), "tok-1".to_string()),
+            ("NOTION_VERSION".to_string(), "2025-09-03".to_string()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn execute_sends_plugin_default_headers_alongside_bearer_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me"))
+            .and(header("Authorization", "Bearer tok-1"))
+            .and(header("Notion-Version", "2025-09-03"))
+            .and(header("X-Static", "fixed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object": "user"})))
+            .mount(&server)
+            .await;
+
+        let outcome = execute_api_call_step_core(
+            &mk_step("/users/me"),
+            &notion_like_plugin(&server.uri()),
+            &notion_env(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_call_header_overrides_plugin_default_without_duplicate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let mut step = mk_step("/users/me");
+        step.api_headers = Some(HashMap::from([(
+            "notion-version".to_string(),
+            "2022-06-28".to_string(),
+        )]));
+        let outcome = execute_api_call_step_core(
+            &step,
+            &notion_like_plugin(&server.uri()),
+            &notion_env(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        let sent: Vec<_> = requests[0]
+            .headers
+            .get_all("notion-version")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(sent, vec!["2022-06-28".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn execute_fails_before_sending_when_default_header_field_is_missing() {
+        let server = MockServer::start().await;
+        let mut env = notion_env();
+        env.remove("NOTION_VERSION");
+        let outcome = execute_api_call_step_core(
+            &mk_step("/users/me"),
+            &notion_like_plugin(&server.uri()),
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome
+                .result
+                .output
+                .contains("Default header `Notion-Version`")
+                && outcome.result.output.contains("NOTION_VERSION"),
+            "{}",
+            outcome.result.output
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn default_headers_never_replace_auth_headers() {
+        let mut auth = resolve_auth(
+            &ApiAuthKind::ApiKeyHeader {
+                header_name: "X-Api-Key".into(),
+                env_key: "K".into(),
+            },
+            &HashMap::from([("K".to_string(), "secret".to_string())]),
+        )
+        .unwrap();
+        let defaults = vec![ApiDefaultHeader {
+            name: "x-api-key".into(),
+            value: "other".into(),
+        }];
+        apply_default_headers(&mut auth, &defaults, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(auth.headers.len(), 1);
+        assert_eq!(
+            auth.headers.get("X-Api-Key").map(String::as_str),
+            Some("secret")
+        );
+    }
 
     #[tokio::test]
     async fn execute_success_extracts_array() {

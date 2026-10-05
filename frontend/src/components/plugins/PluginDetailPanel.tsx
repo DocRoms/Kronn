@@ -30,7 +30,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     editingCustomServerId,
     setEditingCustomServerId, setEditingCustomConfigId, setEditingCustomOriginalScope,
     setCustomName, setCustomBaseUrl, setCustomDescription, setCustomDocsUrl,
-    setCustomFields, setReplacingFields, setCustomEndpoints, setCustomAuth,
+    setCustomFields, setReplacingFields, setCustomEndpoints, setCustomHeaders, setCustomAuth,
     setAddMcpGlobal, setAddMcpIncludeGeneral, setAddMcpProjectIds,
     handleDeleteMcpConfig, setSelectedConfigId, resetAddMcp, setPortabilityMode,
     editingEnvId, setEditingEnvId, editingEnv, setEditingEnv, editingEnvLoading, editingEnvError, visibleFields, setVisibleFields,
@@ -119,6 +119,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     );
     setReplacingFields(new Set());
     setCustomEndpoints(spec.endpoints ?? []);
+    setCustomHeaders(spec.default_headers ?? []);
     setCustomAuth(spec.auth ?? 'None');
     // Refonte 2b (2026-06-10) — the edit form renders IN-PLACE
     // inside this modal (see mcp-detail-body below). No more

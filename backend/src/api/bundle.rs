@@ -104,6 +104,12 @@ pub async fn create_bundle(
                 ca.bundle_id
             )));
         }
+        if let Err(error) = crate::api::mcps::validate_custom_payload(&ca.payload) {
+            return Json(ApiResponse::err(format!(
+                "Custom API `{}`: {error}",
+                ca.bundle_id
+            )));
+        }
         let server = crate::api::mcps::materialize_custom_server(&ca.payload);
         id_map.insert(ca.bundle_id.clone(), server.id.clone());
         custom_servers.push((ca.bundle_id.clone(), server, ca.payload.clone()));
